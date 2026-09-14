@@ -1,4 +1,7 @@
-# Draft: Show HN (not posted; waiting on the ROCm and AliceVision threads first)
+# Show HN
+
+Posted 2026-09-14 as a regular submission (HN gates the Show HN section for new accounts):
+https://news.ycombinator.com/item?id=49700640
 
 Submit at https://news.ycombinator.com/submit with title + URL (leave "text" empty), then add
 the comment below as the first comment. Tuesday to Thursday, 9 to 11 am Eastern.
