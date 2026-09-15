@@ -3,10 +3,14 @@
 **Meshroom / AliceVision photogrammetry on AMD Radeon GPUs, via HIP.**
 
 AliceVision's dense reconstruction (`DepthMap`, the stage Meshroom needs a GPU for) is
-written in CUDA and has only ever run on NVIDIA. Cheshire compiles those same CUDA kernels as
-HIP through a small compatibility layer, adds a **memory bridge** that lets the stage spill from
-VRAM into system RAM instead of failing, and packages the result for Windows and Linux.
-Validated against a CUDA node's output on RDNA1, RDNA2 and RDNA4 cards.
+written in CUDA. An official SYCL backend was merged upstream in May 2026
+([AliceVision#2077](https://github.com/alicevision/AliceVision/pull/2077), closing the
+eight-year [#439](https://github.com/alicevision/AliceVision/issues/439)) but has not appeared
+in any release, resolves to off when AdaptiveCpp is absent, and has no published results on
+AMD hardware. Cheshire is a HIP port you can download and run today, on Windows and Linux:
+the same CUDA kernels compiled through a small compatibility layer, plus a **memory bridge**
+that lets the stage spill from VRAM into system RAM instead of failing, validated
+per architecture against a CUDA node's output on RDNA1, RDNA2 and RDNA4 cards.
 
 The cat that grins on any hardware.
 
@@ -25,13 +29,22 @@ number is why the design is what it is.
 
 Same photos, same SfM, same DepthMap parameters as the CUDA reference (Meshroom 2023.3 on a
 GTX 1080 Ti); only the GPU stage differs. Metrics are per view over pixels valid in both maps.
+Times are the DepthMap stage only. The CUDA reference ran as Meshroom runs it, in chunks of
+12 views (four chunks for 41 views: 105.4 + 111.1 + 106.3 + 56.2 s); the HIP times are one
+invocation over all views. The one apples-to-apples row is the RX 6750 XT inside a real
+Meshroom job on the same node, also four chunks: 352 s.
 
-| GPU | OS | 6 views | 41 views | valid masks | median rel. depth error | within 1 % (median view, 6 / 41) |
-|---|---|---|---|---|---|---|
-| GTX 1080 Ti (CUDA reference) | Linux | 31.9 s | 105.5 s | | | |
-| Radeon RX 9070, RDNA4 | Windows | **17.4 s** | 124.4 s | identical | 0.0000 | 98.9 % / 98.7 % |
-| Radeon RX 6750 XT, RDNA2 | Linux | **31.0 s** | 226.1 s | identical | 0.0000 | 97.5 % / 98.1 % |
-| Radeon RX 5500 XT, RDNA1 | Linux | 60.7 s | 447.7 s | identical | 0.0000 | 97.5 % / 98.1 % |
+| GPU | OS | 6 views | 41 views | per view (41) | valid masks | median rel. depth error | within 1 % (median view, 6 / 41) |
+|---|---|---|---|---|---|---|---|
+| GTX 1080 Ti (CUDA reference, 4 Meshroom chunks) | Linux | 31.8 s | 379.0 s | 9.2 s | | | |
+| Radeon RX 9070, RDNA4 | Windows | 17.4 s | 124.4 s | 3.0 s | identical | 0.0000 | 98.9 % / 98.7 % |
+| Radeon RX 6750 XT, RDNA2 | Linux | 31.0 s | 226.1 s (352 s in 4 Meshroom chunks) | 5.5 s | identical | 0.0000 | 97.5 % / 98.1 % |
+| Radeon RX 5500 XT, RDNA1 | Linux | 60.7 s | 447.7 s | 10.9 s | identical | 0.0000 | 97.5 % / 98.1 % |
+
+Per-view cost on every HIP card is flat between 6 and 41 views (the port scales linearly);
+the CUDA reference's per-view cost rises from 5.3 s to 9.2 s across the chunked run. Until
+2026-09-15 this table listed the CUDA 41-view time as 105.5 s, which was the first chunk
+alone; the corrected figure is the sum of all four (`data/ref/monstree-full/DepthMap/*/[0-3].log`).
 
 ### What "identical" means here, per comparison
 
@@ -97,7 +110,10 @@ stage at full speed. Design, knobs and every table:
 * **Linux ROCm 7.2 has no `hipMallocMipmappedArray`** on RDNA1 (and WSL2 has no textures at
   all). Mipmaps are emulated in the compat layer as one texture per level, in array or pitched
   linear memory: bit-identical to native mipmaps on the RX 9070, 15 % slower there, so the
-  Windows build keeps native. Linear levels are what lets the bridge account for camera images.
+  Windows build keeps native and the Linux bundle emulates on every architecture. The
+  bit-identity is expected rather than remarkable: AliceVision samples its mip chain only at
+  integer levels (`level = log2(scale / minDownscale)`), where trilinear filtering reduces to
+  bilinear on one level. Linear levels are what lets the bridge account for camera images.
 * **GPU atomics into mapped host memory are silently wrong on Linux** unless the memory is
   allocated non-coherent: on an RX 6750 XT, `atomicMin` into default (fine-grained) host memory
   fails on every element while `atomicAdd` works, and both are right on

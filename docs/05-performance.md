@@ -5,7 +5,7 @@ Every change below keeps the output **bit-identical** to the validated build unl
 
 | build | monstree-mini6 (6 views) | monstree-full (41 views) |
 |---|---|---|
-| CUDA node (GTX 1080 Ti, Meshroom 2023.3) | 31.9 s | 105.5 s |
+| CUDA node (GTX 1080 Ti, Meshroom 2023.3) | 31.9 s | 379.0 s (four 12-view chunks; 105.5 s was chunk 0 only, corrected 2026-09-15) |
 | first validated HIP build (float4 textures) | 21.2 s | 154.7 s |
 | + fused SGM aggregation | 18.0 s | 134.0 s |
 | + half4 textures restored (buffer-copy mip levels) | 17.8 s | 131.2 s |

@@ -25,7 +25,7 @@ should come only from fast-math / FMA contraction and texture-filter precision.
 |---|---|---|---|
 | monstree-mini6 | GTX 1080 Ti, CUDA 11.3 | 31.9 s (6 views, 6 tiles/view, `--rangeSize 12`) | `data/ref/monstree-mini6/DepthMap/820d.../0.status` |
 | monstree-mini6 | **RX 9070, HIP (Cheshire)** | 21.2 s first validated build; **17.4 s** after tuning (docs/05) | `build/run-mini6.log` |
-| monstree-full (41 views) | GTX 1080 Ti, CUDA 11.3 | 105.5 s | `data/ref/monstree-full/DepthMap/*/0.status` |
+| monstree-full (41 views) | GTX 1080 Ti, CUDA 11.3 | **379.0 s** = 4 Meshroom chunks of 12 views (105.4 + 111.1 + 106.3 + 56.2 s); listed as 105.5 s (chunk 0 only) until 2026-09-15 | `data/ref/monstree-full/DepthMap/*/[0-3].log` |
 | monstree-full (41 views) | **RX 9070, HIP (Cheshire)** | 154.7 s first validated build; **124.4 s** after tuning (docs/05) | `build/run-full.log` |
 
 ## Results
@@ -66,7 +66,7 @@ Full per-view table, CSV/JSON and downscaled best/median/worst panels:
 * per-view **median** relative depth error is 0.0000 on all 41 views
 * fraction within 1 %: median over views 0.988; 34 views >= 0.97; worst view 0.917 (1430763847),
   then 0.925 (528863451) and 0.928 (1317225462); largest per-view p95 = 7.1 %
-* wall time 154.7 s on the RX 9070 vs 105.5 s on the 1080 Ti (mini6 was 21 s vs 32 s); the
+* wall time 154.7 s on the RX 9070 vs 379.0 s on the 1080 Ti across its four Meshroom chunks (the 105.5 s quoted here until 2026-09-15 was chunk 0 alone; mini6 was 21 s vs 32 s); the
   41-view run is not yet profiled - float4 textures double image bandwidth and the planner's
   tile parallelism has not been looked at
 
@@ -90,13 +90,13 @@ pixels differing by >1 % is the cross-GPU noise floor. Details and panels:
 
 ### monstree-full (41 views) on house-pc, RX 5500 XT (Linux), 2026-09-03
 
-447.7 s vs 105.5 s CUDA on the same host; masks identical on 41/41, median error 0, median
+447.7 s vs 379.0 s CUDA (four chunks) on the same host; masks identical on 41/41, median error 0, median
 view 98.1 % within 1 % (worst 92.3 %). Same envelope as the RX 9070. Details:
 [docs/validation/monstree-full-rx5500xt-linux/index.md](validation/monstree-full-rx5500xt-linux/index.md).
 
 ### house-pc, RX 6750 XT (RDNA2, Linux), 2026-09-03
 
-6 views 31.0 s (CUDA 1080 Ti 31.9 s, same host), 41 views 226.1 s (105.5 s); masks identical
+6 views 31.0 s (CUDA 1080 Ti 31.9 s, same host), 41 views 226.1 s (CUDA 379.0 s in four chunks; the HIP build inside a real four-chunk Meshroom job on this node: 352 s); masks identical
 on every view, median error 0, 97.5 % / 98.1 % median-view within 1 %. The RX 6750 XT and the
 RX 5500 XT produce identical statistics on both sets (RDNA1 and RDNA2 agree bit-for-bit, see
 the compare in this session). Pages: [6 views](validation/monstree-mini6-rx6750xt-linux/index.md),

@@ -28,7 +28,7 @@ GTX 1080 Ti; only the GPU stage differs. Per view over jointly valid pixels:
 
 | GPU | OS | 6 views | 41 views | valid masks | median rel. depth error | within 1 % (median view) |
 |---|---|---|---|---|---|---|
-| GTX 1080 Ti (CUDA reference) | Linux | 31.9 s | 105.5 s | | | |
+| GTX 1080 Ti (CUDA reference, 4 Meshroom chunks) | Linux | 31.8 s | 379 s | | | |
 | Radeon RX 9070 (RDNA4) | Windows | 17.4 s | 124 s | identical | 0.0000 | 98.9 % / 98.7 % |
 | Radeon RX 6750 XT (RDNA2) | Linux | 31.0 s | 226 s | identical | 0.0000 | 97.5 % / 98.1 % |
 | Radeon RX 5500 XT (RDNA1) | Linux | 60.7 s | 448 s | identical | 0.0000 | 97.5 % / 98.1 % |
