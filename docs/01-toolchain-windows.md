@@ -82,3 +82,8 @@ and prints nothing. `package_windows.py` now bundles them from the VS Redist tre
 uses `/arch:AVX2` (needed so Eigen's SSE3 paths inline under clang-cl); a Bulldozer-era CPU
 without AVX2 exits with `0xC000001D` (STATUS_ILLEGAL_INSTRUCTION). `CHESHIRE_ARCH_FLAG=/arch:AVX`
 builds a variant for those.
+
+Third lesson from the same machine: its Adrenalin driver was dated 2025-09 and installs
+`amdhip64_6.dll`; the ROCm 7.2.1 packages carry `amdhip64_7.dll`, and with that driver
+`hipGetDeviceCount` returns `hipErrorNoDevice` (AliceVision prints "No CUDA-Enabled GPU").
+The HIP 7 runtime needs Adrenalin 26.2.2 or newer, as the ROCm-for-Windows release notes say.

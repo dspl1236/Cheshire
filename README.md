@@ -152,6 +152,9 @@ Windows packages carry every DLL they need, the MSVC and OpenMP runtimes include
 2026-09-15 they did not, and a machine without Visual Studio died with exit code 0xC0000135
 and no message). They are compiled for AVX2; a pre-2013 CPU dies with 0xC000001D (illegal
 instruction), and an AVX-only build is available on request or via `CHESHIRE_ARCH_FLAG=/arch:AVX`.
+They need **Adrenalin 26.2.2 or newer**: the packages carry the HIP 7.2 runtime, and a 2025
+driver (which ships the HIP 6 runtime) answers `hipErrorNoDevice`, shown by the tools as
+"No CUDA-Enabled GPU" even though the card is fine.
 
 Reproduce a row: unpack a cache under `data/ref/<dataset>/`, then `scripts\run-depthmap.cmd <dataset>`
 (Windows, set `CHESHIRE_INSTALL` to the unzipped folder) or `scripts/linux/run-depthmap.sh` (Linux).
@@ -165,7 +168,8 @@ Every package carries RDNA3 code objects (gfx1100/1101/1102, plus the APUs gfx11
 and none has run on RDNA3 hardware; there is no such chip here. Ten minutes on an RX 7600/7700/7800/7900,
 or a Ryzen 7040/8040/AI 300 laptop, closes the gap (Windows: the RDNA2+RDNA3+RDNA4 zip; if it
 exits without a message, the exit code says why: 0xC0000135 means a DLL is missing, 0xC000001D
-means the CPU lacks AVX2):
+means the CPU lacks AVX2; "No CUDA-Enabled GPU" with the card present means the Adrenalin
+driver predates 26.2.2):
 
 1. Download the RDNA3+RDNA4 Windows zip (or the Linux bundle) and
    `monstree-mini6-meshroom-cache.tar.gz` from the release pages above.
