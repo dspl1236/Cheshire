@@ -1,4 +1,7 @@
-# Drafts: comments on the two Meshroom threads (not posted)
+# Comments on the two Meshroom threads
+
+#3179 posted 2026-09-15: https://github.com/alicevision/Meshroom/issues/3179#issuecomment-5685964192
+#595: not posted yet (post a day later).
 
 Highest-intent venues there are: the people in these threads asked for exactly this. Post
 #3179 first (it names HIP porting and is 26 days old with one comment), #595 a day later.

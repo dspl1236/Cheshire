@@ -6,7 +6,7 @@ Target: https://github.com/alicevision/AliceVision/discussions (category "Show a
 answer; this is the introduction.
 
 Posted 2026-09-10: https://github.com/orgs/alicevision/discussions/2175
-Title corrected 2026-09-15 ("bit-identical across RDNA1/2/4" was an overclaim; RDNA4 vs RDNA2 shares the CUDA noise floor).
+Body CUDA figure corrected to 379 s and title corrected 2026-09-15 ("bit-identical across RDNA1/2/4" was an overclaim; RDNA4 vs RDNA2 shares the CUDA noise floor).
 
 ---
 
