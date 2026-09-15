@@ -13,6 +13,7 @@ set ARCHS=%ARCH%
 if defined CHESHIRE_HIP_ARCHS set ARCHS=%CHESHIRE_HIP_ARCHS%
 set R=%CHESHIRE_ROOT:\=/%
 set LLVMBIN=%ROCM_PATH%/lib/llvm/bin
+if defined CHESHIRE_LLVM_BIN set LLVMBIN=%CHESHIRE_LLVM_BIN%
 set V=%R%/tools/vcpkg-deps/x64-windows-release
 rem CHESHIRE_BUILD_SUFFIX: keep variants side by side (e.g. -emu for the mipmap-emulation build)
 set BLD=%R%/build/av-%ARCH%%CHESHIRE_BUILD_SUFFIX%
@@ -30,15 +31,19 @@ rem clang-cl on x64) while defining __SSE3__ etc., so Eigen picks SSE3 intrinsic
 rem CHESHIRE_ARCH_FLAG: /arch:AVX2 (default; Haswell 2013 and newer) or /arch:AVX for older CPUs
 set ARCHFLAG=%CHESHIRE_ARCH_FLAG%
 if "%ARCHFLAG%"=="" set ARCHFLAG=/arch:AVX2
-set CFLAGS=-I%R%/hip/compat/include/omp_shim %ARCHFLAG%
-set CXXFLAGS=-I%R%/hip/compat/include/omp_shim %ARCHFLAG%
+rem CHESHIRE_EXTRA_CXXFLAGS: appended to the host compiler flags (e.g. a /FI shim for an older clang)
+set CFLAGS=-I%R%/hip/compat/include/omp_shim %ARCHFLAG% %CHESHIRE_EXTRA_CXXFLAGS%
+set CXXFLAGS=-I%R%/hip/compat/include/omp_shim %ARCHFLAG% %CHESHIRE_EXTRA_CXXFLAGS%
 
 rem STL helper shim: the vcpkg archive was built with a newer MSVC STL that exports
 rem __std_min/max_element_*i from msvcp140; MSVC 14.50.35717 does not. See hip/compat/stlcompat.
 set STLC=%R%/build/stlcompat
 if not exist "%STLC%" mkdir "%STLC%"
 "%LLVMBIN%/clang-cl.exe" /nologo /O2 /MD /c "%R%/hip/compat/stlcompat/std_minmax_element.cpp" /Fo"%STLC%/std_minmax_element.obj" || exit /b 1
-"%LLVMBIN%/llvm-lib.exe" /nologo /out:"%STLC%/stlcompat.lib" "%STLC%/std_minmax_element.obj" || exit /b 1
+rem HIP SDK 6.2 ships no llvm-lib; any archiver works for one object, use the 7.2.1 wheel one
+set LLVMLIB=%LLVMBIN%/llvm-lib.exe
+if not exist "%LLVMLIB%" set LLVMLIB=%R%/tools/venv-rocm/Lib/site-packages/_rocm_sdk_devel/lib/llvm/bin/llvm-lib.exe
+"%LLVMLIB%" /nologo /out:"%STLC%/stlcompat.lib" "%STLC%/std_minmax_element.obj" || exit /b 1
 
 cmake -S "%R%/third_party/aliceVision" -B "%BLD%" -G Ninja -DCMAKE_BUILD_TYPE=Release ^
   "-DCMAKE_EXE_LINKER_FLAGS=%STLC%/stlcompat.lib" ^
