@@ -102,7 +102,8 @@ stage at full speed. Design, knobs and every table:
   allocated non-coherent: on an RX 6750 XT, `atomicMin` into default (fine-grained) host memory
   fails on every element while `atomicAdd` works, and both are right on
   `hipHostMallocNonCoherent` memory (`hip/tests/host_atomics.hip`; Windows passes all cases).
-  Anything that spills a buffer kernels do atomics on, LLM runtimes included, needs to know.
+  Anything that spills a buffer kernels do atomics on, LLM runtimes included, needs to know:
+  standalone write-up in [docs/notes/gpu-host-memory-on-rocm.md](docs/notes/gpu-host-memory-on-rocm.md).
 * **Fine-grained host memory is the wrong tier for texture-sampled data**: with the default
   mapping, 186 MB of camera images behind PCIe cost 22x while 6 GB of streamed volumes cost
   4.7x; allocated coarse-grained, the device caches them and the images cost nothing.
