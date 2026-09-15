@@ -102,6 +102,16 @@ RX 5500 XT produce identical statistics on both sets (RDNA1 and RDNA2 agree bit-
 the compare in this session). Pages: [6 views](validation/monstree-mini6-rx6750xt-linux/index.md),
 [41 views](validation/monstree-full-rx6750xt-linux/index.md).
 
+### bench-pc, RX 6750 XT (RDNA2, Windows, HIP SDK 6.2 build), 2026-09-15
+
+The same card under Windows through AMD's HIP 6 runtime (v0.2.2 `gfx1031` package, `/arch:AVX`
+build on an FX-8120): 6 views 28.1 s, 41 views 190.3 s in one process (24 simultaneous tiles, no
+spills); masks identical on every view, median error 0, 98.7 % / 98.7 % median-view within 1 %.
+Against its own Linux / HIP 7.2 output on the 6-view set: identical masks, median 0, 97.1-98.7 %
+within 1 %, not bit-identical (different compiler and runtime on the same silicon). Pages:
+[6 views](validation/monstree-mini6-rx6750xt-windows-hip6/index.md),
+[41 views](validation/monstree-full-rx6750xt-windows-hip6/index.md).
+
 ## v0.2.0 regression (2026-09-04)
 
 The bridge v2 work changed the allocator, the planner and the mip-level storage. Regression

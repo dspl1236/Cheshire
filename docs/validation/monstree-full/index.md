@@ -6,7 +6,7 @@ both maps: relative depth error |hip - cuda| / cuda.
 
 | | CUDA reference | HIP (Cheshire) |
 |---|---|---|
-| DepthMap wall time | 105.5 s | 124.4 s |
+| DepthMap wall time | 379.0 s (four Meshroom chunks; 105.5 s was chunk 0 only, corrected 2026-09-15) | 124.4 s |
 | views | 41 | 41 |
 
 ## Summary

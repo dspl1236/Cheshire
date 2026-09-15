@@ -6,7 +6,7 @@ i3-4330; ROCm 7.2 user-space in the bundle; emulated mipmaps.
 
 | | CUDA (GTX 1080 Ti, same host) | HIP (RX 6750 XT) |
 |---|---|---|
-| DepthMap wall time, 41 views | 105.5 s | 226.1 s |
+| DepthMap wall time, 41 views | 379.0 s (four Meshroom chunks; 105.5 s was chunk 0 only, corrected 2026-09-15) | 226.1 s |
 
 * mask agreement >= 95 %: 41 / 41
 * per-view median relative depth error: 0.0000 on every view
