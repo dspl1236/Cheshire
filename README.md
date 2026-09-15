@@ -40,6 +40,7 @@ Meshroom jobs on the same node, also four chunks: RX 6750 XT 352 s, RX 5500 XT 5
 | GTX 1080 Ti (CUDA reference, 4 Meshroom chunks) | Linux | 31.8 s | 379.0 s | 9.2 s | | | |
 | Radeon RX 9070, RDNA4 | Windows | 17.4 s | 124.4 s | 3.0 s | identical | 0.0000 | 98.9 % / 98.7 % |
 | Radeon RX 6750 XT, RDNA2 | Linux | 31.0 s | 226.1 s (352 s in 4 Meshroom chunks) | 5.5 s | identical | 0.0000 | 97.5 % / 98.1 % |
+| Radeon RX 6750 XT, RDNA2, HIP SDK 6.2 build | Windows | 28.1 s | | | identical | 0.0000 | 98.7 % / |
 | Radeon RX 5500 XT, RDNA1 | Linux | 60.7 s | 447.7 s (594 s in 4 Meshroom chunks) | 10.9 s | identical | 0.0000 | 97.5 % / 98.1 % |
 
 Per-view cost on every HIP card is flat between 6 and 41 views (the port scales linearly);
@@ -58,13 +59,15 @@ tables in [docs/validation](docs/validation/)).
 | same card, any bridge configuration vs the uncapped run | identical | 0 | 100 % (every pixel equal) | bit-identical |
 | RX 5500 XT vs RX 6750 XT (RDNA1 vs RDNA2), same HIP build | identical | 0 | 100 % (every pixel equal) | bit-identical |
 | RX 9070 vs RX 6750 XT (RDNA4 vs RDNA2), same HIP build | identical | 0 | 97.0-98.5 % | not bit-identical: p95 error 0.07-0.24 % |
+| RX 6750 XT under Windows / HIP 6.2 vs the same card under Linux / HIP 7.2 | identical | 0 | 97.1-98.7 % | not bit-identical: same silicon, different compiler and runtime |
 | any HIP card vs the CUDA GTX 1080 Ti | identical | 0 | 97.5-98.9 % | same noise floor as RDNA4 vs RDNA2 |
 
-So the port is deterministic (same inputs, same architecture family, same bits), and the
-1-3 % of pixels that differ by more than 1 % between RDNA4 and RDNA2, or between any AMD card
-and CUDA, is the algorithm's cross-hardware noise floor: texture-filter and FMA rounding
-propagating through SGM's argmin, not a port defect. The same 1-3 % appears between two AMD
-generations running identical code, which is what rules out the port as the cause.
+So the port is deterministic (same inputs, same build, same architecture family, same bits),
+and the 1-3 % of pixels that differ by more than 1 % between RDNA4 and RDNA2, between two
+toolchains on the same card, or between any AMD card and CUDA, is the algorithm's noise floor:
+texture-filter and FMA rounding propagating through SGM's argmin, not a port defect. The same
+1-3 % appears between two AMD generations running identical code and between two compilers on
+identical silicon, which is what rules out the port as the cause.
 
 ## Memory bridge
 
@@ -143,7 +146,8 @@ maps being bit-identical between the two:
 | asset | size | contents |
 |---|---|---|
 | `cheshire-alicevision-hip-windows-x64-rocm7.2.1-gfx1201.zip` (v0.2.1) | 100 MB | self-contained AliceVision + HIP DepthMap for RDNA4 on Windows; unzip, needs only the Adrenalin driver and a CPU with AVX2 (2013 or newer) |
-| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-rdna3-rdna4.zip` (v0.2.1) | 101 MB | the same, with code objects for RDNA3 and RDNA4 discrete parts and the RDNA3 APUs (gfx1100/1101/1102/1103/1150/1151/1152/1153/1200/1201): RX 7000 owners and Ryzen 7040/8040/AI laptops, this is the one to try. RX 6000 (RDNA2) on Windows: AMD's Windows HIP runtime does not enumerate it at all (`hipErrorNoDevice` on an RX 6750 XT with Adrenalin 26.8; [AMD's support table](https://rocm.docs.amd.com/projects/install-on-windows/en/latest/reference/system-requirements.html) marks every RX 6000 unsupported), so RDNA2 is Linux-only |
+| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-rdna3-rdna4.zip` (v0.2.1) | 101 MB | the same, with code objects for RDNA3 and RDNA4 discrete parts and the RDNA3 APUs (gfx1100/1101/1102/1103/1150/1151/1152/1153/1200/1201): RX 7000 owners and Ryzen 7040/8040/AI laptops, this is the one to try. RX 6000 (RDNA2) on Windows: AMD's Windows HIP runtime does not enumerate it at all (`hipErrorNoDevice` on an RX 6750 XT with Adrenalin 26.8; [AMD's support table](https://rocm.docs.amd.com/projects/install-on-windows/en/latest/reference/system-requirements.html) marks every RX 6000 unsupported), so RDNA2 on Windows needs the HIP 6 runtime: see the `hip6.2` packages below |
+| `cheshire-alicevision-hip6.2-windows-x64-gfx1030-avx.zip`, `-gfx1031-avx.zip`, `-gfx1032-avx.zip` (v0.2.2) | 143 MB each | RX 6000 on Windows through AMD's HIP 6.2 runtime (the one the driver ships): one package per chip because the HIP SDK 6.2 toolchain cannot bundle several. gfx1030 = RX 6800/6900/6950, gfx1031 = RX 6700/6750, gfx1032 = RX 6600/6650. Compiled for AVX so pre-2013 CPUs work too. Validated on an RX 6750 XT: 28.1 s on the 6-view set, 98.7 % within 1 % of CUDA |
 | `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.2.1) | ~120 MB | relocatable Linux bundle, code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested); needs only `amdgpu` + `/dev/kfd` |
 | `monstree-mini6-meshroom-cache.tar.gz` (v0.1.0) | 383 MB | 6-view Meshroom 2023.3 cache: CameraInit, SfM, PrepareDenseScene and the CUDA DepthMap reference |
 | `monstree-full-cuda-reference.tar.gz` (v0.1.0) | 680 MB | 41-view SfM + CUDA DepthMap reference (GTX 1080 Ti) |

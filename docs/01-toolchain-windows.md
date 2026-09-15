@@ -94,3 +94,27 @@ marks every RX 6000 card unsupported by the current HIP SDK. RDNA2 code objects 
 build are therefore inert; RX 6000 owners get the Linux bundle, where the same card works. A
 Windows RDNA2 build would need the older HIP SDK 6.x toolchain and runtime (`amdhip64_6.dll`,
 which the driver ships), a separate build environment this repo does not have.
+
+## RDNA2 on Windows through HIP SDK 6.2 (2026-09-15)
+
+AMD's Windows driver ships the HIP 6 runtime (`amdhip64_6.dll`), and that runtime still
+enumerates RX 6000 cards where the 7.2 one refuses them. Building against the HIP SDK 6.2.4
+toolchain (clang 19; installed on bench-pc and copied to `tools/rocm-6.2`; no llvm-lib; device
+libs under `amdgcn/bitcode`) needs three things beyond the 7.2 recipe:
+
+1. `CHESHIRE_ROCM_PATH`, `CHESHIRE_LLVM_BIN`, `CHESHIRE_DEVICE_LIB_PATH` (env.cmd /
+   build-alicevision.cmd) point at the copied tree.
+2. clang 19 against the MSVC 14.50 STL: `-D__builtin_verbose_trap(x,y)=__builtin_trap()` on both
+   the host and the HIP flags (`CHESHIRE_EXTRA_CXXFLAGS`, `CHESHIRE_HIP_EXTRA_FLAGS`). A force-included
+   shim does not reach HIP TUs, whose runtime wrapper includes the STL first. CMake reads the host
+   flags only on the first configure, so a build directory configured without the macro must be wiped.
+3. **One architecture per build.** With several `--offload-arch` values the HIP SDK 6.2 toolchain
+   writes an offload bundle whose entries are all the same code object (the last one compiled;
+   verified by parsing `__CLANG_OFFLOAD_BUNDLE__`: six entries, one md5, `e_flags` of gfx1102).
+   The runtime then reports "program ISA gfx1102 is not compatible with the device ISA gfx1031",
+   `hipGetSymbolAddress` returns `hipErrorNoBinaryForGpu`, and the first constant upload crashes.
+   Single-architecture builds are correct (entry `e_flags` 0x37 = gfx1031).
+
+Result on bench-pc's RX 6750 XT: the 6-view set in 28.1 s, masks identical to CUDA, 98.7 %
+within 1 % (`docs/validation/monstree-mini6-rx6750xt-windows-hip6/`). Against the same card's
+Linux / HIP 7.2 output: masks identical, median 0, 97-98.7 % within 1 %, not bit-identical.
