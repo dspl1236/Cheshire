@@ -139,7 +139,8 @@ stage at full speed. Design, knobs and every table:
 ## Downloads
 
 Binaries are on the [v0.2.1 release](https://github.com/dspl1236/cheshire/releases/tag/v0.2.1)
-(bridge v2 plus APU code objects); the data sets and references are on
+(bridge v2 plus APU code objects) and, for RX 6000 cards on Windows, the
+[v0.2.2 release](https://github.com/dspl1236/cheshire/releases/tag/v0.2.2); the data sets and references are on
 [v0.1.0](https://github.com/dspl1236/cheshire/releases/tag/v0.1.0) and unchanged, the depth
 maps being bit-identical between the two:
 
