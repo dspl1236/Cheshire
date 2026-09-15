@@ -108,7 +108,10 @@ The same card under Windows through AMD's HIP 6 runtime (v0.2.2 `gfx1031` packag
 build on an FX-8120): 6 views 28.1 s, 41 views 190.3 s in one process (24 simultaneous tiles, no
 spills); masks identical on every view, median error 0, 98.7 % / 98.7 % median-view within 1 %.
 Against its own Linux / HIP 7.2 output on the 6-view set: identical masks, median 0, 97.1-98.7 %
-within 1 %, not bit-identical (different compiler and runtime on the same silicon). Pages:
+within 1 %, not bit-identical (different compiler and runtime on the same silicon). With mipmap
+emulation forced on, the same package takes 232.3 s on the 41 views and is bit-identical to the
+native-mipmap run (41 / 41), which puts it within 3 % of the Linux bundle: the Linux/Windows gap
+on this card is the mipmap path, nothing else. Pages:
 [6 views](validation/monstree-mini6-rx6750xt-windows-hip6/index.md),
 [41 views](validation/monstree-full-rx6750xt-windows-hip6/index.md).
 

@@ -113,8 +113,11 @@ stage at full speed. Design, knobs and every table:
   reads are fine. AliceVision's mip chain is built through a buffer copy instead.
 * **Linux ROCm 7.2 has no `hipMallocMipmappedArray`** on RDNA1 (and WSL2 has no textures at
   all). Mipmaps are emulated in the compat layer as one texture per level, in array or pitched
-  linear memory: bit-identical to native mipmaps on the RX 9070, 15 % slower there, so the
-  Windows build keeps native and the Linux bundle emulates on every architecture. The
+  linear memory: bit-identical to native mipmaps on the RX 9070 (15 % slower there) and on the
+  RX 6750 XT (41 / 41 views bit-identical, 232.3 s vs 190.3 s on the 41-view set), so the
+  Windows build keeps native and the Linux bundle emulates on every architecture. That 18 %
+  is the whole Linux-vs-Windows gap for the RX 6750 XT: the Linux bundle's 226.1 s is within
+  3 % of the Windows build with emulation forced on. The
   bit-identity is expected rather than remarkable: AliceVision samples its mip chain only at
   integer levels (`level = log2(scale / minDownscale)`), where trilinear filtering reduces to
   bilinear on one level. Linear levels are what lets the bridge account for camera images.

@@ -159,7 +159,11 @@ What it took to get from "bundle on disk" to "HIP sees the card", each a real de
    handle; `tex2DLod` becomes a table lookup + `tex2D`. AliceVision only samples at integer
    levels, and on the RX 9070 the emulated output is **bit-identical** to native mipmaps -
    but it costs ~35 % on that card (23.5 s vs 17.4 s on mini6), so the Windows build keeps
-   native mipmaps (`-DCHESHIRE_NATIVE_MIPMAP`) and the Linux bundle emulates.
+   native mipmaps (`-DCHESHIRE_NATIVE_MIPMAP`) and the Linux bundle emulates. On the RX 6750 XT
+   the same experiment under Windows / HIP 6.2 (41 views: 232.3 s emulated vs 190.3 s native,
+   bit-identical) lands within 3 % of this Linux bundle's 226.1 s, so emulation accounts for the
+   entire Linux-vs-Windows difference on that card. A native mipmap path on Linux (when the
+   runtime grows one, or a hand-built one) is therefore worth about 18 % on RDNA2.
 5. The half-array `surf2Dwrite` defect reproduces on Linux/RDNA1 too: it is a HIP runtime
    bug, not a Windows one. The buffer-copy mip builder covers both.
 6. Small ones: `getent`-based home under `sudo` in `node-amd-setup.sh`; git must carry the
