@@ -115,3 +115,16 @@ against the v0.1.0 outputs (which this document validates against CUDA):
 * The strict per-view criterion (>= 98 % of jointly valid pixels within 1 %) is at the noise
   floor of the RX 6750 XT (97.5 % median view), so the matrix runner reports the number rather
   than PASS/FAIL against CUDA; bit-identity to the validated output is the regression gate.
+
+### Meshroom jobs on the node, four chunks each, 41 photos, `standard` preset (2026-09-11 / 09-15)
+
+The like-for-like comparison with the CUDA reference (which ran the same way):
+
+| GPU | DepthMap chunks | total | textured mesh vertices |
+|---|---|---|---|
+| GTX 1080 Ti, CUDA (Meshroom 2023.3 as shipped) | 105.4 + 111.1 + 106.3 + 56.2 | 379 s | 1,156,930 |
+| RX 6750 XT, HIP (paired into the same Meshroom 2023.3) | 99.2 + 103.7 + 95.0 + 54.0 | 352 s | 1,143,582 |
+| RX 5500 XT, HIP (same) | 165.4 + 163.9 + 171.2 + 93.2 | 594 s | 1,136,840 |
+
+Feature extraction ran on the CPU for the HIP jobs (PopSift is CUDA-only), so the SfM inputs
+differ slightly from the CUDA job's; the vertex counts are within 2 % of each other.

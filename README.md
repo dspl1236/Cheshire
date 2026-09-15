@@ -31,15 +31,16 @@ Same photos, same SfM, same DepthMap parameters as the CUDA reference (Meshroom 
 GTX 1080 Ti); only the GPU stage differs. Metrics are per view over pixels valid in both maps.
 Times are the DepthMap stage only. The CUDA reference ran as Meshroom runs it, in chunks of
 12 views (four chunks for 41 views: 105.4 + 111.1 + 106.3 + 56.2 s); the HIP times are one
-invocation over all views. The one apples-to-apples row is the RX 6750 XT inside a real
-Meshroom job on the same node, also four chunks: 352 s.
+invocation over all views. The apples-to-apples numbers are the two cards run inside real
+Meshroom jobs on the same node, also four chunks: RX 6750 XT 352 s, RX 5500 XT 594 s
+(both jobs reconstructed the full 41-photo mesh, within 2 % of the CUDA job's vertex count).
 
 | GPU | OS | 6 views | 41 views | per view (41) | valid masks | median rel. depth error | within 1 % (median view, 6 / 41) |
 |---|---|---|---|---|---|---|---|
 | GTX 1080 Ti (CUDA reference, 4 Meshroom chunks) | Linux | 31.8 s | 379.0 s | 9.2 s | | | |
 | Radeon RX 9070, RDNA4 | Windows | 17.4 s | 124.4 s | 3.0 s | identical | 0.0000 | 98.9 % / 98.7 % |
 | Radeon RX 6750 XT, RDNA2 | Linux | 31.0 s | 226.1 s (352 s in 4 Meshroom chunks) | 5.5 s | identical | 0.0000 | 97.5 % / 98.1 % |
-| Radeon RX 5500 XT, RDNA1 | Linux | 60.7 s | 447.7 s | 10.9 s | identical | 0.0000 | 97.5 % / 98.1 % |
+| Radeon RX 5500 XT, RDNA1 | Linux | 60.7 s | 447.7 s (594 s in 4 Meshroom chunks) | 10.9 s | identical | 0.0000 | 97.5 % / 98.1 % |
 
 Per-view cost on every HIP card is flat between 6 and 41 views (the port scales linearly);
 the CUDA reference's per-view cost rises from 5.3 s to 9.2 s across the chunked run. Until
