@@ -25,14 +25,14 @@ setup)
   echo "unpacking $TB"
   tar -C "$APPS" -xzf "$TB"
   chown -R "$U:$U" "$APPS"
-  # RDNA2 cards that are not gfx1030 (6700 XT = gfx1031) run the gfx1030 code object;
-  # RDNA1 (RX 5500 = gfx1012, RX 5700 = gfx1010) needs 10.1.0 only if the bundle lacks its gfx.
+  # No HSA_OVERRIDE_GFX_VERSION: the bundle carries native code objects for every RDNA part
+  # (and the APUs / Vega), and an override left over from one card crashes the next one:
+  # presenting an RX 5500 XT as gfx1030 dies with HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION
+  # on the first kernel. Only set it by hand for a chip whose gfx id is missing from the bundle.
   cat > "$ENVF" <<EOF
 export ALICEVISION_ROOT=$BUNDLE
 export LD_LIBRARY_PATH=$BUNDLE/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}
 export PATH=$BUNDLE/bin:\$PATH
-# RDNA2 (gfx103x) -> gfx1030 code object; comment out on RDNA3/RDNA4
-export HSA_OVERRIDE_GFX_VERSION=10.3.0
 EOF
   echo "wrote $ENVF ; log out and back in for the group change, then: bash $0 check"
   ;;

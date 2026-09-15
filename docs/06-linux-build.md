@@ -203,3 +203,13 @@ whether the 7.2 *runtime* initialises a given APU or a Vega is untested here. AP
 memory, so they are the case where the bridge's VRAM budget is a software knob rather than a
 board limit: expect `hipMemGetInfo` to report the carve-out, and `CHESHIRE_BRIDGE_VRAM_MB` to be
 the thing to tune. The Windows RDNA3+RDNA4 package carries the RDNA3 APUs too.
+
+### Card swaps and `HSA_OVERRIDE_GFX_VERSION` (2026-09-15)
+
+`node-amd-setup.sh` used to write `HSA_OVERRIDE_GFX_VERSION=10.3.0` into `env.sh` for the
+RX 6700 XT era, and the Meshroom pairing wrapper sources `env.sh`. With the RX 5500 XT swapped
+back in, the first Meshroom DepthMap chunk died with `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`
+("Failed to move Gaussian filter to symbol"): the override made the runtime pick the gfx1030
+code object for an RDNA1 card, the day-one RDNA1 crash. The bundle has native code objects for
+every RDNA part, so the override is gone from the setup script; set it by hand only for a chip
+whose gfx id the bundle lacks, and unset it when the card changes.
