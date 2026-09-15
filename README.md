@@ -10,6 +10,17 @@ Validated against a CUDA node's output on RDNA1, RDNA2 and RDNA4 cards.
 
 The cat that grins on any hardware.
 
+Two things here are not off-the-shelf. The port itself is close to mechanical (a compat
+header does what `hipify` would), but it is *validated*: every architecture is compared
+against a CUDA reference with a stated metric, and the porting bugs found on the way are the
+kind that produce wrong output rather than errors (HIP dropping `surf2Dwrite` into 16-bit
+float arrays; GPU atomics into mapped host memory silently wrong on Linux unless the memory
+is non-coherent). The memory bridge is the novel part: it decides *what* spills to system RAM
+by buffer class, and the policy is set by measurement, not by intuition. With the default
+fine-grained host mapping, 186 MB of texture-sampled camera images behind PCIe cost 22x while
+6 GB of streamed volumes cost 4.7x; coarse-grained mapping turns the images to 1.0x. That
+number is why the design is what it is.
+
 ## Results
 
 Same photos, same SfM, same DepthMap parameters as the CUDA reference (Meshroom 2023.3 on a
@@ -22,10 +33,24 @@ GTX 1080 Ti); only the GPU stage differs. Metrics are per view over pixels valid
 | Radeon RX 6750 XT, RDNA2 | Linux | **31.0 s** | 226.1 s | identical | 0.0000 | 97.5 % / 98.1 % |
 | Radeon RX 5500 XT, RDNA1 | Linux | 60.7 s | 447.7 s | identical | 0.0000 | 97.5 % / 98.1 % |
 
-RDNA1 and RDNA2 produce bit-identical depth maps. The remaining 1-3 % of pixels that differ by
-more than 1 % between GPU generations (and against CUDA) is the algorithm's cross-hardware
-noise floor: texture-filter and FMA rounding, not a port defect. Full per-view tables and
-side-by-side panels: [docs/validation](docs/validation/).
+### What "identical" means here, per comparison
+
+Three different comparisons appear in this repo, and they have three different answers.
+All metrics are per view over pixels valid in both maps (`scripts/compare_depthmaps.py`;
+tables in [docs/validation](docs/validation/)).
+
+| comparison | validity masks | median rel. depth error | pixels within 1 % | verdict |
+|---|---|---|---|---|
+| same card, any bridge configuration vs the uncapped run | identical | 0 | 100 % (every pixel equal) | bit-identical |
+| RX 5500 XT vs RX 6750 XT (RDNA1 vs RDNA2), same HIP build | identical | 0 | 100 % (every pixel equal) | bit-identical |
+| RX 9070 vs RX 6750 XT (RDNA4 vs RDNA2), same HIP build | identical | 0 | 97.0-98.5 % | not bit-identical: p95 error 0.07-0.24 % |
+| any HIP card vs the CUDA GTX 1080 Ti | identical | 0 | 97.5-98.9 % | same noise floor as RDNA4 vs RDNA2 |
+
+So the port is deterministic (same inputs, same architecture family, same bits), and the
+1-3 % of pixels that differ by more than 1 % between RDNA4 and RDNA2, or between any AMD card
+and CUDA, is the algorithm's cross-hardware noise floor: texture-filter and FMA rounding
+propagating through SGM's argmin, not a port defect. The same 1-3 % appears between two AMD
+generations running identical code, which is what rules out the port as the cause.
 
 ## Memory bridge
 
