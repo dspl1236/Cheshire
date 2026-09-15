@@ -1,0 +1,9 @@
+# house-pc RX 5500 XT (RDNA1, 8 GB): first run of bridge v2 / linear levels / v0.2.1 bundle on RDNA1
+default               | ~/apps/cheshire/bundle |
+img-host              | ~/apps/cheshire/bundle | CHESHIRE_BRIDGE_HOST_CLASSES=image
+map-host              | ~/apps/cheshire/bundle | CHESHIRE_BRIDGE_HOST_CLASSES=map
+vol-host              | ~/apps/cheshire/bundle | CHESHIRE_BRIDGE_HOST_CLASSES=volume CHESHIRE_BRIDGE_HOST_MB=7000
+cap4000               | ~/apps/cheshire/bundle | CHESHIRE_BRIDGE_VRAM_MB=4000
+cap1500               | ~/apps/cheshire/bundle | CHESHIRE_BRIDGE_VRAM_MB=1500 CHESHIRE_BRIDGE_HOST_MB=7000
+cap700                | ~/apps/cheshire/bundle | CHESHIRE_BRIDGE_VRAM_MB=700 CHESHIRE_BRIDGE_HOST_MB=7000
+cap500                | ~/apps/cheshire/bundle | CHESHIRE_BRIDGE_VRAM_MB=500 CHESHIRE_BRIDGE_HOST_MB=7000

@@ -25,6 +25,25 @@ while todo:
 # without it hipGetDeviceCount reports no GPU. Not in any import table, so copy it explicitly.
 for c in rbin.glob('amd_comgr*.dll'):
     if c.name.lower() not in have: shutil.copy2(c, stage / 'bin' / c.name); copied.append(c.name.lower())
+# MSVC runtime + LLVM OpenMP runtime: present on a developer's PC (Visual Studio drops them into
+# System32) and absent on a clean one, where the exe dies with 0xC0000135 and no message. Both
+# are Microsoft-redistributable; take them from the VS Redist tree, falling back to System32.
+import glob
+redist = sorted(glob.glob(r'C:\Program Files*\Microsoft Visual Studio\*\*\VC\Redist\MSVC.*d\Microsoft.VC*.CRT'))        + sorted(glob.glob(r'C:\Program Files*\Microsoft Visual Studio\*\*\VC\Redist\MSVC.*d\Microsoft.VC*.OpenMP.LLVM'))
+runtime = {}
+for d in redist + [r'C:\Windows\System32']:
+    for f in Path(d).glob('*.dll'):
+        n = f.name.lower()
+        if n not in runtime and (n.startswith(('msvcp140', 'vcruntime140', 'concrt140')) or n.startswith('libomp140')) and not n.endswith('d.dll') and 'debug' not in n:
+            runtime[n] = f
+missing_rt = set()
+for pe in list((stage / 'bin').glob('*.dll')) + list((stage / 'bin').glob('*.exe')):
+    for dep in imports(pe):
+        if dep in have: continue
+        if dep in runtime: missing_rt.add(dep)
+for n in sorted(missing_rt):
+    shutil.copy2(runtime[n], stage / 'bin' / runtime[n].name); have.add(n); copied.append(n)
+print(f"runtime DLLs bundled: {' '.join(sorted(missing_rt))}")
 print(f"copied {len(copied)} DLLs: {' '.join(sorted(copied))[:600]}")
 with zipfile.ZipFile(outzip, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
     for p in stage.rglob('*'):

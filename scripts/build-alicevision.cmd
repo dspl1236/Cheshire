@@ -27,8 +27,11 @@ rem OpenMP 3+ omp.h shim (see hip/compat/include/omp_shim). Via the environment 
 rem own MSVC defaults (/EHsc /DWIN32 ...) stay intact; -DCMAKE_CXX_FLAGS would replace them.
 rem /arch:AVX2: AliceVision's OptimizeForArchitecture (TARGET_ARCHITECTURE=core) emits /arch:SSE2 (ignored by
 rem clang-cl on x64) while defining __SSE3__ etc., so Eigen picks SSE3 intrinsics the compiler will not inline.
-set CFLAGS=-I%R%/hip/compat/include/omp_shim /arch:AVX2
-set CXXFLAGS=-I%R%/hip/compat/include/omp_shim /arch:AVX2
+rem CHESHIRE_ARCH_FLAG: /arch:AVX2 (default; Haswell 2013 and newer) or /arch:AVX for older CPUs
+set ARCHFLAG=%CHESHIRE_ARCH_FLAG%
+if "%ARCHFLAG%"=="" set ARCHFLAG=/arch:AVX2
+set CFLAGS=-I%R%/hip/compat/include/omp_shim %ARCHFLAG%
+set CXXFLAGS=-I%R%/hip/compat/include/omp_shim %ARCHFLAG%
 
 rem STL helper shim: the vcpkg archive was built with a newer MSVC STL that exports
 rem __std_min/max_element_*i from msvcp140; MSVC 14.50.35717 does not. See hip/compat/stlcompat.

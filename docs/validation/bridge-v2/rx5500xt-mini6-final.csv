@@ -1,0 +1,9 @@
+case,install,env,stage_s,wall_s,tiles,spills,identical,worst_dev,cuda_within_1pct,strict_pass_vs_cuda,planner,map_vram_peak_mb,map_host_peak_mb,volume_vram_peak_mb,volume_host_peak_mb,image_vram_peak_mb,image_host_peak_mb,other_vram_peak_mb,other_host_peak_mb
+default,~/apps/cheshire/bundle,,61.148,61.4,16,0,True,0.0,n/a,False,"VRAM budget 5872.32 MB, 2 full R cameras + 4 tiles, images resident",596,0,3992,0,186,0,0,0
+img-host,~/apps/cheshire/bundle,CHESHIRE_BRIDGE_HOST_CLASSES=image,109.839,109.9,16,48,True,0.0,n/a,False,"VRAM budget 5872.32 MB, 2 full R cameras + 4 tiles, images resident",596,0,3992,0,0,186,0,0
+map-host,~/apps/cheshire/bundle,CHESHIRE_BRIDGE_HOST_CLASSES=map,90.283,90.4,16,362,True,0.0,n/a,False,"VRAM budget 5872.32 MB, 2 full R cameras + 4 tiles, images resident",0,596,3992,0,186,0,0,0
+vol-host,~/apps/cheshire/bundle,CHESHIRE_BRIDGE_HOST_CLASSES=volume CHESHIRE_BRIDGE_HOST_MB=7000,347.172,347.3,16,51,True,0.0,n/a,False,"VRAM budget 5872.32 MB, 2 full R cameras + 4 tiles, images resident",596,0,0,3992,186,0,0,0
+cap4000,~/apps/cheshire/bundle,CHESHIRE_BRIDGE_VRAM_MB=4000,60.106,60.2,8,0,True,0.0,n/a,False,"VRAM budget 3200 MB, 1 full R cameras + 2 tiles, images resident",312,0,1996,0,186,0,0,0
+cap1500,~/apps/cheshire/bundle,CHESHIRE_BRIDGE_VRAM_MB=1500 CHESHIRE_BRIDGE_HOST_MB=7000,59.947,60.0,2,0,True,0.0,n/a,False,"VRAM budget 1200 MB, 0 full R cameras + 2 tiles, images resident",100,0,499,0,186,0,0,0
+cap700,~/apps/cheshire/bundle,CHESHIRE_BRIDGE_VRAM_MB=700 CHESHIRE_BRIDGE_HOST_MB=7000,61.028,61.1,1,191,True,0.0,n/a,False,VRAM budget 560 MB is below one tile (668.658 MB); running one tile with volumes/maps spil,58,29,249,0,186,0,0,0
+cap500,~/apps/cheshire/bundle,CHESHIRE_BRIDGE_VRAM_MB=500 CHESHIRE_BRIDGE_HOST_MB=7000,248.039,248.1,1,197,True,0.0,n/a,False,VRAM budget 400 MB is below one tile (668.658 MB); running one tile with volumes/maps spil,32,45,187,155,186,0,0,0

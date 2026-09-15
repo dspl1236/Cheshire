@@ -141,12 +141,17 @@ maps being bit-identical between the two:
 
 | asset | size | contents |
 |---|---|---|
-| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-gfx1201.zip` (v0.2.1) | 100 MB | self-contained AliceVision + HIP DepthMap for RDNA4 on Windows; unzip, needs only the Adrenalin driver |
-| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-rdna3-rdna4.zip` (v0.2.1) | 100 MB | the same, with code objects for RDNA3/RDNA4 discrete parts and the RDNA3 APUs (gfx1100/1101/1102/1103/1150/1151/1152/1153/1200/1201): RX 7000 owners and Ryzen 7040/8040/AI laptops, this is the one to try |
+| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-gfx1201.zip` (v0.2.1) | 100 MB | self-contained AliceVision + HIP DepthMap for RDNA4 on Windows; unzip, needs only the Adrenalin driver and a CPU with AVX2 (2013 or newer) |
+| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-rdna2-rdna3-rdna4.zip` (v0.2.1) | 101 MB | the same, with code objects for RDNA2, RDNA3 and RDNA4 discrete parts and the RDNA3 APUs (gfx1030/1031/1032/1100/1101/1102/1103/1150/1151/1152/1153/1200/1201): RX 6000 / RX 7000 owners and Ryzen 7040/8040/AI laptops, this is the one to try |
 | `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.2.1) | ~120 MB | relocatable Linux bundle, code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested); needs only `amdgpu` + `/dev/kfd` |
 | `monstree-mini6-meshroom-cache.tar.gz` (v0.1.0) | 383 MB | 6-view Meshroom 2023.3 cache: CameraInit, SfM, PrepareDenseScene and the CUDA DepthMap reference |
 | `monstree-full-cuda-reference.tar.gz` (v0.1.0) | 680 MB | 41-view SfM + CUDA DepthMap reference (GTX 1080 Ti) |
 | `cheshire-hip-depthmap-outputs.tar.gz` (v0.1.0) | 966 MB | the HIP depth maps behind the table above (RX 9070 6 + 41 views, RX 5500 XT, RX 6750 XT) |
+
+Windows packages carry every DLL they need, the MSVC and OpenMP runtimes included (until
+2026-09-15 they did not, and a machine without Visual Studio died with exit code 0xC0000135
+and no message). They are compiled for AVX2; a pre-2013 CPU dies with 0xC000001D (illegal
+instruction), and an AVX-only build is available on request or via `CHESHIRE_ARCH_FLAG=/arch:AVX`.
 
 Reproduce a row: unpack a cache under `data/ref/<dataset>/`, then `scripts\run-depthmap.cmd <dataset>`
 (Windows, set `CHESHIRE_INSTALL` to the unzipped folder) or `scripts/linux/run-depthmap.sh` (Linux).
@@ -158,7 +163,9 @@ which prints the per-view table and writes the side-by-side panels. Photos are
 
 Every package carries RDNA3 code objects (gfx1100/1101/1102, plus the APUs gfx1103/1150/1151/1152/1153)
 and none has run on RDNA3 hardware; there is no such chip here. Ten minutes on an RX 7600/7700/7800/7900,
-or a Ryzen 7040/8040/AI 300 laptop, closes the gap:
+or a Ryzen 7040/8040/AI 300 laptop, closes the gap (Windows: the RDNA2+RDNA3+RDNA4 zip; if it
+exits without a message, the exit code says why: 0xC0000135 means a DLL is missing, 0xC000001D
+means the CPU lacks AVX2):
 
 1. Download the RDNA3+RDNA4 Windows zip (or the Linux bundle) and
    `monstree-mini6-meshroom-cache.tar.gz` from the release pages above.

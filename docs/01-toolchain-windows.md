@@ -73,3 +73,12 @@ needs a code object; without it `hipGetDeviceCount` returns 0 and AliceVision re
 "No CUDA-Enabled GPU" with no other diagnostic. The packager copies it explicitly (the
 Linux bundle has the same rule for `libamd_comgr.so`). Verified by running the packaged
 `aliceVision_depthMapEstimation` on the 6-view set with `PATH` reduced to `System32`.
+
+Two more things a clean machine taught (2026-09-15, bench-pc: RX 6750 XT, AMD FX-8120, no Visual
+Studio): the packager's import walk stops at the MSVC runtime (`msvcp140*`, `vcruntime140*`,
+`concrt140`) and the LLVM OpenMP runtime `libomp140.x86_64.dll`, because on the build PC those
+live in System32. On a machine without them the exe exits with `0xC0000135` (STATUS_DLL_NOT_FOUND)
+and prints nothing. `package_windows.py` now bundles them from the VS Redist tree. And the build
+uses `/arch:AVX2` (needed so Eigen's SSE3 paths inline under clang-cl); a Bulldozer-era CPU
+without AVX2 exits with `0xC000001D` (STATUS_ILLEGAL_INSTRUCTION). `CHESHIRE_ARCH_FLAG=/arch:AVX`
+builds a variant for those.

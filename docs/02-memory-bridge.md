@@ -266,3 +266,18 @@ operations PCIe carries as atomics, so on fine-grained system memory it is silen
 The bridge now allocates its host tier `hipHostMallocMapped | hipHostMallocNonCoherent`: the
 device caches it, atomics resolve in L2, and the CPU only ever reads spilled blocks through
 `hipMemcpy` after a synchronisation, which is where coarse-grained memory becomes visible.
+
+### RDNA1 on the final build (RX 5500 XT, 2026-09-15)
+
+First run of bridge v2, linear levels and the v0.2.1 bundle on RDNA1 (`docs/validation/bridge-v2/rx5500xt-mini6-final.md`);
+every row bit-identical to the RDNA1/RDNA2 v0.1.0 output. The atomics probe reproduces the
+fine-grained-memory failure on this card exactly as on the RX 6750 XT.
+
+| placement | DepthMap | vs VRAM |
+|---|---|---|
+| everything in VRAM (v0.1.0: 60.7 s) | 61.1 s | |
+| 4 GB / 1.5 GB / 700 MB cap, v2 planner | 60.1 / 59.9 / 61.0 s | 1.0x |
+| camera images in host RAM (coarse-grained) | 110 s | 1.8x (no Infinity Cache on RDNA1; RDNA2 1.3x, RDNA4 1.0x) |
+| maps in host RAM | 90 s | 1.5x |
+| similarity volumes in host RAM | 347 s | 5.7x |
+| 500 MB cap (one tile, volumes + maps spill) | 248 s | 4.1x |
