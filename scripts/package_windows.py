@@ -45,6 +45,8 @@ for n in sorted(missing_rt):
     shutil.copy2(runtime[n], stage / 'bin' / runtime[n].name); have.add(n); copied.append(n)
 print(f"runtime DLLs bundled: {' '.join(sorted(missing_rt))}")
 print(f"copied {len(copied)} DLLs: {' '.join(sorted(copied))[:600]}")
+# the no-repo runner, so the zip is usable on its own: run-depthmap-standalone.cmd <package> <cache> <out>
+shutil.copy2(Path(__file__).with_name('run-depthmap-standalone.cmd'), stage / 'run-depthmap-standalone.cmd')
 with zipfile.ZipFile(outzip, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
     for p in stage.rglob('*'):
         if p.is_file(): z.write(p, p.relative_to(stage.parent))
