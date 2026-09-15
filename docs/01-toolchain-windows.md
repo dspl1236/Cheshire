@@ -87,3 +87,10 @@ Third lesson from the same machine: its Adrenalin driver was dated 2025-09 and i
 `amdhip64_6.dll`; the ROCm 7.2.1 packages carry `amdhip64_7.dll`, and with that driver
 `hipGetDeviceCount` returns `hipErrorNoDevice` (AliceVision prints "No CUDA-Enabled GPU").
 The HIP 7 runtime needs Adrenalin 26.2.2 or newer, as the ROCm-for-Windows release notes say.
+
+And the last one: with Adrenalin 26.8 (driver 32.0.21045.5002, 2026-08-16) the HIP 7.2.1
+runtime still answers `hipErrorNoDevice` for the RX 6750 XT, and AMD's Windows support table
+marks every RX 6000 card unsupported by the current HIP SDK. RDNA2 code objects in a Windows
+build are therefore inert; RX 6000 owners get the Linux bundle, where the same card works. A
+Windows RDNA2 build would need the older HIP SDK 6.x toolchain and runtime (`amdhip64_6.dll`,
+which the driver ships), a separate build environment this repo does not have.
