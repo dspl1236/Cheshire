@@ -41,6 +41,11 @@ host mapped coherent         atomicMin bad=65536/65536  atomicAdd bad=0/65536
 host mapped non-coherent     atomicMin bad=0/65536      atomicAdd bad=0/65536
 ```
 
+RX 5500 XT (gfx1012, RDNA1) in the same box, same runtime: identical result, `atomicMin`
+wrong on 65536/65536 for both fine-grained placements, correct on non-coherent. Two GPU
+generations, one platform, one behaviour: it is the runtime's handling of fine-grained
+memory, not a card.
+
 RX 9070 (gfx1201), Windows 11, ROCm 7.2.1: all four placements correct.
 
 The platform is not the excuse. The Haswell root port advertises `AtomicOpsCap: 32bit+ 64bit+

@@ -25,3 +25,6 @@
 
 kernel: 7.0.0-31-generic
 cpu: Intel(R) Core(TM) i3-4330 CPU @ 3.50GHz
+
+# 2026-09-15: RX 5500 XT (gfx1012) in the same slot: host_atomics gives the same result as the RX 6750 XT
+# (atomicMin wrong on all 65536 elements for fine-grained/coherent mapped host memory, correct on non-coherent; atomicAdd always correct).
