@@ -1,18 +1,20 @@
 // Cheshire: Meshroom pairing launcher for Windows.
 //
-// Installed by meshroom-pair.cmd as <Meshroom>\aliceVision\bin\aliceVision_depthMapEstimation.exe,
-// with the original CUDA binary kept beside it as aliceVision_depthMapEstimation.cuda.exe and the
-// HIP package's path in aliceVision_depthMapEstimation.cheshire.txt. Meshroom runs the DepthMap
-// node as `aliceVision_depthMapEstimation {allParams}` through a shell, so it lands here.
+// Installed by meshroom-pair.cmd under the name of a Meshroom node binary in
+// <Meshroom>\aliceVision\bin (aliceVision_depthMapEstimation.exe, aliceVision_featureMatching.exe),
+// with Meshroom's own binary kept beside it as <name>.cuda.exe and the Cheshire package's path in
+// <name>.cheshire.txt. Meshroom runs its nodes as `aliceVision_<node> {allParams}` through a shell,
+// so they land here; the launcher takes its role from its own file name.
 //
-// Per run: NVIDIA present (nvidia-smi answers) -> the CUDA binary; otherwise the HIP build, with
-// the Cheshire package's bin first on PATH and ALICEVISION_ROOT pointing at the package so it finds
-// its own DLLs and share/ tree, not Meshroom's. CHESHIRE_DEPTHMAP=cuda|hip forces one. Meshroom
-// 2023.3 still passes --sgmFilteringAxes, which upstream AliceVision removed (the HIP build is based
-// on 2026 upstream and always filters YX): dropped on the HIP path, kept on the CUDA path.
+// Per run: NVIDIA present (nvidia-smi answers) -> Meshroom's binary (CUDA DepthMap, CPU matcher);
+// otherwise the Cheshire build, with the package's bin first on PATH and ALICEVISION_ROOT pointing
+// at the package so it finds its own DLLs and share/ tree, not Meshroom's. CHESHIRE_DEPTHMAP=cuda|hip
+// forces one for every paired binary. Meshroom 2023.3 still passes --sgmFilteringAxes to DepthMap,
+// which upstream AliceVision removed (the HIP build is based on 2026 upstream and always filters YX):
+// dropped on the HIP path, kept on the CUDA path.
 //
-// Build (from scripts\env.cmd): clang-cl /O2 /EHsc meshroom-pair-launcher.cpp /Fe:launcher.exe
-// No dependencies beyond kernel32/shell32: plain Win32 CreateProcessW, exit code passed through.
+// Build: scripts\windows\build-launcher.cmd (clang-cl, static CRT). Plain Win32 CreateProcessW,
+// exit code passed through.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
@@ -21,12 +23,23 @@
 #include <cstdio>
 #include <cwchar>
 
-static std::wstring exeDir() {
+static std::wstring exePath() {
     wchar_t buf[MAX_PATH * 4];
     DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH * 4);
-    std::wstring p(buf, n);
+    return std::wstring(buf, n);
+}
+static std::wstring exeDir() {
+    const std::wstring p = exePath();
     size_t i = p.find_last_of(L"\\/");
     return i == std::wstring::npos ? L"." : p.substr(0, i);
+}
+// "aliceVision_depthMapEstimation" from ...\aliceVision_depthMapEstimation.exe
+static std::wstring exeStem() {
+    const std::wstring p = exePath();
+    size_t i = p.find_last_of(L"\\/");
+    std::wstring name = i == std::wstring::npos ? p : p.substr(i + 1);
+    size_t d = name.find_last_of(L'.');
+    return d == std::wstring::npos ? name : name.substr(0, d);
 }
 
 static std::wstring readLine(const std::wstring& path) {
@@ -96,28 +109,29 @@ int wmain() {
     int argc = 0;
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::vector<std::wstring> args(argv + 1, argv + argc);
-    const std::wstring dir = exeDir();
-    const std::wstring cuda = dir + L"\\aliceVision_depthMapEstimation.cuda.exe";
-    const std::wstring pkg = readLine(dir + L"\\aliceVision_depthMapEstimation.cheshire.txt");
+    const std::wstring dir = exeDir(), stem = exeStem();
+    const std::wstring orig = dir + L"\\" + stem + L".cuda.exe";
+    const std::wstring pkg = readLine(dir + L"\\" + stem + L".cheshire.txt");
+    const bool isDepthMap = stem == L"aliceVision_depthMapEstimation";
     std::wstring mode = envVar(L"CHESHIRE_DEPTHMAP");
     if (mode.empty()) mode = L"auto";
-    const bool useCuda = mode == L"cuda" || (mode == L"auto" && nvidiaPresent());
-    if (useCuda) {
-        fwprintf(stderr, L"[cheshire] DepthMap backend: CUDA (%ls)\n", cuda.c_str());
-        return run(cuda, args);
+    const bool useOrig = mode == L"cuda" || (mode == L"auto" && nvidiaPresent());
+    if (useOrig) {
+        fwprintf(stderr, L"[cheshire] %ls: Meshroom's own binary (%ls)\n", stem.c_str(), orig.c_str());
+        return run(orig, args);
     }
     if (pkg.empty()) {
-        fwprintf(stderr, L"[cheshire] no NVIDIA card and no Cheshire package path in %ls\\aliceVision_depthMapEstimation.cheshire.txt\n", dir.c_str());
+        fwprintf(stderr, L"[cheshire] no NVIDIA card and no Cheshire package path in %ls\\%ls.cheshire.txt\n", dir.c_str(), stem.c_str());
         return 2;
     }
-    const std::wstring hip = pkg + L"\\bin\\aliceVision_depthMapEstimation.exe";
+    const std::wstring hip = pkg + L"\\bin\\" + stem + L".exe";
     SetEnvironmentVariableW(L"ALICEVISION_ROOT", pkg.c_str());
     SetEnvironmentVariableW(L"PATH", (pkg + L"\\bin;" + envVar(L"PATH")).c_str());
     std::vector<std::wstring> kept;
     for (size_t i = 0; i < args.size(); ++i) {
-        if (args[i] == L"--sgmFilteringAxes") { ++i; continue; }   // removed upstream; YX is the only behaviour
+        if (isDepthMap && args[i] == L"--sgmFilteringAxes") { ++i; continue; }   // removed upstream; YX is the only behaviour
         kept.push_back(args[i]);
     }
-    fwprintf(stderr, L"[cheshire] DepthMap backend: HIP (%ls)\n", hip.c_str());
+    fwprintf(stderr, L"[cheshire] %ls: Cheshire HIP build (%ls)\n", stem.c_str(), hip.c_str());
     return run(hip, kept);
 }
