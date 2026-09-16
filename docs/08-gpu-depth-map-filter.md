@@ -30,6 +30,9 @@ counts, which is how the two findings below were made.
 | 41 views | 58.8 s (votes 55.7 s) | 10.0 s (votes 7.1 s) | 123 / 123 files identical |
 | engine bay, 107 views | 123.5 s (votes 114.3 s) | 26.5 s (votes 19.0 s) | 321 / 321 files identical |
 
+RX 5500 XT on Linux (house-pc, i3-4330), 41 views with the v0.2.6 bundle: CPU pass 317.0 s, GPU pass
+26.9 s, 123 / 123 output files byte-identical. On a node with a slow CPU the win is 12x.
+
 What is left in the GPU pass is reading: each rc reads its 10 neighbours' depth maps from EXR again,
 1,177 reads for 107 views. A shared cache of decoded depth maps would take most of the remaining
 19 s; it is the next thing to do on this node.
