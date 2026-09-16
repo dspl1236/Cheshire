@@ -188,7 +188,7 @@ which prints the per-view table and writes the side-by-side panels. Photos are
 
 ### Using it from Meshroom on Windows
 
-Meshroom runs its DepthMap node as `aliceVision_depthMapEstimation` from its own `aliceVisionin`.
+Meshroom runs its DepthMap node as `aliceVision_depthMapEstimation` from its own `aliceVision\bin`.
 `meshroom-pair.cmd` (in every Windows zip, and in
 [`cheshire-meshroom-pair-windows.zip`](https://github.com/dspl1236/cheshire/releases/tag/v0.2.4) for
 the older zips) replaces that one binary with a launcher and keeps the CUDA one beside it as

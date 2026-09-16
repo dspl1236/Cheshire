@@ -133,7 +133,7 @@ batch quoting of `%*` is fragile. The launcher:
   `aliceVision_depthMapEstimation.cheshire.txt` beside itself;
 * runs `nvidia-smi -L` (System32, installed with the NVIDIA driver); exit 0 means CUDA, else HIP;
   `CHESHIRE_DEPTHMAP=cuda|hip` overrides;
-* on the HIP path sets `ALICEVISION_ROOT` to the package and puts `<package>in` first on PATH
+* on the HIP path sets `ALICEVISION_ROOT` to the package and puts `<package>\bin` first on PATH
   (the package is self-contained: vcpkg, ROCm, MSVC and OpenMP DLLs), and drops
   `--sgmFilteringAxes` like the Linux wrapper (removed upstream);
 * `CreateProcessW` with the arguments re-quoted by the MSVC rules, waits, returns the child's exit code.
