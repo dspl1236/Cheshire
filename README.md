@@ -25,6 +25,24 @@ fine-grained host mapping, 186 MB of texture-sampled camera images behind PCIe c
 6 GB of streamed volumes cost 4.7x; coarse-grained mapping turns the images to 1.0x. That
 number is why the design is what it is.
 
+## What it does today
+
+| Meshroom node | upstream | Cheshire | status |
+|---|---|---|---|
+| DepthMap | CUDA only | HIP port + VRAM-to-RAM memory bridge | validated RDNA1/2/4, Windows + Linux; bit-identical to native across caps |
+| FeatureMatching | CPU (kd-tree) on every vendor | exact GPU brute-force 2-NN (HIP; the source also builds as CUDA) | validated end to end (v0.2.5): 592 s -> 75 s on 107 photos, same reconstruction |
+| FeatureExtraction | CUDA (PopSift) or CPU | CPU on AMD (`forceCpuExtraction`) | PopSift port not started |
+| DepthMapFilter | CPU | | next port |
+| Meshing | CPU | | profile its voting pass, port that |
+| Texturing | CPU | | after Meshing |
+| PrepareDenseScene | CPU | | small win, when convenient |
+| SfM, ImageMatching, MeshFiltering | CPU | | stay on the CPU (sequential or tiny) |
+
+Everything installs by pairing: one script swaps the two GPU node binaries in an existing Meshroom
+2023.3 install and keeps Meshroom's own beside them, choosing per run by the card present. On a
+12-thread desktop the 107-photo engine bay job went from 39 minutes with the CUDA-era layout to 30,
+and the two GPU stages together are now larger than the remaining CPU work on the RX 9070.
+
 ## Results
 
 Same photos, same SfM, same DepthMap parameters as the CUDA reference (Meshroom 2023.3 on a
@@ -182,20 +200,18 @@ upstream refuses. Details in `docs/02-memory-bridge.md`.
 
 ## Downloads
 
-Binaries are on the [v0.2.1 release](https://github.com/dspl1236/cheshire/releases/tag/v0.2.1)
-(bridge v2 plus APU code objects), for RX 6000 cards on Windows the
-[v0.2.2 release](https://github.com/dspl1236/cheshire/releases/tag/v0.2.2), and for Linux the
-[v0.2.3 release](https://github.com/dspl1236/cheshire/releases/tag/v0.2.3) (faster mipmap emulation); the data sets and references are on
+Binaries are on the [v0.2.5 release](https://github.com/dspl1236/cheshire/releases/tag/v0.2.5)
+(every package rebuilt with the GPU matcher, the bridge fixes and the pairing files); the data sets
+and references are on
 [v0.1.0](https://github.com/dspl1236/cheshire/releases/tag/v0.1.0) and unchanged, the depth
 maps being bit-identical between the two:
 
 | asset | size | contents |
 |---|---|---|
-| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-gfx1201.zip` (v0.2.1) | 100 MB | self-contained AliceVision + HIP DepthMap for RDNA4 on Windows; unzip, needs only the Adrenalin driver and a CPU with AVX2 (2013 or newer) |
-| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-rdna3-rdna4.zip` (v0.2.1) | 101 MB | the same, with code objects for RDNA3 and RDNA4 discrete parts and the RDNA3 APUs (gfx1100/1101/1102/1103/1150/1151/1152/1153/1200/1201): RX 7000 owners and Ryzen 7040/8040/AI laptops, this is the one to try. RX 6000 (RDNA2) on Windows: AMD's Windows HIP runtime does not enumerate it at all (`hipErrorNoDevice` on an RX 6750 XT with Adrenalin 26.8; [AMD's support table](https://rocm.docs.amd.com/projects/install-on-windows/en/latest/reference/system-requirements.html) marks every RX 6000 unsupported), so RDNA2 on Windows needs the HIP 6 runtime: see the `hip6.2` packages below |
-| `cheshire-alicevision-hip6.2-windows-x64-gfx1030-avx.zip`, `-gfx1031-avx.zip`, `-gfx1032-avx.zip` (v0.2.2) | 143 MB each | RX 6000 on Windows through AMD's HIP 6.2 runtime (the one the driver ships): one package per chip because the HIP SDK 6.2 toolchain cannot bundle several. gfx1030 = RX 6800/6900/6950, gfx1031 = RX 6700/6750, gfx1032 = RX 6600/6650. Compiled for AVX so pre-2013 CPUs work too. Validated on an RX 6750 XT: 28.1 s on the 6-view set, 98.7 % within 1 % of CUDA |
-| `cheshire-meshroom-pair-windows.zip` (v0.2.4) | 94 KB | Meshroom pairing for Windows: `meshroom-pair.cmd` + launcher, plugs any Windows package above into a Meshroom 2023.3 install (see below) |
-| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.2.3) | ~120 MB | relocatable Linux bundle with the packed-slot mipmap sampler (11 % faster than v0.2.1 on RDNA1, same outputs), code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested); needs only `amdgpu` + `/dev/kfd` |
+| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-gfx1201.zip` (v0.2.5) | 104 MB | self-contained AliceVision + HIP DepthMap + GPU matcher for RDNA4 discrete on Windows (HIP 7.2 runtime, vcpkg and MSVC runtimes bundled), `meshroom-pair.cmd` + launcher in the root |
+| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-rdna3-rdna4.zip` (v0.2.5) | ~110 MB | the same with gfx1100/1101/1102/1103, gfx1150/1151/1152/1153, gfx1200/1201 |
+| `cheshire-alicevision-hip6.2-windows-x64-gfx1030-avx.zip`, `-gfx1031-avx.zip`, `-gfx1032-avx.zip` (v0.2.5) | 147 MB each | RX 6000 on Windows through AMD's HIP 6.2 runtime (the one the driver ships): one package per chip because the HIP SDK 6.2 toolchain cannot bundle several. gfx1030 = RX 6800/6900/6950, gfx1031 = RX 6700/6750, gfx1032 = RX 6600/6650. AVX build. Validated on an RX 6750 XT (v0.2.2 build): 28.1 s / 190.3 s |
+| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.2.5) | ~120 MB | relocatable Linux bundle with the GPU matcher and the packed-slot mipmap sampler, code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested); needs only `amdgpu` + `/dev/kfd`; validated on the RX 6750 XT and RX 5500 XT |
 | `monstree-mini6-meshroom-cache.tar.gz` (v0.1.0) | 383 MB | 6-view Meshroom 2023.3 cache: CameraInit, SfM, PrepareDenseScene and the CUDA DepthMap reference |
 | `monstree-full-cuda-reference.tar.gz` (v0.1.0) | 680 MB | 41-view SfM + CUDA DepthMap reference (GTX 1080 Ti) |
 | `cheshire-hip-depthmap-outputs.tar.gz` (v0.1.0) | 966 MB | the HIP depth maps behind the table above (RX 9070 6 + 41 views, RX 5500 XT, RX 6750 XT) |
@@ -256,6 +272,29 @@ driver predates 26.2.2):
 Expected: mask agreement 1.000, median relative depth error 0.0000, 97-99 % of pixels within
 1 % on every view, and a time somewhere between the RX 6750 XT and the RX 9070 rows.
 
+## Roadmap
+
+The aim is a small PC with a big GPU that runs a Meshroom job as fast as a workstation and just
+as precisely. In order, each proven on the 6-view set for bit-identity against the CPU output and
+timed on the 41-view and engine bay sets:
+
+1. **DepthMapFilter on the GPU.** Per-pixel consistency of each depth map against its neighbours,
+   115 s of CPU on the engine bay job. A small port.
+2. **Meshing's voting pass.** Every depth-map pixel casts a ray through the Delaunay volume; per-ray,
+   embarrassingly parallel, and the suspected majority of Meshing's 539 s. Delaunay and the graph
+   cut stay on the CPU.
+3. **Texturing.** Per-face visibility and colour blending, rasterisation-shaped, 192 s.
+4. **One Windows package** carrying the HIP 7.2 and HIP 6.2 builds with the launcher choosing by
+   card, instead of one zip per toolchain and chip.
+5. **A CUDA build of the same tree** so NVIDIA users get the GPU matcher too (the source already
+   compiles as CUDA; the packaging does not exist yet), and a Linux bundle built against an older
+   glibc for Ubuntu 22.04 / Debian 12 nodes.
+6. **Hardware still unrun:** RDNA3 discrete, the RDNA3.5 APUs, Vega, and a card without the 4-byte
+   dot instruction (RX 5700, original Vega) for the matcher's fallback path.
+
+Not planned: SfM on the GPU (incremental and sequential; Ceres's GPU solvers are CUDA-only and the
+outer loop dominates anyway) and PopSift on HIP until the stages above are done.
+
 ## Layout
 
 | Path | What |
@@ -276,15 +315,14 @@ Expected: mask agreement 1.000, median relative depth error 0.0000, 97-99 % of p
 * Validate: `scripts\run-depthmap.cmd <dataset>` or `scripts/linux/run-depthmap.sh` against a
   Meshroom cache; `scripts/compare_depthmaps.py` produces the numbers and panels.
 
-## Status and next
+## Status
 
-Works end to end on RDNA1, RDNA2 and RDNA4; RDNA3 has its code object in every bundle but no
-hardware run yet. GCN 4 (RX 400/500) is out: the ROCm 7.2 runtime refuses to initialise on an
-RX 570 even though the kernel driver accepts it (docs/06). A production Meshroom 2023.3 node runs its DepthMap on the HIP build through
-`scripts/linux/meshroom-pair.sh`, and Meshroom on Windows through `meshroom-pair.cmd` (one
-launcher each, picks CUDA or HIP per run, so the card can be swapped); both also pair the GPU
-descriptor matcher. Next on the GPU: DepthMapFilter, then Meshing's voting pass, then Texturing. Next: planner-chosen tile sizes for the below-one-tile regime, a same-version CUDA
-reference, RDNA3 hardware.
+Works end to end on RDNA1, RDNA2 and RDNA4 (Windows and Linux); RDNA3 has its code object in
+every bundle but no hardware run yet. GCN 4 (RX 400/500) is out: the ROCm 7.2 runtime refuses to
+initialise on an RX 570 even though the kernel driver accepts it (docs/06). A production Meshroom
+2023.3 node (house-pc, RX 6750 XT, Linux) runs its DepthMap and FeatureMatching on the Cheshire
+bundle through the pairing script; the same works on Windows through `meshroom-pair.cmd`. What
+comes next is the roadmap above.
 
 Primary repository: [git.hausofdub.com/dspl1236/cheshire](https://git.hausofdub.com/dspl1236/cheshire);
 mirror: [github.com/dspl1236/cheshire](https://github.com/dspl1236/cheshire). Licensed MPL-2.0.
