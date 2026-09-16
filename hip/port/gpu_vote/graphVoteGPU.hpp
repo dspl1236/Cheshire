@@ -38,11 +38,21 @@ struct VoteInput {
     const double* rayCamCenter = nullptr;    // 3 per ray: CArr[cam]
     uint32_t nbRays = 0;
     float fullWeight = 1.0f;
+    // Per ray, forceTedgesByGradientIJCV's maxDist (nPixelSizeBehind * getCamPixelSize, as the float
+    // upstream computes). When set, that pass runs on the GPU right after the votes, on the same
+    // resident mesh, reading the final emptiness scores and adding to each ray's last cell's `on`.
+    // nullptr: votes only. (The final cellTWeight = max(cellTWeight, min(1e6, max(1, cellTWeight) * on))
+    // loop stays on the host.)
+    const float* rayTedgeDist = nullptr;
 };
 
 // cellAttr: 8 floats per cell in GC_cellInfo order (cellSWeight, cellTWeight, gEdgeVisWeight[4],
 // emptinessScore, on), read in, voted on, written back.
 bool fillGraph(const VoteInput& in, float* cellAttr);
+
+// True (once) when the last successful fillGraph also ran the weakly-supported-surfaces pass, so the
+// host must skip its own ray loop in forceTedgesByGradientIJCV.
+bool tedgesDone();
 
 }  // namespace gpu
 }  // namespace fuseCut

@@ -569,7 +569,7 @@ endif()
         shutil.copy2(ROOT / "hip" / "port" / "gpu_vote" / f, gv_dst / f)
     gfp = AV / "src/aliceVision/fuseCut/GraphFiller.cpp"
     patch(gfp, '#include <boost/atomic/atomic_ref.hpp>' + NL,
-          '#ifdef ALICEVISION_HAVE_GPU_FILTER' + NL + '#include "aliceVision/fuseCut/gpu/graphVoteGPU.hpp"  // cheshire' + NL + '#endif' + NL)
+          '#ifdef ALICEVISION_HAVE_GPU_FILTER' + NL + '#include "aliceVision/fuseCut/gpu/graphVoteGPU.hpp"  // cheshire' + NL + '#include <cstdlib>' + NL + '#include <cmath>' + NL + '#endif' + NL)
     patch(gfp, """    // choose random order to prevent waiting
     const unsigned int seed = (unsigned int)_mp.userParams.get<unsigned int>("delaunaycut.seed", 0);
 """, """#ifdef ALICEVISION_HAVE_GPU_FILTER
@@ -588,7 +588,9 @@ endif()
         for (size_t i = 0; i < nbV; ++i) vco[i + 1] = vco[i] + (uint32_t)(i < vcells.size() ? vcells[i].size() : 0);
         vcl.reserve(vco[nbV]);
         for (size_t i = 0; i < nbV && i < vcells.size(); ++i) for (CellIndex c : vcells[i]) vcl.push_back((uint32_t)c);
-        std::vector<uint32_t> rv, rc; std::vector<float> rw; std::vector<double> rd, rcc;
+        std::vector<uint32_t> rv, rc; std::vector<float> rw, rt; std::vector<double> rd, rcc;
+        // the weakly-supported-surfaces pass (forceTedgesByGradientIJCV) runs on the GPU too, right after the votes
+        const bool forceTEdge = _mp.userParams.get<bool>("delaunaycut.voteFilteringForWeaklySupportedSurfaces", true);
         for (size_t i = 0; i < nbV; ++i)
         {
             const GC_vertexInfo& v = _verticesAttr[i];
@@ -601,6 +603,7 @@ endif()
                 const int cam = v.cams[c];
                 rv.push_back((uint32_t)i); rc.push_back(_camsVertexes[cam] < 0 ? NONE : (uint32_t)_camsVertexes[cam]);
                 rw.push_back(weight); rd.push_back(maxDist);
+                if (forceTEdge) rt.push_back((float)nPixelSizeBehind * _mp.getCamPixelSize(_verticesCoords[i], cam));
                 rcc.push_back(_mp.CArr[cam].x); rcc.push_back(_mp.CArr[cam].y); rcc.push_back(_mp.CArr[cam].z);
             }
         }
@@ -616,8 +619,8 @@ endif()
         in.vertices = verts.data(); in.nbVertices = (uint32_t)nbV; in.cellVertices = cv.data(); in.cellAdjacent = ca.data(); in.nbCells = (uint32_t)nbC;
         in.vertexCellsOffset = vco.data(); in.vertexCells = vcl.data();
         in.rayVertex = rv.data(); in.rayCamVertex = rc.data(); in.rayWeight = rw.data(); in.rayMaxDist = rd.data(); in.rayCamCenter = rcc.data();
-        in.nbRays = (uint32_t)rv.size(); in.fullWeight = fullWeight;
-        ALICEVISION_LOG_INFO("cheshire: " << in.nbRays << " rays, " << nbC << " cells, " << nbV << " vertices to the GPU.");
+        in.nbRays = (uint32_t)rv.size(); in.fullWeight = fullWeight; in.rayTedgeDist = forceTEdge ? rt.data() : nullptr;
+        ALICEVISION_LOG_INFO("cheshire: " << in.nbRays << " rays, " << nbC << " cells, " << nbV << " vertices to the GPU" << (forceTEdge ? " (votes + weakly supported surfaces)." : "."));
         if (gpu::fillGraph(in, attr.data()))
         {
             for (size_t c = 0; c < nbC; ++c)
@@ -644,6 +647,56 @@ endif()
     if second != -1:
         t = t[:second] + t[second + len(dup):]
         gfp.write_text(t, encoding="utf-8", newline=NL)
+    patch(gfp, "    const float forceTEdgeDelta = 0.1f;" + NL, """#ifdef ALICEVISION_HAVE_GPU_FILTER
+    // cheshire: the ray loop below already ran on the GPU (gpu::fillGraph); only the final cellTWeight update is left.
+    // CHESHIRE_GPU_TEDGE_CHECK=1: run the CPU loop as well and report how the two `on` vectors compare.
+    std::vector<float> gpuOn;
+    if (gpu::tedgesDone())
+    {
+        if (std::getenv("CHESHIRE_GPU_TEDGE_CHECK") == nullptr)
+        {
+            for (GC_cellInfo& c : _cellsAttr)
+            {
+                const float w = std::max(1.0f, c.cellTWeight) * c.on;
+                c.cellTWeight = std::max(c.cellTWeight, std::min(1000000.0f, w));
+            }
+            return;
+        }
+        gpuOn.resize(_cellsAttr.size());
+        for (size_t i = 0; i < _cellsAttr.size(); ++i) { gpuOn[i] = _cellsAttr[i].on; _cellsAttr[i].on = 0.0f; }
+    }
+#endif
+""", after=False)
+    patch(gfp, """    for (GC_cellInfo& c : _cellsAttr)
+    {
+        const float w = std::max(1.0f, c.cellTWeight) * c.on;
+""", """#ifdef ALICEVISION_HAVE_GPU_FILTER
+    if (!gpuOn.empty())
+    {
+        size_t cpuNz = 0, gpuNz = 0, mismatch = 0; double maxDiff = 0.0, sumCpu = 0.0, sumGpu = 0.0;
+        for (size_t i = 0; i < _cellsAttr.size(); ++i)
+        {
+            const float c = _cellsAttr[i].on, g = gpuOn[i];
+            cpuNz += c != 0.0f; gpuNz += g != 0.0f; sumCpu += c; sumGpu += g;
+            const double d = std::fabs((double)c - (double)g);
+            maxDiff = std::max(maxDiff, d);
+            if (d > 1e-3 * std::max(1.0, (double)std::fabs(c))) ++mismatch;
+            _cellsAttr[i].on = g;   // keep the GPU result, this was a check
+        }
+        ALICEVISION_LOG_INFO("cheshire: tedge check: cells with on != 0: cpu " << cpuNz << ", gpu " << gpuNz << "; sum cpu " << sumCpu << ", gpu " << sumGpu
+                             << "; max |diff| " << maxDiff << "; cells beyond 1e-3 relative: " << mismatch);
+    }
+#endif
+""", after=False)
+    # the pairing scripts detect the GPU votes from --help: say so in the program description
+    mm = AV / "src/software/pipeline/main_meshing.cpp"
+    t = mm.read_text(encoding="utf-8")
+    if "CHESHIRE_GPU_VOTE" not in t:
+        old_desc = 'CmdLine cmdline("AliceVision meshing");'
+        if old_desc not in t:
+            sys.exit("meshing description not found")
+        t = t.replace(old_desc, 'CmdLine cmdline("AliceVision meshing (cheshire: the graph-weight votes and the weakly-supported-surfaces pass run on the GPU when a device is present; CHESHIRE_GPU_VOTE=0 for the CPU passes)");', 1)
+        mm.write_text(t, encoding="utf-8", newline=NL)
     fc = AV / "src/aliceVision/fuseCut/CMakeLists.txt"
     t = fc.read_text(encoding="utf-8")
     if "gpu/graphVoteGPU.cu" not in t:

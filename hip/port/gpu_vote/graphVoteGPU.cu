@@ -1,8 +1,8 @@
 // Cheshire: Meshing's graph-weight voting on the GPU (see graphVoteGPU.hpp).
 //
-// TetrahedronsRayMarching (Intersections.cpp) and GraphFiller::rayMarchingGraphEmpty / Full
-// transcribed for one thread per ray. Double precision, FMA contraction off, the same expression
-// order as upstream, and upstream's quirks kept on purpose:
+// TetrahedronsRayMarching (Intersections.cpp), GraphFiller::rayMarchingGraphEmpty / Full and
+// GraphFiller::forceTedgesByGradientIJCV transcribed for one thread per ray. Double precision, FMA
+// contraction off, the same expression order as upstream, and upstream's quirks kept on purpose:
 //   * "is the new point farther than the best ambiguous one" and "did we move at all" compare
 //     Eigen::Vector3d::size(), which is the element count 3, not a length: so the first hit wins and
 //     the "too close" test never fires;
@@ -13,6 +13,7 @@
 #include "graphVoteGPU.hpp"
 #include <cuda_runtime.h>
 #include <cfloat>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdio>
@@ -207,7 +208,7 @@ struct Marching {
 };
 
 // cell attribute slots
-enum { A_SW = 0, A_TW = 1, A_G0 = 2, A_EMPT = 6, A_STRIDE = 8 };
+enum { A_SW = 0, A_TW = 1, A_G0 = 2, A_EMPT = 6, A_ON = 7, A_STRIDE = 8 };
 
 __global__ void voteKernel(Mesh mesh, const uint32_t* __restrict__ rayVertex, const uint32_t* __restrict__ rayCam, const float* __restrict__ rayWeight,
                            const double* __restrict__ rayMaxDist, const double* __restrict__ rayCamCenter, uint32_t nbRays, float fullWeightParam,
@@ -266,7 +267,96 @@ __global__ void voteKernel(Mesh mesh, const uint32_t* __restrict__ rayVertex, co
     }
 }
 
-bool g_checked = false, g_available = false;
+// std::max(a, b): b only when a < b (a NaN stays)
+__device__ __forceinline__ float smax(float a, float b) { return a < b ? b : a; }
+
+// Whether the cells around vertex `v` and the cells around geometry `g` (a vertex, or an edge: the cells
+// around both of its vertices) share a cell: the set_intersection upstream builds on the first step
+// behind the vertex, whose only effect is whether the (quirky) midSilent read happens at all.
+__device__ bool sharesCell(const Mesh& m, uint32_t v, Geo g)
+{
+    uint32_t i = m.vco[v], ie = m.vco[v + 1];
+    uint32_t j = m.vco[g.a], je = m.vco[g.a + 1];
+    uint32_t k = 0, ke = 0;
+    if (g.type == GEdge) { k = m.vco[g.b]; ke = m.vco[g.b + 1]; }
+    while (i < ie && j < je) {
+        const uint32_t ci = m.vcl[i], cj = m.vcl[j];
+        if (ci < cj) { ++i; continue; }
+        if (cj < ci) { ++j; continue; }
+        if (g.type != GEdge) return true;
+        while (k < ke && m.vcl[k] < ci) ++k;
+        if (k < ke && m.vcl[k] == ci) return true;
+        ++i; ++j;
+    }
+    return false;
+}
+
+// forceTedgesByGradientIJCV, one thread per ray: read-only over the (final) emptiness scores, one
+// atomic add on the last cell's `on`. The loop bounds lag one step behind the march exactly as
+// upstream's lastIntersectPt does, and the sigma products are float like the upstream constants.
+__global__ void tedgeKernel(Mesh mesh, const uint32_t* __restrict__ rayVertex, const uint32_t* __restrict__ rayCam, const float* __restrict__ rayDist,
+                            const double* __restrict__ rayCamCenter, uint32_t nbRays, uint32_t nbCells, float* __restrict__ attr)
+{
+    const uint32_t r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= nbRays) return;
+    const uint32_t vi = rayVertex[r], camV = rayCam[r];
+    if (camV == NONE) return;
+    const float maxDist = rayDist[r];
+    const V3 C = {rayCamCenter[3 * size_t(r)], rayCamCenter[3 * size_t(r) + 1], rayCamCenter[3 * size_t(r) + 2]};
+    const V3 originPt = mesh.P(vi);
+    float maxJump = 0.0f, maxSilent = 0.0f, midSilent = 10000000.0f;
+
+    // towards the camera: emptiness before the point (jump part) and around it (front silent part)
+    {
+        Marching mr(mesh, vi, camV, false);
+        Geo geometry = gVertex(vi); V3 ip = originPt, lastIp = originPt;
+        const double frontRange = double((4.0f + 2.0f) * maxDist), silentRange = double(2.0f * maxDist);
+        while ((geometry.type != GVertex || psize(sub(C, ip)) > 1.0e-3) && psize(sub(lastIp, originPt)) <= frontRange) {
+            lastIp = ip;
+            geometry = mr.next(); ip = mr.ip;
+            if (geometry.type == GNone) break;
+            if (geometry.type == GFacet) {
+                const float e = attr[size_t(mr.prevInter.a) * A_STRIDE + A_EMPT];
+                if (psize(sub(lastIp, originPt)) > silentRange) maxJump = smax(maxJump, e);
+                else maxSilent = smax(maxSilent, e);
+            }
+        }
+    }
+    // behind the point: the first cell's emptiness (mid) and the max around it (back silent part)
+    uint32_t lastCell = NONE;
+    {
+        Marching mr(mesh, vi, camV, true);
+        Geo geometry = gVertex(vi); V3 ip = originPt, lastIp = originPt;
+        const double backRange = double(2.0f * maxDist);
+        bool first = true;
+        while (psize(sub(lastIp, originPt)) <= backRange) {
+            const Geo previousGeometry = geometry;
+            lastIp = ip;
+            geometry = mr.next(); ip = mr.ip;
+            if (geometry.type == GNone) break;
+            if (geometry.type == GFacet) {
+                const float e = attr[size_t(mr.prevInter.a) * A_STRIDE + A_EMPT];
+                if (first) { midSilent = e; first = false; }
+                maxSilent = smax(maxSilent, e);
+                lastCell = geometry.a;
+            } else if (first) {
+                // upstream quirk: when the first step lands on a vertex or an edge it reads
+                // _cellsAttr[geometry.facet.cellIndex] through the union, i.e. cell index = that vertex
+                // index (or the edge's first vertex), once the two neighbourhoods are known to intersect
+                if (previousGeometry.type == GVertex && sharesCell(mesh, previousGeometry.a, geometry) && geometry.a < nbCells)
+                    midSilent = attr[size_t(geometry.a) * A_STRIDE + A_EMPT];
+                first = false;
+            }
+        }
+    }
+    if (lastCell != NONE) {
+        // equation 6: (g / B) < k_rel, (B - g) > k_abs, g < k_outl
+        if ((midSilent / maxJump < 0.1f) && (maxJump - midSilent > 10000.0f) && (maxSilent < 100.0f))
+            atomicAdd(attr + size_t(lastCell) * A_STRIDE + A_ON, maxJump - midSilent);
+    }
+}
+
+bool g_checked = false, g_available = false, g_tedgesDone = false;
 std::mutex g_mutex;
 
 template<class T> bool up(T** d, const T* h, size_t n) {
@@ -292,31 +382,63 @@ bool voteAvailable()
 
 bool fillGraph(const VoteInput& in, float* cellAttr)
 {
+    // CHESHIRE_GPU_VOTE_LOG=1: where the time goes (uploads, kernels, download)
+    const bool log = std::getenv("CHESHIRE_GPU_VOTE_LOG") != nullptr;
+    auto now = [] { return std::chrono::steady_clock::now(); };
+    auto secs = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) { return std::chrono::duration<double>(b - a).count(); };
+    const auto t0 = now();
     double* dv = nullptr; uint32_t *dcv = nullptr, *dca = nullptr, *dvco = nullptr, *dvcl = nullptr; float* dattr = nullptr;
-    uint32_t *drv = nullptr, *drc = nullptr; float* drw = nullptr; double *drd = nullptr, *drcc = nullptr;
+    uint32_t *drv = nullptr, *drc = nullptr; float *drw = nullptr, *drt = nullptr; double *drd = nullptr, *drcc = nullptr;
     bool ok = up(&dv, in.vertices, 3 * size_t(in.nbVertices)) && up(&dcv, in.cellVertices, 4 * size_t(in.nbCells)) && up(&dca, in.cellAdjacent, 4 * size_t(in.nbCells))
            && up(&dvco, in.vertexCellsOffset, size_t(in.nbVertices) + 1) && up(&dvcl, in.vertexCells, size_t(in.vertexCellsOffset[in.nbVertices]))
            && up(&dattr, cellAttr, size_t(in.nbCells) * A_STRIDE);
     const uint32_t chunk = kRayChunk;
     if (ok) ok = cudaMalloc((void**)&drv, chunk * 4) == cudaSuccess && cudaMalloc((void**)&drc, chunk * 4) == cudaSuccess && cudaMalloc((void**)&drw, chunk * 4) == cudaSuccess
-              && cudaMalloc((void**)&drd, chunk * 8) == cudaSuccess && cudaMalloc((void**)&drcc, size_t(chunk) * 24) == cudaSuccess;
+              && cudaMalloc((void**)&drt, chunk * 4) == cudaSuccess && cudaMalloc((void**)&drd, chunk * 8) == cudaSuccess && cudaMalloc((void**)&drcc, size_t(chunk) * 24) == cudaSuccess;
+    const auto t1 = now();
+    const bool tedges = in.rayTedgeDist != nullptr;
+    double voteSec = 0, tedgeSec = 0;
     if (ok) {
         Mesh mesh{dv, dcv, dca, dvco, dvcl};
-        for (uint32_t r0 = 0; ok && r0 < in.nbRays; r0 += chunk) {
-            const uint32_t n = in.nbRays - r0 < chunk ? in.nbRays - r0 : chunk;
-            ok = cudaMemcpy(drv, in.rayVertex + r0, n * 4, cudaMemcpyHostToDevice) == cudaSuccess
-              && cudaMemcpy(drc, in.rayCamVertex + r0, n * 4, cudaMemcpyHostToDevice) == cudaSuccess
-              && cudaMemcpy(drw, in.rayWeight + r0, n * 4, cudaMemcpyHostToDevice) == cudaSuccess
-              && cudaMemcpy(drd, in.rayMaxDist + r0, n * 8, cudaMemcpyHostToDevice) == cudaSuccess
-              && cudaMemcpy(drcc, in.rayCamCenter + 3 * size_t(r0), size_t(n) * 24, cudaMemcpyHostToDevice) == cudaSuccess;
-            if (!ok) break;
-            voteKernel<<<(n + kBlock - 1) / kBlock, kBlock>>>(mesh, drv, drc, drw, drd, drcc, n, in.fullWeight, dattr);
-            ok = cudaGetLastError() == cudaSuccess;
+        // the ray arrays go up in chunks; each pass is complete (and synchronised) before the next starts,
+        // so the tedge pass reads the final emptiness scores as upstream does
+        for (int pass = 0; ok && pass < (tedges ? 2 : 1); ++pass) {
+            for (uint32_t r0 = 0; ok && r0 < in.nbRays; r0 += chunk) {
+                const uint32_t n = in.nbRays - r0 < chunk ? in.nbRays - r0 : chunk;
+                ok = cudaMemcpy(drv, in.rayVertex + r0, n * 4, cudaMemcpyHostToDevice) == cudaSuccess
+                  && cudaMemcpy(drc, in.rayCamVertex + r0, n * 4, cudaMemcpyHostToDevice) == cudaSuccess
+                  && cudaMemcpy(drcc, in.rayCamCenter + 3 * size_t(r0), size_t(n) * 24, cudaMemcpyHostToDevice) == cudaSuccess;
+                if (ok && pass == 0)
+                    ok = cudaMemcpy(drw, in.rayWeight + r0, n * 4, cudaMemcpyHostToDevice) == cudaSuccess
+                      && cudaMemcpy(drd, in.rayMaxDist + r0, n * 8, cudaMemcpyHostToDevice) == cudaSuccess;
+                if (ok && pass == 1) ok = cudaMemcpy(drt, in.rayTedgeDist + r0, n * 4, cudaMemcpyHostToDevice) == cudaSuccess;
+                if (!ok) break;
+                const auto tk = now();
+                if (pass == 0) voteKernel<<<(n + kBlock - 1) / kBlock, kBlock>>>(mesh, drv, drc, drw, drd, drcc, n, in.fullWeight, dattr);
+                else tedgeKernel<<<(n + kBlock - 1) / kBlock, kBlock>>>(mesh, drv, drc, drt, drcc, n, in.nbCells, dattr);
+                ok = cudaGetLastError() == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess;
+                (pass == 0 ? voteSec : tedgeSec) += secs(tk, now());
+            }
         }
+        const auto t2 = now();
         if (ok) ok = cudaMemcpy(cellAttr, dattr, size_t(in.nbCells) * A_STRIDE * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess;
+        if (log) std::fprintf(stderr, "[cheshire] meshing votes profile: %u rays, %u cells: uploads %.2f s, vote kernels %.2f s, tedge kernels %.2f s (ray uploads incl.), download %.2f s\n",
+                              in.nbRays, in.nbCells, secs(t0, t1), voteSec, tedgeSec, secs(t2, now()));
     }
-    for (void* p : {(void*)dv, (void*)dcv, (void*)dca, (void*)dvco, (void*)dvcl, (void*)dattr, (void*)drv, (void*)drc, (void*)drw, (void*)drd, (void*)drcc}) if (p) cudaFree(p);
+    for (void* p : {(void*)dv, (void*)dcv, (void*)dca, (void*)dvco, (void*)dvcl, (void*)dattr, (void*)drv, (void*)drc, (void*)drw, (void*)drt, (void*)drd, (void*)drcc}) if (p) cudaFree(p);
+    {
+        std::lock_guard<std::mutex> g(g_mutex);
+        g_tedgesDone = ok && tedges;
+    }
     return ok;
+}
+
+bool tedgesDone()
+{
+    std::lock_guard<std::mutex> g(g_mutex);
+    const bool d = g_tedgesDone;
+    g_tedgesDone = false;
+    return d;
 }
 
 }  // namespace gpu
