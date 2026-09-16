@@ -102,6 +102,14 @@ against CUDA. The RX 6750 XT, back in the same node later that morning: 28.0 s /
 31.0 s / 226.1 s), 41 / 41 byte-identical to its 2026-09-03 run. Page:
 [docs/validation/monstree-full-rx5500xt-linux-v0.2.3/index.md](validation/monstree-full-rx5500xt-linux-v0.2.3/index.md).
 
+### bench-pc, GTX 1080 Ti (CUDA 11.6, Windows), same host as the RX 6750 XT Windows runs, 2026-09-16
+
+CUDA and HIP on identical host hardware for the first time: 40.0 s / 287.1 s on the 1080 Ti (14
+tiles) against 28.1 s / 190.3 s on the RX 6750 XT. And CUDA against CUDA: this run is bit-identical
+to the Linux CUDA 11.3 reference on 37 of 41 views, with one view off by 7.2 % of pixels, so the
+reference disagrees with itself across builds by as much as HIP disagrees with it. Page:
+[docs/validation/monstree-full-gtx1080ti-windows-cuda/index.md](validation/monstree-full-gtx1080ti-windows-cuda/index.md).
+
 ### house-pc, RX 6750 XT (RDNA2, Linux), 2026-09-03
 
 6 views 31.0 s (CUDA 1080 Ti 31.9 s, same host), 41 views 226.1 s (CUDA 379.0 s in four chunks; the HIP build inside a real four-chunk Meshroom job on this node: 352 s); masks identical

@@ -1,0 +1,29 @@
+@echo off
+rem Cheshire: run the *CUDA* DepthMap from an unpacked Meshroom 2023.3 Windows release on the same
+rem cache and with the same parameters as run-depthmap-standalone.cmd, for a same-host CUDA vs HIP
+rem comparison (Meshroom ships aliceVision_depthMapEstimation.exe built for CUDA 11.x).
+rem Usage: run-depthmap-cuda-standalone.cmd <Meshroom-2023.3.0 dir> <Meshroom cache dir> <out dir>
+rem   CHESHIRE_DEPTHMAP_EXTRA adds arguments (e.g. --rangeStart 0 --rangeSize 1).
+setlocal
+set MR=%~1
+set CACHE=%~2
+set OUT=%~3
+if "%OUT%"=="" ( echo usage: %~nx0 ^<Meshroom dir^> ^<cache dir^> ^<out dir^> & exit /b 1 )
+set INST=%MR%\aliceVision
+if not exist "%INST%\bin\aliceVision_depthMapEstimation.exe" ( echo no aliceVision\bin\aliceVision_depthMapEstimation.exe under %MR% & exit /b 1 )
+for /d %%D in ("%CACHE%\StructureFromMotion\*") do set SFM=%%D\sfm.abc
+for /d %%D in ("%CACHE%\PrepareDenseScene\*") do set IMGS=%%D
+if not exist "%OUT%" mkdir "%OUT%"
+set ALICEVISION_ROOT=%INST%
+set PATH=%INST%\bin;%INST%\lib;%PATH%
+"%INST%\bin\aliceVision_hardwareResources.exe" -v info 2>&1 | findstr /i "name: memory CUDA"
+"%INST%\bin\aliceVision_depthMapEstimation.exe" --input "%SFM%" --imagesFolder "%IMGS%" ^
+  --downscale 2 --minViewAngle 2.0 --maxViewAngle 70.0 --tileBufferWidth 1024 --tileBufferHeight 1024 --tilePadding 64 ^
+  --autoAdjustSmallImage True --chooseTCamsPerTile True --maxTCams 10 ^
+  --sgmScale 2 --sgmStepXY 2 --sgmStepZ -1 --sgmMaxTCamsPerTile 4 --sgmWSH 4 --sgmUseSfmSeeds True --sgmSeedsRangeInflate 0.2 ^
+  --sgmDepthThicknessInflate 0.0 --sgmMaxSimilarity 1.0 --sgmGammaC 5.5 --sgmGammaP 8.0 --sgmP1 10.0 --sgmP2Weighting 100.0 ^
+  --sgmMaxDepths 1500 --sgmDepthListPerTile True --sgmUseConsistentScale False ^
+  --refineEnabled True --refineScale 1 --refineStepXY 1 --refineMaxTCamsPerTile 4 --refineSubsampling 10 --refineHalfNbDepths 15 ^
+  --refineWSH 3 --refineSigma 15.0 --refineGammaC 15.5 --refineGammaP 8.0 --refineInterpolateMiddleDepth False --refineUseConsistentScale False ^
+  --colorOptimizationEnabled True --colorOptimizationNbIterations 100 --sgmUseCustomPatchPattern False --refineUseCustomPatchPattern False ^
+  --nbGPUs 0 --verboseLevel info --output "%OUT%" %CHESHIRE_DEPTHMAP_EXTRA%

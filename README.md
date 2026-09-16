@@ -38,6 +38,7 @@ Meshroom jobs on the same node, also four chunks: RX 6750 XT 352 s, RX 5500 XT 5
 | GPU | OS | 6 views | 41 views | per view (41) | valid masks | median rel. depth error | within 1 % (median view, 6 / 41) |
 |---|---|---|---|---|---|---|---|
 | GTX 1080 Ti (CUDA reference, 4 Meshroom chunks) | Linux | 31.8 s | 379.0 s | 9.2 s | | | |
+| GTX 1080 Ti, CUDA 11.6 (Meshroom 2023.3 Windows build), same host as the RX 6750 XT Windows rows | Windows | 40.0 s | 287.1 s | 7.0 s | 37 / 41 identical to the reference | 0.0000 | 100 % / 100 % (worst view 92.9 %) |
 | Radeon RX 9070, RDNA4 | Windows | 17.4 s | 124.4 s | 3.0 s | identical | 0.0000 | 98.9 % / 98.7 % |
 | Radeon RX 6750 XT, RDNA2 | Linux | 31.0 s | 226.1 s (352 s in 4 Meshroom chunks) | 5.5 s | identical | 0.0000 | 97.5 % / 98.1 % |
 | Radeon RX 6750 XT, RDNA2, HIP SDK 6.2 build | Windows | 28.1 s | 190.3 s | 4.6 s | identical | 0.0000 | 98.7 % / 98.7 % |
@@ -62,14 +63,17 @@ tables in [docs/validation](docs/validation/)).
 | RX 5500 XT vs RX 6750 XT (RDNA1 vs RDNA2), same HIP build | identical | 0 | 100 % (every pixel equal) | bit-identical |
 | RX 9070 vs RX 6750 XT (RDNA4 vs RDNA2), same HIP build | identical | 0 | 97.0-98.5 % | not bit-identical: p95 error 0.07-0.24 % |
 | RX 6750 XT under Windows / HIP 6.2 vs the same card under Linux / HIP 7.2 | identical | 0 | 97.1-98.7 % | not bit-identical: same silicon, different compiler and runtime |
+| **GTX 1080 Ti, CUDA 11.6 on Windows vs GTX 1080 Ti, CUDA 11.3 on Linux** (the reference itself) | 41 / 41 | 0 | 100 % median view, 92.9 % worst | 37 / 41 depth maps bit-identical; the other four differ by up to 7.2 % of pixels. CUDA is not bit-identical to CUDA across builds either |
 | any HIP card vs the CUDA GTX 1080 Ti | identical | 0 | 97.5-98.9 % | same noise floor as RDNA4 vs RDNA2 |
 
 So the port is deterministic (same inputs, same build, same architecture family, same bits),
 and the 1-3 % of pixels that differ by more than 1 % between RDNA4 and RDNA2, between two
 toolchains on the same card, or between any AMD card and CUDA, is the algorithm's noise floor:
 texture-filter and FMA rounding propagating through SGM's argmin, not a port defect. The same
-1-3 % appears between two AMD generations running identical code and between two compilers on
-identical silicon, which is what rules out the port as the cause.
+1-3 % appears between two AMD generations running identical code, between two compilers on
+identical silicon, and between two CUDA builds on the same NVIDIA card (the reference disagrees
+with a Windows CUDA 11.6 run of itself on 4 of 41 views, one of them by 7.2 % of pixels), which
+is what rules out the port as the cause.
 
 ## Memory bridge
 
