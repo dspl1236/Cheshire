@@ -60,6 +60,7 @@ TRACKED = [
     "src/aliceVision/fuseCut/Fuser.cpp",
     "src/aliceVision/fuseCut/CMakeLists.txt",
     "src/software/pipeline/main_depthMapFiltering.cpp",
+    "src/aliceVision/fuseCut/GraphFiller.cpp",
 ]
 
 
@@ -558,6 +559,97 @@ if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
     target_compile_definitions(aliceVision_fuseCut PRIVATE ALICEVISION_HAVE_GPU_FILTER=1)
 endif()
 """ + t[j:]
+        fc.write_text(t, encoding="utf-8", newline=NL)
+
+
+    # 4e. GPU meshing votes (hip/port/gpu_vote): GraphFiller::fillGraph's ray marching on the GPU.
+    gv_dst = AV / "src/aliceVision/fuseCut/gpu"
+    gv_dst.mkdir(parents=True, exist_ok=True)
+    for f in ("graphVoteGPU.hpp", "graphVoteGPU.cu"):
+        shutil.copy2(ROOT / "hip" / "port" / "gpu_vote" / f, gv_dst / f)
+    gfp = AV / "src/aliceVision/fuseCut/GraphFiller.cpp"
+    patch(gfp, '#include <boost/atomic/atomic_ref.hpp>' + NL,
+          '#ifdef ALICEVISION_HAVE_GPU_FILTER' + NL + '#include "aliceVision/fuseCut/gpu/graphVoteGPU.hpp"  // cheshire' + NL + '#endif' + NL)
+    patch(gfp, """    // choose random order to prevent waiting
+    const unsigned int seed = (unsigned int)_mp.userParams.get<unsigned int>("delaunaycut.seed", 0);
+""", """#ifdef ALICEVISION_HAVE_GPU_FILTER
+    // cheshire: the same rays on the GPU, one thread each (CHESHIRE_GPU_VOTE=0 for the CPU loop below)
+    if (gpu::voteAvailable())
+    {
+        const uint32_t NONE = 0xffffffffu;
+        const size_t nbV = _verticesCoords.size(), nbC = _tetrahedralization.nb_cells();
+        std::vector<double> verts(3 * nbV);
+        for (size_t i = 0; i < nbV; ++i) { verts[3 * i] = _verticesCoords[i].x; verts[3 * i + 1] = _verticesCoords[i].y; verts[3 * i + 2] = _verticesCoords[i].z; }
+        std::vector<uint32_t> cv(4 * nbC), ca(4 * nbC);
+        for (size_t c = 0; c < nbC; ++c)
+            for (int k = 0; k < 4; ++k) { cv[4 * c + k] = (uint32_t)_tetrahedralization.cell_vertex(c, k); ca[4 * c + k] = (uint32_t)_tetrahedralization.cell_adjacent(c, k); }
+        const auto& vcells = _tetrahedralization.getNeighboringCellsPerVertex();
+        std::vector<uint32_t> vco(nbV + 1, 0), vcl;
+        for (size_t i = 0; i < nbV; ++i) vco[i + 1] = vco[i] + (uint32_t)(i < vcells.size() ? vcells[i].size() : 0);
+        vcl.reserve(vco[nbV]);
+        for (size_t i = 0; i < nbV && i < vcells.size(); ++i) for (CellIndex c : vcells[i]) vcl.push_back((uint32_t)c);
+        std::vector<uint32_t> rv, rc; std::vector<float> rw; std::vector<double> rd, rcc;
+        for (size_t i = 0; i < nbV; ++i)
+        {
+            const GC_vertexInfo& v = _verticesAttr[i];
+            if (!v.isReal()) continue;
+            float weight = (float)v.nrc;
+            weight = (float)_mp.userParams.get<double>("LargeScale.forceWeight", weight);
+            const double maxDist = v.pixSize <= 0.0 ? 0.0 : nPixelSizeBehind * (double)v.pixSize;
+            for (int c = 0; c < v.cams.size(); c++)
+            {
+                const int cam = v.cams[c];
+                rv.push_back((uint32_t)i); rc.push_back(_camsVertexes[cam] < 0 ? NONE : (uint32_t)_camsVertexes[cam]);
+                rw.push_back(weight); rd.push_back(maxDist);
+                rcc.push_back(_mp.CArr[cam].x); rcc.push_back(_mp.CArr[cam].y); rcc.push_back(_mp.CArr[cam].z);
+            }
+        }
+        std::vector<float> attr(8 * nbC);
+        for (size_t c = 0; c < nbC; ++c)
+        {
+            const GC_cellInfo& ci = _cellsAttr[c];
+            attr[8 * c] = ci.cellSWeight; attr[8 * c + 1] = ci.cellTWeight;
+            for (int k = 0; k < 4; ++k) attr[8 * c + 2 + k] = ci.gEdgeVisWeight[k];
+            attr[8 * c + 6] = ci.emptinessScore; attr[8 * c + 7] = ci.on;
+        }
+        gpu::VoteInput in;
+        in.vertices = verts.data(); in.nbVertices = (uint32_t)nbV; in.cellVertices = cv.data(); in.cellAdjacent = ca.data(); in.nbCells = (uint32_t)nbC;
+        in.vertexCellsOffset = vco.data(); in.vertexCells = vcl.data();
+        in.rayVertex = rv.data(); in.rayCamVertex = rc.data(); in.rayWeight = rw.data(); in.rayMaxDist = rd.data(); in.rayCamCenter = rcc.data();
+        in.nbRays = (uint32_t)rv.size(); in.fullWeight = fullWeight;
+        ALICEVISION_LOG_INFO("cheshire: " << in.nbRays << " rays, " << nbC << " cells, " << nbV << " vertices to the GPU.");
+        if (gpu::fillGraph(in, attr.data()))
+        {
+            for (size_t c = 0; c < nbC; ++c)
+            {
+                GC_cellInfo& ci = _cellsAttr[c];
+                ci.cellSWeight = attr[8 * c]; ci.cellTWeight = attr[8 * c + 1];
+                for (int k = 0; k < 4; ++k) ci.gEdgeVisWeight[k] = attr[8 * c + 2 + k];
+                ci.emptinessScore = attr[8 * c + 6]; ci.on = attr[8 * c + 7];
+            }
+            return;
+        }
+        ALICEVISION_LOG_WARNING("cheshire: GPU meshing votes failed, falling back to the CPU loop");
+    }
+#endif
+    // choose random order to prevent waiting
+    const unsigned int seed = (unsigned int)_mp.userParams.get<unsigned int>("delaunaycut.seed", 0);
+""", after=False)
+    t = gfp.read_text(encoding="utf-8")
+    # patch() inserted the block before the anchor and left the anchor: drop the duplicated two lines
+    dup = """    // choose random order to prevent waiting
+    const unsigned int seed = (unsigned int)_mp.userParams.get<unsigned int>("delaunaycut.seed", 0);
+"""
+    first = t.find(dup); second = t.find(dup, first + len(dup))
+    if second != -1:
+        t = t[:second] + t[second + len(dup):]
+        gfp.write_text(t, encoding="utf-8", newline=NL)
+    fc = AV / "src/aliceVision/fuseCut/CMakeLists.txt"
+    t = fc.read_text(encoding="utf-8")
+    if "gpu/graphVoteGPU.cu" not in t:
+        t = t.replace("    list(APPEND fuseCut_files_headers gpu/depthMapFilterGPU.hpp)", "    list(APPEND fuseCut_files_headers gpu/depthMapFilterGPU.hpp gpu/graphVoteGPU.hpp)", 1)
+        t = t.replace("    list(APPEND fuseCut_files_sources gpu/depthMapFilterGPU.cu)", "    list(APPEND fuseCut_files_sources gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu)", 1)
+        t = t.replace("        set_source_files_properties(gpu/depthMapFilterGPU.cu PROPERTIES LANGUAGE HIP)", "        set_source_files_properties(gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu PROPERTIES LANGUAGE HIP)", 1)
         fc.write_text(t, encoding="utf-8", newline=NL)
 
 

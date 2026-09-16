@@ -1705,7 +1705,7 @@ index 7a671e0..f700fb3 100644
  } // namespace depthMap
  } // namespace aliceVision
 diff --git a/src/aliceVision/fuseCut/CMakeLists.txt b/src/aliceVision/fuseCut/CMakeLists.txt
-index 1b7f39c..c0324c0 100644
+index 1b7f39c..7d43ebc 100644
 --- a/src/aliceVision/fuseCut/CMakeLists.txt
 +++ b/src/aliceVision/fuseCut/CMakeLists.txt
 @@ -24,6 +24,17 @@ set(fuseCut_files_sources
@@ -1715,10 +1715,10 @@ index 1b7f39c..c0324c0 100644
 +# --- cheshire HIP backend --- (GPU depth map filter)
 +set(fuseCut_gpu_links "")
 +if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
-+    list(APPEND fuseCut_files_headers gpu/depthMapFilterGPU.hpp)
-+    list(APPEND fuseCut_files_sources gpu/depthMapFilterGPU.cu)
++    list(APPEND fuseCut_files_headers gpu/depthMapFilterGPU.hpp gpu/graphVoteGPU.hpp)
++    list(APPEND fuseCut_files_sources gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu)
 +    if (ALICEVISION_HAVE_HIP)
-+        set_source_files_properties(gpu/depthMapFilterGPU.cu PROPERTIES LANGUAGE HIP)
++        set_source_files_properties(gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu PROPERTIES LANGUAGE HIP)
 +    endif()
 +    set(fuseCut_gpu_links ${ALICEVISION_CUDA_LIBRARIES})
 +endif()
@@ -1847,6 +1847,87 @@ index 7b385ee..879fbc3 100644
          }
      }
  
+diff --git a/src/aliceVision/fuseCut/GraphFiller.cpp b/src/aliceVision/fuseCut/GraphFiller.cpp
+index 6647c39..64d3bd3 100644
+--- a/src/aliceVision/fuseCut/GraphFiller.cpp
++++ b/src/aliceVision/fuseCut/GraphFiller.cpp
+@@ -11,6 +11,9 @@
+ #include <aliceVision/fuseCut/MaxFlow_AdjList.hpp>
+ 
+ #include <boost/atomic/atomic_ref.hpp>
++#ifdef ALICEVISION_HAVE_GPU_FILTER
++#include "aliceVision/fuseCut/gpu/graphVoteGPU.hpp"  // cheshire
++#endif
+ 
+ 
+ namespace aliceVision {
+@@ -83,6 +86,66 @@ void GraphFiller::fillGraph(double nPixelSizeBehind, float fullWeight)
+ {
+     ALICEVISION_LOG_INFO("Computing s-t graph weights.");
+ 
++#ifdef ALICEVISION_HAVE_GPU_FILTER
++    // cheshire: the same rays on the GPU, one thread each (CHESHIRE_GPU_VOTE=0 for the CPU loop below)
++    if (gpu::voteAvailable())
++    {
++        const uint32_t NONE = 0xffffffffu;
++        const size_t nbV = _verticesCoords.size(), nbC = _tetrahedralization.nb_cells();
++        std::vector<double> verts(3 * nbV);
++        for (size_t i = 0; i < nbV; ++i) { verts[3 * i] = _verticesCoords[i].x; verts[3 * i + 1] = _verticesCoords[i].y; verts[3 * i + 2] = _verticesCoords[i].z; }
++        std::vector<uint32_t> cv(4 * nbC), ca(4 * nbC);
++        for (size_t c = 0; c < nbC; ++c)
++            for (int k = 0; k < 4; ++k) { cv[4 * c + k] = (uint32_t)_tetrahedralization.cell_vertex(c, k); ca[4 * c + k] = (uint32_t)_tetrahedralization.cell_adjacent(c, k); }
++        const auto& vcells = _tetrahedralization.getNeighboringCellsPerVertex();
++        std::vector<uint32_t> vco(nbV + 1, 0), vcl;
++        for (size_t i = 0; i < nbV; ++i) vco[i + 1] = vco[i] + (uint32_t)(i < vcells.size() ? vcells[i].size() : 0);
++        vcl.reserve(vco[nbV]);
++        for (size_t i = 0; i < nbV && i < vcells.size(); ++i) for (CellIndex c : vcells[i]) vcl.push_back((uint32_t)c);
++        std::vector<uint32_t> rv, rc; std::vector<float> rw; std::vector<double> rd, rcc;
++        for (size_t i = 0; i < nbV; ++i)
++        {
++            const GC_vertexInfo& v = _verticesAttr[i];
++            if (!v.isReal()) continue;
++            float weight = (float)v.nrc;
++            weight = (float)_mp.userParams.get<double>("LargeScale.forceWeight", weight);
++            const double maxDist = v.pixSize <= 0.0 ? 0.0 : nPixelSizeBehind * (double)v.pixSize;
++            for (int c = 0; c < v.cams.size(); c++)
++            {
++                const int cam = v.cams[c];
++                rv.push_back((uint32_t)i); rc.push_back(_camsVertexes[cam] < 0 ? NONE : (uint32_t)_camsVertexes[cam]);
++                rw.push_back(weight); rd.push_back(maxDist);
++                rcc.push_back(_mp.CArr[cam].x); rcc.push_back(_mp.CArr[cam].y); rcc.push_back(_mp.CArr[cam].z);
++            }
++        }
++        std::vector<float> attr(8 * nbC);
++        for (size_t c = 0; c < nbC; ++c)
++        {
++            const GC_cellInfo& ci = _cellsAttr[c];
++            attr[8 * c] = ci.cellSWeight; attr[8 * c + 1] = ci.cellTWeight;
++            for (int k = 0; k < 4; ++k) attr[8 * c + 2 + k] = ci.gEdgeVisWeight[k];
++            attr[8 * c + 6] = ci.emptinessScore; attr[8 * c + 7] = ci.on;
++        }
++        gpu::VoteInput in;
++        in.vertices = verts.data(); in.nbVertices = (uint32_t)nbV; in.cellVertices = cv.data(); in.cellAdjacent = ca.data(); in.nbCells = (uint32_t)nbC;
++        in.vertexCellsOffset = vco.data(); in.vertexCells = vcl.data();
++        in.rayVertex = rv.data(); in.rayCamVertex = rc.data(); in.rayWeight = rw.data(); in.rayMaxDist = rd.data(); in.rayCamCenter = rcc.data();
++        in.nbRays = (uint32_t)rv.size(); in.fullWeight = fullWeight;
++        ALICEVISION_LOG_INFO("cheshire: " << in.nbRays << " rays, " << nbC << " cells, " << nbV << " vertices to the GPU.");
++        if (gpu::fillGraph(in, attr.data()))
++        {
++            for (size_t c = 0; c < nbC; ++c)
++            {
++                GC_cellInfo& ci = _cellsAttr[c];
++                ci.cellSWeight = attr[8 * c]; ci.cellTWeight = attr[8 * c + 1];
++                for (int k = 0; k < 4; ++k) ci.gEdgeVisWeight[k] = attr[8 * c + 2 + k];
++                ci.emptinessScore = attr[8 * c + 6]; ci.on = attr[8 * c + 7];
++            }
++            return;
++        }
++        ALICEVISION_LOG_WARNING("cheshire: GPU meshing votes failed, falling back to the CPU loop");
++    }
++#endif
+     // choose random order to prevent waiting
+     const unsigned int seed = (unsigned int)_mp.userParams.get<unsigned int>("delaunaycut.seed", 0);
+     const std::vector<int> verticesRandIds = mvsUtils::createRandomArrayOfIntegers(_verticesAttr.size(), seed);
 diff --git a/src/aliceVision/matching/CMakeLists.txt b/src/aliceVision/matching/CMakeLists.txt
 index a7544f6..af70d7c 100644
 --- a/src/aliceVision/matching/CMakeLists.txt
