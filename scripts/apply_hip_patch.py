@@ -25,6 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 AV = ROOT / "third_party" / "aliceVision"
 MARK = "# --- cheshire HIP backend ---"
+NL = chr(10)
 
 
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
@@ -53,6 +54,9 @@ TRACKED = [
     "src/aliceVision/mvsUtils/ImagesCache.hpp",
     "src/aliceVision/mvsUtils/ImagesCache.cpp",
     "src/aliceVision/depthMap/DepthMapEstimator.cpp",
+    "src/aliceVision/matching/RegionsMatcher.cpp",
+    "src/aliceVision/matching/CMakeLists.txt",
+    "src/software/pipeline/main_featureMatching.cpp",
 ]
 
 
@@ -335,6 +339,85 @@ endif()
     if "        CUDA::cudart\n" in t:
         t = t.replace("        CUDA::cudart\n", "        ${ALICEVISION_CUDA_LIBRARIES}   # CUDA::cudart, or hip::host on a HIP build\n", 1)
         dm.write_text(t, encoding="utf-8", newline="\n")
+
+    # 4b. GPU descriptor matcher (hip/port/gpu_matcher): exact brute-force 2-NN on the GPU behind
+    #     RegionsMatcher, taken for ANN_L2 / BRUTE_FORCE_L2 whenever a device is present. Compiled as
+    #     HIP here; the same source is CUDA for an NVIDIA build (ALICEVISION_HAVE_CUDA).
+    gm_dst = AV / "src/aliceVision/matching/gpu"
+    gm_dst.mkdir(parents=True, exist_ok=True)
+    for f in ("gpuMatcher.hpp", "gpuMatcher.cu", "ArrayMatcher_gpuBruteForce.hpp"):
+        shutil.copy2(ROOT / "hip" / "port" / "gpu_matcher" / f, gm_dst / f)
+    rm = AV / "src/aliceVision/matching/RegionsMatcher.cpp"
+    patch(rm, '#include "aliceVision/matching/ArrayMatcher_cascadeHashing.hpp"' + NL,
+          '#ifdef ALICEVISION_HAVE_GPU_MATCHER' + NL + '#include "aliceVision/matching/gpu/ArrayMatcher_gpuBruteForce.hpp"  // cheshire' + NL + '#endif' + NL)
+    gm_block = """#ifdef ALICEVISION_HAVE_GPU_MATCHER
+            // cheshire: exact 2-NN on the GPU instead of the kd-tree / CPU brute force
+            if ((matcherType == ANN_L2 || matcherType == BRUTE_FORCE_L2) && gpu::available() && gpu::supportsDim(regions.DescriptorLength()))
+            {
+                typedef feature::L2_Vectorized<SCALAR> MetricT;
+                typedef ArrayMatcher_gpuBruteForce<SCALAR, MetricT> MatcherT;
+                out.reset(new matching::RegionsMatcher<MatcherT>(randomNumberGenerator, regions, true));
+                return out;
+            }
+#endif
+"""
+    patch(rm, "            // Build on the fly unsigned char based Matcher" + NL, gm_block.replace("SCALAR", "unsigned char"))
+    patch(rm, "            // Build on the fly float based Matcher" + NL, gm_block.replace("SCALAR", "float"))
+    mc = AV / "src/aliceVision/matching/CMakeLists.txt"
+    patch(mc, "alicevision_add_library(aliceVision_matching" + NL, f"""{MARK} (GPU matcher)
+set(matching_gpu_links "")
+if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
+    list(APPEND matching_files_headers gpu/gpuMatcher.hpp gpu/ArrayMatcher_gpuBruteForce.hpp)
+    list(APPEND matching_files_sources gpu/gpuMatcher.cu)
+    if (ALICEVISION_HAVE_HIP)
+        set_source_files_properties(gpu/gpuMatcher.cu PROPERTIES LANGUAGE HIP)
+    endif()
+    set(matching_gpu_links ${{ALICEVISION_CUDA_LIBRARIES}})
+endif()
+
+""", after=False)
+    patch(mc, "        ${FLANN_LIBRARIES}" + NL, "        ${matching_gpu_links}" + NL)
+    patch(mc, "# Unit tests" + NL, f"""{MARK} (GPU matcher)
+if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
+    target_compile_definitions(aliceVision_matching PRIVATE ALICEVISION_HAVE_GPU_MATCHER=1)
+endif()
+
+""", after=False)
+
+    # 4c. Meshroom 2023.3 chunk options for FeatureMatching: the 2023.3 node passes
+    #     --rangeStart/--rangeSize (a range of *views*, chunk file = rangeStart/rangeSize) while this
+    #     AliceVision chunks *pairs* with --rangeIteration/--rangeBlocksCount. Accept the old pair so
+    #     the paired binary is a drop-in: keep the pairs whose first view's index is in the range.
+    fm = AV / "src/software/pipeline/main_featureMatching.cpp"
+    patch(fm, "    int rangeIteration = 0;" + NL,
+          "    int rangeStart = -1;  // cheshire: Meshroom 2023.3 chunking" + NL + "    int rangeSize = -1;" + NL)
+    patch(fm, '        ("rangeIteration", po::value<int>(&rangeIteration)->default_value(rangeIteration),' + NL,
+          '        ("rangeStart", po::value<int>(&rangeStart)->default_value(rangeStart),' + NL
+          + '         "cheshire: Meshroom 2023.3 chunking, first view index of the chunk (pairs are selected by their first view).")' + NL
+          + '        ("rangeSize", po::value<int>(&rangeSize)->default_value(rangeSize),' + NL
+          + '         "cheshire: Meshroom 2023.3 chunking, number of views in the chunk.")' + NL, after=False)
+    patch(fm, "    int chunkStart, chunkEnd;" + NL,
+          """    // cheshire: Meshroom 2023.3 chunking (--rangeStart/--rangeSize over views)
+    if (rangeStart >= 0 && rangeSize > 0)
+    {
+        std::vector<IndexT> viewIds;
+        viewIds.reserve(sfmData.getViews().size());
+        for (const auto& v : sfmData.getViews()) viewIds.push_back(v.first);
+        std::set<IndexT> chunkViews;
+        for (int i = rangeStart; i < rangeStart + rangeSize && i < int(viewIds.size()); ++i) chunkViews.insert(viewIds[i]);
+        PairSet chunkPairs;
+        for (const auto& pair : allPairs) if (chunkViews.count(pair.first)) chunkPairs.insert(pair);
+        ALICEVISION_LOG_INFO("Meshroom 2023.3 chunking: views " << rangeStart << " to " << rangeStart + rangeSize << " -> " << chunkPairs.size() << " of " << allPairs.size() << " pairs.");
+        allPairs.swap(chunkPairs);
+        rangeIteration = rangeStart / rangeSize;   // output file prefix, as the 2023.3 binary named it
+        rangeBlocksCount = 1;
+        if (allPairs.empty())
+        {
+            ALICEVISION_LOG_INFO("No image pair in this chunk.");
+            return EXIT_SUCCESS;
+        }
+    }
+""", after=False)
 
     # 5. regenerate the reviewable patch
     subprocess.run(["git", "add", "-N", "src/aliceVision/depthMap/cuda/hip"], cwd=AV, check=True)

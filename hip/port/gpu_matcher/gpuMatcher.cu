@@ -1,0 +1,207 @@
+// Cheshire: GPU brute-force 2-NN for descriptor matching (see gpuMatcher.hpp).
+//
+// One thread per query descriptor; the database is streamed through shared memory in tiles, and
+// every thread scans the whole tile. Within a wavefront all lanes read the same database row at
+// the same time, so the tile reads are broadcasts and the loop is compute-bound: 128 multiply-adds
+// per (query, row). uint8 descriptors are kept packed (4 per uint32) in shared memory and in
+// registers and unpacked on the fly; distances are exact integers (max 128 * 255^2 < 2^31), so
+// the uint8 path is bit-exact against the CPU brute force. Float descriptors use plain FMA.
+//
+// CUDA dialect. Under HIP the build force-includes cheshire/cuda_to_hip.h, which maps the runtime
+// calls; __global__/__shared__/__syncthreads are the same in both.
+#include "gpuMatcher.hpp"
+#include <cuda_runtime.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+
+namespace aliceVision {
+namespace matching {
+namespace gpu {
+
+namespace {
+
+constexpr int kQueriesPerBlock = 256;   // threads per block = queries per block
+constexpr int kTileRowsU8 = 256;        // 256 rows x 128 B = 32 KB of shared memory
+constexpr int kTileRowsF32 = 64;        // 64 rows x 128 x 4 B = 32 KB
+
+struct Best2 {
+    int i0 = -1, i1 = -1;
+    float d0 = 3.4e38f, d1 = 3.4e38f;
+    __device__ inline void push(int i, float d) {
+        // strict '<' against the current best keeps the lower row index on ties (rows arrive in order)
+        if (d < d0) { d1 = d0; i1 = i0; d0 = d; i0 = i; }
+        else if (d < d1) { d1 = d; i1 = i; }
+    }
+};
+
+// DIM scalars per descriptor, uint8, packed as DIM/4 uint32 per row.
+template<int DIM>
+__global__ void knn2_u8(const unsigned int* __restrict__ db, int rows, const unsigned int* __restrict__ q, int nbQuery,
+                        int* __restrict__ outIdx, float* __restrict__ outDist)
+{
+    constexpr int W = DIM / 4;
+    __shared__ unsigned int tile[kTileRowsU8 * W];
+    const int qi = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int qreg[W];
+    if (qi < nbQuery)
+        for (int k = 0; k < W; ++k) qreg[k] = q[size_t(qi) * W + k];
+    else
+        for (int k = 0; k < W; ++k) qreg[k] = 0u;
+    Best2 best;
+    for (int base = 0; base < rows; base += kTileRowsU8) {
+        const int n = min(kTileRowsU8, rows - base);
+        // cooperative tile load: n * W words
+        for (int t = threadIdx.x; t < n * W; t += blockDim.x) tile[t] = db[size_t(base) * W + t];
+        __syncthreads();
+        if (qi < nbQuery) {
+            for (int r = 0; r < n; ++r) {
+                const unsigned int* row = tile + r * W;
+                int acc = 0;
+#pragma unroll
+                for (int k = 0; k < W; ++k) {
+                    const unsigned int a = qreg[k], b = row[k];
+                    const int d0 = int(a & 0xffu) - int(b & 0xffu);
+                    const int d1 = int((a >> 8) & 0xffu) - int((b >> 8) & 0xffu);
+                    const int d2 = int((a >> 16) & 0xffu) - int((b >> 16) & 0xffu);
+                    const int d3 = int(a >> 24) - int(b >> 24);
+                    acc += d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3;
+                }
+                best.push(base + r, float(acc));
+            }
+        }
+        __syncthreads();
+    }
+    if (qi < nbQuery) {
+        outIdx[2 * qi] = best.i0; outIdx[2 * qi + 1] = best.i1;
+        outDist[2 * qi] = best.d0; outDist[2 * qi + 1] = best.d1;
+    }
+}
+
+template<int DIM>
+__global__ void knn2_f32(const float* __restrict__ db, int rows, const float* __restrict__ q, int nbQuery,
+                         int* __restrict__ outIdx, float* __restrict__ outDist)
+{
+    __shared__ float tile[kTileRowsF32 * DIM];
+    const int qi = blockIdx.x * blockDim.x + threadIdx.x;
+    float qreg[DIM];
+    if (qi < nbQuery)
+        for (int k = 0; k < DIM; ++k) qreg[k] = q[size_t(qi) * DIM + k];
+    else
+        for (int k = 0; k < DIM; ++k) qreg[k] = 0.f;
+    Best2 best;
+    for (int base = 0; base < rows; base += kTileRowsF32) {
+        const int n = min(kTileRowsF32, rows - base);
+        for (int t = threadIdx.x; t < n * DIM; t += blockDim.x) tile[t] = db[size_t(base) * DIM + t];
+        __syncthreads();
+        if (qi < nbQuery) {
+            for (int r = 0; r < n; ++r) {
+                const float* row = tile + r * DIM;
+                float acc = 0.f;
+#pragma unroll
+                for (int k = 0; k < DIM; ++k) { const float d = qreg[k] - row[k]; acc = fmaf(d, d, acc); }
+                best.push(base + r, acc);
+            }
+        }
+        __syncthreads();
+    }
+    if (qi < nbQuery) {
+        outIdx[2 * qi] = best.i0; outIdx[2 * qi + 1] = best.i1;
+        outDist[2 * qi] = best.d0; outDist[2 * qi + 1] = best.d1;
+    }
+}
+
+bool g_checked = false, g_available = false;
+std::mutex g_mutex;
+
+void logOnce(const char* what) {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    std::fprintf(stderr, "[cheshire] matcher: %s\n", what);
+}
+
+}  // namespace
+
+bool available()
+{
+    std::lock_guard<std::mutex> g(g_mutex);
+    if (g_checked) return g_available;
+    g_checked = true;
+    if (const char* e = std::getenv("CHESHIRE_GPU_MATCHER")) {
+        if (e[0] == '0') { logOnce("GPU brute-force disabled by CHESHIRE_GPU_MATCHER=0"); return g_available = false; }
+    }
+    int n = 0;
+    if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1) { logOnce("no GPU device, CPU matcher"); return g_available = false; }
+    cudaDeviceProp p{};
+    if (cudaGetDeviceProperties(&p, 0) != cudaSuccess) { logOnce("cannot query device 0, CPU matcher"); return g_available = false; }
+    char line[320];
+    std::snprintf(line, sizeof line, "GPU brute-force L2 2-NN on %s (exact; CHESHIRE_GPU_MATCHER=0 for the CPU matcher)", p.name);
+    logOnce(line);
+    return g_available = true;
+}
+
+bool supportsDim(int dim) { return dim == 128 || dim == 64; }
+
+struct KnnMatcher::Impl {
+    void* db = nullptr; size_t dbCap = 0;
+    void* q = nullptr; size_t qCap = 0;
+    int* idx = nullptr; float* dist = nullptr; size_t outCap = 0;   // in queries
+    int rows = 0, dim = 0; bool isFloat = false;
+    size_t rowBytes() const { return size_t(dim) * (isFloat ? 4 : 1); }
+    static bool grow(void** p, size_t* cap, size_t need) {
+        if (need <= *cap) return true;
+        if (*p) cudaFree(*p);
+        *p = nullptr; *cap = 0;
+        if (cudaMalloc(p, need) != cudaSuccess) return false;
+        *cap = need; return true;
+    }
+    ~Impl() { if (db) cudaFree(db); if (q) cudaFree(q); if (idx) cudaFree(idx); if (dist) cudaFree(dist); }
+};
+
+KnnMatcher::KnnMatcher() : impl_(new Impl) {}
+KnnMatcher::~KnnMatcher() { delete impl_; }
+int KnnMatcher::rows() const { return impl_->rows; }
+
+bool KnnMatcher::build(const void* data, int rows, int dim, bool isFloat)
+{
+    Impl& m = *impl_;
+    if (rows < 1 || !supportsDim(dim)) { m.rows = 0; return false; }
+    m.rows = rows; m.dim = dim; m.isFloat = isFloat;
+    const size_t bytes = size_t(rows) * m.rowBytes();
+    if (!Impl::grow(&m.db, &m.dbCap, bytes)) return false;
+    return cudaMemcpy(m.db, data, bytes, cudaMemcpyHostToDevice) == cudaSuccess;
+}
+
+bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist)
+{
+    Impl& m = *impl_;
+    if (m.rows < 2 || nbQuery < 1) return false;
+    const size_t qBytes = size_t(nbQuery) * m.rowBytes();
+    if (!Impl::grow(&m.q, &m.qCap, qBytes)) return false;
+    if (size_t(nbQuery) > m.outCap) {
+        if (m.idx) cudaFree(m.idx); if (m.dist) cudaFree(m.dist);
+        m.idx = nullptr; m.dist = nullptr; m.outCap = 0;
+        if (cudaMalloc((void**)&m.idx, size_t(nbQuery) * 2 * sizeof(int)) != cudaSuccess) return false;
+        if (cudaMalloc((void**)&m.dist, size_t(nbQuery) * 2 * sizeof(float)) != cudaSuccess) return false;
+        m.outCap = size_t(nbQuery);
+    }
+    if (cudaMemcpy(m.q, queries, qBytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    const dim3 block(kQueriesPerBlock), grid((nbQuery + kQueriesPerBlock - 1) / kQueriesPerBlock);
+    if (m.isFloat) {
+        if (m.dim == 128) knn2_f32<128><<<grid, block>>>((const float*)m.db, m.rows, (const float*)m.q, nbQuery, m.idx, m.dist);
+        else              knn2_f32<64><<<grid, block>>>((const float*)m.db, m.rows, (const float*)m.q, nbQuery, m.idx, m.dist);
+    } else {
+        if (m.dim == 128) knn2_u8<128><<<grid, block>>>((const unsigned int*)m.db, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);
+        else              knn2_u8<64><<<grid, block>>>((const unsigned int*)m.db, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);
+    }
+    if (cudaGetLastError() != cudaSuccess) return false;
+    if (cudaMemcpy(idx, m.idx, size_t(nbQuery) * 2 * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+    if (cudaMemcpy(dist, m.dist, size_t(nbQuery) * 2 * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+    return true;
+}
+
+}  // namespace gpu
+}  // namespace matching
+}  // namespace aliceVision

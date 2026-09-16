@@ -3,6 +3,7 @@
 # DepthMap parameters of the node's `standard` preset (Meshroom 2023.3, downscale 2), then
 # compare against a reference DepthMap folder if given.
 # Usage: run-depthmap.sh <AliceVision bundle or install dir> <cache dir with StructureFromMotion/ and PrepareDenseScene/> <out dir> [reference DepthMap dir]
+#   CHESHIRE_DOWNSCALE: DepthMap downscale (default 2; 1 = full-resolution depth maps, 4x the memory per tile)
 #   CHESHIRE_DEPTHMAP_EXTRA: extra depthMapEstimation arguments (e.g. "--rangeStart 0 --rangeSize 1")
 set -euo pipefail
 AV="$1"; CACHE="$2"; OUT="$3"; REF="${4:-}"
@@ -13,7 +14,7 @@ export ALICEVISION_ROOT="$AV"
 export LD_LIBRARY_PATH="$AV/lib:$AV/aliceVision/lib:${LD_LIBRARY_PATH:-}"
 "$AV/bin/aliceVision_hardwareResources" 2>&1 | grep -iE "name:|memory" || true
 "$AV/bin/aliceVision_depthMapEstimation" --input "$SFM" --imagesFolder "$IMGS" \
-  --downscale 2 --minViewAngle 2.0 --maxViewAngle 70.0 --tileBufferWidth 1024 --tileBufferHeight 1024 --tilePadding 64 \
+  --downscale ${CHESHIRE_DOWNSCALE:-2} --minViewAngle 2.0 --maxViewAngle 70.0 --tileBufferWidth 1024 --tileBufferHeight 1024 --tilePadding 64 \
   --autoAdjustSmallImage True --chooseTCamsPerTile True --maxTCams 10 \
   --sgmScale 2 --sgmStepXY 2 --sgmStepZ -1 --sgmMaxTCamsPerTile 4 --sgmWSH 4 --sgmUseSfmSeeds True --sgmSeedsRangeInflate 0.2 \
   --sgmDepthThicknessInflate 0.0 --sgmMaxSimilarity 1.0 --sgmGammaC 5.5 --sgmGammaP 8.0 --sgmP1 10.0 --sgmP2Weighting 100.0 \

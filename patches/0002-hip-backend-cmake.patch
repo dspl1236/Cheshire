@@ -351,10 +351,10 @@ index 0564791..d2e3efc 100644
  
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h b/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h
 new file mode 100644
-index 0000000..9a0976d
+index 0000000..b488193
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h
-@@ -0,0 +1,355 @@
+@@ -0,0 +1,370 @@
 +// Cheshire memory bridge v2: VRAM first, mapped system RAM when VRAM is short, and the
 +// choice of *what* spills made by buffer class instead of by arrival order.
 +//
@@ -392,6 +392,10 @@ index 0000000..9a0976d
 +//                                        hipMemGetInfo, 1 upstream formula on the bridge's VRAM
 +//                                        budget + image reserve, never fewer than one tile (default),
 +//                                        2 tile buffers get all the VRAM and images go to host
++//   CHESHIRE_BRIDGE_MIN_SPILL_MB=N       allocations under N MB always stay in VRAM (default 4):
++//                                        spilling a sub-megabyte map saves nothing and puts every
++//                                        kernel read of it on the PCIe link (the 41-view set at
++//                                        downscale 1 under a 2 GB cap spilled 3240 maps of 0 MB)
 +//   CHESHIRE_BRIDGE_LOG=1                log placement decisions and a per-class summary at exit
 +#pragma once
 +#include <hip/hip_runtime.h>
@@ -465,6 +469,7 @@ index 0000000..9a0976d
 +    bool hostFirst[kClasses] = {false, false, false, false};
 +    bool vramOnly[kClasses] = {false, false, false, false};
 +    size_t vramCap = ~size_t(0), hostCap = 0, reserve = 0;
++    size_t minSpill = size_t(4) << 20;
 +    double vramFraction = 0.9;
 +    long long vramCapEnv = -1;   // -1 unset, 0 no cap, >0 MB
 +    int planner = 1;
@@ -474,6 +479,7 @@ index 0000000..9a0976d
 +        log = std::getenv("CHESHIRE_BRIDGE_LOG") != nullptr;
 +        if (const char* v = std::getenv("CHESHIRE_BRIDGE_VRAM_MB")) vramCapEnv = std::strtoll(v, nullptr, 10);
 +        if (const char* f = std::getenv("CHESHIRE_BRIDGE_VRAM_FRACTION")) vramFraction = std::strtod(f, nullptr);
++        if (const char* f = std::getenv("CHESHIRE_BRIDGE_MIN_SPILL_MB")) minSpill = size_t(std::strtod(f, nullptr) * (1 << 20));
 +        if (const char* p = std::getenv("CHESHIRE_BRIDGE_PLANNER")) planner = std::atoi(p);
 +        const char* hc = std::getenv("CHESHIRE_BRIDGE_HOST_CLASSES");
 +        const char* vc = std::getenv("CHESHIRE_BRIDGE_VRAM_ONLY_CLASSES");
@@ -573,8 +579,17 @@ index 0000000..9a0976d
 +    if (!s.enabled) return true;
 +    if (s.vramOnly[int(cls)]) return true;
 +    if (s.hostFirst[int(cls)]) return false;
-+    const size_t reserve = (cls == Class::Image) ? 0 : s.reserve;   // the reserve is *for* images
++    // The reserve is *for* images and is the planner's estimate of what they will need; the
++    // images already resident are counted in vramBytes, so only the part not yet loaded is held
++    // back. Without this a 2 GB cap with 0.5 GB in use spilled every 93 MB map to the host
++    // while 1.4 GB of VRAM sat empty (RX 6750 XT, 41 views at downscale 1).
++    size_t reserve = 0;
++    if (cls != Class::Image) {
++        const size_t liveImages = s.stats.cls[int(Class::Image)].vramBytes;
++        reserve = s.reserve > liveImages ? s.reserve - liveImages : 0;
++    }
 +    if (s.vramCap == ~size_t(0)) return true;
++    if (bytes < s.minSpill) return true;   // small blocks: the cap is soft, and a host-resident 4 KB map costs a PCIe round trip per read
 +    return s.stats.vramBytes + bytes + reserve <= s.vramCap;
 +}
 +inline bool mayFallBack(Class cls) { return !st().vramOnly[int(cls)]; }
@@ -1689,6 +1704,91 @@ index 7a671e0..f700fb3 100644
 +
  } // namespace depthMap
  } // namespace aliceVision
+diff --git a/src/aliceVision/matching/CMakeLists.txt b/src/aliceVision/matching/CMakeLists.txt
+index a7544f6..af70d7c 100644
+--- a/src/aliceVision/matching/CMakeLists.txt
++++ b/src/aliceVision/matching/CMakeLists.txt
+@@ -30,6 +30,17 @@ set(matching_files_sources
+     svgVisualization.cpp
+ )
+ 
++# --- cheshire HIP backend --- (GPU matcher)
++set(matching_gpu_links "")
++if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
++    list(APPEND matching_files_headers gpu/gpuMatcher.hpp gpu/ArrayMatcher_gpuBruteForce.hpp)
++    list(APPEND matching_files_sources gpu/gpuMatcher.cu)
++    if (ALICEVISION_HAVE_HIP)
++        set_source_files_properties(gpu/gpuMatcher.cu PROPERTIES LANGUAGE HIP)
++    endif()
++    set(matching_gpu_links ${ALICEVISION_CUDA_LIBRARIES})
++endif()
++
+ alicevision_add_library(aliceVision_matching
+     SOURCES ${matching_files_headers} ${matching_files_sources}
+     PUBLIC_LINKS
+@@ -42,8 +53,14 @@ alicevision_add_library(aliceVision_matching
+     PRIVATE_LINKS
+         Boost::boost
+         ${FLANN_LIBRARIES}
++        ${matching_gpu_links}
+ )
+ 
++# --- cheshire HIP backend --- (GPU matcher)
++if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
++    target_compile_definitions(aliceVision_matching PRIVATE ALICEVISION_HAVE_GPU_MATCHER=1)
++endif()
++
+ # Unit tests
+ alicevision_add_test(matching_test.cpp NAME "matching"          LINKS aliceVision_matching ${FLANN_LIBRARIES})
+ alicevision_add_test(filters_test.cpp  NAME "matching_filters"  LINKS aliceVision_matching)
+diff --git a/src/aliceVision/matching/RegionsMatcher.cpp b/src/aliceVision/matching/RegionsMatcher.cpp
+index 00d1c75..72c300e 100644
+--- a/src/aliceVision/matching/RegionsMatcher.cpp
++++ b/src/aliceVision/matching/RegionsMatcher.cpp
+@@ -10,6 +10,9 @@
+ #include "aliceVision/matching/ArrayMatcher_bruteForce.hpp"
+ #include "aliceVision/matching/ArrayMatcher_kdtreeFlann.hpp"
+ #include "aliceVision/matching/ArrayMatcher_cascadeHashing.hpp"
++#ifdef ALICEVISION_HAVE_GPU_MATCHER
++#include "aliceVision/matching/gpu/ArrayMatcher_gpuBruteForce.hpp"  // cheshire
++#endif
+ 
+ #include <aliceVision/system/Logger.hpp>
+ 
+@@ -69,6 +72,16 @@ std::unique_ptr<IRegionsMatcher> createRegionsMatcher(std::mt19937& randomNumber
+         if (regions.Type_id() == typeid(unsigned char).name())
+         {
+             // Build on the fly unsigned char based Matcher
++#ifdef ALICEVISION_HAVE_GPU_MATCHER
++            // cheshire: exact 2-NN on the GPU instead of the kd-tree / CPU brute force
++            if ((matcherType == ANN_L2 || matcherType == BRUTE_FORCE_L2) && gpu::available() && gpu::supportsDim(regions.DescriptorLength()))
++            {
++                typedef feature::L2_Vectorized<unsigned char> MetricT;
++                typedef ArrayMatcher_gpuBruteForce<unsigned char, MetricT> MatcherT;
++                out.reset(new matching::RegionsMatcher<MatcherT>(randomNumberGenerator, regions, true));
++                return out;
++            }
++#endif
+             switch (matcherType)
+             {
+                 case BRUTE_FORCE_L2:
+@@ -98,6 +111,16 @@ std::unique_ptr<IRegionsMatcher> createRegionsMatcher(std::mt19937& randomNumber
+         else if (regions.Type_id() == typeid(float).name())
+         {
+             // Build on the fly float based Matcher
++#ifdef ALICEVISION_HAVE_GPU_MATCHER
++            // cheshire: exact 2-NN on the GPU instead of the kd-tree / CPU brute force
++            if ((matcherType == ANN_L2 || matcherType == BRUTE_FORCE_L2) && gpu::available() && gpu::supportsDim(regions.DescriptorLength()))
++            {
++                typedef feature::L2_Vectorized<float> MetricT;
++                typedef ArrayMatcher_gpuBruteForce<float, MetricT> MatcherT;
++                out.reset(new matching::RegionsMatcher<MatcherT>(randomNumberGenerator, regions, true));
++                return out;
++            }
++#endif
+             switch (matcherType)
+             {
+                 case BRUTE_FORCE_L2:
 diff --git a/src/aliceVision/mvsData/ROI.hpp b/src/aliceVision/mvsData/ROI.hpp
 index e3b2880..b4e5c7b 100644
 --- a/src/aliceVision/mvsData/ROI.hpp
@@ -1803,3 +1903,54 @@ index 27e3ec0..027ba01 100644
  #define ALICEVISION_DEPTHMAP_BACKEND_CUDA() @ALICEVISION_DEPTHMAP_BACKEND_CUDA@
  #define ALICEVISION_DEPTHMAP_BACKEND_SYCL() @ALICEVISION_DEPTHMAP_BACKEND_SYCL@
  
+diff --git a/src/software/pipeline/main_featureMatching.cpp b/src/software/pipeline/main_featureMatching.cpp
+index cc6313f..15828fc 100644
+--- a/src/software/pipeline/main_featureMatching.cpp
++++ b/src/software/pipeline/main_featureMatching.cpp
+@@ -105,6 +105,8 @@ int aliceVision_main(int argc, char** argv)
+     float distRatio = 0.8f;
+     std::vector<std::string> predefinedPairList;
+     int rangeIteration = 0;
++    int rangeStart = -1;  // cheshire: Meshroom 2023.3 chunking
++    int rangeSize = -1;
+     int rangeBlocksCount = 1;
+     std::string nearestMatchingMethod = "ANN_L2";
+     robustEstimation::ERobustEstimator geometricEstimator = robustEstimation::ERobustEstimator::ACRANSAC;
+@@ -183,6 +185,10 @@ int aliceVision_main(int argc, char** argv)
+          "Export debug files (svg, dot).")
+         ("maxMatches", po::value<std::size_t>(&numMatchesToKeep)->default_value(numMatchesToKeep),
+          "Maximum number pf matches to keep.")
++        ("rangeStart", po::value<int>(&rangeStart)->default_value(rangeStart),
++         "cheshire: Meshroom 2023.3 chunking, first view index of the chunk (pairs are selected by their first view).")
++        ("rangeSize", po::value<int>(&rangeSize)->default_value(rangeSize),
++         "cheshire: Meshroom 2023.3 chunking, number of views in the chunk.")
+         ("rangeIteration", po::value<int>(&rangeIteration)->default_value(rangeIteration),
+          "chunk index.")
+         ("rangeBlocksCount", po::value<int>(&rangeBlocksCount)->default_value(rangeBlocksCount),
+@@ -275,6 +281,26 @@ int aliceVision_main(int argc, char** argv)
+ 
+     ALICEVISION_LOG_INFO("Number of pairs: " << allPairs.size());
+ 
++    // cheshire: Meshroom 2023.3 chunking (--rangeStart/--rangeSize over views)
++    if (rangeStart >= 0 && rangeSize > 0)
++    {
++        std::vector<IndexT> viewIds;
++        viewIds.reserve(sfmData.getViews().size());
++        for (const auto& v : sfmData.getViews()) viewIds.push_back(v.first);
++        std::set<IndexT> chunkViews;
++        for (int i = rangeStart; i < rangeStart + rangeSize && i < int(viewIds.size()); ++i) chunkViews.insert(viewIds[i]);
++        PairSet chunkPairs;
++        for (const auto& pair : allPairs) if (chunkViews.count(pair.first)) chunkPairs.insert(pair);
++        ALICEVISION_LOG_INFO("Meshroom 2023.3 chunking: views " << rangeStart << " to " << rangeStart + rangeSize << " -> " << chunkPairs.size() << " of " << allPairs.size() << " pairs.");
++        allPairs.swap(chunkPairs);
++        rangeIteration = rangeStart / rangeSize;   // output file prefix, as the 2023.3 binary named it
++        rangeBlocksCount = 1;
++        if (allPairs.empty())
++        {
++            ALICEVISION_LOG_INFO("No image pair in this chunk.");
++            return EXIT_SUCCESS;
++        }
++    }
+     int chunkStart, chunkEnd;
+     if (!rangeComputation(chunkStart, chunkEnd, rangeIteration, rangeBlocksCount, allPairs.size()))
+     {

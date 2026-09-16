@@ -44,3 +44,5 @@ target_link_libraries(linear_tex PRIVATE hip::device)
 
 add_executable(host_atomics host_atomics.hip)
 target_link_libraries(host_atomics PRIVATE hip::device)
+add_executable(host_backing host_backing.hip)
+target_link_libraries(host_backing PRIVATE hip::device)

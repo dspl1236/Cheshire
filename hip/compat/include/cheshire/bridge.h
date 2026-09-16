@@ -35,6 +35,10 @@
 //                                        hipMemGetInfo, 1 upstream formula on the bridge's VRAM
 //                                        budget + image reserve, never fewer than one tile (default),
 //                                        2 tile buffers get all the VRAM and images go to host
+//   CHESHIRE_BRIDGE_MIN_SPILL_MB=N       allocations under N MB always stay in VRAM (default 4):
+//                                        spilling a sub-megabyte map saves nothing and puts every
+//                                        kernel read of it on the PCIe link (the 41-view set at
+//                                        downscale 1 under a 2 GB cap spilled 3240 maps of 0 MB)
 //   CHESHIRE_BRIDGE_LOG=1                log placement decisions and a per-class summary at exit
 #pragma once
 #include <hip/hip_runtime.h>
@@ -108,6 +112,7 @@ struct State {
     bool hostFirst[kClasses] = {false, false, false, false};
     bool vramOnly[kClasses] = {false, false, false, false};
     size_t vramCap = ~size_t(0), hostCap = 0, reserve = 0;
+    size_t minSpill = size_t(4) << 20;
     double vramFraction = 0.9;
     long long vramCapEnv = -1;   // -1 unset, 0 no cap, >0 MB
     int planner = 1;
@@ -117,6 +122,7 @@ struct State {
         log = std::getenv("CHESHIRE_BRIDGE_LOG") != nullptr;
         if (const char* v = std::getenv("CHESHIRE_BRIDGE_VRAM_MB")) vramCapEnv = std::strtoll(v, nullptr, 10);
         if (const char* f = std::getenv("CHESHIRE_BRIDGE_VRAM_FRACTION")) vramFraction = std::strtod(f, nullptr);
+        if (const char* f = std::getenv("CHESHIRE_BRIDGE_MIN_SPILL_MB")) minSpill = size_t(std::strtod(f, nullptr) * (1 << 20));
         if (const char* p = std::getenv("CHESHIRE_BRIDGE_PLANNER")) planner = std::atoi(p);
         const char* hc = std::getenv("CHESHIRE_BRIDGE_HOST_CLASSES");
         const char* vc = std::getenv("CHESHIRE_BRIDGE_VRAM_ONLY_CLASSES");
@@ -216,8 +222,17 @@ inline bool vramAllowed(size_t bytes, Class cls) {
     if (!s.enabled) return true;
     if (s.vramOnly[int(cls)]) return true;
     if (s.hostFirst[int(cls)]) return false;
-    const size_t reserve = (cls == Class::Image) ? 0 : s.reserve;   // the reserve is *for* images
+    // The reserve is *for* images and is the planner's estimate of what they will need; the
+    // images already resident are counted in vramBytes, so only the part not yet loaded is held
+    // back. Without this a 2 GB cap with 0.5 GB in use spilled every 93 MB map to the host
+    // while 1.4 GB of VRAM sat empty (RX 6750 XT, 41 views at downscale 1).
+    size_t reserve = 0;
+    if (cls != Class::Image) {
+        const size_t liveImages = s.stats.cls[int(Class::Image)].vramBytes;
+        reserve = s.reserve > liveImages ? s.reserve - liveImages : 0;
+    }
     if (s.vramCap == ~size_t(0)) return true;
+    if (bytes < s.minSpill) return true;   // small blocks: the cap is soft, and a host-resident 4 KB map costs a PCIe round trip per read
     return s.stats.vramBytes + bytes + reserve <= s.vramCap;
 }
 inline bool mayFallBack(Class cls) { return !st().vramOnly[int(cls)]; }
