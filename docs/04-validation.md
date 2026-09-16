@@ -98,7 +98,8 @@ view 98.1 % within 1 % (worst 92.3 %). Same envelope as the RX 9070. Details:
 
 Same node, the bundle rebuilt with the packed-slot mipmap sampler: 6 views 52.4 s (was 60.7 s),
 41 views 396.9 s (was 447.7 s), outputs byte-identical to the earlier Linux runs, same statistics
-against CUDA. Page:
+against CUDA. The RX 6750 XT, back in the same node later that morning: 28.0 s / 205.7 s (was
+31.0 s / 226.1 s), 41 / 41 byte-identical to its 2026-09-03 run. Page:
 [docs/validation/monstree-full-rx5500xt-linux-v0.2.3/index.md](validation/monstree-full-rx5500xt-linux-v0.2.3/index.md).
 
 ### house-pc, RX 6750 XT (RDNA2, Linux), 2026-09-03

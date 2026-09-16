@@ -41,6 +41,7 @@ Meshroom jobs on the same node, also four chunks: RX 6750 XT 352 s, RX 5500 XT 5
 | Radeon RX 9070, RDNA4 | Windows | 17.4 s | 124.4 s | 3.0 s | identical | 0.0000 | 98.9 % / 98.7 % |
 | Radeon RX 6750 XT, RDNA2 | Linux | 31.0 s | 226.1 s (352 s in 4 Meshroom chunks) | 5.5 s | identical | 0.0000 | 97.5 % / 98.1 % |
 | Radeon RX 6750 XT, RDNA2, HIP SDK 6.2 build | Windows | 28.1 s | 190.3 s | 4.6 s | identical | 0.0000 | 98.7 % / 98.7 % |
+| Radeon RX 6750 XT, RDNA2, v0.2.3 bundle | Linux | 28.0 s | 205.7 s | 5.0 s | identical | 0.0000 | 97.5 % / 98.1 % |
 | Radeon RX 5500 XT, RDNA1 | Linux | 60.7 s | 447.7 s (594 s in 4 Meshroom chunks) | 10.9 s | identical | 0.0000 | 97.5 % / 98.1 % |
 | Radeon RX 5500 XT, RDNA1, v0.2.3 bundle | Linux | 52.4 s | 396.9 s | 9.7 s | identical | 0.0000 | 97.5 % / 98.1 % |
 
@@ -125,8 +126,8 @@ stage at full speed. Design, knobs and every table:
   run-time uniformity check that takes one scalar descriptor load on the common path (the
   per-pixel levels of `useConsistentScale` fall back to an out-of-line waterfall). Emulation
   now costs 4 % on the RX 9070 (17.2 s) and 9 % on the RX 6750 XT (208.1 s), still
-  bit-identical; the v0.2.3 Linux bundle takes the RX 5500 XT from 447.7 s to 396.9 s on the
-  41-view set, byte-identical output. The
+  bit-identical; the v0.2.3 Linux bundle takes the RX 5500 XT from 447.7 s to 396.9 s and the
+  RX 6750 XT from 226.1 s to 205.7 s on the 41-view set, byte-identical output. The
   bit-identity is expected rather than remarkable: AliceVision samples its mip chain only at
   integer levels (`level = log2(scale / minDownscale)`), where trilinear filtering reduces to
   bilinear on one level. Linear levels are what lets the bridge account for camera images.

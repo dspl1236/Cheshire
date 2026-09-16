@@ -8,6 +8,15 @@ same RX 5500 XT / i3-4330 node as the [v0.2.1 result](../monstree-full-rx5500xt-
 | 6 views | 60.7 s | **52.4 s** |
 | 41 views | 447.7 s | **396.9 s** |
 
+The RX 6750 XT went back into the same node later that morning, same bundle:
+
+| | v0.2.1 bundle (2026-09-03) | v0.2.3 bundle |
+|---|---|---|
+| 6 views | 31.0 s | **28.0 s** |
+| 41 views | 226.1 s | **205.7 s** |
+
+Its 41 depth maps are byte-identical to its own 2026-09-03 run and to the RX 5500 XT run above.
+
 Outputs: the 6 depth maps are byte-identical to the v0.2.1 run on this card; the 41 depth maps are
 byte-identical to the first Linux 41-view run of 2026-09-03 (`/data/scans/monstree-full/out/cheshire-hip`
 on house-pc, RX 6750 XT at the time), so the sampler change alters nothing but time, and RDNA1 and
