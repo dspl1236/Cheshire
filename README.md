@@ -32,7 +32,7 @@ number is why the design is what it is.
 | DepthMap | CUDA only | HIP port + VRAM-to-RAM memory bridge | validated RDNA1/2/4, Windows + Linux; bit-identical to native across caps |
 | FeatureMatching | CPU (kd-tree) on every vendor | exact GPU brute-force 2-NN (HIP; the source also builds as CUDA) | validated end to end (v0.2.5): 592 s -> 75 s on 107 photos, same reconstruction |
 | FeatureExtraction | CUDA (PopSift) or CPU | CPU on AMD (`forceCpuExtraction`) | PopSift port not started |
-| DepthMapFilter | CPU | | next port |
+| DepthMapFilter | CPU | GPU vote pass (HIP / CUDA source) | validated (v0.2.6): 123.5 s -> 26.5 s on 107 photos, bit-identical; found and replicated an upstream vote-buffer quirk |
 | Meshing | CPU | | profile its voting pass, port that |
 | Texturing | CPU | | after Meshing |
 | PrepareDenseScene | CPU | | small win, when convenient |
@@ -279,8 +279,9 @@ The aim is a small PC with a big GPU that runs a Meshroom job as fast as a works
 as precisely. In order, each proven on the 6-view set for bit-identity against the CPU output and
 timed on the 41-view and engine bay sets:
 
-1. **DepthMapFilter on the GPU.** Per-pixel consistency of each depth map against its neighbours,
-   115 s of CPU on the engine bay job. A small port.
+1. ~~**DepthMapFilter on the GPU.**~~ Done in v0.2.6 ([docs/08](docs/08-gpu-depth-map-filter.md)):
+   123.5 s to 26.5 s on the engine bay job, what remains is EXR reading; a shared decoded-map cache
+   is the follow-up.
 2. **Meshing's voting pass.** Every depth-map pixel casts a ray through the Delaunay volume; per-ray,
    embarrassingly parallel, and the suspected majority of Meshing's 539 s. Delaunay and the graph
    cut stay on the CPU.
