@@ -1704,6 +1704,149 @@ index 7a671e0..f700fb3 100644
 +
  } // namespace depthMap
  } // namespace aliceVision
+diff --git a/src/aliceVision/fuseCut/CMakeLists.txt b/src/aliceVision/fuseCut/CMakeLists.txt
+index 1b7f39c..c0324c0 100644
+--- a/src/aliceVision/fuseCut/CMakeLists.txt
++++ b/src/aliceVision/fuseCut/CMakeLists.txt
+@@ -24,6 +24,17 @@ set(fuseCut_files_sources
+     Mesher.cpp
+ )
+ 
++# --- cheshire HIP backend --- (GPU depth map filter)
++set(fuseCut_gpu_links "")
++if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
++    list(APPEND fuseCut_files_headers gpu/depthMapFilterGPU.hpp)
++    list(APPEND fuseCut_files_sources gpu/depthMapFilterGPU.cu)
++    if (ALICEVISION_HAVE_HIP)
++        set_source_files_properties(gpu/depthMapFilterGPU.cu PROPERTIES LANGUAGE HIP)
++    endif()
++    set(fuseCut_gpu_links ${ALICEVISION_CUDA_LIBRARIES})
++endif()
++
+ alicevision_add_library(aliceVision_fuseCut
+     SOURCES ${fuseCut_files_headers} ${fuseCut_files_sources}
+     PUBLIC_LINKS
+@@ -37,9 +48,14 @@ alicevision_add_library(aliceVision_fuseCut
+         Boost::container
+     PRIVATE_LINKS
+         nanoflann::nanoflann
++        ${fuseCut_gpu_links}
+         Boost::boost
+         Boost::json
+ )
++# --- cheshire HIP backend --- (GPU depth map filter)
++if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
++    target_compile_definitions(aliceVision_fuseCut PRIVATE ALICEVISION_HAVE_GPU_FILTER=1)
++endif()
+ 
+ # Unit tests
+ alicevision_add_test(DelaunayGraphCut_test.cpp
+diff --git a/src/aliceVision/fuseCut/Fuser.cpp b/src/aliceVision/fuseCut/Fuser.cpp
+index 7b385ee..879fbc3 100644
+--- a/src/aliceVision/fuseCut/Fuser.cpp
++++ b/src/aliceVision/fuseCut/Fuser.cpp
+@@ -16,6 +16,9 @@
+ #include <aliceVision/mvsUtils/common.hpp>
+ #include <aliceVision/mvsUtils/fileIO.hpp>
+ #include <aliceVision/mvsUtils/mapIO.hpp>
++#ifdef ALICEVISION_HAVE_GPU_FILTER
++#include "aliceVision/fuseCut/gpu/depthMapFilterGPU.hpp"  // cheshire
++#endif
+ #include <aliceVision/image/io.hpp>
+ #include <aliceVision/image/imageAlgo.hpp>
+ 
+@@ -171,6 +174,78 @@ bool Fuser::filterGroupsRC(int rc, float pixToleranceFactor, int pixSizeBall, in
+ 
+     StaticVector<int> tcams = _mp.findNearestCamsFromLandmarks(rc, nNearestCams);
+ 
++#ifdef ALICEVISION_HAVE_GPU_FILTER
++    // cheshire: the same votes on the GPU (one thread per tc pixel); the per-camera matrix
++    // decompositions upstream redoes per pixel are done once here with upstream's own code
++    if (gpu::available())
++    {
++        auto geom = [&](int cam) {
++            gpu::CamGeom g{};
++            const Matrix3x4& P = _mp.camArr[cam];
++            const double pm[12] = {P.m11, P.m12, P.m13, P.m14, P.m21, P.m22, P.m23, P.m24, P.m31, P.m32, P.m33, P.m34};
++            for (int i = 0; i < 12; ++i) g.P[i] = pm[i];
++            const Matrix3x3& iC = _mp.iCamArr[cam];
++            const double im[9] = {iC.m11, iC.m12, iC.m13, iC.m21, iC.m22, iC.m23, iC.m31, iC.m32, iC.m33};
++            for (int i = 0; i < 9; ++i) g.iCam[i] = im[i];
++            g.C[0] = _mp.CArr[cam].x; g.C[1] = _mp.CArr[cam].y; g.C[2] = _mp.CArr[cam].z;
++            Point3d Co; Matrix3x3 Ro, iRo, Ko, iKo, iPo;
++            _mp.decomposeProjectionMatrix(Co, Ro, iRo, Ko, iKo, iPo, P);
++            const double rp[9] = {iPo.m11, iPo.m12, iPo.m13, iPo.m21, iPo.m22, iPo.m23, iPo.m31, iPo.m32, iPo.m33};
++            for (int i = 0; i < 9; ++i) g.riP[i] = rp[i];
++            g.rC[0] = Co.x; g.rC[1] = Co.y; g.rC[2] = Co.z;
++            g.w = _mp.getWidth(cam); g.h = _mp.getHeight(cam);
++            return g;
++        };
++        gpu::GroupFilter gf;
++        bool ok = gf.setRc(depthMap.data(), simMap.data(), geom(rc));
++        for (int c = 0; ok && c < tcams.size(); c++)
++        {
++            const int tc = tcams[c];
++            image::Image<float> tcdepthMap;
++            mvsUtils::readMap(tc, _mp, mvsUtils::EFileType::depthMap, tcdepthMap);
++            if (std::getenv("CHESHIRE_GPU_FILTER_DEBUG") && tcdepthMap.height() > 0)
++            {
++                // one tc pixel through both implementations, printed side by side
++                int x = tcdepthMap.width() / 2, y = tcdepthMap.height() / 2;
++                while (y < tcdepthMap.height() && !(tcdepthMap(y, x) > 0.0f)) ++y;
++                if (y < tcdepthMap.height())
++                {
++                    const float depth = tcdepthMap(y, x);
++                    const Point3d p = _mp.CArr[tc] + (_mp.iCamArr[tc] * Point2d((float)x, (float)y)).normalize() * depth;
++                    Pixel pix; _mp.getPixelFor3DPoint(&pix, p, rc);
++                    const float pixDepth = (_mp.CArr[rc] - p).size();
++                    const double avRcTc = _mp.getCamPixelSizeRcTc(p, rc, tc, 1.0f), avRc = _mp.getCamPixelSize(p, rc, 1.0f);
++                    const float pixSize = pixToleranceFactor * _mp.getCamPixelSizePlaneSweepAlpha(p, rc, tc, 1, 1);
++                    const float rcd = _mp.isPixelInImage(pix, rc) ? depthMap(pix.y, pix.x) : -999.f;
++                    double o[10]; gf.probe(tcdepthMap.data(), geom(tc), x, y, pixToleranceFactor, pixSizeBall, pixSizeBallWSP, o);
++                    std::fprintf(stderr, "[cheshire] filter probe rc=%d tc=%d tcpix=(%d,%d) depth=%.9g\n  CPU: pix=(%d,%d) pixDepth=%.9g avRcTc=%.17g avRc=%.17g pixSize=%.9g rcDepth=%.9g p=(%.17g,%.17g,%.17g)\n  GPU: pix=(%g,%g) pixDepth=%.9g avRcTc=%.17g avRc=%.17g pixSize=%.9g rcDepth=%.9g p=(%.17g,%.17g,%.17g)\n",
++                                 rc, tc, x, y, depth, pix.x, pix.y, pixDepth, avRcTc, avRc, pixSize, rcd, p.x, p.y, p.z,
++                                 o[0], o[1], o[2], o[3], o[4], o[5], o[9], o[6], o[7], o[8]);
++                }
++            }
++            if (tcdepthMap.height() > 0 && tcdepthMap.width() > 0)
++                ok = gf.accumulate(tcdepthMap.data(), geom(tc), pixToleranceFactor, pixSizeBall, pixSizeBallWSP);
++            if (ok && std::getenv("CHESHIRE_GPU_FILTER_DEBUG"))
++            {
++                long long cnt = -1; gf.voteCount(&cnt);
++                std::fprintf(stderr, "[cheshire] filter votes GPU rc=%d tc=%d (%dx%d): %lld rc pixels voted\n", rc, tc, tcdepthMap.width(), tcdepthMap.height(), cnt);
++            }
++        }
++        if (ok && gf.result(numOfModalsMap.data()))
++        {
++            image::writeImageWithFloat(
++              getFileNameFromIndex(_mp, rc, mvsUtils::EFileType::nmodMap),
++              numOfModalsMap,
++              image::ImageWriteOptions().toColorSpace(image::EImageColorSpace::LINEAR).storageDataType(image::EStorageDataType::Float));
++            delete numOfPtsMap;
++            ALICEVISION_LOG_DEBUG(rc << " solved (GPU).");
++            mvsUtils::printfElapsedTime(t1);
++            return true;
++        }
++        ALICEVISION_LOG_WARNING("cheshire: GPU depth map filter failed for camera " << rc << ", falling back to the CPU pass");
++    }
++#endif
++
+     for (int c = 0; c < tcams.size(); c++)
+     {
+         numOfPtsMap->resize_with(w * h, 0);
+@@ -201,6 +276,12 @@ bool Fuser::filterGroupsRC(int rc, float pixToleranceFactor, int pixSizeBall, in
+             {
+                 numOfModalsMap(i) += static_cast<int>((*numOfPtsMap)[i] > 0);
+             }
++            if (std::getenv("CHESHIRE_GPU_FILTER_DEBUG"))   // cheshire diagnostics
++            {
++                long long cnt = 0;
++                for (int i = 0; i < w * h; i++) cnt += (*numOfPtsMap)[i] > 0;
++                std::fprintf(stderr, "[cheshire] filter votes CPU rc=%d tc=%d (%dx%d): %lld rc pixels voted\n", rc, tc, tcdepthMap.width(), tcdepthMap.height(), cnt);
++            }
+         }
+     }
+ 
 diff --git a/src/aliceVision/matching/CMakeLists.txt b/src/aliceVision/matching/CMakeLists.txt
 index a7544f6..af70d7c 100644
 --- a/src/aliceVision/matching/CMakeLists.txt
