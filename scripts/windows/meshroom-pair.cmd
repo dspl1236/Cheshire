@@ -36,6 +36,7 @@ rem packages carry the plain CPU featureMatching, which must not be put in Meshr
 set FMOK=
 if exist "%PKG%\bin\aliceVision_featureMatching.exe" (
   set "PATH=%PKG%\bin;%PATH%"
+  set "ALICEVISION_ROOT=%PKG%"
   "%PKG%\bin\aliceVision_featureMatching.exe" --help > "%TEMP%\cheshire-fm-help.txt" 2>&1
   findstr /c:"--rangeStart" "%TEMP%\cheshire-fm-help.txt" >nul 2>&1 && set FMOK=1
   del /q "%TEMP%\cheshire-fm-help.txt" 2>nul

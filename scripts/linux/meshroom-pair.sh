@@ -62,7 +62,8 @@ EOF
 pair aliceVision_depthMapEstimation --sgmFilteringAxes
 # only a bundle with the GPU matcher understands Meshroom 2023.3's --rangeStart/--rangeSize; older
 # bundles carry the plain CPU featureMatching, which must not be put in Meshroom's way
-if LD_LIBRARY_PATH="$BUNDLE/lib" "$BUNDLE/bin/aliceVision_featureMatching" --help 2>&1 | grep -q -- '--rangeStart'; then
+fm_help=$(ALICEVISION_ROOT="$BUNDLE" LD_LIBRARY_PATH="$BUNDLE/lib" "$BUNDLE/bin/aliceVision_featureMatching" --help 2>&1 || true)   # not piped: pipefail + grep -q would SIGPIPE the probe
+if grep -q -- '--rangeStart' <<<"$fm_help"; then
   pair aliceVision_featureMatching
 else
   echo "bundle's aliceVision_featureMatching has no GPU matcher (pre-v0.2.5): DepthMap paired only"
