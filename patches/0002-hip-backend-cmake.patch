@@ -990,17 +990,17 @@ index 0000000..ee7224e
 +// tex2D<T>, tex2DLod<T>, surf2Dwrite, atomicAdd ...
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/mipmap_emu.h b/src/aliceVision/depthMap/cuda/hip/cheshire/mipmap_emu.h
 new file mode 100644
-index 0000000..7a770e7
+index 0000000..ff51784
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshire/mipmap_emu.h
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,270 @@
 +// Cheshire: mipmapped-array emulation for HIP stacks without hipMallocMipmappedArray
 +// (Linux ROCm 7.2 reports "Mipmap not supported on one of the devices", e.g. RX 5500 XT).
 +//
 +// A "mipmapped array" becomes one plain 2D level per mip level; a texture object over it becomes
-+// a small device-side table of one texture object per level, and the 64-bit handle AliceVision
-+// carries around (cudaTextureObject_t) is the device pointer of that table. Device code samples
-+// with tex2DLod(handle, u, v, level) -> tex2D(table[int(level + 0.5)], u, v): AliceVision only
++// one texture object per level whose descriptors are packed into a fixed-stride device buffer,
++// and the 64-bit handle AliceVision carries around (cudaTextureObject_t) is that buffer. Device code samples
++// with tex2DLod(handle, u, v, level) -> tex2D(slot[int(level + 0.5)], u, v): AliceVision only
 +// samples at integer levels (level = log2(scale / minDownscale)), so bilinear at that level is
 +// exactly what trilinear at an integer LOD returns. Fractional levels (custom patch-pattern
 +// subparts) are rounded to the nearest level.
@@ -1019,17 +1019,51 @@ index 0000000..7a770e7
 +namespace cheshire { namespace mip {
 +
 +constexpr int kMaxLevels = 16;
-+struct TexSet { hipTextureObject_t t[kMaxLevels]; int n; };
++// Packed level table. On AMD a texture object is a pointer to HIP_TEXTURE_OBJECT_SIZE_DWORD
++// dwords of constant memory (image descriptor, then sampler descriptor) and nothing else, so the
++// per-level descriptors are copied into one buffer of kMaxLevels fixed-stride slots; the fake
++// handle is the buffer base and level l's texture object is base + l * kSlotBytes. Slots past the
++// last level repeat the last level, so the device clamps against a constant and never loads a
++// table entry: the descriptor address is arithmetic on kernel arguments, as with a native
++// mipmapped texture, instead of two dependent loads per sample (the v0.2 table: handle -> TexSet
++// -> hipTextureObject_t -> descriptor).
++constexpr int kSlotBytes = 128;  // >= HIP_TEXTURE_OBJECT_SIZE_DWORD * 4 (80), cache-line aligned
++static_assert(kSlotBytes >= HIP_TEXTURE_OBJECT_SIZE_DWORD * 4, "texture object slot too small");
 +
 +}}  // namespace cheshire::mip
++
++// Slot addressing in the constant address space, the way tex2D reads the descriptor.
++#if defined(__HIP_DEVICE_COMPILE__)
++typedef const unsigned int __attribute__((address_space(4)))* cheshire_cslot;
++// Per-lane level (rare: only under useConsistentScale, where AliceVision derives a per-pixel
++// level in computeRcTcMipmapLevels). Kept out of line so the common path stays small: the
++// compiler emits a waterfall loop over the distinct descriptors here.
++template<class T>
++__device__ __attribute__((noinline)) T cheshire_tex2DLod_divergent(hipTextureObject_t handle, float u, float v, int l)
++{
++    return tex2D<T>((hipTextureObject_t)((cheshire_cslot)handle + size_t(l) * (cheshire::mip::kSlotBytes / 4)), u, v);
++}
++#endif
 +
 +template<class T>
 +__device__ inline T cheshire_tex2DLod(hipTextureObject_t handle, float u, float v, float level)
 +{
-+    const cheshire::mip::TexSet* s = reinterpret_cast<const cheshire::mip::TexSet*>(handle);
 +    int l = int(level + 0.5f);
-+    l = l < 0 ? 0 : (l >= s->n ? s->n - 1 : l);
-+    return tex2D<T>(s->t[l], u, v);
++    l = l < 0 ? 0 : (l > cheshire::mip::kMaxLevels - 1 ? cheshire::mip::kMaxLevels - 1 : l);
++#if defined(__HIP_DEVICE_COMPILE__)
++    // The level is normally a kernel argument (wave-uniform), but it reaches here through float
++    // VALU ops, so the backend cannot see that and would fetch the descriptor with vector loads
++    // plus a readfirstlane per dword at every sample (121 of them in
++    // volume_computeSimilarity_kernel). Check uniformity at run time instead: when every lane
++    // agrees, address the slot with the scalar value, which costs one scalar descriptor load.
++    const int first = __builtin_amdgcn_readfirstlane(l);
++    if (__builtin_expect(__all(l == first), 1))
++        return tex2D<T>((hipTextureObject_t)((cheshire_cslot)handle + size_t(first) * (cheshire::mip::kSlotBytes / 4)), u, v);
++    return cheshire_tex2DLod_divergent<T>(handle, u, v, l);
++#else
++    const char* base = reinterpret_cast<const char*>(handle);
++    return tex2D<T>(reinterpret_cast<hipTextureObject_t>(const_cast<char*>(base + l * cheshire::mip::kSlotBytes)), u, v);
++#endif
 +}
 +
 +// host-side implementation (plain __host__ functions: parsed in both compilation passes)
@@ -1049,7 +1083,7 @@ index 0000000..7a770e7
 +// handed to AliceVision is then the address of this record).
 +struct Level { hipArray_t arr = nullptr; void* dev = nullptr; size_t pitch = 0; size_t w = 0, h = 0; hipChannelFormatDesc desc{}; size_t elemBytes = 0; };
 +struct MipRec { std::vector<Level*> levels; hipChannelFormatDesc desc{}; size_t w = 0, h = 0; size_t elemBytes = 0; Storage st = Storage::Array; };
-+struct TexRec { std::vector<hipTextureObject_t> levels; TexSet* dev; };
++struct TexRec { std::vector<hipTextureObject_t> levels; void* dev; };  // dev: packed slot buffer (kMaxLevels * kSlotBytes)
 +
 +struct Registry {
 +    std::mutex m;
@@ -1202,10 +1236,15 @@ index 0000000..7a770e7
 +        if (e != hipSuccess) { for (auto x : tr.levels) (void)hipDestroyTextureObject(x); return e; }
 +        tr.levels.push_back(t);
 +    }
-+    TexSet host{}; host.n = int(tr.levels.size());
-+    for (int i = 0; i < host.n; ++i) host.t[i] = tr.levels[i];
-+    hipError_t e = hipMalloc(reinterpret_cast<void**>(&tr.dev), sizeof(TexSet));
-+    if (e == hipSuccess) e = hipMemcpy(tr.dev, &host, sizeof(TexSet), hipMemcpyHostToDevice);
++    // pack the per-level descriptors into fixed-stride slots (see cheshire_tex2DLod); the
++    // descriptors only reference the level storage, which outlives the texture, so the level
++    // texture objects are kept solely to be destroyed together with the packed copy.
++    const int n = int(tr.levels.size());
++    hipError_t e = hipMalloc(&tr.dev, size_t(kMaxLevels) * kSlotBytes);
++    for (int i = 0; e == hipSuccess && i < kMaxLevels; ++i) {
++        const hipTextureObject_t src = tr.levels[i < n ? i : n - 1];
++        e = hipMemcpy(static_cast<char*>(tr.dev) + size_t(i) * kSlotBytes, reinterpret_cast<const void*>(src), HIP_TEXTURE_OBJECT_SIZE_DWORD * 4, hipMemcpyDefault);
++    }
 +    if (e != hipSuccess) { for (auto x : tr.levels) (void)hipDestroyTextureObject(x); if (tr.dev) (void)hipFree(tr.dev); return e; }
 +    { std::lock_guard<std::mutex> g(reg().m); reg().texs[tr.dev] = tr; }
 +    *out = reinterpret_cast<hipTextureObject_t>(tr.dev);
