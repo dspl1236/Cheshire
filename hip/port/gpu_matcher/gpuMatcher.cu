@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <mutex>
 
 namespace aliceVision {
@@ -115,6 +116,22 @@ __global__ void knn2_f32(const float* __restrict__ db, int rows, const float* __
 bool g_checked = false, g_available = false;
 std::mutex g_mutex;
 
+// CHESHIRE_GPU_MATCHER_LOG=1: cumulative time inside build()/search2() (uploads, kernel, downloads)
+// printed at exit, to split the matcher's share of "Regions Matching" from the CPU work around it.
+struct Profile {
+    bool on = std::getenv("CHESHIRE_GPU_MATCHER_LOG") != nullptr;
+    double buildSec = 0, searchSec = 0; size_t builds = 0, searches = 0, queries = 0;
+    ~Profile() {
+        if (on) std::fprintf(stderr, "[cheshire] matcher profile: %zu builds %.2f s, %zu searches %.2f s (%zu query descriptors)\n",
+                             builds, buildSec, searches, searchSec, queries);
+    }
+} g_profile;
+struct ScopedTimer {
+    double& acc; std::chrono::steady_clock::time_point t0;
+    explicit ScopedTimer(double& a) : acc(a), t0(std::chrono::steady_clock::now()) {}
+    ~ScopedTimer() { acc += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); }
+};
+
 void logOnce(const char* what) {
     static bool done = false;
     if (done) return;
@@ -168,6 +185,7 @@ bool KnnMatcher::build(const void* data, int rows, int dim, bool isFloat)
 {
     Impl& m = *impl_;
     if (rows < 1 || !supportsDim(dim)) { m.rows = 0; return false; }
+    ScopedTimer timer(g_profile.buildSec); g_profile.builds++;
     m.rows = rows; m.dim = dim; m.isFloat = isFloat;
     const size_t bytes = size_t(rows) * m.rowBytes();
     if (!Impl::grow(&m.db, &m.dbCap, bytes)) return false;
@@ -178,6 +196,7 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
 {
     Impl& m = *impl_;
     if (m.rows < 2 || nbQuery < 1) return false;
+    ScopedTimer timer(g_profile.searchSec); g_profile.searches++; g_profile.queries += size_t(nbQuery);
     const size_t qBytes = size_t(nbQuery) * m.rowBytes();
     if (!Impl::grow(&m.q, &m.qCap, qBytes)) return false;
     if (size_t(nbQuery) > m.outCap) {

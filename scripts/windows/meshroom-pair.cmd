@@ -35,6 +35,7 @@ rem only a package with the GPU matcher understands Meshroom 2023.3's --rangeSta
 rem packages carry the plain CPU featureMatching, which must not be put in Meshroom's way
 set FMOK=
 if exist "%PKG%\bin\aliceVision_featureMatching.exe" (
+  set "PATH=%PKG%\bin;%PATH%"
   for /f %%X in ('"%PKG%\bin\aliceVision_featureMatching.exe" --help 2^>^&1 ^| findstr /c:"--rangeStart"') do set FMOK=1
 )
 if defined FMOK ( call :pair aliceVision_featureMatching ) else ( echo package's aliceVision_featureMatching has no GPU matcher ^(pre-v0.2.5^): DepthMap paired only )
