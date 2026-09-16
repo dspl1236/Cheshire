@@ -161,9 +161,13 @@ What it took to get from "bundle on disk" to "HIP sees the card", each a real de
    but it costs ~35 % on that card (23.5 s vs 17.4 s on mini6), so the Windows build keeps
    native mipmaps (`-DCHESHIRE_NATIVE_MIPMAP`) and the Linux bundle emulates. On the RX 6750 XT
    the same experiment under Windows / HIP 6.2 (41 views: 232.3 s emulated vs 190.3 s native,
-   bit-identical) lands within 3 % of this Linux bundle's 226.1 s, so emulation accounts for the
-   entire Linux-vs-Windows difference on that card. A native mipmap path on Linux (when the
-   runtime grows one, or a hand-built one) is therefore worth about 18 % on RDNA2.
+   bit-identical) lands within 3 % of this Linux bundle's 226.1 s, so emulation accounted for the
+   entire Linux-vs-Windows difference on that card. Most of it was the level table, not the
+   extra textures: the packed-slot sampler (2026-09-15, `mipmap_emu.h`) brings emulation to
+   208.1 s on that card (9 % over native) and 17.2 s vs 16.5 s on the RX 9070, bit-identical.
+   The remainder is one scalar descriptor load per sample that the compiler cannot hoist past
+   the uniformity check; a hand-built hardware mip chain would remove it, at the price of
+   per-generation image-descriptor layouts.
 5. The half-array `surf2Dwrite` defect reproduces on Linux/RDNA1 too: it is a HIP runtime
    bug, not a Windows one. The buffer-copy mip builder covers both.
 6. Small ones: `getent`-based home under `sudo` in `node-amd-setup.sh`; git must carry the

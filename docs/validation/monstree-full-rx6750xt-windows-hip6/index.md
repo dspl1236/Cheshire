@@ -21,8 +21,25 @@ depth maps bit-identical to the native run on 41 / 41 views ([table](mipemu-vs-n
 That is within 3 % of the Linux bundle, which always emulates because ROCm 7.2 on Linux has no
 `hipMallocMipmappedArray`. So the 16 % between Linux and Windows on this card is the mipmap
 path, not the host CPU (i3-4330 vs FX-8120), not the runtime (HIP 7.2 vs 6.2) and not the OS;
-at equal mipmap path the two stacks are within noise of each other. Native mipmaps are worth
+at equal mipmap path the two stacks are within noise of each other. Native mipmaps were worth
 18 % on RDNA2 for this job (they were 15-35 % on the RX 9070 depending on the set).
+
+**Closing the gap (same day).** Storage layout is not the cause: the emulated package with
+`CHESHIRE_MIPMAP_STORAGE=array` took 227.1 s. The disassembly of `volume_computeSimilarity_kernel`
+was: every `tex2DLod` fetched its level's descriptor through the device-side handle table with
+vector loads and ten `v_readfirstlane`s per sample (121 in the kernel, none in the native build).
+Two revisions of the emulated sampler, both bit-identical to native on 41 / 41 views:
+
+| sampler | RX 6750 XT, 41 views | RX 9070, 6 views | `v_readfirstlane` / vector loads in the similarity kernel |
+|---|---|---|---|
+| native mipmaps | 190.3 s | 16.5 s | 0 / 2 |
+| v0.2.2 table (handle -> table -> texture -> descriptor) | 232.3 s | 19.9 s | 120 / 52 |
+| packed slots, per-lane index | 214.2 s | 18.3 s | 121 / 18 |
+| packed slots + run-time uniformity check (current) | **208.1 s** | **17.2 s** | 12 / 2 |
+
+The current sampler keeps one scalar descriptor load per sample (`s_load` 69 vs 38 in native)
+because the uniformity check is a convergent operation the compiler will not hoist out of the
+patch loops; that is the remaining 9 % on RDNA2 and 4 % on RDNA4.
 
 * [vs the CUDA reference](vs-cuda.md): masks agree on 41 / 41 views, per-view median error 0.0000 on
   every view, within 1 %: median over views 0.987, worst 0.942 (view 1317225462),

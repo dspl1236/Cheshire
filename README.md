@@ -113,11 +113,18 @@ stage at full speed. Design, knobs and every table:
   reads are fine. AliceVision's mip chain is built through a buffer copy instead.
 * **Linux ROCm 7.2 has no `hipMallocMipmappedArray`** on RDNA1 (and WSL2 has no textures at
   all). Mipmaps are emulated in the compat layer as one texture per level, in array or pitched
-  linear memory: bit-identical to native mipmaps on the RX 9070 (15 % slower there) and on the
-  RX 6750 XT (41 / 41 views bit-identical, 232.3 s vs 190.3 s on the 41-view set), so the
-  Windows build keeps native and the Linux bundle emulates on every architecture. That 18 %
-  is the whole Linux-vs-Windows gap for the RX 6750 XT: the Linux bundle's 226.1 s is within
-  3 % of the Windows build with emulation forced on. The
+  linear memory: bit-identical to native mipmaps on the RX 9070 and on the RX 6750 XT (41 / 41
+  views), so the Windows build keeps native and the Linux bundle emulates on every
+  architecture. Emulation used to cost 21 % (RX 9070, 6 views: 19.9 s vs 16.5 s) and 22 %
+  (RX 6750 XT, 41 views: 232.3 s vs 190.3 s), which was the whole Linux-vs-Windows gap on
+  that card. The disassembly showed why: the per-level texture handles lived in a device-side
+  table, and the compiler could not prove the table index wave-uniform, so every sample
+  fetched its descriptor with vector loads and ten `v_readfirstlane`s. The level descriptors
+  are now packed into fixed-stride constant-memory slots addressed by arithmetic, with a
+  run-time uniformity check that takes one scalar descriptor load on the common path (the
+  per-pixel levels of `useConsistentScale` fall back to an out-of-line waterfall). Emulation
+  now costs 4 % on the RX 9070 (17.2 s) and 9 % on the RX 6750 XT (208.1 s), still
+  bit-identical. The
   bit-identity is expected rather than remarkable: AliceVision samples its mip chain only at
   integer levels (`level = log2(scale / minDownscale)`), where trilinear filtering reduces to
   bilinear on one level. Linear levels are what lets the bridge account for camera images.

@@ -111,7 +111,8 @@ Against its own Linux / HIP 7.2 output on the 6-view set: identical masks, media
 within 1 %, not bit-identical (different compiler and runtime on the same silicon). With mipmap
 emulation forced on, the same package takes 232.3 s on the 41 views and is bit-identical to the
 native-mipmap run (41 / 41), which puts it within 3 % of the Linux bundle: the Linux/Windows gap
-on this card is the mipmap path, nothing else. Pages:
+on this card is the mipmap path, nothing else. The packed-slot sampler that followed (see the
+README's mipmap bullet) takes the same package to 208.1 s, again bit-identical. Pages:
 [6 views](validation/monstree-mini6-rx6750xt-windows-hip6/index.md),
 [41 views](validation/monstree-full-rx6750xt-windows-hip6/index.md).
 
