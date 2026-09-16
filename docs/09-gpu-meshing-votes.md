@@ -51,6 +51,12 @@ Engine bay, 107 photos: 19.1 M rays, 21.7 M cells, 3.34 M vertices.
 6 views (912 k rays, 1.6 M cells): the whole GPU phase is under a second (uploads 0.31 s, votes
 0.26 s, tedges 0.24 s); Meshing 43.7 s either way.
 
+RX 5500 XT on Linux (house-pc, i3-4330, 4 threads) with the v0.2.7 bundle, 41 views, 18.5 M rays
+through 11.4 M cells: vote kernels 13.1 s, tedge kernels 12.6 s, uploads 0.36 s. Meshing end to
+end 491.2 s on the CPU against 413.5 s with the GPU passes, and the GPU run still ran the CPU
+tedge loop for the cross-check. On a node with a slow CPU the two passes are a bigger share of
+the node and the saving is a sixth of it.
+
 So the two ray-marching passes go from about 37 s to about 18 s on this desktop, and the node
 barely notices, because they were never the majority of Meshing. Where the 510 s go (engine bay,
 CPU): dense point cloud 74 s, tetrahedralisation 41 s, neighbour tables 47 s, the two vote passes
@@ -60,11 +66,13 @@ sequential augmenting-path algorithm on a 21.7 M-node graph); it is its own proj
 
 ## Validation
 
-The weakly-supported-surfaces pass is bit-identical to the CPU pass: with
+The weakly-supported-surfaces pass reproduces the CPU pass cell for cell: with
 `CHESHIRE_GPU_TEDGE_CHECK=1` the CPU loop runs on the same emptiness scores right after the GPU
-one, and on both sets the `on` vectors match exactly (6 views: 1,468 non-zero cells, engine bay:
-17,882 non-zero cells, max difference 0). It only reads scores and writes one cell per ray, so
-there is nothing order-dependent in it.
+one and the two `on` vectors are compared. On the RX 9070 they match exactly on both sets (6
+views: 1,468 non-zero cells, engine bay: 17,882 non-zero cells, max difference 0). On the RX 5500
+XT's 41-view run the same cells are non-zero (25,482) with the same total, and the largest
+per-cell difference is 8 on values around 1e8, one float ulp: where several rays add to the same
+cell, the additions land in a different order. No cell differs by more than 1e-3 relative.
 
 The vote pass cannot be bit-identical to the CPU, and the CPU is not bit-identical to itself:
 votes are float atomics added in whatever order the threads arrive, and upstream randomises the
