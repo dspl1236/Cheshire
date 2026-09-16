@@ -2046,6 +2046,19 @@ index 27e3ec0..027ba01 100644
  #define ALICEVISION_DEPTHMAP_BACKEND_CUDA() @ALICEVISION_DEPTHMAP_BACKEND_CUDA@
  #define ALICEVISION_DEPTHMAP_BACKEND_SYCL() @ALICEVISION_DEPTHMAP_BACKEND_SYCL@
  
+diff --git a/src/software/pipeline/main_depthMapFiltering.cpp b/src/software/pipeline/main_depthMapFiltering.cpp
+index 0c2eec6..412d275 100644
+--- a/src/software/pipeline/main_depthMapFiltering.cpp
++++ b/src/software/pipeline/main_depthMapFiltering.cpp
+@@ -105,7 +105,7 @@ int aliceVision_main(int argc, char* argv[])
+     // clang-format on
+ 
+     CmdLine cmdline("This program filters depth maps to remove values that are not consistent with other depth maps.\n"
+-                    "AliceVision depthMapFiltering");
++                    "AliceVision depthMapFiltering (cheshire: the group votes run on the GPU when a device is present; CHESHIRE_GPU_FILTER=0 for the CPU pass)");
+     cmdline.add(requiredParams);
+     cmdline.add(optionalParams);
+     if (!cmdline.execute(argc, argv))
 diff --git a/src/software/pipeline/main_featureMatching.cpp b/src/software/pipeline/main_featureMatching.cpp
 index cc6313f..7e5c3ac 100644
 --- a/src/software/pipeline/main_featureMatching.cpp

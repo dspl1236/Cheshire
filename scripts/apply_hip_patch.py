@@ -59,6 +59,7 @@ TRACKED = [
     "src/software/pipeline/main_featureMatching.cpp",
     "src/aliceVision/fuseCut/Fuser.cpp",
     "src/aliceVision/fuseCut/CMakeLists.txt",
+    "src/software/pipeline/main_depthMapFiltering.cpp",
 ]
 
 
@@ -523,6 +524,16 @@ endif()
                 std::fprintf(stderr, "[cheshire] filter votes CPU rc=%d tc=%d (%dx%d): %lld rc pixels voted\\n", rc, tc, tcdepthMap.width(), tcdepthMap.height(), cnt);
             }
 """)
+    # the pairing scripts detect the GPU pass from --help: say so in the program description
+    df = AV / "src/software/pipeline/main_depthMapFiltering.cpp"
+    t = df.read_text(encoding="utf-8")
+    old_desc = '"AliceVision depthMapFiltering");'
+    if "CHESHIRE_GPU_FILTER" not in t:
+        if old_desc not in t:
+            sys.exit("depthMapFiltering description not found")
+        t = t.replace(old_desc, '"AliceVision depthMapFiltering (cheshire: the group votes run on the GPU when a device is present; CHESHIRE_GPU_FILTER=0 for the CPU pass)");', 1)
+        df.write_text(t, encoding="utf-8", newline=NL)
+
     fc = AV / "src/aliceVision/fuseCut/CMakeLists.txt"
     patch(fc, "alicevision_add_library(aliceVision_fuseCut" + NL, f"""{MARK} (GPU depth map filter)
 set(fuseCut_gpu_links "")

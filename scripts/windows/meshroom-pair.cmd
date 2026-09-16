@@ -22,7 +22,7 @@ if "%PKG%"=="" ( echo usage: %~nx0 ^<Meshroom dir^> ^<Cheshire package dir^> ^| 
 set BIN=%MR%\aliceVision\bin
 if not exist "%BIN%\" ( echo %BIN% not found: is %MR% a Meshroom 2023.x Windows install? & exit /b 1 )
 if /i "%PKG%"=="--unpair" (
-  for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching) do call :unpair %%N
+  for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_depthMapFiltering) do call :unpair %%N
   exit /b 0
 )
 if not exist "%PKG%\bin\aliceVision_depthMapEstimation.exe" ( echo no HIP aliceVision_depthMapEstimation.exe in %PKG%\bin & exit /b 1 )
@@ -42,6 +42,15 @@ if exist "%PKG%\bin\aliceVision_featureMatching.exe" (
   del /q "%TEMP%\cheshire-fm-help.txt" 2>nul
 )
 if defined FMOK ( call :pair aliceVision_featureMatching ) else ( echo package's aliceVision_featureMatching has no GPU matcher ^(pre-v0.2.5^): DepthMap paired only )
+rem DepthMapFilter (v0.2.6+): the package's depthMapFiltering carries the GPU vote pass; older packages
+rem carry the plain CPU one, which is harmless but pointless, so gate on the newer help text
+set DFOK=
+if exist "%PKG%\bin\aliceVision_depthMapFiltering.exe" (
+  "%PKG%\bin\aliceVision_depthMapFiltering.exe" --help > "%TEMP%\cheshire-df-help.txt" 2>&1
+  findstr /c:"CHESHIRE_GPU_FILTER" "%TEMP%\cheshire-df-help.txt" >nul 2>&1 && set DFOK=1
+  del /q "%TEMP%\cheshire-df-help.txt" 2>nul
+)
+if defined DFOK ( call :pair aliceVision_depthMapFiltering ) else ( echo package's aliceVision_depthMapFiltering has no GPU pass ^(pre-v0.2.6^): not paired )
 exit /b 0
 
 :pair
