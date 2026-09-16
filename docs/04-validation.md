@@ -94,6 +94,13 @@ pixels differing by >1 % is the cross-GPU noise floor. Details and panels:
 view 98.1 % within 1 % (worst 92.3 %). Same envelope as the RX 9070. Details:
 [docs/validation/monstree-full-rx5500xt-linux/index.md](validation/monstree-full-rx5500xt-linux/index.md).
 
+### house-pc, RX 5500 XT (Linux), v0.2.3 bundle, 2026-09-16
+
+Same node, the bundle rebuilt with the packed-slot mipmap sampler: 6 views 52.4 s (was 60.7 s),
+41 views 396.9 s (was 447.7 s), outputs byte-identical to the earlier Linux runs, same statistics
+against CUDA. Page:
+[docs/validation/monstree-full-rx5500xt-linux-v0.2.3/index.md](validation/monstree-full-rx5500xt-linux-v0.2.3/index.md).
+
 ### house-pc, RX 6750 XT (RDNA2, Linux), 2026-09-03
 
 6 views 31.0 s (CUDA 1080 Ti 31.9 s, same host), 41 views 226.1 s (CUDA 379.0 s in four chunks; the HIP build inside a real four-chunk Meshroom job on this node: 352 s); masks identical

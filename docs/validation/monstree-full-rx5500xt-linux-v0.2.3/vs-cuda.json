@@ -1,0 +1,10 @@
+{
+ "views": 41,
+ "views_mask_agree_ge_0p95": 41,
+ "median_of_view_median_rel": 0.0,
+ "median_of_view_within_1pct": 0.9806,
+ "min_within_1pct": 0.9233,
+ "max_p95_rel": 0.06221,
+ "strict_pass": false,
+ "criterion": "every view: >=98% of jointly-valid pixels within 1% rel. depth and mask agreement >=95%"
+}

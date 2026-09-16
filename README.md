@@ -42,6 +42,7 @@ Meshroom jobs on the same node, also four chunks: RX 6750 XT 352 s, RX 5500 XT 5
 | Radeon RX 6750 XT, RDNA2 | Linux | 31.0 s | 226.1 s (352 s in 4 Meshroom chunks) | 5.5 s | identical | 0.0000 | 97.5 % / 98.1 % |
 | Radeon RX 6750 XT, RDNA2, HIP SDK 6.2 build | Windows | 28.1 s | 190.3 s | 4.6 s | identical | 0.0000 | 98.7 % / 98.7 % |
 | Radeon RX 5500 XT, RDNA1 | Linux | 60.7 s | 447.7 s (594 s in 4 Meshroom chunks) | 10.9 s | identical | 0.0000 | 97.5 % / 98.1 % |
+| Radeon RX 5500 XT, RDNA1, v0.2.3 bundle | Linux | 52.4 s | 396.9 s | 9.7 s | identical | 0.0000 | 97.5 % / 98.1 % |
 
 Per-view cost on every HIP card is flat between 6 and 41 views (the port scales linearly);
 the CUDA reference's per-view cost rises from 5.3 s to 9.2 s across the chunked run. Until
@@ -124,7 +125,8 @@ stage at full speed. Design, knobs and every table:
   run-time uniformity check that takes one scalar descriptor load on the common path (the
   per-pixel levels of `useConsistentScale` fall back to an out-of-line waterfall). Emulation
   now costs 4 % on the RX 9070 (17.2 s) and 9 % on the RX 6750 XT (208.1 s), still
-  bit-identical. The
+  bit-identical; the v0.2.3 Linux bundle takes the RX 5500 XT from 447.7 s to 396.9 s on the
+  41-view set, byte-identical output. The
   bit-identity is expected rather than remarkable: AliceVision samples its mip chain only at
   integer levels (`level = log2(scale / minDownscale)`), where trilinear filtering reduces to
   bilinear on one level. Linear levels are what lets the bridge account for camera images.
@@ -149,8 +151,9 @@ stage at full speed. Design, knobs and every table:
 ## Downloads
 
 Binaries are on the [v0.2.1 release](https://github.com/dspl1236/cheshire/releases/tag/v0.2.1)
-(bridge v2 plus APU code objects) and, for RX 6000 cards on Windows, the
-[v0.2.2 release](https://github.com/dspl1236/cheshire/releases/tag/v0.2.2); the data sets and references are on
+(bridge v2 plus APU code objects), for RX 6000 cards on Windows the
+[v0.2.2 release](https://github.com/dspl1236/cheshire/releases/tag/v0.2.2), and for Linux the
+[v0.2.3 release](https://github.com/dspl1236/cheshire/releases/tag/v0.2.3) (faster mipmap emulation); the data sets and references are on
 [v0.1.0](https://github.com/dspl1236/cheshire/releases/tag/v0.1.0) and unchanged, the depth
 maps being bit-identical between the two:
 
@@ -159,7 +162,7 @@ maps being bit-identical between the two:
 | `cheshire-alicevision-hip-windows-x64-rocm7.2.1-gfx1201.zip` (v0.2.1) | 100 MB | self-contained AliceVision + HIP DepthMap for RDNA4 on Windows; unzip, needs only the Adrenalin driver and a CPU with AVX2 (2013 or newer) |
 | `cheshire-alicevision-hip-windows-x64-rocm7.2.1-rdna3-rdna4.zip` (v0.2.1) | 101 MB | the same, with code objects for RDNA3 and RDNA4 discrete parts and the RDNA3 APUs (gfx1100/1101/1102/1103/1150/1151/1152/1153/1200/1201): RX 7000 owners and Ryzen 7040/8040/AI laptops, this is the one to try. RX 6000 (RDNA2) on Windows: AMD's Windows HIP runtime does not enumerate it at all (`hipErrorNoDevice` on an RX 6750 XT with Adrenalin 26.8; [AMD's support table](https://rocm.docs.amd.com/projects/install-on-windows/en/latest/reference/system-requirements.html) marks every RX 6000 unsupported), so RDNA2 on Windows needs the HIP 6 runtime: see the `hip6.2` packages below |
 | `cheshire-alicevision-hip6.2-windows-x64-gfx1030-avx.zip`, `-gfx1031-avx.zip`, `-gfx1032-avx.zip` (v0.2.2) | 143 MB each | RX 6000 on Windows through AMD's HIP 6.2 runtime (the one the driver ships): one package per chip because the HIP SDK 6.2 toolchain cannot bundle several. gfx1030 = RX 6800/6900/6950, gfx1031 = RX 6700/6750, gfx1032 = RX 6600/6650. Compiled for AVX so pre-2013 CPUs work too. Validated on an RX 6750 XT: 28.1 s on the 6-view set, 98.7 % within 1 % of CUDA |
-| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.2.1) | ~120 MB | relocatable Linux bundle, code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested); needs only `amdgpu` + `/dev/kfd` |
+| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.2.3) | ~120 MB | relocatable Linux bundle with the packed-slot mipmap sampler (11 % faster than v0.2.1 on RDNA1, same outputs), code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested); needs only `amdgpu` + `/dev/kfd` |
 | `monstree-mini6-meshroom-cache.tar.gz` (v0.1.0) | 383 MB | 6-view Meshroom 2023.3 cache: CameraInit, SfM, PrepareDenseScene and the CUDA DepthMap reference |
 | `monstree-full-cuda-reference.tar.gz` (v0.1.0) | 680 MB | 41-view SfM + CUDA DepthMap reference (GTX 1080 Ti) |
 | `cheshire-hip-depthmap-outputs.tar.gz` (v0.1.0) | 966 MB | the HIP depth maps behind the table above (RX 9070 6 + 41 views, RX 5500 XT, RX 6750 XT) |
