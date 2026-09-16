@@ -301,6 +301,7 @@ times the volume memory, which is where a cap bites hardest, so the 41-view set 
 | 2 GB cap, + 4 MB spill floor | 854.7 s | 1052 |
 | 2 GB cap, + reserve net of resident images | **749.9 s** | 0 |
 | 1 GB cap, + 4 MB spill floor | 4035.1 s | 1061 |
+| 1 GB cap, + reserve net of resident images | 4027.0 s | 1061 |
 
 Every capped run is bit-identical to its uncapped run on Windows (41 / 41, and a second uncapped
 run is bit-identical to the first). On Linux 40 / 41: one view differs in 110 pixels out of 12.2

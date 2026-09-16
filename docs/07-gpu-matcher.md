@@ -77,6 +77,26 @@ Same registration, a marginally lower reprojection error, 0.5 % fewer landmarks 
 7.9x faster. The whole job went from 39 minutes to 30 on this desktop; the CPU share fell from 1750 s
 to 1230 s and the matching stage no longer depends on the CPU at all.
 
+## Linux, RDNA2, and the cross-platform check
+
+The same chunk 0 through the v0.2.5 Linux bundle on the RX 6750 XT (house-pc): 29.2 s of matching
+against 13.0 s on the RX 9070, GPU search 28.4 s of it. The 41 depth maps of that bundle are
+bit-identical to v0.2.3's, so the matcher's presence changes nothing downstream.
+
+The putative match sets (geometric filtering off) agree with the Windows RX 9070 run on 1923 of
+1930 pairs; the other 7 differ by exactly one match each. Every one of those is a ratio-test
+boundary case: the GPU distances are exact integers and identical on both platforms, and the
+decision `d1 < 0.8^2 * d2` is made on the CPU in `float`, where MSVC and GCC do not round
+`0.8f * 0.8f` and the product the same way. So the kernels are cross-platform exact; the last bit
+of the ratio test is the compiler's. After geometric filtering (AC-RANSAC) the files differ more,
+191 of 277 common pairs by a few matches each, which is that filter's own platform dependence
+and not the matcher.
+
+A build with the dot instruction compiled out (`CHESHIRE_MATCHER_NO_DOT4`) produces byte-identical
+matches to the dot-instruction build on the RX 9070, 14.3 s against 13.0 s. Note the compiler
+pattern-matched part of the manual multiply-add loop back into `v_dot4` (36 instructions against
+64), so a card that genuinely lacks the instruction (gfx1010, gfx900) still awaits a hardware run.
+
 ## Pairing
 
 `meshroom-pair.cmd` / `meshroom-pair.sh` now pair `aliceVision_featureMatching` next to
