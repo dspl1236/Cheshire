@@ -92,6 +92,11 @@ of the ratio test is the compiler's. After geometric filtering (AC-RANSAC) the f
 191 of 277 common pairs by a few matches each, which is that filter's own platform dependence
 and not the matcher.
 
+RDNA1 (RX 5500 XT, gfx1012, Linux, v0.2.5 bundle): chunk 0 in 55.5 s (GPU search 52.6 s), and
+the putative matches byte-identical to the RX 6750 XT's. Three AMD generations and two operating
+systems now agree on the matcher's output to the byte; the 41 depth maps of that run are also
+bit-identical to the card's v0.2.3 output (396.4 s).
+
 A build with the dot instruction compiled out (`CHESHIRE_MATCHER_NO_DOT4`) produces byte-identical
 matches to the dot-instruction build on the RX 9070, 14.3 s against 13.0 s. Note the compiler
 pattern-matched part of the manual multiply-add loop back into `v_dot4` (36 instructions against

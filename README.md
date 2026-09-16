@@ -63,6 +63,7 @@ Meshroom jobs on the same node, also four chunks: RX 6750 XT 352 s, RX 5500 XT 5
 | Radeon RX 6750 XT, RDNA2, v0.2.3 bundle | Linux | 28.0 s | 205.7 s | 5.0 s | identical | 0.0000 | 97.5 % / 98.1 % |
 | Radeon RX 5500 XT, RDNA1 | Linux | 60.7 s | 447.7 s (594 s in 4 Meshroom chunks) | 10.9 s | identical | 0.0000 | 97.5 % / 98.1 % |
 | Radeon RX 5500 XT, RDNA1, v0.2.3 bundle | Linux | 52.4 s | 396.9 s | 9.7 s | identical | 0.0000 | 97.5 % / 98.1 % |
+| Radeon RX 5500 XT, RDNA1, v0.2.5 bundle | Linux | | 396.4 s | 9.7 s | identical | 0.0000 | 97.5 % / 98.1 % |
 
 Per-view cost on every HIP card is flat between 6 and 41 views (the port scales linearly);
 the CUDA reference's per-view cost rises from 5.3 s to 9.2 s across the chunked run. Until
