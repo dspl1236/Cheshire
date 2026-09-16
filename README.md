@@ -115,6 +115,17 @@ Tile parallelism costs nothing to give up on this GPU, so a card with 1 GB to sp
 stage at full speed. Design, knobs and every table:
 [docs/02-memory-bridge.md](docs/02-memory-bridge.md).
 
+### GPU descriptor matcher (2026-09-16)
+
+FeatureMatching is the second GPU-shaped stage, and upstream has no GPU path for it on any vendor.
+`hip/port/gpu_matcher/` is an exact brute-force 2-NN on the GPU behind AliceVision's
+`RegionsMatcher` (taken for `ANN_L2` / `BRUTE_FORCE_L2` whenever a device is present; the same
+source builds as HIP or CUDA), byte-identical to the CPU brute force. Engine bay set, 107 phone
+photos, RX 9070: the FeatureMatching node from 592 s to 75 s, the matching stage from 543 s to
+40.7 s, and the reconstruction unchanged (107 / 107 cameras, residual RMSE 1.694 px vs 1.712,
+mesh within 0.3 %). The pairing scripts swap this binary in next to DepthMap. Details and the
+Meshroom 2023.3 chunking compatibility in [docs/07-gpu-matcher.md](docs/07-gpu-matcher.md).
+
 ### Full-resolution depth maps under a cap (downscale 1, 41 views, 2026-09-16)
 
 | card | uncapped | 2 GB cap | 1 GB cap |
@@ -271,7 +282,8 @@ Works end to end on RDNA1, RDNA2 and RDNA4; RDNA3 has its code object in every b
 hardware run yet. GCN 4 (RX 400/500) is out: the ROCm 7.2 runtime refuses to initialise on an
 RX 570 even though the kernel driver accepts it (docs/06). A production Meshroom 2023.3 node runs its DepthMap on the HIP build through
 `scripts/linux/meshroom-pair.sh`, and Meshroom on Windows through `meshroom-pair.cmd` (one
-launcher each, picks CUDA or HIP per run, so the card can be swapped). Next: planner-chosen tile sizes for the below-one-tile regime, a same-version CUDA
+launcher each, picks CUDA or HIP per run, so the card can be swapped); both also pair the GPU
+descriptor matcher. Next on the GPU: DepthMapFilter, then Meshing's voting pass, then Texturing. Next: planner-chosen tile sizes for the below-one-tile regime, a same-version CUDA
 reference, RDNA3 hardware.
 
 Primary repository: [git.hausofdub.com/dspl1236/cheshire](https://git.hausofdub.com/dspl1236/cheshire);

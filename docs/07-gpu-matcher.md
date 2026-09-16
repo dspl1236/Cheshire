@@ -48,7 +48,34 @@ on the engine bay set it selected exactly Meshroom's 1930 pairs for chunk 0 and 
 | chunk 0 (20 views, 1930 pairs), kd-tree, Meshroom's own run | 181.5 s | 164461 | |
 | chunk 0, GPU | 41.7 s / 42.0 s (two runs) | 164600 | 4.3x; exact search keeps a few more pairs |
 
-The geometric filtering after it is unchanged (8 s per chunk).
+The geometric filtering after it is unchanged (8 s per chunk). The first kernel unpacked bytes
+and took 42 s on chunk 0; the profile (`CHESHIRE_GPU_MATCHER_LOG=1`) put 41.2 of those seconds
+inside the GPU search with 20,000 descriptors per image (51 billion multiply-adds per pair), so
+the uint8 path became |q|^2 + |r|^2 - 2 q.r with the packed 4-byte dot instruction
+(`v_dot4_u32_u8` on RDNA2+/Vega 20, `dp4a` on sm_61+, four multiply-adds elsewhere), same
+integer, same match files: 13.0 s.
+
+## End to end: "as good or better"
+
+The engine bay job (107 phone photos) run twice through the paired Meshroom install with the same
+CameraInit / FeatureExtraction / ImageMatching results, once with Meshroom's kd-tree matcher and
+once with the GPU matcher, RX 9070:
+
+| | kd-tree (Meshroom) | GPU matcher |
+|---|---|---|
+| FeatureMatching node (6 chunks, incl. geometric filtering) | 592 s | 75 s |
+| matching stage alone, all chunks | 543 s | 40.7 s |
+| match lines after geometric filtering | 506743 | 503214 |
+| SfM: cameras registered | 107 / 107 | 107 / 107 |
+| SfM: landmarks | 141963 | 141249 |
+| SfM: final residual RMSE (px) | 1.712 | 1.694 |
+| SfM: mean track length | 3.002 | 3.001 |
+| textured mesh | 1,184,852 vertices, 2,357,143 faces | 1,180,762 vertices, 2,349,340 faces |
+
+Same registration, a marginally lower reprojection error, 0.5 % fewer landmarks and a mesh within
+0.3 %: the exact matcher and the approximate one land on the same reconstruction, and the node is
+7.9x faster. The whole job went from 39 minutes to 30 on this desktop; the CPU share fell from 1750 s
+to 1230 s and the matching stage no longer depends on the CPU at all.
 
 ## Pairing
 
