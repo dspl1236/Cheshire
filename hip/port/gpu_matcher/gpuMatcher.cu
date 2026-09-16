@@ -41,7 +41,11 @@ struct Best2 {
 // (v_dot4_u32_u8 on RDNA2+/Vega 20, dp4a on sm_61+), else four multiply-adds. Exact in every case.
 __device__ __forceinline__ unsigned int dot4u8(unsigned int a, unsigned int b, unsigned int acc)
 {
-#if defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx900__) && !defined(__gfx1010__)
+#if defined(CHESHIRE_MATCHER_NO_DOT4)
+    // fallback path forced at build time (what gfx1010 / gfx900 / pre-Pascal get), for testing it on any card
+    return acc + (a & 0xffu) * (b & 0xffu) + ((a >> 8) & 0xffu) * ((b >> 8) & 0xffu)
+               + ((a >> 16) & 0xffu) * ((b >> 16) & 0xffu) + (a >> 24) * (b >> 24);
+#elif defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx900__) && !defined(__gfx1010__)
     return __builtin_amdgcn_udot4(a, b, acc, false);
 #elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 610
     return __dp4a(a, b, acc);
