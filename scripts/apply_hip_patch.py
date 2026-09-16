@@ -390,7 +390,14 @@ endif()
     #     the paired binary is a drop-in: keep the pairs whose first view's index is in the range.
     fm = AV / "src/software/pipeline/main_featureMatching.cpp"
     patch(fm, "    int rangeIteration = 0;" + NL,
-          "    int rangeStart = -1;  // cheshire: Meshroom 2023.3 chunking" + NL + "    int rangeSize = -1;" + NL)
+          "    int rangeStart = -1;  // cheshire: Meshroom 2023.3 chunking" + NL + "    int rangeSize = -1;" + NL + "    int legacyChunkIndex = -1;" + NL)
+    t = fm.read_text(encoding="utf-8")
+    if "legacyChunkIndex >= 0" not in t:
+        old_prefix = '    const std::string filePrefix = std::to_string(rangeIteration) + ".";'
+        if old_prefix not in t:
+            sys.exit("filePrefix line not found in main_featureMatching.cpp")
+        t = t.replace(old_prefix, '    const std::string filePrefix = std::to_string(legacyChunkIndex >= 0 ? legacyChunkIndex : rangeIteration) + ".";  // cheshire', 1)
+        fm.write_text(t, encoding="utf-8", newline=NL)
     patch(fm, '        ("rangeIteration", po::value<int>(&rangeIteration)->default_value(rangeIteration),' + NL,
           '        ("rangeStart", po::value<int>(&rangeStart)->default_value(rangeStart),' + NL
           + '         "cheshire: Meshroom 2023.3 chunking, first view index of the chunk (pairs are selected by their first view).")' + NL
@@ -409,7 +416,8 @@ endif()
         for (const auto& pair : allPairs) if (chunkViews.count(pair.first)) chunkPairs.insert(pair);
         ALICEVISION_LOG_INFO("Meshroom 2023.3 chunking: views " << rangeStart << " to " << rangeStart + rangeSize << " -> " << chunkPairs.size() << " of " << allPairs.size() << " pairs.");
         allPairs.swap(chunkPairs);
-        rangeIteration = rangeStart / rangeSize;   // output file prefix, as the 2023.3 binary named it
+        legacyChunkIndex = rangeStart / rangeSize;   // output file prefix, as the 2023.3 binary named it
+        rangeIteration = 0;                          // the pair range below is then "all of the chunk"
         rangeBlocksCount = 1;
         if (allPairs.empty())
         {

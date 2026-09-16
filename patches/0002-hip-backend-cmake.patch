@@ -1904,19 +1904,20 @@ index 27e3ec0..027ba01 100644
  #define ALICEVISION_DEPTHMAP_BACKEND_SYCL() @ALICEVISION_DEPTHMAP_BACKEND_SYCL@
  
 diff --git a/src/software/pipeline/main_featureMatching.cpp b/src/software/pipeline/main_featureMatching.cpp
-index cc6313f..15828fc 100644
+index cc6313f..7e5c3ac 100644
 --- a/src/software/pipeline/main_featureMatching.cpp
 +++ b/src/software/pipeline/main_featureMatching.cpp
-@@ -105,6 +105,8 @@ int aliceVision_main(int argc, char** argv)
+@@ -105,6 +105,9 @@ int aliceVision_main(int argc, char** argv)
      float distRatio = 0.8f;
      std::vector<std::string> predefinedPairList;
      int rangeIteration = 0;
 +    int rangeStart = -1;  // cheshire: Meshroom 2023.3 chunking
 +    int rangeSize = -1;
++    int legacyChunkIndex = -1;
      int rangeBlocksCount = 1;
      std::string nearestMatchingMethod = "ANN_L2";
      robustEstimation::ERobustEstimator geometricEstimator = robustEstimation::ERobustEstimator::ACRANSAC;
-@@ -183,6 +185,10 @@ int aliceVision_main(int argc, char** argv)
+@@ -183,6 +186,10 @@ int aliceVision_main(int argc, char** argv)
           "Export debug files (svg, dot).")
          ("maxMatches", po::value<std::size_t>(&numMatchesToKeep)->default_value(numMatchesToKeep),
           "Maximum number pf matches to keep.")
@@ -1927,7 +1928,7 @@ index cc6313f..15828fc 100644
          ("rangeIteration", po::value<int>(&rangeIteration)->default_value(rangeIteration),
           "chunk index.")
          ("rangeBlocksCount", po::value<int>(&rangeBlocksCount)->default_value(rangeBlocksCount),
-@@ -275,6 +281,26 @@ int aliceVision_main(int argc, char** argv)
+@@ -275,6 +282,27 @@ int aliceVision_main(int argc, char** argv)
  
      ALICEVISION_LOG_INFO("Number of pairs: " << allPairs.size());
  
@@ -1943,7 +1944,8 @@ index cc6313f..15828fc 100644
 +        for (const auto& pair : allPairs) if (chunkViews.count(pair.first)) chunkPairs.insert(pair);
 +        ALICEVISION_LOG_INFO("Meshroom 2023.3 chunking: views " << rangeStart << " to " << rangeStart + rangeSize << " -> " << chunkPairs.size() << " of " << allPairs.size() << " pairs.");
 +        allPairs.swap(chunkPairs);
-+        rangeIteration = rangeStart / rangeSize;   // output file prefix, as the 2023.3 binary named it
++        legacyChunkIndex = rangeStart / rangeSize;   // output file prefix, as the 2023.3 binary named it
++        rangeIteration = 0;                          // the pair range below is then "all of the chunk"
 +        rangeBlocksCount = 1;
 +        if (allPairs.empty())
 +        {
@@ -1954,3 +1956,12 @@ index cc6313f..15828fc 100644
      int chunkStart, chunkEnd;
      if (!rangeComputation(chunkStart, chunkEnd, rangeIteration, rangeBlocksCount, allPairs.size()))
      {
+@@ -401,7 +429,7 @@ int aliceVision_main(int argc, char** argv)
+     // when a range is specified, generate a file prefix to reflect the current iteration
+     // => with matchFilePerImage: avoids overwriting files if a view is present in several iterations
+     // => without matchFilePerImage: avoids overwriting the unique resulting file
+-    const std::string filePrefix = std::to_string(rangeIteration) + ".";
++    const std::string filePrefix = std::to_string(legacyChunkIndex >= 0 ? legacyChunkIndex : rangeIteration) + ".";  // cheshire
+ 
+     ALICEVISION_LOG_INFO(std::to_string(mapPutativesMatches.size()) << " putative image pair matches");
+ 
