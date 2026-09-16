@@ -37,39 +37,65 @@ struct Best2 {
     }
 };
 
-// DIM scalars per descriptor, uint8, packed as DIM/4 uint32 per row.
+// Dot product of two words of four uint8 each, accumulated into acc. One hardware instruction
+// (v_dot4_u32_u8 on RDNA2+/Vega 20, dp4a on sm_61+), else four multiply-adds. Exact in every case.
+__device__ __forceinline__ unsigned int dot4u8(unsigned int a, unsigned int b, unsigned int acc)
+{
+#if defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx900__) && !defined(__gfx1010__)
+    return __builtin_amdgcn_udot4(a, b, acc, false);
+#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 610
+    return __dp4a(a, b, acc);
+#else
+    return acc + (a & 0xffu) * (b & 0xffu) + ((a >> 8) & 0xffu) * ((b >> 8) & 0xffu)
+               + ((a >> 16) & 0xffu) * ((b >> 16) & 0xffu) + (a >> 24) * (b >> 24);
+#endif
+}
+
+// Squared norm of one packed uint8 row (DIM scalars): |r|^2, exact (max 128 * 255^2).
 template<int DIM>
-__global__ void knn2_u8(const unsigned int* __restrict__ db, int rows, const unsigned int* __restrict__ q, int nbQuery,
-                        int* __restrict__ outIdx, float* __restrict__ outDist)
+__global__ void rowNormsU8(const unsigned int* __restrict__ db, int rows, unsigned int* __restrict__ norms)
+{
+    constexpr int W = DIM / 4;
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= rows) return;
+    unsigned int n = 0;
+    for (int k = 0; k < W; ++k) { const unsigned int a = db[size_t(r) * W + k]; n = dot4u8(a, a, n); }
+    norms[r] = n;
+}
+
+// DIM scalars per descriptor, uint8, packed as DIM/4 uint32 per row. Squared L2 as
+// |q|^2 + |r|^2 - 2 q.r with q.r from the packed dot product: the same integer as the
+// difference-of-squares form, at a quarter of the instructions.
+template<int DIM>
+__global__ void knn2_u8(const unsigned int* __restrict__ db, const unsigned int* __restrict__ dbNorm, int rows,
+                        const unsigned int* __restrict__ q, int nbQuery, int* __restrict__ outIdx, float* __restrict__ outDist)
 {
     constexpr int W = DIM / 4;
     __shared__ unsigned int tile[kTileRowsU8 * W];
+    __shared__ unsigned int tileNorm[kTileRowsU8];
     const int qi = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int qreg[W];
-    if (qi < nbQuery)
-        for (int k = 0; k < W; ++k) qreg[k] = q[size_t(qi) * W + k];
-    else
+    unsigned int qnorm = 0;
+    if (qi < nbQuery) {
+        for (int k = 0; k < W; ++k) { qreg[k] = q[size_t(qi) * W + k]; qnorm = dot4u8(qreg[k], qreg[k], qnorm); }
+    } else {
         for (int k = 0; k < W; ++k) qreg[k] = 0u;
+    }
     Best2 best;
     for (int base = 0; base < rows; base += kTileRowsU8) {
         const int n = min(kTileRowsU8, rows - base);
-        // cooperative tile load: n * W words
+        // cooperative tile load: n * W words plus the row norms
         for (int t = threadIdx.x; t < n * W; t += blockDim.x) tile[t] = db[size_t(base) * W + t];
+        for (int t = threadIdx.x; t < n; t += blockDim.x) tileNorm[t] = dbNorm[base + t];
         __syncthreads();
         if (qi < nbQuery) {
             for (int r = 0; r < n; ++r) {
                 const unsigned int* row = tile + r * W;
-                int acc = 0;
+                unsigned int dot = 0;
 #pragma unroll
-                for (int k = 0; k < W; ++k) {
-                    const unsigned int a = qreg[k], b = row[k];
-                    const int d0 = int(a & 0xffu) - int(b & 0xffu);
-                    const int d1 = int((a >> 8) & 0xffu) - int((b >> 8) & 0xffu);
-                    const int d2 = int((a >> 16) & 0xffu) - int((b >> 16) & 0xffu);
-                    const int d3 = int(a >> 24) - int(b >> 24);
-                    acc += d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3;
-                }
-                best.push(base + r, float(acc));
+                for (int k = 0; k < W; ++k) dot = dot4u8(qreg[k], row[k], dot);
+                const int d2 = int(qnorm + tileNorm[r]) - 2 * int(dot);   // exact, >= 0
+                best.push(base + r, float(d2));
             }
         }
         __syncthreads();
@@ -163,6 +189,7 @@ bool supportsDim(int dim) { return dim == 128 || dim == 64; }
 
 struct KnnMatcher::Impl {
     void* db = nullptr; size_t dbCap = 0;
+    void* dbNorm = nullptr; size_t dbNormCap = 0;   // uint8 path: |row|^2 per database row
     void* q = nullptr; size_t qCap = 0;
     int* idx = nullptr; float* dist = nullptr; size_t outCap = 0;   // in queries
     int rows = 0, dim = 0; bool isFloat = false;
@@ -174,7 +201,7 @@ struct KnnMatcher::Impl {
         if (cudaMalloc(p, need) != cudaSuccess) return false;
         *cap = need; return true;
     }
-    ~Impl() { if (db) cudaFree(db); if (q) cudaFree(q); if (idx) cudaFree(idx); if (dist) cudaFree(dist); }
+    ~Impl() { if (db) cudaFree(db); if (dbNorm) cudaFree(dbNorm); if (q) cudaFree(q); if (idx) cudaFree(idx); if (dist) cudaFree(dist); }
 };
 
 KnnMatcher::KnnMatcher() : impl_(new Impl) {}
@@ -189,7 +216,15 @@ bool KnnMatcher::build(const void* data, int rows, int dim, bool isFloat)
     m.rows = rows; m.dim = dim; m.isFloat = isFloat;
     const size_t bytes = size_t(rows) * m.rowBytes();
     if (!Impl::grow(&m.db, &m.dbCap, bytes)) return false;
-    return cudaMemcpy(m.db, data, bytes, cudaMemcpyHostToDevice) == cudaSuccess;
+    if (cudaMemcpy(m.db, data, bytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    if (!isFloat) {
+        if (!Impl::grow(&m.dbNorm, &m.dbNormCap, size_t(rows) * sizeof(unsigned int))) return false;
+        const dim3 block(256), grid((rows + 255) / 256);
+        if (dim == 128) rowNormsU8<128><<<grid, block>>>((const unsigned int*)m.db, rows, (unsigned int*)m.dbNorm);
+        else            rowNormsU8<64><<<grid, block>>>((const unsigned int*)m.db, rows, (unsigned int*)m.dbNorm);
+        if (cudaGetLastError() != cudaSuccess) return false;
+    }
+    return true;
 }
 
 bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist)
@@ -212,8 +247,8 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
         if (m.dim == 128) knn2_f32<128><<<grid, block>>>((const float*)m.db, m.rows, (const float*)m.q, nbQuery, m.idx, m.dist);
         else              knn2_f32<64><<<grid, block>>>((const float*)m.db, m.rows, (const float*)m.q, nbQuery, m.idx, m.dist);
     } else {
-        if (m.dim == 128) knn2_u8<128><<<grid, block>>>((const unsigned int*)m.db, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);
-        else              knn2_u8<64><<<grid, block>>>((const unsigned int*)m.db, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);
+        if (m.dim == 128) knn2_u8<128><<<grid, block>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);
+        else              knn2_u8<64><<<grid, block>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);
     }
     if (cudaGetLastError() != cudaSuccess) return false;
     if (cudaMemcpy(idx, m.idx, size_t(nbQuery) * 2 * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
