@@ -281,3 +281,53 @@ fine-grained-memory failure on this card exactly as on the RX 6750 XT.
 | maps in host RAM | 90 s | 1.5x |
 | similarity volumes in host RAM | 347 s | 5.7x |
 | 500 MB cap (one tile, volumes + maps spill) | 248 s | 4.1x |
+
+### Full-resolution depth maps (downscale 1), 2026-09-16: two more fixes and a Windows check
+
+Meshroom's "standard" preset runs DepthMap at downscale 2. At downscale 1 every tile carries four
+times the volume memory, which is where a cap bites hardest, so the 41-view set was run at
+`CHESHIRE_DOWNSCALE=1` on both cards, uncapped and under 2 GB and 1 GB caps.
+
+| RX 9070, Windows (native mipmaps) | time | tiles in flight | spills |
+|---|---|---|---|
+| uncapped | 499.6 s | 30 | 0 |
+| 2 GB cap | 558.7 s | 1 | 0 |
+| 1 GB cap | 2871.6 s | 1 | 6061 (maps + 3 volumes) |
+
+| RX 6750 XT, Linux (emulated mipmaps: images are bridge-tracked) | time | spills |
+|---|---|---|
+| uncapped | 744.1 s (20 tiles) | 0 |
+| 2 GB cap, v0.2.3 bridge | 863.0 s | 6047 |
+| 2 GB cap, + 4 MB spill floor | 854.7 s | 1052 |
+| 2 GB cap, + reserve net of resident images | **749.9 s** | 0 |
+| 1 GB cap, + 4 MB spill floor | 4035.1 s | 1061 |
+
+Every capped run is bit-identical to its uncapped run on Windows (41 / 41, and a second uncapped
+run is bit-identical to the first). On Linux 40 / 41: one view differs in 110 pixels out of 12.2
+million by a relative 1e-6 inside an 8 x 27 patch, masks unchanged; not a placement error (that
+would be a tile-shaped block), and Windows never shows it. Left open as Linux-only float
+accumulation-order noise.
+
+What the series taught, and the two fixes it produced:
+
+* **Sub-megabyte spills.** Under the Linux 2 GB cap the bridge pushed 3240 maps of under a
+  megabyte to host memory, where every kernel read crosses the link, for no memory gain.
+  `CHESHIRE_BRIDGE_MIN_SPILL_MB` (default 4): allocations under it always stay in VRAM. It cut the
+  spill count six-fold but only 1 % of the time, which pointed at the real cost.
+* **The image reserve counted resident images twice.** The planner reserves VRAM for the camera
+  images it expects; on Linux those images are bridge-tracked, so once loaded they were counted
+  both as live bytes and as the reserve, and 93 MB maps were spilled with 1.4 GB of VRAM empty.
+  The reserve is now net of the Image class's live bytes. With it the 2 GB cap costs nothing on the
+  RX 6750 XT (749.9 s vs 744.1 s uncapped, zero spills).
+* **The 1 GB regime is the link.** At 1 GB the SGM volumes themselves live behind PCIe (host peak
+  only 400 MB, but read at 28 GB/s instead of 615), and the run is 4-5x slower on both cards. That
+  is the price of running at all where upstream refuses; the planner's one-tile floor is right,
+  the spill placement is right, and nothing short of the tile size shrinking will change it.
+* **Windows spills are real system memory.** Task Manager reports the capped process at 14 GB of
+  "dedicated GPU memory" while the bridge holds 0 MB of VRAM. `hip/tests/host_backing.hip` settles
+  it: 4 GB of `hipHostMallocMapped | NonCoherent` reads at 28 GB/s (VRAM: 615 GB/s) and leaves
+  `hipMemGetInfo` unchanged. The Task Manager figure is a WDDM commitment number (it shows dwm.exe
+  at 6.7 GB too), not residency.
+* **Host RAM.** The depth map process reached 31 GB resident at downscale 1 with 400 MB of bridge
+  spill: that is AliceVision's own full-resolution image cache, not the bridge. A 16 GB node should
+  stay at downscale 2, whatever the GPU.

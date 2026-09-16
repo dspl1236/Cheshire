@@ -87,7 +87,9 @@ Measured on the RX 9070 (`hip/tests/membridge_probe.hip`), the tiers the bridge 
 | pinned host copies | 28 GB/s each way |
 
 On Windows the driver already lets `hipMalloc` run past VRAM into system RAM; on Linux it fails
-hard. The bridge (`hip/compat/include/cheshire/bridge.h`) makes both behave the same, and v2
+hard. (Mapped host memory is real system memory on both: `hip/tests/host_backing.hip` reads it at
+28 GB/s against 615 GB/s for VRAM and it leaves free VRAM untouched; Task Manager's "dedicated GPU
+memory" for such a process is a commitment figure, not residency.) The bridge (`hip/compat/include/cheshire/bridge.h`) makes both behave the same, and v2
 decides *what* spills by buffer class instead of by arrival order. Measured, one class at a
 time behind PCIe, every run bit-identical:
 
@@ -112,6 +114,20 @@ its tile parallelism from the bridge's budget instead of `hipMemGetInfo`:
 Tile parallelism costs nothing to give up on this GPU, so a card with 1 GB to spare runs the
 stage at full speed. Design, knobs and every table:
 [docs/02-memory-bridge.md](docs/02-memory-bridge.md).
+
+### Full-resolution depth maps under a cap (downscale 1, 41 views, 2026-09-16)
+
+| card | uncapped | 2 GB cap | 1 GB cap |
+|---|---|---|---|
+| RX 9070, Windows | 499.6 s (30 tiles) | 558.7 s (1 tile, no spills) | 2871.6 s (volumes behind PCIe) |
+| RX 6750 XT, Linux | 744.1 s (20 tiles) | 749.9 s (1 tile, no spills, after two bridge fixes) | 4035 s |
+
+Capped runs are bit-identical to uncapped on Windows (41 / 41, twice); on Linux 40 / 41, the odd
+view differing by 110 pixels at 1e-6. The series produced two bridge fixes (a 4 MB floor under which
+nothing spills, and an image reserve net of the images already resident: the Linux 2 GB cap went
+from 863 s with 6047 spills to 749.9 s with none) and a hard floor: at 1 GB the SGM volumes
+themselves live behind the link and the job runs 4-5x slower, which is the price of running where
+upstream refuses. Details in `docs/02-memory-bridge.md`.
 
 ## What was found on the way (reproducers in `hip/tests/`)
 
