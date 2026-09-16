@@ -118,3 +118,28 @@ libs under `amdgcn/bitcode`) needs three things beyond the 7.2 recipe:
 Result on bench-pc's RX 6750 XT: the 6-view set in 28.1 s, masks identical to CUDA, 98.7 %
 within 1 % (`docs/validation/monstree-mini6-rx6750xt-windows-hip6/`). Against the same card's
 Linux / HIP 7.2 output: masks identical, median 0, 97-98.7 % within 1 %, not bit-identical.
+
+## Meshroom pairing on Windows (2026-09-16)
+
+`scripts/windows/meshroom-pair.cmd` + `meshroom-pair-launcher.exe` (source
+`scripts/windows/meshroom-pair-launcher.cpp`, built by `scripts/windows/build-launcher.cmd` with the
+toolchain's clang-cl, static CRT, Win32 only). Meshroom 2023.3 runs the DepthMap node as
+`aliceVision_depthMapEstimation {allParams}` through a shell (`Popen(..., shell=True)` in
+`meshroom/core/desc.py`), which cmd.exe resolves on PATH with PATHEXT, so the replacement has to be
+an `.exe` with the original name; a `.cmd` would also resolve but only when nothing else does, and
+batch quoting of `%*` is fragile. The launcher:
+
+* keeps the original as `aliceVision_depthMapEstimation.cuda.exe` and reads the package path from
+  `aliceVision_depthMapEstimation.cheshire.txt` beside itself;
+* runs `nvidia-smi -L` (System32, installed with the NVIDIA driver); exit 0 means CUDA, else HIP;
+  `CHESHIRE_DEPTHMAP=cuda|hip` overrides;
+* on the HIP path sets `ALICEVISION_ROOT` to the package and puts `<package>in` first on PATH
+  (the package is self-contained: vcpkg, ROCm, MSVC and OpenMP DLLs), and drops
+  `--sgmFilteringAxes` like the Linux wrapper (removed upstream);
+* `CreateProcessW` with the arguments re-quoted by the MSVC rules, waits, returns the child's exit code.
+
+Verified on bench-pc (GTX 1080 Ti): auto-selects CUDA, one view in 15.4 s through the launcher, and
+`CHESHIRE_DEPTHMAP=hip` switches to the HIP package (which then correctly reports no AMD device).
+Verified on this PC (RX 9070): a complete `meshroom_batch` photogrammetry run with
+`FeatureExtraction:forceCpuExtraction=True` whose DepthMap node logs
+`[cheshire] DepthMap backend: HIP`, see the README.

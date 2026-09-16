@@ -47,6 +47,11 @@ print(f"runtime DLLs bundled: {' '.join(sorted(missing_rt))}")
 print(f"copied {len(copied)} DLLs: {' '.join(sorted(copied))[:600]}")
 # the no-repo runner, so the zip is usable on its own: run-depthmap-standalone.cmd <package> <cache> <out>
 shutil.copy2(Path(__file__).with_name('run-depthmap-standalone.cmd'), stage / 'run-depthmap-standalone.cmd')
+# Meshroom pairing: the pair script plus the launcher it installs (built by scripts/windows/build-launcher.cmd)
+shutil.copy2(Path(__file__).parent / 'windows' / 'meshroom-pair.cmd', stage / 'meshroom-pair.cmd')
+launcher = Path(__file__).parent.parent / 'build' / 'meshroom-pair-launcher.exe'
+if launcher.exists(): shutil.copy2(launcher, stage / 'meshroom-pair-launcher.exe')
+else: print('WARNING: build/meshroom-pair-launcher.exe missing (run scripts/windows/build-launcher.cmd); zip has no pairing launcher')
 with zipfile.ZipFile(outzip, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
     for p in stage.rglob('*'):
         if p.is_file(): z.write(p, p.relative_to(stage.parent))

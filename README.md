@@ -186,6 +186,26 @@ Both run the exact Meshroom 2023.3 DepthMap command line and finish with `script
 which prints the per-view table and writes the side-by-side panels. Photos are
 [alicevision/dataset_monstree](https://github.com/alicevision/dataset_monstree).
 
+### Using it from Meshroom on Windows
+
+Meshroom runs its DepthMap node as `aliceVision_depthMapEstimation` from its own `aliceVisionin`.
+`meshroom-pair.cmd` (in every Windows zip, and in
+[`cheshire-meshroom-pair-windows.zip`](https://github.com/dspl1236/cheshire/releases/tag/v0.2.4) for
+the older zips) replaces that one binary with a launcher and keeps the CUDA one beside it as
+`.cuda.exe`:
+
+```
+meshroom-pair.cmd C:\Meshroom-2023.3.0 C:\cheshire-alicevision-hip-windows-x64-rocm7.2.1-gfx1201
+meshroom-pair.cmd C:\Meshroom-2023.3.0 --unpair
+```
+
+The launcher decides per run: an NVIDIA card present (`nvidia-smi` answers) runs the CUDA binary,
+otherwise the HIP build from the package, with the package's DLLs and `share/` in front so nothing
+of Meshroom's older AliceVision leaks in. `CHESHIRE_DEPTHMAP=cuda|hip` forces one; the choice is
+printed as the first line of the node's log. Every other node keeps running from Meshroom. On AMD,
+set **FeatureExtraction > forceCpuExtraction** in the graph (PopSift is CUDA-only; the CPU SIFT
+costs nothing measurable on these sets). The same pairing on Linux is `scripts/linux/meshroom-pair.sh`.
+
 ## Help wanted: RDNA3
 
 Every package carries RDNA3 code objects (gfx1100/1101/1102, plus the APUs gfx1103/1150/1151/1152/1153)
@@ -233,8 +253,8 @@ Expected: mask agreement 1.000, median relative depth error 0.0000, 97-99 % of p
 Works end to end on RDNA1, RDNA2 and RDNA4; RDNA3 has its code object in every bundle but no
 hardware run yet. GCN 4 (RX 400/500) is out: the ROCm 7.2 runtime refuses to initialise on an
 RX 570 even though the kernel driver accepts it (docs/06). A production Meshroom 2023.3 node runs its DepthMap on the HIP build through
-`scripts/linux/meshroom-pair.sh` (one wrapper, picks CUDA or HIP per run, so the card can be
-swapped). Next: planner-chosen tile sizes for the below-one-tile regime, a same-version CUDA
+`scripts/linux/meshroom-pair.sh`, and Meshroom on Windows through `meshroom-pair.cmd` (one
+launcher each, picks CUDA or HIP per run, so the card can be swapped). Next: planner-chosen tile sizes for the below-one-tile regime, a same-version CUDA
 reference, RDNA3 hardware.
 
 Primary repository: [git.hausofdub.com/dspl1236/cheshire](https://git.hausofdub.com/dspl1236/cheshire);
