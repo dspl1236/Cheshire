@@ -70,6 +70,10 @@ vote thresholds, where a last-ulp change would need an exact tie to matter. Pass
 to 18.3 s and 15.0 s (the kernel itself is 15 s and 13 s on RDNA1's double-precision rate, mostly
 overlapped), Meshing 273.7 s (v0.2.10) to 200.9 s.
 
+RX 6750 XT in the same machine, same bundle, same 41 views: passes 8.6 s and 6.8 s (kernel 2.3 s
+and 2.0 s), Meshing 157.0 s, the cut 3.2 s; the same vertex on every query, the same last-ulp
+distance note.
+
 ## What is left in Meshing
 
 With the visibility passes at 13 s together, Meshing on the engine bay is 159 s: the depth-map
