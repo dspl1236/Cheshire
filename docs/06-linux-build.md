@@ -221,3 +221,20 @@ back in, the first Meshroom DepthMap chunk died with `HSA_STATUS_ERROR_MEMORY_AP
 code object for an RDNA1 card, the day-one RDNA1 crash. The bundle has native code objects for
 every RDNA part, so the override is gone from the setup script; set it by hand only for a chip
 whose gfx id the bundle lacks, and unset it when the card changes.
+
+## Headless card and runtime PM (house-pc, 2026-09-16)
+
+Twice the node hung with nothing running: the journal shows the display-less card going through an
+`amdgpu` BACO runtime suspend/resume cycle every 8 s for hours (something polls it; the node service
+is guarded, the remaining suspect is `thermald` reading hwmon) and then stopping mid-resume. Boots
+where the card never suspends never hang. The fix is to keep a compute-only card out of runtime
+suspend, which a display-less card gains nothing from:
+
+```
+# /etc/udev/rules.d/80-amdgpu-no-runpm.rules
+ACTION=="add|change", SUBSYSTEM=="pci", DRIVER=="amdgpu", ATTR{power/control}="on"
+```
+
+(`udevadm control --reload-rules && udevadm trigger --subsystem-match=pci --action=change` applies
+it without a reboot; `amdgpu.runpm=0` on the kernel command line is the equivalent.) A few watts
+idle; `power/runtime_status` stays `active`.
