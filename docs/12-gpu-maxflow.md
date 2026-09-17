@@ -44,7 +44,7 @@ the standalone harness the solver was developed against; `CHESHIRE_MAXFLOW_RELAB
 |---|---|---|
 | 6-view graph, 1.6 M nodes, 16 M edges: the cut | 4.6 s | 2.0 s |
 | engine bay graph, 21.7 M nodes, 217 M edges: the cut | 109 s | 5.3 s |
-| engine bay Meshing, end to end | 296.5 s (v0.2.9) | 189 s |
+| engine bay Meshing, end to end | 296.5 s (v0.2.9), 495.9 s (v0.2.6), 510 s (upstream) | 189 s (two runs: 190.3, 188.7) |
 
 RX 5500 XT on Linux (house-pc, i3-4330, 8 GB VRAM) with the v0.2.10 bundle, 41 views, 11.4 M nodes and 114 M edges: the cut 38 s (BK) to 9.0 s, labellings identical (0 of 11,417,156 cells in the in-process check), Meshing 302.9 s (v0.2.9) to 270.3 s, 413.5 s at v0.2.7.
 
