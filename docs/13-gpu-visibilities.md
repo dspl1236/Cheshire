@@ -77,7 +77,9 @@ distance note.
 The engine bay itself on that machine (the same SfM and filtered depth maps as the RX 9070 runs,
 copied over; i3-4330, RX 6750 XT, v0.2.11 bundle): Meshing 245.3 s, the same vertex as nanoflann
 on all 152,201,929 queries of each pass, the cut 7.1 s. The RX 9070 with 12 host threads does the
-same job in 159 s; the difference is almost all host work on four threads.
+same job in 159 s; the difference is almost all host work on four threads. The RX 5500 XT (8 GB) on the same inputs: Meshing 312.7 s,
+the same vertex on every query, the cut 28.0 s, every stage on the device with nothing falling
+back to the host, so the 107-photo job fits the 8 GB card end to end.
 
 ## What is left in Meshing
 
