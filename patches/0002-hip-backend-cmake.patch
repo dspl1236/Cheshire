@@ -2381,7 +2381,7 @@ index 50a15fd..4c6a480 100644
                                     << std::pow(float(ns + 1), 3.f) << " points).");
  }
 diff --git a/src/aliceVision/fuseCut/Tetrahedralization.cpp b/src/aliceVision/fuseCut/Tetrahedralization.cpp
-index bd5e932..470a2b6 100644
+index bd5e932..1e5b724 100644
 --- a/src/aliceVision/fuseCut/Tetrahedralization.cpp
 +++ b/src/aliceVision/fuseCut/Tetrahedralization.cpp
 @@ -4,6 +4,9 @@
@@ -2394,7 +2394,44 @@ index bd5e932..470a2b6 100644
  #include "Tetrahedralization.hpp"
  
  #include <aliceVision/mvsData/geometry.hpp>
-@@ -50,6 +53,56 @@ Tetrahedralization::Tetrahedralization(const std::vector<Point3d> & vertices)
+@@ -22,6 +25,26 @@ Tetrahedralization::Tetrahedralization(const std::vector<Point3d> & vertices)
+     GEO::initialize();
+     GEO::Delaunay_var tetrahedralization = GEO::Delaunay::create(3, "BDEL");
+     tetrahedralization->set_stores_neighbors(true);
++    // cheshire: geogram inserts the points in a biased randomised order, drawing from its own
++    // generator, so the same points came out as the same tetrahedra numbered differently on every
++    // run, and every per-cell weight and the mesh that follows moved with them. Resetting the
++    // generator fixes the insertion order. CHESHIRE_TETRA_RANDOM=1 restores geogram's own state.
++    if (std::getenv("CHESHIRE_TETRA_RANDOM") == nullptr)
++    {
++        GEO::Numeric::random_reset();
++        if (std::getenv("CHESHIRE_TETRA_SINGLE_THREAD") != nullptr)
++            GEO::Process::enable_multithreading(false);
++    }
++    // a checksum of the points handed to geogram, in order
++    auto cheshireTetraHash = [](const void* data, std::size_t bytes) {
++        const unsigned char* p = static_cast<const unsigned char*>(data);
++        std::uint64_t h = 14695981039346656037ull;
++        for (std::size_t i = 0; i < bytes; ++i)
++            h = (h ^ (std::uint64_t)p[i]) * 1099511628211ull;
++        return h;
++    };
++    ALICEVISION_LOG_INFO("cheshire: tetrahedralization input: " << _vertices.size() << " points, checksum "
++                         << std::hex << cheshireTetraHash(_vertices.front().m, _vertices.size() * 3 * sizeof(double)) << std::dec);
+     tetrahedralization->set_vertices(_vertices.size(), _vertices.front().m);
+ 
+     //Copy information
+@@ -42,6 +65,9 @@ Tetrahedralization::Tetrahedralization(const std::vector<Point3d> & vertices)
+         c.adjacent[3] = tetrahedralization->cell_adjacent(ci, 3);
+     }
+ 
++    // cheshire: and of the cells geogram produced, in order
++    ALICEVISION_LOG_INFO("cheshire: tetrahedralization output: " << _mesh.size() << " cells, checksum "
++                         << std::hex << cheshireTetraHash(_mesh.data(), _mesh.size() * sizeof(Cell)) << std::dec);
+     //Remove geogram data
+     tetrahedralization.reset();
+ 
+@@ -50,6 +76,56 @@ Tetrahedralization::Tetrahedralization(const std::vector<Point3d> & vertices)
  
  void Tetrahedralization::updateVertexToCellsCache(const size_t verticesCount)
  {

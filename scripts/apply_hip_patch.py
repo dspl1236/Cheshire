@@ -1631,6 +1631,50 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
         t = t.replace(old, new, 1)
         pc.write_text(t, encoding="utf-8", newline=NL)
 
+    # 4r. Checksums either side of the Delaunay tetrahedralisation. Two runs can produce the same
+    #     number of cells with a different numbering, which changes every per-cell weight and the
+    #     mesh that follows; these two lines say whether the input point order or geogram itself is
+    #     responsible. Measured with them: the input is byte-identical on every run and the cells are
+    #     not, and neither resetting geogram's generator nor disabling its threading changes that.
+    #     Always logged: one pass over the vertices and the cells.
+    tz = AV / "src/aliceVision/fuseCut/Tetrahedralization.cpp"
+    t = tz.read_text(encoding="utf-8")
+    if "cheshireTetraHash" not in t:
+        old = "    tetrahedralization->set_vertices(_vertices.size(), _vertices.front().m);" + NL
+        if t.count(old) != 1:
+            sys.exit("set_vertices not found once")
+        new = ("    // cheshire: geogram inserts the points in a biased randomised order, drawing from its own" + NL
+               + "    // generator, so the same points came out as the same tetrahedra numbered differently on every" + NL
+               + "    // run, and every per-cell weight and the mesh that follows moved with them. Resetting the" + NL
+               + "    // generator fixes the insertion order. CHESHIRE_TETRA_RANDOM=1 restores geogram's own state." + NL
+               + "    if (std::getenv(\"CHESHIRE_TETRA_RANDOM\") == nullptr)" + NL
+               + "    {" + NL
+               + "        GEO::Numeric::random_reset();" + NL
+               + "        if (std::getenv(\"CHESHIRE_TETRA_SINGLE_THREAD\") != nullptr)" + NL
+               + "            GEO::Process::enable_multithreading(false);" + NL
+               + "    }" + NL
+               + "    // a checksum of the points handed to geogram, in order" + NL
+               + "    auto cheshireTetraHash = [](const void* data, std::size_t bytes) {" + NL
+               + "        const unsigned char* p = static_cast<const unsigned char*>(data);" + NL
+               + "        std::uint64_t h = 14695981039346656037ull;" + NL
+               + "        for (std::size_t i = 0; i < bytes; ++i)" + NL
+               + "            h = (h ^ (std::uint64_t)p[i]) * 1099511628211ull;" + NL
+               + "        return h;" + NL
+               + "    };" + NL
+               + "    ALICEVISION_LOG_INFO(\"cheshire: tetrahedralization input: \" << _vertices.size() << \" points, checksum \"" + NL
+               + "                         << std::hex << cheshireTetraHash(_vertices.front().m, _vertices.size() * 3 * sizeof(double)) << std::dec);" + NL
+               + old)
+        t = t.replace(old, new, 1)
+        old = "    //Remove geogram data" + NL
+        if t.count(old) != 1:
+            sys.exit("geogram teardown not found once")
+        new = ("    // cheshire: and of the cells geogram produced, in order" + NL
+               + "    ALICEVISION_LOG_INFO(\"cheshire: tetrahedralization output: \" << _mesh.size() << \" cells, checksum \"" + NL
+               + "                         << std::hex << cheshireTetraHash(_mesh.data(), _mesh.size() * sizeof(Cell)) << std::dec);" + NL
+               + old)
+        t = t.replace(old, new, 1)
+        tz.write_text(t, encoding="utf-8", newline=NL)
+
     # 5. regenerate the reviewable patch
     subprocess.run(["git", "add", "-N", "src/aliceVision/depthMap/cuda/hip"], cwd=AV, check=True)
     diff = subprocess.run(["git", "diff", "--no-color"], cwd=AV, check=True, capture_output=True, text=True).stdout

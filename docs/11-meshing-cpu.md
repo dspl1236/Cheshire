@@ -154,3 +154,28 @@ their last bits, and with them the cut. Running with `CHESHIRE_GPU_VOTE=0 CHESHI
 changes nothing about that, because upstream's CPU vote loop accumulates the same way. A
 deterministic accumulation for the votes is the next step, and it would make Meshing reproducible
 end to end.
+
+## Why the mesh is still not byte-reproducible
+
+With the point cloud and the helper points fixed, the obvious next suspect was the graph-weight
+votes, which accumulate float contributions per cell in parallel. Dumping the s-t graph from two
+runs of the 6-view job (`CHESHIRE_MAXFLOW_DUMP`) confirmed the weights move: 90 % of the 16,722,900
+capacities differ and the total differs by 1.5 %, far beyond rounding, because the sink weight is
+multiplied by an accumulated term and clamped at a million, so a small difference in a sum can swing
+one capacity a long way.
+
+It also showed something else. The two graphs are not the same graph with different numbers on the
+edges: the cell-to-cell adjacency differs, while the internal edge count (13,378,280) and the degree
+sequence as a multiset match exactly. That is a relabelling, so the tetrahedra themselves are
+numbered differently from run to run. Apply step 4r logs a checksum either side of the
+tetrahedralisation to place it. Three runs, and then three more: the 265,271 points handed to
+geogram are byte-identical every time, and the 1,672,310 cells that come back are different every
+time. Resetting geogram's own random generator before the build does not change that, and neither
+does disabling geogram's multithreading (`CHESHIRE_TETRA_SINGLE_THREAD=1`), so it is not the biased
+randomised insertion order and not its thread count.
+
+So the votes are one of two sources, and the smaller one. Until the tetrahedralisation numbers its
+cells reproducibly, deterministic vote accumulation cannot by itself make two runs agree, and the
+cell numbering is upstream's, inside geogram. Both facts are worth knowing before anyone spends
+effort on fixed-point accumulation: it is still a sound change, but it buys stability of the weights
+given a numbering, not a reproducible mesh.
