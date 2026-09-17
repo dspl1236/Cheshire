@@ -43,6 +43,12 @@ CPU. `CHESHIRE_GPU_TEX=0` restores the CPU loop.
 | Texturing node, end to end | 165.8 s (220 s inside Meshroom) | 79.3 s |
 | 6 views, 1 atlas, end to end | 16.6 s | 10.3 s |
 
+RX 5500 XT (8 GB) on Linux (house-pc, i3-4330, 14 GB RAM) with the v0.2.8 bundle, 41 views, 3
+atlases in chunks of 2 with all 41 images kept in RAM: Texturing 271.5 s on the CPU against 102.5 s
+with the GPU passes (uploads 3.0 s, pyramids 0.7 s, rasterisation 4.1 s, image reads 10.1 s
+waiting). The textures have the identical set of coloured pixels and differ on 0.008 % of the
+pixels, at most 0.05, 19 to 30 pixels beyond 1e-3 per texture.
+
 What is left on the engine bay: UV unwrap 14 s, mesh load 9 s and save 14 s, per-atlas padding,
 downscale and write about 3.5 s each. Those are the node now.
 

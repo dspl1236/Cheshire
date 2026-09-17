@@ -34,7 +34,7 @@ number is why the design is what it is.
 | FeatureExtraction | CUDA (PopSift) or CPU | CPU on AMD (`forceCpuExtraction`) | PopSift port not started |
 | DepthMapFilter | CPU | GPU vote pass (HIP / CUDA source) | validated (v0.2.6): 123.5 s -> 26.5 s on 107 photos (RX 9070), 317 s -> 26.9 s on 41 views on an i3 + RX 5500 XT, bit-identical; found and replicated an upstream vote-buffer quirk |
 | Meshing | CPU | GPU graph-weight votes + weakly-supported-surfaces pass (HIP / CUDA source) | done (v0.2.7): the two ray passes 37 s -> 18 s on 107 photos (RX 9070), Meshing 491 s -> 413 s on 41 views on an i3 + RX 5500 XT, the weakly-supported-surfaces pass cell-identical to the CPU; the node is bounded by its CPU max-flow (207 s of 495.9 s), which is its own project |
-| Texturing | CPU | GPU Laplacian pyramid + rasterisation, parallel camera selection (HIP / CUDA source) | done (v0.2.8): 165.8 s -> 79.3 s on 107 photos (RX 9070), textures inside the CPU's own run-to-run band; what is left is UV unwrap, mesh I/O and padding |
+| Texturing | CPU | GPU Laplacian pyramid + rasterisation, parallel camera selection (HIP / CUDA source) | done (v0.2.8): 165.8 s -> 79.3 s on 107 photos (RX 9070), 271.5 s -> 102.5 s on 41 views on an i3 + RX 5500 XT, textures inside the CPU's own run-to-run band; what is left is UV unwrap, mesh I/O and padding |
 | PrepareDenseScene | CPU | | small win, when convenient |
 | SfM, ImageMatching, MeshFiltering | CPU | | stay on the CPU (sequential or tiny) |
 
