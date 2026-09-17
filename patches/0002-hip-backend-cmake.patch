@@ -1848,11 +1848,14 @@ index 7b385ee..879fbc3 100644
      }
  
 diff --git a/src/aliceVision/fuseCut/GraphFiller.cpp b/src/aliceVision/fuseCut/GraphFiller.cpp
-index 6647c39..35ce129 100644
+index 6647c39..bc2188e 100644
 --- a/src/aliceVision/fuseCut/GraphFiller.cpp
 +++ b/src/aliceVision/fuseCut/GraphFiller.cpp
-@@ -11,6 +11,11 @@
+@@ -9,8 +9,14 @@
+ #include <aliceVision/mvsUtils/common.hpp>
+ #include <aliceVision/fuseCut/Intersections.hpp>
  #include <aliceVision/fuseCut/MaxFlow_AdjList.hpp>
++#include <aliceVision/fuseCut/MaxFlow_CSR.hpp>  // cheshire
  
  #include <boost/atomic/atomic_ref.hpp>
 +#ifdef ALICEVISION_HAVE_GPU_FILTER
@@ -1863,7 +1866,7 @@ index 6647c39..35ce129 100644
  
  
  namespace aliceVision {
-@@ -83,6 +88,69 @@ void GraphFiller::fillGraph(double nPixelSizeBehind, float fullWeight)
+@@ -83,6 +89,69 @@ void GraphFiller::fillGraph(double nPixelSizeBehind, float fullWeight)
  {
      ALICEVISION_LOG_INFO("Computing s-t graph weights.");
  
@@ -1933,7 +1936,7 @@ index 6647c39..35ce129 100644
      // choose random order to prevent waiting
      const unsigned int seed = (unsigned int)_mp.userParams.get<unsigned int>("delaunaycut.seed", 0);
      const std::vector<int> verticesRandIds = mvsUtils::createRandomArrayOfIntegers(_verticesAttr.size(), seed);
-@@ -266,6 +334,25 @@ void GraphFiller::rayMarchingGraphFull(int vertexIndex,
+@@ -266,6 +335,25 @@ void GraphFiller::rayMarchingGraphFull(int vertexIndex,
  
  void GraphFiller::forceTedgesByGradientIJCV(float nPixelSizeBehind)
  {
@@ -1959,7 +1962,7 @@ index 6647c39..35ce129 100644
      const float forceTEdgeDelta = 0.1f;
      const float minJumpPartRange = 10000.0f;
      const float maxSilentPartRange = 100.0f;
-@@ -465,6 +552,23 @@ void GraphFiller::forceTedgesByGradientIJCV(float nPixelSizeBehind)
+@@ -465,6 +553,23 @@ void GraphFiller::forceTedgesByGradientIJCV(float nPixelSizeBehind)
          }
      }
  
@@ -1983,6 +1986,275 @@ index 6647c39..35ce129 100644
      for (GC_cellInfo& c : _cellsAttr)
      {
          const float w = std::max(1.0f, c.cellTWeight) * c.on;
+@@ -492,10 +597,35 @@ std::vector<CellIndex> GraphFiller::getNeighboringCellsByGeometry(const Geometry
+ }
+ 
+ void GraphFiller::binarize()
++{
++    // cheshire: the CSR graph by default (the same edges in the same order, a fraction of the build
++    // and teardown time); CHESHIRE_MAXFLOW_ADJLIST=1 keeps upstream's adjacency list, and
++    // CHESHIRE_MAXFLOW_CHECK=1 runs both on the same graph and compares flow value and labelling
++    if (std::getenv("CHESHIRE_MAXFLOW_CHECK") != nullptr)
++    {
++        std::vector<bool> csrFull, adjFull;
++        const float fCsr = binarizeImpl<MaxFlow_CSR>(csrFull);
++        const float fAdj = binarizeImpl<MaxFlow_AdjList>(adjFull);
++        std::size_t diff = 0;
++        for (std::size_t i = 0; i < csrFull.size(); ++i)
++            diff += (csrFull[i] != adjFull[i]);
++        ALICEVISION_LOG_INFO("cheshire: max-flow check: CSR flow " << fCsr << ", adjacency-list flow " << fAdj << (fCsr == fAdj ? " (identical)" : " (DIFFERENT)")
++                                                                  << "; cells labelled differently: " << diff << " of " << csrFull.size());
++        _cellIsFull.swap(csrFull);
++    }
++    else if (std::getenv("CHESHIRE_MAXFLOW_ADJLIST") != nullptr)
++        binarizeImpl<MaxFlow_AdjList>(_cellIsFull);
++    else
++        binarizeImpl<MaxFlow_CSR>(_cellIsFull);
++    _cellsAttr.clear();
++}
++
++template<class MaxFlowT>
++float GraphFiller::binarizeImpl(std::vector<bool>& cellIsFull)
+ {
+     const std::size_t nbCells = _cellsAttr.size();
+ 
+-    MaxFlow_AdjList maxFlowGraph(nbCells);
++    MaxFlowT maxFlowGraph(nbCells);
+ 
+     // fill s-t edges
+     for (CellIndex ci = 0; ci < nbCells; ++ci)
+@@ -507,21 +637,23 @@ void GraphFiller::binarize()
+         maxFlowGraph.addNode(ci, ws, wt);
+     }
+ 
++    ALICEVISION_LOG_INFO("cheshire: s-t edges added.");
+     const float CONSTalphaVIS = 1.0f;
+     const float CONSTalphaPHOTO = 5.0f;
+ 
+-    // fill u-v directed edges
+-    for (CellIndex ci = 0; ci < nbCells; ++ci)
++    // cheshire: the facet weights computed in parallel into a table (the same expressions per
++    // facet), then the u-v edges added in upstream's order
+     {
+-        for (VertexIndex k = 0; k < 4; ++k)
+-        {
++        struct FacetEdge { std::uint32_t fv; float wFuFv, wFvFu; };
++        std::vector<FacetEdge> table(nbCells * 4);
++        auto computeFacet = [&](CellIndex ci, VertexIndex k, FacetEdge& out) {
+             Facet fu(ci, k);
+             Facet fv = _tetrahedralization.mirrorFacet(fu);
+             if (_tetrahedralization.isInvalidOrInfiniteCell(fv.cellIndex))
+             {
+-                continue;
++                out.fv = 0xffffffffu; out.wFuFv = 0.0f; out.wFvFu = 0.0f;
++                return;
+             }
+-
+             float a1 = 0.0f;
+             float a2 = 0.0f;
+             if ((!_tetrahedralization.isInfiniteCell(fu.cellIndex)) && (!_tetrahedralization.isInfiniteCell(fv.cellIndex)))
+@@ -530,29 +662,54 @@ void GraphFiller::binarize()
+                 a1 = _tetrahedralization.getFaceWeight(fu);
+                 a2 = _tetrahedralization.getFaceWeight(fv);
+             }
+-
+             // In output of maxflow the cuts will become the surface.
+             // High weight on some facets will avoid cutting them.
+-            float wFvFu = _cellsAttr[fu.cellIndex].gEdgeVisWeight[fu.localVertexIndex] * CONSTalphaVIS + a1 * CONSTalphaPHOTO;
+-            float wFuFv = _cellsAttr[fv.cellIndex].gEdgeVisWeight[fv.localVertexIndex] * CONSTalphaVIS + a2 * CONSTalphaPHOTO;
+-
+-            maxFlowGraph.addEdge(fu.cellIndex, fv.cellIndex, wFuFv, wFvFu);
++            out.fv = (std::uint32_t)fv.cellIndex;
++            out.wFvFu = _cellsAttr[fu.cellIndex].gEdgeVisWeight[fu.localVertexIndex] * CONSTalphaVIS + a1 * CONSTalphaPHOTO;
++            out.wFuFv = _cellsAttr[fv.cellIndex].gEdgeVisWeight[fv.localVertexIndex] * CONSTalphaVIS + a2 * CONSTalphaPHOTO;
++        };
++#pragma omp parallel for schedule(static)
++        for (long long ci = 0; ci < (long long)nbCells; ++ci)
++            for (VertexIndex k = 0; k < 4; ++k)
++                computeFacet((CellIndex)ci, k, table[std::size_t(ci) * 4 + k]);
++        if (std::getenv("CHESHIRE_GPU_VOTE_LOG") != nullptr)
++        {
++            std::size_t bad = 0;
++            for (CellIndex ci = 0; ci < nbCells; ++ci)
++                for (VertexIndex k = 0; k < 4; ++k)
++                {
++                    FacetEdge seq;
++                    computeFacet(ci, k, seq);
++                    const FacetEdge& par = table[std::size_t(ci) * 4 + k];
++                    if (seq.fv != par.fv || seq.wFuFv != par.wFuFv || seq.wFvFu != par.wFvFu)
++                        ++bad;
++                }
++            ALICEVISION_LOG_INFO("cheshire: facet weight check: " << nbCells * 4 << " facets, differing from the sequential computation: " << bad);
+         }
++        for (CellIndex ci = 0; ci < nbCells; ++ci)
++            for (VertexIndex k = 0; k < 4; ++k)
++            {
++                const FacetEdge& e = table[std::size_t(ci) * 4 + k];
++                if (e.fv == 0xffffffffu)
++                    continue;
++                maxFlowGraph.addEdge(ci, e.fv, e.wFuFv, e.wFvFu);
++            }
+     }
+ 
+-    //Clear graph
+-    _cellsAttr.clear();
+-
++    ALICEVISION_LOG_INFO("cheshire: graph built.");
+     // Find graph-cut solution
+     const float totalFlow = maxFlowGraph.compute();
+ 
+-    _cellIsFull.resize(nbCells);
++    ALICEVISION_LOG_INFO("cheshire: max-flow done, labelling cells.");
++    cellIsFull.resize(nbCells);
+     std::size_t nbFullCells = 0;
+     for (CellIndex ci = 0; ci < nbCells; ++ci)
+     {
+-        _cellIsFull[ci] = maxFlowGraph.isTarget(ci);
+-        nbFullCells += _cellIsFull[ci];
++        cellIsFull[ci] = maxFlowGraph.isTarget(ci);
++        nbFullCells += cellIsFull[ci];
+     }
++    ALICEVISION_LOG_INFO("cheshire: max-flow value " << totalFlow << ", full cells " << nbFullCells);
++    return totalFlow;
+ }
+ 
+ }
+diff --git a/src/aliceVision/fuseCut/GraphFiller.hpp b/src/aliceVision/fuseCut/GraphFiller.hpp
+index b148a97..3f883df 100644
+--- a/src/aliceVision/fuseCut/GraphFiller.hpp
++++ b/src/aliceVision/fuseCut/GraphFiller.hpp
+@@ -33,6 +33,7 @@ public:
+     }
+ 
+     void binarize();
++    template<class MaxFlowT> float binarizeImpl(std::vector<bool>& cellIsFull);  // cheshire
+ 
+ private:
+     void initCells();
+diff --git a/src/aliceVision/fuseCut/Kdtree.hpp b/src/aliceVision/fuseCut/Kdtree.hpp
+index 1a63489..c8a423c 100644
+--- a/src/aliceVision/fuseCut/Kdtree.hpp
++++ b/src/aliceVision/fuseCut/Kdtree.hpp
+@@ -4,6 +4,8 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <thread>  // cheshire
++#include <algorithm>
+ #include "nanoflann.hpp"
+ 
+ namespace aliceVision {
+@@ -114,7 +116,7 @@ class Tree
+     {
+         ALICEVISION_LOG_INFO("Build nanoflann KdTree index.");
+         _pointCloudRef = std::make_unique<PointVectorAdaptator>(verticesCoords);
+-        _tree = std::make_unique<KdTree>(3 /*dim*/, *_pointCloudRef.get(), nanoflann::KDTreeSingleIndexAdaptorParams(MAX_LEAF_ELEMENTS));
++        _tree = std::make_unique<KdTree>(3 /*dim*/, *_pointCloudRef.get(), nanoflann::KDTreeSingleIndexAdaptorParams(MAX_LEAF_ELEMENTS, nanoflann::KDTreeSingleIndexAdaptorFlags::None, std::max(1u, std::thread::hardware_concurrency()))  /* cheshire: parallel build */);
+         _tree->buildIndex();
+         ALICEVISION_LOG_INFO("KdTree created for " << verticesCoords.size() << " points.");
+     }
+diff --git a/src/aliceVision/fuseCut/PointCloud.cpp b/src/aliceVision/fuseCut/PointCloud.cpp
+index 50a15fd..9575633 100644
+--- a/src/aliceVision/fuseCut/PointCloud.cpp
++++ b/src/aliceVision/fuseCut/PointCloud.cpp
+@@ -4,6 +4,8 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <thread>  // cheshire
++#include <algorithm>
+ #include "PointCloud.hpp"
+ 
+ #include <aliceVision/utils/filesIO.hpp>
+@@ -35,7 +37,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
+ 
+     ALICEVISION_LOG_INFO("Build nanoflann KdTree index.");
+     PointVectorAdaptator pointCloudRef(verticesCoordsPrepare);
+-    KdTree kdTree(3 /*dim*/, pointCloudRef, nanoflann::KDTreeSingleIndexAdaptorParams(MAX_LEAF_ELEMENTS));
++    KdTree kdTree(3 /*dim*/, pointCloudRef, nanoflann::KDTreeSingleIndexAdaptorParams(MAX_LEAF_ELEMENTS, nanoflann::KDTreeSingleIndexAdaptorFlags::None, std::max(1u, std::thread::hardware_concurrency()))  /* cheshire: parallel build */);
+     kdTree.buildIndex();
+ 
+     ALICEVISION_LOG_INFO("KdTree created for " << verticesCoordsPrepare.size() << " points.");
+@@ -132,7 +134,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
+ {
+ 
+     PointVectorAdaptator pointCloudRef(verticesCoordsPrepare);
+-    KdTree kdTree(3 /*dim*/, pointCloudRef, nanoflann::KDTreeSingleIndexAdaptorParams(MAX_LEAF_ELEMENTS));
++    KdTree kdTree(3 /*dim*/, pointCloudRef, nanoflann::KDTreeSingleIndexAdaptorParams(MAX_LEAF_ELEMENTS, nanoflann::KDTreeSingleIndexAdaptorFlags::None, std::max(1u, std::thread::hardware_concurrency()))  /* cheshire: parallel build */);
+     kdTree.buildIndex();
+     ALICEVISION_LOG_INFO("NANOFLANN: KdTree created.");
+ 
+diff --git a/src/aliceVision/fuseCut/Tetrahedralization.cpp b/src/aliceVision/fuseCut/Tetrahedralization.cpp
+index bd5e932..470a2b6 100644
+--- a/src/aliceVision/fuseCut/Tetrahedralization.cpp
++++ b/src/aliceVision/fuseCut/Tetrahedralization.cpp
+@@ -4,6 +4,9 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <cstdlib>  // cheshire
++#include <cstdint>
++#include <aliceVision/system/Logger.hpp>
+ #include "Tetrahedralization.hpp"
+ 
+ #include <aliceVision/mvsData/geometry.hpp>
+@@ -50,6 +53,56 @@ Tetrahedralization::Tetrahedralization(const std::vector<Point3d> & vertices)
+ 
+ void Tetrahedralization::updateVertexToCellsCache(const size_t verticesCount)
+ {
++    // cheshire: cells are visited in ascending order and each cell lists a vertex once, so
++    // counting then appending gives exactly the ascending, duplicate-free lists the map of sets did
++    if (std::getenv("CHESHIRE_MESH_OLD_NEIGHBOURS") == nullptr)
++    {
++        _neighboringCellsPerVertex.clear();
++        _neighboringCellsPerVertex.resize(verticesCount);
++        std::vector<std::uint32_t> counts(verticesCount, 0);
++        const CellIndex nbC = nb_cells();
++        for (CellIndex ci = 0; ci < nbC; ++ci)
++            for (VertexIndex k = 0; k < 4; ++k)
++            {
++                const VertexIndex vi = cell_vertex(ci, k);
++                if (vi == GEO::NO_VERTEX || vi >= verticesCount)
++                    continue;
++                ++counts[vi];
++            }
++        for (size_t vi = 0; vi < verticesCount; ++vi)
++            _neighboringCellsPerVertex[vi].reserve(counts[vi]);
++        for (CellIndex ci = 0; ci < nbC; ++ci)
++            for (VertexIndex k = 0; k < 4; ++k)
++            {
++                const VertexIndex vi = cell_vertex(ci, k);
++                if (vi == GEO::NO_VERTEX || vi >= verticesCount)
++                    continue;
++                _neighboringCellsPerVertex[vi].push_back(ci);
++            }
++        if (std::getenv("CHESHIRE_GPU_VOTE_LOG") != nullptr)
++        {
++            // build upstream's table as well and compare list for list
++            std::map<VertexIndex, std::set<CellIndex>> tmp;
++            for (CellIndex ci = 0; ci < nbC; ++ci)
++                for (VertexIndex k = 0; k < 4; ++k)
++                {
++                    const VertexIndex vi = cell_vertex(ci, k);
++                    if (vi == GEO::NO_VERTEX || vi >= verticesCount)
++                        continue;
++                    tmp[vi].insert(ci);
++                }
++            std::size_t bad = 0, n = 0;
++            for (size_t vi = 0; vi < verticesCount; ++vi)
++            {
++                const auto it = tmp.find(vi);
++                const std::vector<CellIndex> ref = it == tmp.end() ? std::vector<CellIndex>() : std::vector<CellIndex>(it->second.begin(), it->second.end());
++                n += ref.size();
++                if (ref != _neighboringCellsPerVertex[vi]) ++bad;
++            }
++            ALICEVISION_LOG_INFO("cheshire: neighbour table check: " << verticesCount << " vertices, " << n << " entries, lists differing from upstream's construction: " << bad);
++        }
++        return;
++    }
+     _neighboringCellsPerVertex.clear();
+ 
+     std::map<VertexIndex, std::set<CellIndex>> neighboringCellsPerVertexTmp;
 diff --git a/src/aliceVision/matching/CMakeLists.txt b/src/aliceVision/matching/CMakeLists.txt
 index a7544f6..af70d7c 100644
 --- a/src/aliceVision/matching/CMakeLists.txt
@@ -2513,7 +2785,7 @@ index cc6313f..7e5c3ac 100644
      ALICEVISION_LOG_INFO(std::to_string(mapPutativesMatches.size()) << " putative image pair matches");
  
 diff --git a/src/software/pipeline/main_meshing.cpp b/src/software/pipeline/main_meshing.cpp
-index 4fe193b..91cce63 100644
+index 4fe193b..a271a2f 100644
 --- a/src/software/pipeline/main_meshing.cpp
 +++ b/src/software/pipeline/main_meshing.cpp
 @@ -271,7 +271,7 @@ int aliceVision_main(int argc, char* argv[])
@@ -2525,6 +2797,14 @@ index 4fe193b..91cce63 100644
      cmdline.add(requiredParams);
      cmdline.add(optionalParams);
      cmdline.add(advancedParams);
+@@ -418,6 +418,7 @@ int aliceVision_main(int argc, char* argv[])
+                     fuseCut::GraphFiller gfiller(mp, pc, tetrahedralization);
+                     gfiller.build(cams);
+                     gfiller.binarize();
++                    ALICEVISION_LOG_INFO("cheshire: binarize returned.");
+ 
+                     fuseCut::Mesher mesher(mp, pc, tetrahedralization, gfiller.getCellsStatus());
+                     mesher.graphCutPostProcessing(&hexah[0]);
 diff --git a/src/software/pipeline/main_texturing.cpp b/src/software/pipeline/main_texturing.cpp
 index a8714f8..1cf26df 100644
 --- a/src/software/pipeline/main_texturing.cpp

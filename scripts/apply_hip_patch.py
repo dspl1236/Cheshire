@@ -64,6 +64,10 @@ TRACKED = [
     "src/aliceVision/mesh/Texturing.cpp",
     "src/aliceVision/mesh/CMakeLists.txt",
     "src/software/pipeline/main_texturing.cpp",
+    "src/aliceVision/fuseCut/Tetrahedralization.cpp",
+    "src/aliceVision/fuseCut/PointCloud.cpp",
+    "src/aliceVision/fuseCut/Kdtree.hpp",
+    "src/aliceVision/fuseCut/GraphFiller.hpp",
 ]
 
 
@@ -981,6 +985,270 @@ if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
 endif()
 """ + t[j:]
         mc.write_text(t, encoding="utf-8", newline=NL)
+
+
+    # 4g. Meshing CPU quick wins, all exact:
+    #     - the cells-around-each-vertex table by counting instead of a map of sets (47 s -> ~1 s on
+    #       21.7 M cells; same ascending, duplicate-free lists; CHESHIRE_MESH_OLD_NEIGHBOURS=1 keeps
+    #       upstream's construction, and CHESHIRE_GPU_VOTE_LOG=1 logs a checksum of the table)
+    #     - nanoflann index builds on every core (1.9 builds the same tree from any thread count)
+    #     - timestamps around the graph build, the max-flow and the labelling in binarize
+    tz = AV / "src/aliceVision/fuseCut/Tetrahedralization.cpp"
+    patch(tz, "void Tetrahedralization::updateVertexToCellsCache(const size_t verticesCount)" + NL + "{" + NL,
+          """    // cheshire: cells are visited in ascending order and each cell lists a vertex once, so
+    // counting then appending gives exactly the ascending, duplicate-free lists the map of sets did
+    if (std::getenv("CHESHIRE_MESH_OLD_NEIGHBOURS") == nullptr)
+    {
+        _neighboringCellsPerVertex.clear();
+        _neighboringCellsPerVertex.resize(verticesCount);
+        std::vector<std::uint32_t> counts(verticesCount, 0);
+        const CellIndex nbC = nb_cells();
+        for (CellIndex ci = 0; ci < nbC; ++ci)
+            for (VertexIndex k = 0; k < 4; ++k)
+            {
+                const VertexIndex vi = cell_vertex(ci, k);
+                if (vi == GEO::NO_VERTEX || vi >= verticesCount)
+                    continue;
+                ++counts[vi];
+            }
+        for (size_t vi = 0; vi < verticesCount; ++vi)
+            _neighboringCellsPerVertex[vi].reserve(counts[vi]);
+        for (CellIndex ci = 0; ci < nbC; ++ci)
+            for (VertexIndex k = 0; k < 4; ++k)
+            {
+                const VertexIndex vi = cell_vertex(ci, k);
+                if (vi == GEO::NO_VERTEX || vi >= verticesCount)
+                    continue;
+                _neighboringCellsPerVertex[vi].push_back(ci);
+            }
+        if (std::getenv("CHESHIRE_GPU_VOTE_LOG") != nullptr)
+        {
+            // build upstream's table as well and compare list for list
+            std::map<VertexIndex, std::set<CellIndex>> tmp;
+            for (CellIndex ci = 0; ci < nbC; ++ci)
+                for (VertexIndex k = 0; k < 4; ++k)
+                {
+                    const VertexIndex vi = cell_vertex(ci, k);
+                    if (vi == GEO::NO_VERTEX || vi >= verticesCount)
+                        continue;
+                    tmp[vi].insert(ci);
+                }
+            std::size_t bad = 0, n = 0;
+            for (size_t vi = 0; vi < verticesCount; ++vi)
+            {
+                const auto it = tmp.find(vi);
+                const std::vector<CellIndex> ref = it == tmp.end() ? std::vector<CellIndex>() : std::vector<CellIndex>(it->second.begin(), it->second.end());
+                n += ref.size();
+                if (ref != _neighboringCellsPerVertex[vi]) ++bad;
+            }
+            ALICEVISION_LOG_INFO("cheshire: neighbour table check: " << verticesCount << " vertices, " << n << " entries, lists differing from upstream's construction: " << bad);
+        }
+        return;
+    }
+""")
+    patch(tz, """    _neighboringCellsPerVertex.resize(verticesCount);
+    for (const auto& it : neighboringCellsPerVertexTmp)
+    {
+        const std::set<CellIndex>& input = it.second;
+        std::vector<CellIndex>& output = _neighboringCellsPerVertex[it.first];
+        output.assign(input.begin(), input.end());
+    }
+""", """""")
+    t = tz.read_text(encoding="utf-8")
+    if "#include <cstdlib>  // cheshire" not in t:
+        i = t.index("#include")
+        t = t[:i] + "#include <cstdlib>  // cheshire" + NL + "#include <cstdint>" + NL + "#include <aliceVision/system/Logger.hpp>" + NL + t[i:]
+        tz.write_text(t, encoding="utf-8", newline=NL)
+    for rel, old in (("src/aliceVision/fuseCut/PointCloud.cpp", "nanoflann::KDTreeSingleIndexAdaptorParams(MAX_LEAF_ELEMENTS)"),
+                     ("src/aliceVision/fuseCut/Kdtree.hpp", "nanoflann::KDTreeSingleIndexAdaptorParams(MAX_LEAF_ELEMENTS)")):
+        f = AV / rel
+        t = f.read_text(encoding="utf-8")
+        if "n_thread_build" not in t and "cheshireKdThreads()" not in t:
+            new = "nanoflann::KDTreeSingleIndexAdaptorParams(MAX_LEAF_ELEMENTS, nanoflann::KDTreeSingleIndexAdaptorFlags::None, std::max(1u, std::thread::hardware_concurrency()))  /* cheshire: parallel build */"
+            t = t.replace(old, new)
+            i = t.index("#include")
+            t = t[:i] + "#include <thread>  // cheshire" + NL + "#include <algorithm>" + NL + t[i:]
+            f.write_text(t, encoding="utf-8", newline=NL)
+    patch(gfp, "    const float CONSTalphaVIS = 1.0f;" + NL, "    ALICEVISION_LOG_INFO(\"cheshire: s-t edges added.\");" + NL, after=False)
+    patch(gfp, "    // Find graph-cut solution" + NL, "    ALICEVISION_LOG_INFO(\"cheshire: graph built.\");" + NL, after=False)
+    patch(gfp, "    _cellIsFull.resize(nbCells);" + NL, "    ALICEVISION_LOG_INFO(\"cheshire: max-flow done, labelling cells.\");" + NL, after=False)
+    patch(mm, "                    gfiller.binarize();" + NL, "                    ALICEVISION_LOG_INFO(\"cheshire: binarize returned.\");" + NL)
+
+
+    # 4h. CSR max-flow graph (hip/port/meshing_csr/MaxFlow_CSR.hpp): the same s-t graph laid out as a
+    #     compressed sparse row graph with every node's out-edges in adjacency-list order, so
+    #     Boykov-Kolmogorov sees the same edges in the same order; 66 s of graph build and 25 s of
+    #     teardown become a few seconds. CHESHIRE_MAXFLOW_ADJLIST=1 keeps upstream's class,
+    #     CHESHIRE_MAXFLOW_CHECK=1 runs both on the same graph and compares.
+    shutil.copy2(ROOT / "hip" / "port" / "meshing_csr" / "MaxFlow_CSR.hpp", AV / "src/aliceVision/fuseCut/MaxFlow_CSR.hpp")
+    gfh = AV / "src/aliceVision/fuseCut/GraphFiller.hpp"
+    patch(gfh, "    void binarize();" + NL, "    template<class MaxFlowT> float binarizeImpl(std::vector<bool>& cellIsFull);  // cheshire" + NL)
+    patch(gfp, "#include <aliceVision/fuseCut/MaxFlow_AdjList.hpp>" + NL, "#include <aliceVision/fuseCut/MaxFlow_CSR.hpp>  // cheshire" + NL)
+    t = gfp.read_text(encoding="utf-8")
+    old_head = """void GraphFiller::binarize()
+{
+    const std::size_t nbCells = _cellsAttr.size();
+
+    MaxFlow_AdjList maxFlowGraph(nbCells);
+"""
+    new_head = """void GraphFiller::binarize()
+{
+    // cheshire: the CSR graph by default (the same edges in the same order, a fraction of the build
+    // and teardown time); CHESHIRE_MAXFLOW_ADJLIST=1 keeps upstream's adjacency list, and
+    // CHESHIRE_MAXFLOW_CHECK=1 runs both on the same graph and compares flow value and labelling
+    if (std::getenv("CHESHIRE_MAXFLOW_CHECK") != nullptr)
+    {
+        std::vector<bool> csrFull, adjFull;
+        const float fCsr = binarizeImpl<MaxFlow_CSR>(csrFull);
+        const float fAdj = binarizeImpl<MaxFlow_AdjList>(adjFull);
+        std::size_t diff = 0;
+        for (std::size_t i = 0; i < csrFull.size(); ++i)
+            diff += (csrFull[i] != adjFull[i]);
+        ALICEVISION_LOG_INFO("cheshire: max-flow check: CSR flow " << fCsr << ", adjacency-list flow " << fAdj << (fCsr == fAdj ? " (identical)" : " (DIFFERENT)")
+                                                                  << "; cells labelled differently: " << diff << " of " << csrFull.size());
+        _cellIsFull.swap(csrFull);
+    }
+    else if (std::getenv("CHESHIRE_MAXFLOW_ADJLIST") != nullptr)
+        binarizeImpl<MaxFlow_AdjList>(_cellIsFull);
+    else
+        binarizeImpl<MaxFlow_CSR>(_cellIsFull);
+    _cellsAttr.clear();
+}
+
+template<class MaxFlowT>
+float GraphFiller::binarizeImpl(std::vector<bool>& cellIsFull)
+{
+    const std::size_t nbCells = _cellsAttr.size();
+
+    MaxFlowT maxFlowGraph(nbCells);
+"""
+    if old_head in t:
+        t = t.replace(old_head, new_head, 1)
+        t = t.replace("""    //Clear graph
+    _cellsAttr.clear();
+
+""", "", 1)
+        old_tail = """    _cellIsFull.resize(nbCells);
+    std::size_t nbFullCells = 0;
+    for (CellIndex ci = 0; ci < nbCells; ++ci)
+    {
+        _cellIsFull[ci] = maxFlowGraph.isTarget(ci);
+        nbFullCells += _cellIsFull[ci];
+    }
+}"""
+        new_tail = """    cellIsFull.resize(nbCells);
+    std::size_t nbFullCells = 0;
+    for (CellIndex ci = 0; ci < nbCells; ++ci)
+    {
+        cellIsFull[ci] = maxFlowGraph.isTarget(ci);
+        nbFullCells += cellIsFull[ci];
+    }
+    ALICEVISION_LOG_INFO("cheshire: max-flow value " << totalFlow << ", full cells " << nbFullCells);
+    return totalFlow;
+}"""
+        if old_tail not in t:
+            sys.exit("binarize tail not found")
+        t = t.replace(old_tail, new_tail, 1)
+        gfp.write_text(t, encoding="utf-8", newline=NL)
+    elif "binarizeImpl<MaxFlow_CSR>" not in t:
+        sys.exit("binarize head not found")
+
+
+    # 4i. parallel facet weights in binarize: two circumsphere centres and a few normalisations per
+    #     facet, 87 M facets single-threaded upstream (30 s); computed in parallel into a table and
+    #     the edges added in the same order with the same values (CHESHIRE_GPU_VOTE_LOG=1 recomputes
+    #     them sequentially and compares).
+    t = gfp.read_text(encoding="utf-8")
+    old_loop = """    // fill u-v directed edges
+    for (CellIndex ci = 0; ci < nbCells; ++ci)
+    {
+        for (VertexIndex k = 0; k < 4; ++k)
+        {
+            Facet fu(ci, k);
+            Facet fv = _tetrahedralization.mirrorFacet(fu);
+            if (_tetrahedralization.isInvalidOrInfiniteCell(fv.cellIndex))
+            {
+                continue;
+            }
+
+            float a1 = 0.0f;
+            float a2 = 0.0f;
+            if ((!_tetrahedralization.isInfiniteCell(fu.cellIndex)) && (!_tetrahedralization.isInfiniteCell(fv.cellIndex)))
+            {
+                // Score for each facet based on the quality of the topology
+                a1 = _tetrahedralization.getFaceWeight(fu);
+                a2 = _tetrahedralization.getFaceWeight(fv);
+            }
+
+            // In output of maxflow the cuts will become the surface.
+            // High weight on some facets will avoid cutting them.
+            float wFvFu = _cellsAttr[fu.cellIndex].gEdgeVisWeight[fu.localVertexIndex] * CONSTalphaVIS + a1 * CONSTalphaPHOTO;
+            float wFuFv = _cellsAttr[fv.cellIndex].gEdgeVisWeight[fv.localVertexIndex] * CONSTalphaVIS + a2 * CONSTalphaPHOTO;
+
+            maxFlowGraph.addEdge(fu.cellIndex, fv.cellIndex, wFuFv, wFvFu);
+        }
+    }
+"""
+    new_loop = """    // cheshire: the facet weights computed in parallel into a table (the same expressions per
+    // facet), then the u-v edges added in upstream's order
+    {
+        struct FacetEdge { std::uint32_t fv; float wFuFv, wFvFu; };
+        std::vector<FacetEdge> table(nbCells * 4);
+        auto computeFacet = [&](CellIndex ci, VertexIndex k, FacetEdge& out) {
+            Facet fu(ci, k);
+            Facet fv = _tetrahedralization.mirrorFacet(fu);
+            if (_tetrahedralization.isInvalidOrInfiniteCell(fv.cellIndex))
+            {
+                out.fv = 0xffffffffu; out.wFuFv = 0.0f; out.wFvFu = 0.0f;
+                return;
+            }
+            float a1 = 0.0f;
+            float a2 = 0.0f;
+            if ((!_tetrahedralization.isInfiniteCell(fu.cellIndex)) && (!_tetrahedralization.isInfiniteCell(fv.cellIndex)))
+            {
+                // Score for each facet based on the quality of the topology
+                a1 = _tetrahedralization.getFaceWeight(fu);
+                a2 = _tetrahedralization.getFaceWeight(fv);
+            }
+            // In output of maxflow the cuts will become the surface.
+            // High weight on some facets will avoid cutting them.
+            out.fv = (std::uint32_t)fv.cellIndex;
+            out.wFvFu = _cellsAttr[fu.cellIndex].gEdgeVisWeight[fu.localVertexIndex] * CONSTalphaVIS + a1 * CONSTalphaPHOTO;
+            out.wFuFv = _cellsAttr[fv.cellIndex].gEdgeVisWeight[fv.localVertexIndex] * CONSTalphaVIS + a2 * CONSTalphaPHOTO;
+        };
+#pragma omp parallel for schedule(static)
+        for (long long ci = 0; ci < (long long)nbCells; ++ci)
+            for (VertexIndex k = 0; k < 4; ++k)
+                computeFacet((CellIndex)ci, k, table[std::size_t(ci) * 4 + k]);
+        if (std::getenv("CHESHIRE_GPU_VOTE_LOG") != nullptr)
+        {
+            std::size_t bad = 0;
+            for (CellIndex ci = 0; ci < nbCells; ++ci)
+                for (VertexIndex k = 0; k < 4; ++k)
+                {
+                    FacetEdge seq;
+                    computeFacet(ci, k, seq);
+                    const FacetEdge& par = table[std::size_t(ci) * 4 + k];
+                    if (seq.fv != par.fv || seq.wFuFv != par.wFuFv || seq.wFvFu != par.wFvFu)
+                        ++bad;
+                }
+            ALICEVISION_LOG_INFO("cheshire: facet weight check: " << nbCells * 4 << " facets, differing from the sequential computation: " << bad);
+        }
+        for (CellIndex ci = 0; ci < nbCells; ++ci)
+            for (VertexIndex k = 0; k < 4; ++k)
+            {
+                const FacetEdge& e = table[std::size_t(ci) * 4 + k];
+                if (e.fv == 0xffffffffu)
+                    continue;
+                maxFlowGraph.addEdge(ci, e.fv, e.wFuFv, e.wFvFu);
+            }
+    }
+"""
+    if old_loop in t:
+        t = t.replace(old_loop, new_loop, 1)
+        gfp.write_text(t, encoding="utf-8", newline=NL)
+    elif "facet weight check" not in t:
+        sys.exit("binarize edge loop not found")
 
 
     # 5. regenerate the reviewable patch
