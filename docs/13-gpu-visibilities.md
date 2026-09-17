@@ -74,6 +74,11 @@ RX 6750 XT in the same machine, same bundle, same 41 views: passes 8.6 s and 6.8
 and 2.0 s), Meshing 157.0 s, the cut 3.2 s; the same vertex on every query, the same last-ulp
 distance note.
 
+The engine bay itself on that machine (the same SfM and filtered depth maps as the RX 9070 runs,
+copied over; i3-4330, RX 6750 XT, v0.2.11 bundle): Meshing 245.3 s, the same vertex as nanoflann
+on all 152,201,929 queries of each pass, the cut 7.1 s. The RX 9070 with 12 host threads does the
+same job in 159 s; the difference is almost all host work on four threads.
+
 ## What is left in Meshing
 
 With the visibility passes at 13 s together, Meshing on the engine bay is 159 s: the depth-map
