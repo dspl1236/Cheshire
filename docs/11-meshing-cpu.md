@@ -87,3 +87,45 @@ logs each iteration's time. Engine bay: the cleaning step 17.1 s to 12.9 s (setu
 4.0, 2.0, 2.1, 2.0 s per iteration, all single-threaded), Meshing 145.1 s to 139.0 s. What is
 left there is the serial per-point loop and the adjacency setup ([docs/13](13-gpu-visibilities.md)
 lists the order of the remaining Meshing work).
+
+## The dense point cloud
+
+Meshing starts by turning the filtered depth maps into a raw point array and thinning it: 42 s of
+the engine bay job, 20 s reading maps and 22 s in `filterByPixSize`. Apply step 4p
+([hip/port/fusion_filter/filterFusion.inc](../hip/port/fusion_filter/filterFusion.inc)) changes two
+things.
+
+The load loop runs one camera per thread on every core instead of three cameras at a time. Every
+point already lands in a slot whose index is a pure function of camera and block, the per-camera
+ranges are disjoint and nothing appends, so the thread count cannot change a value; running the
+6-view job on 1, 3 and 12 threads gives identical candidate counts, identical survivor counts and an
+identical round-by-round decision trace.
+
+The filter itself was the last racy stage in Meshing: it writes `pixSize = -1.0` into the very array
+the other threads' predicates are reading, so which of two mutual losers survives depended on
+timing. It now decides in index order, which is upstream's loop at one thread, computed in rounds
+that read only the previous round's decisions. `CHESHIRE_FILTER_CHECK=1` runs both in one process
+and compares every slot.
+
+The tree got smaller for a reason worth writing down: three quarters of the array is not points at
+all. Every block the load loop discards keeps the value the arrays were constructed with, the
+coordinate (0,0,0) with pixel size and similarity score zero, and upstream leaves all 50 million of
+them in the tree, where they behave as one very cheap point at the origin that underbids everything
+in reach. They are replaced by a single sentinel carrying the smallest score any of them presents.
+Two conditions make that exact, and both are measured on every call: the excluded slots must share
+one coordinate, and no candidate dropped mid-pass may underbid a live one. Upstream's function runs
+unchanged if either fails.
+
+| engine bay, 107 photos | before | after |
+|---|---|---|
+| load depth maps and add points | 20.1 s | 16.5 s |
+| first filter (61,154,352 slots, 10,728,129 of them points) | 21.6 s | 5.2 s |
+| Meshing end to end | 139.0 s | 112.4 s |
+
+The 6-view job: 17.3 s to 10.8 s. Every filter call on both jobs is identical to single-threaded
+upstream: 0 of 18,289,152 and 0 of 664,776 slots differ on the 6-view job, 0 of 61,154,352 and 0 of
+5,967,295 on the engine bay.
+
+The dense point cloud is now reproducible, but the mesh is not yet: the grid helper points seed from
+`random_device` unless `delaunaycut.seed` is non-zero, and the GPU vote and min-cut kernels both
+accumulate with float atomics, so two runs still differ by a handful of vertices.

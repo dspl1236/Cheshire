@@ -2206,19 +2206,20 @@ index 1a63489..c8a423c 100644
          ALICEVISION_LOG_INFO("KdTree created for " << verticesCoords.size() << " points.");
      }
 diff --git a/src/aliceVision/fuseCut/PointCloud.cpp b/src/aliceVision/fuseCut/PointCloud.cpp
-index 50a15fd..92bfa5f 100644
+index 50a15fd..79849a4 100644
 --- a/src/aliceVision/fuseCut/PointCloud.cpp
 +++ b/src/aliceVision/fuseCut/PointCloud.cpp
-@@ -4,6 +4,8 @@
+@@ -4,6 +4,9 @@
  // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <string>  // cheshire
 +#include <thread>  // cheshire
 +#include <algorithm>
  #include "PointCloud.hpp"
  
  #include <aliceVision/utils/filesIO.hpp>
-@@ -15,6 +17,14 @@
+@@ -15,6 +18,14 @@
  #include <aliceVision/mvsData/geometry.hpp>
  
  #include <aliceVision/fuseCut/Kdtree.hpp>
@@ -2233,7 +2234,16 @@ index 50a15fd..92bfa5f 100644
  
  #include <geogram/mesh/mesh.h>
  #include <geogram/basic/geometry_nd.h>
-@@ -35,7 +45,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
+@@ -27,7 +38,7 @@ namespace fuseCut {
+ namespace fs = std::filesystem;
+ 
+ /// Filter by pixSize
+-void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
++void filterByPixSizeUpstream(const std::vector<Point3d>& verticesCoordsPrepare,  // cheshire: filterFusion.inc keeps the name
+                      std::vector<double>& pixSizePrepare,
+                      double pixSizeMarginCoef,
+                      std::vector<float>& simScorePrepare)
+@@ -35,7 +46,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
  
      ALICEVISION_LOG_INFO("Build nanoflann KdTree index.");
      PointVectorAdaptator pointCloudRef(verticesCoordsPrepare);
@@ -2242,7 +2252,15 @@ index 50a15fd..92bfa5f 100644
      kdTree.buildIndex();
  
      ALICEVISION_LOG_INFO("KdTree created for " << verticesCoordsPrepare.size() << " points.");
-@@ -119,7 +129,7 @@ void removeInvalidPoints(std::vector<Point3d>& verticesCoordsPrepare,
+@@ -64,6 +75,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
+     }
+     ALICEVISION_LOG_INFO("Filtering done.");
+ }
++#include "aliceVision/fuseCut/filterFusion.inc"  // cheshire
+ 
+ /// Remove invalid points based on invalid pixSize
+ void removeInvalidPoints(std::vector<Point3d>& verticesCoordsPrepare, std::vector<double>& pixSizePrepare, std::vector<float>& simScorePrepare)
+@@ -119,7 +131,7 @@ void removeInvalidPoints(std::vector<Point3d>& verticesCoordsPrepare,
      verticesAttrPrepare.swap(verticesAttrTmp);
  }
  
@@ -2251,7 +2269,7 @@ index 50a15fd..92bfa5f 100644
                                      std::vector<Point3d>& verticesCoordsPrepare,
                                      std::vector<double>& pixSizePrepare,
                                      std::vector<float>& simScorePrepare,
-@@ -132,7 +142,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
+@@ -132,7 +144,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
  {
  
      PointVectorAdaptator pointCloudRef(verticesCoordsPrepare);
@@ -2260,7 +2278,7 @@ index 50a15fd..92bfa5f 100644
      kdTree.buildIndex();
      ALICEVISION_LOG_INFO("NANOFLANN: KdTree created.");
  
-@@ -244,6 +254,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
+@@ -244,6 +256,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
  
      ALICEVISION_LOG_INFO("Visibilities created.");
  }
@@ -2268,6 +2286,25 @@ index 50a15fd..92bfa5f 100644
  
  
  PointCloud::PointCloud(mvsUtils::MultiViewParams& mp) : _mp(mp)
+@@ -294,8 +307,16 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
+ 
+     ALICEVISION_LOG_INFO("Load depth maps and add points.");
+     {
+-        omp_set_nested(1);
+-#pragma omp parallel for num_threads(3)
++        // cheshire: one camera per thread on every core (upstream: three cameras at a time, each with a
++        // nested parallel loop over blocks). Every point lands in a fixed preallocated slot,
++        // index = startIndex[c] + sy * sxMax + sx, so the values do not depend on the thread count.
++        // CHESHIRE_FUSION_THREADS overrides; with one camera per thread the inner loop stays serial.
++        int cheshireFusionThreads = omp_get_max_threads();
++        if (const char* e = std::getenv("CHESHIRE_FUSION_THREADS"))
++            cheshireFusionThreads = std::max(1, std::atoi(e));
++        ALICEVISION_LOG_INFO("cheshire: loading depth maps on " << cheshireFusionThreads << " threads.");
++        omp_set_nested(cheshireFusionThreads > 1 ? 0 : 1);
++#pragma omp parallel for num_threads(cheshireFusionThreads)
+         for (int c = 0; c < cams.size(); c++)
+         {
+             image::Image<float> depthMap;
 diff --git a/src/aliceVision/fuseCut/Tetrahedralization.cpp b/src/aliceVision/fuseCut/Tetrahedralization.cpp
 index bd5e932..470a2b6 100644
 --- a/src/aliceVision/fuseCut/Tetrahedralization.cpp

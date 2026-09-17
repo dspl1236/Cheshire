@@ -1496,6 +1496,59 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
         t = t[:i] + "#include <cstdlib>  // cheshire" + NL + "#include <chrono>" + NL + t[i:]
         mcl.write_text(t, encoding="utf-8", newline=NL)
 
+    # 4p. The dense point cloud stage (42 s of Meshing on the engine bay: 20 s reading depth maps,
+    #     20 s building a nanoflann tree over all 61 M raw slots, 1 s of queries).
+    #     (a) the load loop runs one camera per thread on every core instead of three cameras with a
+    #         nested inner loop; every point already lands in a fixed preallocated slot, so the
+    #         result does not change. CHESHIRE_FUSION_THREADS overrides.
+    #     (b) filterByPixSize decides in ascending score order in rounds (one legitimate execution of
+    #         upstream's racy loop, and the same answer whatever the thread count) over a tree built
+    #         from the candidate points only. hip/port/fusion_filter/filterFusion.inc has the
+    #         reasoning and the margin check that makes leaving the rest out exact.
+    #         CHESHIRE_FILTER_OLD=1 keeps upstream, CHESHIRE_FILTER_CHECK=1 runs both and reports.
+    shutil.copy2(ROOT / "hip" / "port" / "fusion_filter" / "filterFusion.inc", AV / "src/aliceVision/fuseCut/filterFusion.inc")
+    pc = AV / "src/aliceVision/fuseCut/PointCloud.cpp"
+    t = pc.read_text(encoding="utf-8")
+    if "filterByPixSizeUpstream" not in t:
+        old = "void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,"
+        if t.count(old) != 1:
+            sys.exit("filterByPixSize definition not found once")
+        t = t.replace(old, "void filterByPixSizeUpstream(const std::vector<Point3d>& verticesCoordsPrepare,  // cheshire: filterFusion.inc keeps the name", 1)
+        end = '    ALICEVISION_LOG_INFO("Filtering done.");' + NL + "}" + NL
+        if t.count(end) != 1:
+            sys.exit("end of filterByPixSize not found once")
+        t = t.replace(end, end + '#include "aliceVision/fuseCut/filterFusion.inc"  // cheshire' + NL, 1)
+        pc.write_text(t, encoding="utf-8", newline=NL)
+    t = pc.read_text(encoding="utf-8")
+    if "CHESHIRE_FUSION_THREADS" not in t:
+        old = ("        omp_set_nested(1);" + NL
+               + "#pragma omp parallel for num_threads(3)" + NL
+               + "        for (int c = 0; c < cams.size(); c++)" + NL
+               + "        {" + NL
+               + "            image::Image<float> depthMap;" + NL)
+        if t.count(old) != 1:
+            sys.exit("dense point cloud load loop not found once")
+        new = ("        // cheshire: one camera per thread on every core (upstream: three cameras at a time, each with a" + NL
+               + "        // nested parallel loop over blocks). Every point lands in a fixed preallocated slot," + NL
+               + "        // index = startIndex[c] + sy * sxMax + sx, so the values do not depend on the thread count." + NL
+               + "        // CHESHIRE_FUSION_THREADS overrides; with one camera per thread the inner loop stays serial." + NL
+               + "        int cheshireFusionThreads = omp_get_max_threads();" + NL
+               + "        if (const char* e = std::getenv(\"CHESHIRE_FUSION_THREADS\"))" + NL
+               + "            cheshireFusionThreads = std::max(1, std::atoi(e));" + NL
+               + "        ALICEVISION_LOG_INFO(\"cheshire: loading depth maps on \" << cheshireFusionThreads << \" threads.\");" + NL
+               + "        omp_set_nested(cheshireFusionThreads > 1 ? 0 : 1);" + NL
+               + "#pragma omp parallel for num_threads(cheshireFusionThreads)" + NL
+               + "        for (int c = 0; c < cams.size(); c++)" + NL
+               + "        {" + NL
+               + "            image::Image<float> depthMap;" + NL)
+        t = t.replace(old, new, 1)
+        pc.write_text(t, encoding="utf-8", newline=NL)
+    t = pc.read_text(encoding="utf-8")
+    if "#include <string>  // cheshire" not in t:
+        i = t.index("#include")
+        t = t[:i] + "#include <string>  // cheshire" + NL + t[i:]
+        pc.write_text(t, encoding="utf-8", newline=NL)
+
     # 5. regenerate the reviewable patch
     subprocess.run(["git", "add", "-N", "src/aliceVision/depthMap/cuda/hip"], cwd=AV, check=True)
     diff = subprocess.run(["git", "diff", "--no-color"], cwd=AV, check=True, capture_output=True, text=True).stdout
