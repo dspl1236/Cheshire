@@ -62,6 +62,14 @@ thousand in 111 M because the point cloud that enters Meshing is itself produced
 upstream stage (the depth-map fusion), not by this code; given the same cloud, the pass is
 deterministic.
 
+RX 5500 XT on Linux (house-pc, i3-4330, the v0.2.11 bundle, 41 views, 88.3 M queries per pass):
+the device names the same vertex as nanoflann on every query of both passes, with either form of
+the metric; about 20 % of the squared distances differ in the last ulp with both forms, so the
+generic-x86-64 gcc build arranges the three products a third way. The distance only enters the
+vote thresholds, where a last-ulp change would need an exact tie to matter. Passes 57 s and 52 s
+to 18.3 s and 15.0 s (the kernel itself is 15 s and 13 s on RDNA1's double-precision rate, mostly
+overlapped), Meshing 273.7 s (v0.2.10) to 200.9 s.
+
 ## What is left in Meshing
 
 With the visibility passes at 13 s together, Meshing on the engine bay is 159 s: the depth-map
