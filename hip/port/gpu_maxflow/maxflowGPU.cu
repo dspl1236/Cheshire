@@ -79,6 +79,24 @@ __global__ void fillKernel(std::uint32_t* __restrict__ a, std::uint32_t n, std::
 
 __global__ void setKernel(std::uint32_t* __restrict__ a, std::uint32_t v) { *a = v; }
 
+// append to the next frontier with one global atomic per block: threads stage their finds in
+// shared memory, the block reserves a range, then copies
+struct FrontierAppend
+{
+    std::uint32_t* stage; std::uint32_t* stageCount; std::uint32_t* base;
+    __device__ __forceinline__ void flush(std::uint32_t* __restrict__ next, std::uint32_t* __restrict__ nextCount)
+    {
+        __syncthreads();
+        if (threadIdx.x == 0 && *stageCount) *base = atomicAdd(nextCount, *stageCount);
+        __syncthreads();
+        for (std::uint32_t i = threadIdx.x; i < *stageCount; i += blockDim.x) next[*base + i] = stage[i];
+        __syncthreads();
+        if (threadIdx.x == 0) *stageCount = 0;
+        __syncthreads();
+    }
+};
+constexpr int kStage = 2048;   // per-block staging slots (a frontier node has at most a handful of neighbours)
+
 // one BFS level from the sink: for every frontier node u, every neighbour w with residual(w->u) > 0
 // that is still unlabelled gets level + 1 and joins the next frontier (pinned nodes never do)
 __global__ void bfsLevelKernel(const std::uint32_t* __restrict__ frontier, const std::uint32_t* __restrict__ nbFrontier, std::uint32_t level,
@@ -87,20 +105,59 @@ __global__ void bfsLevelKernel(const std::uint32_t* __restrict__ frontier, const
                                const std::uint8_t* __restrict__ pinned, std::uint32_t* __restrict__ height, std::uint32_t unlabelled,
                                std::uint32_t* __restrict__ next, std::uint32_t* __restrict__ nextCount)
 {
+    __shared__ std::uint32_t stage[kStage];
+    __shared__ std::uint32_t stageCount, base;
+    if (threadIdx.x == 0) stageCount = 0;
+    __syncthreads();
+    FrontierAppend fa{stage, &stageCount, &base};
     const std::uint32_t n = *nbFrontier;
-    for (std::uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += gridDim.x * blockDim.x) {
-        const std::uint32_t u = frontier[i];
-        const std::uint32_t e0 = rowstart[u], e1 = rowstart[u + 1];
-        for (std::uint32_t e = e0; e < e1; ++e) {
-            if (residual[partner[e]] <= 0.0f) continue;   // w -> u must have capacity left
-            const std::uint32_t w = target[e];
-            if (pinned[w]) continue;
-            if (atomicCAS(&height[w], unlabelled, level + 1) == unlabelled) {
-                const std::uint32_t slot = atomicAdd(nextCount, 1u);
-                next[slot] = w;
+    const std::uint32_t stride = gridDim.x * blockDim.x;
+    // every thread of the block runs the same number of iterations so the block-wide flushes line up
+    const std::uint32_t iters = (n + stride - 1) / stride;
+    for (std::uint32_t it = 0; it < iters; ++it) {
+        const std::uint32_t i = it * stride + blockIdx.x * blockDim.x + threadIdx.x;
+        if (i < n) {
+            const std::uint32_t u = frontier[i];
+            const std::uint32_t e0 = rowstart[u], e1 = rowstart[u + 1];
+            for (std::uint32_t e = e0; e < e1; ++e) {
+                if (residual[partner[e]] <= 0.0f) continue;   // w -> u must have capacity left
+                const std::uint32_t w = target[e];
+                if (pinned[w]) continue;
+                if (atomicCAS(&height[w], unlabelled, level + 1) == unlabelled) {
+                    const std::uint32_t s = atomicAdd(&stageCount, 1u);
+                    if (s < kStage) stage[s] = w;
+                    else { const std::uint32_t slot = atomicAdd(nextCount, 1u); next[slot] = w; }   // overflow: straight to global
+                }
             }
         }
+        // stageCount may exceed kStage by the overflow path; clamp for the copy
+        __syncthreads();
+        if (threadIdx.x == 0 && stageCount > kStage) stageCount = kStage;
+        fa.flush(next, nextCount);
     }
+}
+
+// the first level from the sink, one thread per sink edge: the sink's list holds one edge per cell
+__global__ void bfsSinkLevelKernel(std::uint32_t t, const std::uint32_t* __restrict__ rowstart, const std::uint32_t* __restrict__ target,
+                                   const std::uint32_t* __restrict__ partner, const float* __restrict__ residual,
+                                   const std::uint8_t* __restrict__ pinned, std::uint32_t* __restrict__ height, std::uint32_t unlabelled,
+                                   std::uint32_t* __restrict__ next, std::uint32_t* __restrict__ nextCount)
+{
+    __shared__ std::uint32_t stage[kStage];
+    __shared__ std::uint32_t stageCount, base;
+    if (threadIdx.x == 0) stageCount = 0;
+    __syncthreads();
+    FrontierAppend fa{stage, &stageCount, &base};
+    const std::uint32_t e0 = rowstart[t], e1 = rowstart[t + 1];
+    const std::uint32_t e = e0 + blockIdx.x * blockDim.x + threadIdx.x;
+    if (e < e1 && residual[partner[e]] > 0.0f) {
+        const std::uint32_t w = target[e];
+        if (!pinned[w] && atomicCAS(&height[w], unlabelled, 1u) == unlabelled) {
+            const std::uint32_t s = atomicAdd(&stageCount, 1u);
+            stage[s] = w;   // at most blockDim.x per block
+        }
+    }
+    fa.flush(next, nextCount);
 }
 
 // the nodes that can still act: excess, below the top, not the terminals
@@ -177,11 +234,13 @@ bool globalRelabel(const Graph& g, Device& d, int& levels, int levelsPerSync)
     fillKernel<<<(V + kBlock - 1) / kBlock, kBlock>>>(d.height, V, V);
     const std::uint32_t zero = 0;
     if (cudaMemcpy(d.height + g.sink, &zero, 4, cudaMemcpyHostToDevice) != cudaSuccess) return false;
-    if (cudaMemcpy(d.listA, &g.sink, 4, cudaMemcpyHostToDevice) != cudaSuccess) return false;
-    setKernel<<<1, 1>>>(d.countA, 1u);
+    // level 1 straight from the sink's edge list, one thread per edge (the sink lists every cell)
+    setKernel<<<1, 1>>>(d.countA, 0u);
+    const std::uint32_t nbSinkEdges = g.rowstart[g.sink + 1] - g.rowstart[g.sink];
+    if (nbSinkEdges) bfsSinkLevelKernel<<<(nbSinkEdges + kBlock - 1) / kBlock, kBlock>>>(g.sink, d.rowstart, d.target, d.partner, d.residual, d.pinned, d.height, V, d.listA, d.countA);
     std::uint32_t* cur = d.listA; std::uint32_t* nxt = d.listB;
     std::uint32_t* curCount = d.countA; std::uint32_t* nxtCount = d.countB;
-    levels = 0;
+    levels = 1;
     for (;;) {
         for (int k = 0; k < levelsPerSync; ++k) {
             setKernel<<<1, 1>>>(nxtCount, 0u);
@@ -229,8 +288,9 @@ bool minCut(const Graph& g, std::vector<std::uint8_t>& sinkSide, Stats& stats, i
     const std::uint32_t nbSourceEdges = g.rowstart[g.source + 1] - g.rowstart[g.source];
     if (nbSourceEdges) initSourceKernel<<<(nbSourceEdges + kBlock - 1) / kBlock, kBlock>>>(g.source, d.rowstart, d.target, d.partner, d.residual, d.excess, d.pinned);
     if (cudaDeviceSynchronize() != cudaSuccess) return false;
+    if (verbose) std::fprintf(stderr, "[maxflow] uploads and source saturation: %.2f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 
-    const int relabelEvery = envInt("CHESHIRE_MAXFLOW_RELABEL_EVERY", 1024);   // sweeps between global relabels, queued without host syncs (engine bay: 256 -> 47 s, 1024 -> 35 s)
+    const int relabelEvery = envInt("CHESHIRE_MAXFLOW_RELABEL_EVERY", 128);   // sweeps between global relabels, queued without host syncs (engine bay: 32 -> 7.4 s, 128 -> 5.3 s, 512 -> 8.3 s)
     const int levelsPerSync = envInt("CHESHIRE_MAXFLOW_BFS_BATCH", 32);
     int levels = 0;
     if (!globalRelabel(g, d, levels, levelsPerSync)) return false;
@@ -239,36 +299,44 @@ bool minCut(const Graph& g, std::vector<std::uint8_t>& sinkSide, Stats& stats, i
 
     stats.pulses = 0;
     const unsigned nodeGrid = (V + kBlock - 1) / kBlock;
-    auto sweep = [&](int count) {
-        for (int k = 0; k < count; ++k) {
-            setKernel<<<1, 1>>>(d.countA, 0u);
-            collectActiveKernel<<<nodeGrid, kBlock>>>(V, g.source, g.sink, d.excess, d.height, d.pinned, d.listA, d.countA);
-            pushRelabelKernel<<<kGrid, kBlock>>>(d.listA, d.countA, V, d.rowstart, d.target, d.partner, d.residual, d.excess, d.height, d.work);
+    const int checkEvery = envInt("CHESHIRE_MAXFLOW_CHECK_EVERY", 16);   // sweeps between looks at the active count
+    double sweepSec = 0, relabelSec = 0;
+    auto now = [] { return std::chrono::steady_clock::now(); };
+    auto secs = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) { return std::chrono::duration<double>(b - a).count(); };
+    // sweeps until the active set is empty or the batch is used up; returns the active count seen last
+    auto sweepUntilQuiet = [&](int maxSweeps, std::uint32_t& activeOut) -> bool {
+        const auto ts = now();
+        activeOut = 1;
+        for (int k = 0; k < maxSweeps && activeOut > 0; k += checkEvery) {
+            for (int j = 0; j < checkEvery; ++j) {
+                setKernel<<<1, 1>>>(d.countA, 0u);
+                collectActiveKernel<<<nodeGrid, kBlock>>>(V, g.source, g.sink, d.excess, d.height, d.pinned, d.listA, d.countA);
+                pushRelabelKernel<<<kGrid, kBlock>>>(d.listA, d.countA, V, d.rowstart, d.target, d.partner, d.residual, d.excess, d.height, d.work);
+            }
+            stats.pulses += checkEvery;
+            if (cudaMemcpy(&activeOut, d.countA, 4, cudaMemcpyDeviceToHost) != cudaSuccess) return false;
         }
-        stats.pulses += count;
+        sweepSec += secs(ts, now());
+        return true;
     };
+    float lastFlow = -1.0f;
     for (;;) {
-        if (cudaMemset(d.work, 0, 4) != cudaSuccess) return false;
-        sweep(relabelEvery);
-        unsigned working = 0;
-        if (cudaMemcpy(&working, d.work, 4, cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+        std::uint32_t active = 0;
+        if (!sweepUntilQuiet(relabelEvery, active)) return false;
+        const auto tr = now();
         if (!globalRelabel(g, d, levels, levelsPerSync)) return false;
+        relabelSec += secs(tr, now());
         ++stats.globalRelabels;
-        if (working == 0) {
-            // nothing moved in a whole batch: one sweep with fresh heights decides
-            if (cudaMemset(d.work, 0, 4) != cudaSuccess) return false;
-            sweep(1);
-            if (cudaMemcpy(&working, d.work, 4, cudaMemcpyDeviceToHost) != cudaSuccess) return false;
-            if (working == 0) break;
-        }
-        if (verbose > 1) {
-            float flow = 0; std::uint32_t active = 0;
-            if (cudaMemcpy(&flow, d.excess + g.sink, 4, cudaMemcpyDeviceToHost) != cudaSuccess) return false;
-            if (cudaMemcpy(&active, d.countA, 4, cudaMemcpyDeviceToHost) != cudaSuccess) return false;
-            std::fprintf(stderr, "[maxflow] pulses %d, global relabels %d (%d levels), active %u, flow so far %.6g, %.1f s\n", stats.pulses, stats.globalRelabels, levels, active, flow,
-                         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
-        }
+        float flow = 0;
+        if (cudaMemcpy(&flow, d.excess + g.sink, 4, cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+        if (verbose > 1)
+            std::fprintf(stderr, "[maxflow] sweeps %d, global relabels %d (%d levels), active before relabel %u, flow so far %.7g, sweeps %.1f s, relabels %.1f s\n",
+                         stats.pulses, stats.globalRelabels, levels, active, flow, sweepSec, relabelSec);
+        // done when a batch drained the active set and the fresh heights changed nothing at the sink
+        if (active == 0 && flow == lastFlow) break;
+        lastFlow = flow;
     }
+    if (verbose) std::fprintf(stderr, "[maxflow] sweeps %.2f s, global relabels %.2f s\n", sweepSec, relabelSec);
     // the last global relabel is the final labelling: what still reaches the sink
     std::vector<std::uint32_t> h(V);
     if (cudaMemcpy(h.data(), d.height, size_t(V) * 4, cudaMemcpyDeviceToHost) != cudaSuccess) return false;
