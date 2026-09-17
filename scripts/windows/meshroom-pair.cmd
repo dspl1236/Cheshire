@@ -69,8 +69,8 @@ if exist "%PKG%\bin\aliceVision_texturing.exe" (
 if defined TXOK ( call :pair aliceVision_texturing ) else ( echo package's aliceVision_texturing has no GPU pass ^(pre-v0.2.8^): not paired )
 rem PrepareDenseScene (v0.2.9+): the package's prepareDenseScene runs its image loop on every core; gate on its help text
 set PDOK=
-if exist "%PKG%inliceVision_prepareDenseScene.exe" (
-  "%PKG%inliceVision_prepareDenseScene.exe" --help > "%TEMP%\cheshire-pd-help.txt" 2>&1
+if exist "%PKG%\bin\aliceVision_prepareDenseScene.exe" (
+  "%PKG%\bin\aliceVision_prepareDenseScene.exe" --help > "%TEMP%\cheshire-pd-help.txt" 2>&1
   findstr /c:"CHESHIRE_PDS_THREADS" "%TEMP%\cheshire-pd-help.txt" >nul 2>&1 && set PDOK=1
   del /q "%TEMP%\cheshire-pd-help.txt" 2>nul
 )
