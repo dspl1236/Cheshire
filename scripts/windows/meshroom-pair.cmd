@@ -22,7 +22,7 @@ if "%PKG%"=="" ( echo usage: %~nx0 ^<Meshroom dir^> ^<Cheshire package dir^> ^| 
 set BIN=%MR%\aliceVision\bin
 if not exist "%BIN%\" ( echo %BIN% not found: is %MR% a Meshroom 2023.x Windows install? & exit /b 1 )
 if /i "%PKG%"=="--unpair" (
-  for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_depthMapFiltering aliceVision_meshing) do call :unpair %%N
+  for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing) do call :unpair %%N
   exit /b 0
 )
 if not exist "%PKG%\bin\aliceVision_depthMapEstimation.exe" ( echo no HIP aliceVision_depthMapEstimation.exe in %PKG%\bin & exit /b 1 )
@@ -59,6 +59,14 @@ if exist "%PKG%\bin\aliceVision_meshing.exe" (
   del /q "%TEMP%\cheshire-ms-help.txt" 2>nul
 )
 if defined MSOK ( call :pair aliceVision_meshing ) else ( echo package's aliceVision_meshing has no GPU votes ^(pre-v0.2.7^): not paired )
+rem Texturing (v0.2.8+): the package's texturing carries the GPU pyramid + rasterisation; gate on its help text
+set TXOK=
+if exist "%PKG%\bin\aliceVision_texturing.exe" (
+  "%PKG%\bin\aliceVision_texturing.exe" --help > "%TEMP%\cheshire-tx-help.txt" 2>&1
+  findstr /c:"CHESHIRE_GPU_TEX" "%TEMP%\cheshire-tx-help.txt" >nul 2>&1 && set TXOK=1
+  del /q "%TEMP%\cheshire-tx-help.txt" 2>nul
+)
+if defined TXOK ( call :pair aliceVision_texturing ) else ( echo package's aliceVision_texturing has no GPU pass ^(pre-v0.2.8^): not paired )
 exit /b 0
 
 :pair

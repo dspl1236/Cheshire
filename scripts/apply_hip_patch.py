@@ -61,6 +61,9 @@ TRACKED = [
     "src/aliceVision/fuseCut/CMakeLists.txt",
     "src/software/pipeline/main_depthMapFiltering.cpp",
     "src/aliceVision/fuseCut/GraphFiller.cpp",
+    "src/aliceVision/mesh/Texturing.cpp",
+    "src/aliceVision/mesh/CMakeLists.txt",
+    "src/software/pipeline/main_texturing.cpp",
 ]
 
 
@@ -704,6 +707,280 @@ endif()
         t = t.replace("    list(APPEND fuseCut_files_sources gpu/depthMapFilterGPU.cu)", "    list(APPEND fuseCut_files_sources gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu)", 1)
         t = t.replace("        set_source_files_properties(gpu/depthMapFilterGPU.cu PROPERTIES LANGUAGE HIP)", "        set_source_files_properties(gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu PROPERTIES LANGUAGE HIP)", 1)
         fc.write_text(t, encoding="utf-8", newline=NL)
+
+
+    # 4f. GPU texturing (hip/port/gpu_texturing): Texturing::generateTexturesSubSet's per-camera
+    #     Laplacian pyramid + rasterisation and the final normalise/fuse on the GPU.
+    gt_dst = AV / "src/aliceVision/mesh/gpu"
+    gt_dst.mkdir(parents=True, exist_ok=True)
+    for f in ("texturingGPU.hpp", "texturingGPU.cu"):
+        shutil.copy2(ROOT / "hip" / "port" / "gpu_texturing" / f, gt_dst / f)
+    tx = AV / "src/aliceVision/mesh/Texturing.cpp"
+    patch(tx, '#include "Texturing.hpp"' + NL,
+          '#include <cstdlib>  // cheshire' + NL + '#include <cstdint>' + NL + '#ifdef ALICEVISION_HAVE_GPU_TEX' + NL + '#include "aliceVision/mesh/gpu/texturingGPU.hpp"  // cheshire' + NL + '#include <chrono>' + NL + 'static int cheshirePrefetchDepth = 1;  // cameras read ahead of the one on the GPU (image cache slots - 1)' + NL + '#endif' + NL)
+    # chunk size: what the card holds (the host keeps one atlas at a time on the GPU path)
+    patch(tx, '    ALICEVISION_LOG_INFO("Total amount of available RAM: " << availableRam << " MB.");' + NL, """#ifdef ALICEVISION_HAVE_GPU_TEX
+    // cheshire: the accumulators live in VRAM, so the chunk is what the card holds
+    if (imageType != mvsUtils::EFileType::normalMap && gpu::texAvailable())
+    {
+        const int slots = gpu::maxAtlasSlots(texParams.textureSide, texParams.nbBand, mp.getMaxImageWidth(), mp.getMaxImageHeight(), (std::uint32_t)mesh->tris.size());
+        if (slots >= 1)
+        {
+            nbAtlasMax = std::min(nbAtlas, slots);
+            ALICEVISION_LOG_INFO("cheshire: " << slots << " atlas slots fit in VRAM, processing by chunks of " << nbAtlasMax);
+            // the host holds no atlas pyramids on this path; if the images fit in RAM keep them all,
+            // so a second chunk re-reads nothing (4 GB margin for the mesh, one atlas and the writer)
+            const std::size_t allImagesMB = std::size_t(mp.ncams) * imageMaxMemSize;
+            if (availableRam > 4096 && std::size_t(availableRam - 4096) > allImagesMB)
+            {
+                imageCache.setCacheSize(mp.ncams);
+                cheshirePrefetchDepth = 4;
+                ALICEVISION_LOG_INFO("cheshire: keeping all " << mp.ncams << " images in RAM (" << allImagesMB << " MB), reading 4 cameras ahead");
+            }
+            else if (availableRam > 4096 && std::size_t(availableRam - 4096) > 5 * imageMaxMemSize)
+            {
+                imageCache.setCacheSize(5);
+                cheshirePrefetchDepth = 4;
+                ALICEVISION_LOG_INFO("cheshire: reading 4 cameras ahead");
+            }
+        }
+    }
+#endif
+""", after=False)
+    patch(tx, '    ALICEVISION_LOG_INFO("Reading pixel color.");' + NL, """#ifdef ALICEVISION_HAVE_GPU_TEX
+    // cheshire: per camera, upload the image; pyramid, rasterisation and the final fuse on the GPU
+    if (imageType != mvsUtils::EFileType::normalMap && gpu::texAvailable())
+    {
+        const bool log = std::getenv("CHESHIRE_GPU_TEX_LOG") != nullptr;
+        gpu::Texturer tex;
+        bool ok = tex.init((int)atlasIDs.size(), texParams.textureSide, texParams.nbBand, texParams.multiBandDownscale, mp.getMaxImageWidth(), mp.getMaxImageHeight());
+        if (ok)
+        {
+            // triangle tables for this chunk's atlases: 3D vertices and texture-pixel positions (UDIM tile remapped)
+            const std::uint32_t nbTris = (std::uint32_t)mesh->tris.size();
+            std::vector<double> tp(std::size_t(nbTris) * 9, 0.0), tpx(std::size_t(nbTris) * 6, 0.0);
+            const StaticVector<Point2d>& uvCoords = mesh->uvCoords;
+            for (const std::size_t atlasID : atlasIDs)
+                for (std::size_t i = 0; i < _atlases[atlasID].size(); ++i)
+                {
+                    const int triangleId = _atlases[atlasID][i];
+                    auto& triangleUvIds = mesh->trisUvIds[triangleId];
+                    Point2d udimBL;
+                    udimBL.x = std::floor(std::min({uvCoords[triangleUvIds[0]].x, uvCoords[triangleUvIds[1]].x, uvCoords[triangleUvIds[2]].x}));
+                    udimBL.y = std::floor(std::min({uvCoords[triangleUvIds[0]].y, uvCoords[triangleUvIds[1]].y, uvCoords[triangleUvIds[2]].y}));
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const Point3d& pt = mesh->pts[mesh->tris[triangleId].v[k]];
+                        double* o = &tp[std::size_t(triangleId) * 9 + k * 3];
+                        o[0] = pt.x; o[1] = pt.y; o[2] = pt.z;
+                        Point2d uv = uvCoords[triangleUvIds.m[k]];
+                        uv = uv - udimBL;
+                        const Point2d pix = uv * texParams.textureSide;
+                        tpx[std::size_t(triangleId) * 6 + k * 2] = pix.x;
+                        tpx[std::size_t(triangleId) * 6 + k * 2 + 1] = pix.y;
+                    }
+                }
+            ok = tex.setTriangles(nbTris, tp.data(), tpx.data());
+        }
+        double loadSec = 0.0;
+        int prefetched = -1;   // highest camera id already handed to the cache's reader threads
+        std::vector<std::uint32_t> ids;
+        std::vector<float> scores;
+        for (int camId = 0; ok && camId < (int)contributionsPerCamera.size(); ++camId)
+        {
+            const std::map<AtlasIndex, std::vector<ScorePerTriangle>>& cameraContributions = contributionsPerCamera[camId];
+            if (cameraContributions.empty())
+            {
+                ALICEVISION_LOG_INFO("- camera " << mp.getViewId(camId) << " (" << camId + 1 << "/" << mp.ncams << ") unused.");
+                continue;
+            }
+            ALICEVISION_LOG_INFO("- camera " << mp.getViewId(camId) << " (" << camId + 1 << "/" << mp.ncams << ") with contributions to "
+                                             << cameraContributions.size() << " texture files:");
+            const auto tl0 = std::chrono::steady_clock::now();
+            auto imgPtr = imageCache.getImg_sync(camId);
+            const image::Image<image::RGBfColor>& camImg = *imgPtr;
+            loadSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - tl0).count();
+
+            if (camImg.width() != mp.getWidth(camId) || camImg.height() != mp.getHeight(camId))
+            {
+                ok = false;
+                break;
+            }
+            const Matrix3x4& M = mp.camArr[camId];
+            const double P[12] = {M.m11, M.m12, M.m13, M.m14, M.m21, M.m22, M.m23, M.m24, M.m31, M.m32, M.m33, M.m34};
+            ok = tex.setCamera(reinterpret_cast<const float*>(camImg.data()), camImg.width(), camImg.height(), P);
+            // read the next used cameras' images while this one is rasterised: the cache loads
+            // different cameras concurrently, one thread each, up to its slot count minus this one
+            for (int next = camId + 1, ahead = 0; next < (int)contributionsPerCamera.size() && ahead < cheshirePrefetchDepth; ++next)
+                if (!contributionsPerCamera[next].empty())
+                {
+                    if (next > prefetched)
+                    {
+                        imageCache.refreshImage_async(next);
+                        prefetched = next;
+                    }
+                    ++ahead;
+                }
+            for (const auto& c : cameraContributions)
+            {
+                if (!ok)
+                    break;
+                const AtlasIndex atlasID = c.first;
+                const int slot = (int)(std::find(atlasIDs.begin(), atlasIDs.end(), atlasID) - atlasIDs.begin());
+                ALICEVISION_LOG_INFO("  - Texture file: " << atlasID + 1);
+                for (int band = 0; ok && band < (int)c.second.size(); ++band)
+                {
+                    const ScorePerTriangle& trianglesId = c.second[band];
+                    ALICEVISION_LOG_INFO("      - band " << band + 1 << ": " << trianglesId.size() << " triangles.");
+                    ids.resize(trianglesId.size());
+                    scores.resize(trianglesId.size());
+                    for (std::size_t i = 0; i < trianglesId.size(); ++i)
+                    {
+                        ids[i] = std::get<0>(trianglesId[i]);
+                        scores[i] = texParams.useScore ? std::get<1>(trianglesId[i]) : 1.0f;
+                    }
+                    ok = tex.raster(slot, band, ids.data(), scores.data(), (std::uint32_t)ids.size());
+                }
+            }
+        }
+        for (std::size_t s = 0; ok && s < atlasIDs.size(); ++s)
+        {
+            const std::size_t atlasID = atlasIDs[s];
+            ALICEVISION_LOG_INFO("Create texture " << atlasID + 1);
+            AccuImage atlasTexture;
+            atlasTexture.resize(texParams.textureSide, texParams.textureSide);
+            ok = tex.finish((int)s, reinterpret_cast<float*>(atlasTexture.img.data()), atlasTexture.imgCount.data());
+            if (!ok)
+                break;
+            writeTexture(atlasTexture, atlasID, outPath, textureFileType, -1, imageType);
+        }
+        if (log)
+            ALICEVISION_LOG_INFO("cheshire texturing profile: image loads " << loadSec << " s, uploads " << tex.uploadSec << " s, pyramids " << tex.pyramidSec
+                                                                            << " s, rasterisation " << tex.rasterSec << " s, finish " << tex.finishSec << " s");
+        if (ok)
+            return;
+        ALICEVISION_LOG_WARNING("cheshire: GPU texturing failed, falling back to the CPU loop");
+    }
+#endif
+""")
+    # parallel triangle scoring (Texturing::generateTexturesSubSet): the single-threaded selection of
+    # the best cameras per triangle scored into per-range lists in parallel and merged in triangle
+    # order, so the lists are exactly the sequential ones
+    patch(tx, """        // iterate over atlas' triangles
+        for (size_t i = 0; i < _atlases[atlasID].size(); ++i)
+        {
+            int triangleID = _atlases[atlasID][i];
+""", """        // cheshire: contiguous triangle ranges scored in parallel into their own lists, merged in order below
+        const std::size_t nbAtlasTris = _atlases[atlasID].size();
+        int nbParts = std::max(1, std::min(256, (int)(nbAtlasTris / 2048)));
+        if (const char* pe = std::getenv("CHESHIRE_TEX_PARTS")) nbParts = std::max(1, std::atoi(pe));   // 1: the sequential loop
+        std::vector<std::vector<std::map<AtlasIndex, std::vector<ScorePerTriangle>>>> partialContributions(
+          nbParts, std::vector<std::map<AtlasIndex, std::vector<ScorePerTriangle>>>(mp.ncams));
+#pragma omp parallel for schedule(static)
+        for (int part = 0; part < nbParts; ++part)
+        for (size_t i = nbAtlasTris * part / nbParts; i < nbAtlasTris * (part + 1) / nbParts; ++i)
+        {
+            auto& contributionsPerCamera = partialContributions[part];
+            int triangleID = _atlases[atlasID][i];
+""", after=False)
+    t = tx.read_text(encoding="utf-8")
+    dup = """        // iterate over atlas' triangles
+        for (size_t i = 0; i < _atlases[atlasID].size(); ++i)
+        {
+            int triangleID = _atlases[atlasID][i];
+"""
+    if t.count(dup) == 1:
+        t = t.replace(dup, "", 1)
+        tx.write_text(t, encoding="utf-8", newline=NL)
+    patch(tx, """                if (contrib + 1 == texParams.multiBandNbContrib[band])
+                {
+                    ++band;
+                }
+            }
+        }
+    }
+
+    ALICEVISION_LOG_INFO("Reading pixel color.");""", """                if (contrib + 1 == texParams.multiBandNbContrib[band])
+                {
+                    ++band;
+                }
+            }
+        }
+        for (int part = 0; part < nbParts; ++part)
+            for (int camId = 0; camId < mp.ncams; ++camId)
+                for (auto& perAtlas : partialContributions[part][camId])
+                {
+                    auto& camContribution = contributionsPerCamera[camId];
+                    if (camContribution.find(perAtlas.first) == camContribution.end())
+                        camContribution[perAtlas.first].resize(texParams.nbBand);
+                    auto& dst = camContribution.at(perAtlas.first);
+                    for (std::size_t band = 0; band < perAtlas.second.size(); ++band)
+                        dst[band].insert(dst[band].end(), perAtlas.second[band].begin(), perAtlas.second[band].end());
+                }
+    }
+    if (std::getenv("CHESHIRE_GPU_TEX_LOG") != nullptr)
+    {
+        // order-sensitive checksum of every (camera, atlas, band) list, to compare CHESHIRE_TEX_PARTS=1 against the default
+        std::uint64_t h = 1469598103934665603ull; std::size_t n = 0;
+        for (std::size_t camId = 0; camId < contributionsPerCamera.size(); ++camId)
+            for (const auto& perAtlas : contributionsPerCamera[camId])
+                for (std::size_t band = 0; band < perAtlas.second.size(); ++band)
+                    for (const auto& ts : perAtlas.second[band])
+                    {
+                        const std::uint64_t v[4] = {camId, perAtlas.first * 16 + band, ts.first, (std::uint64_t)ts.second};
+                        for (std::uint64_t x : v) { h ^= x; h *= 1099511628211ull; }
+                        ++n;
+                    }
+        ALICEVISION_LOG_INFO("cheshire: contributions checksum " << std::hex << h << std::dec << " over " << n << " entries");
+    }
+
+    ALICEVISION_LOG_INFO("Reading pixel color.");""", after=False)
+    t = tx.read_text(encoding="utf-8")
+    dup = """                if (contrib + 1 == texParams.multiBandNbContrib[band])
+                {
+                    ++band;
+                }
+            }
+        }
+    }
+
+    ALICEVISION_LOG_INFO("Reading pixel color.");"""
+    if t.count(dup) == 1:   # the original anchor left after the inserted block
+        t = t.replace(dup, "", 1)
+        tx.write_text(t, encoding="utf-8", newline=NL)
+    # the pairing scripts detect the GPU pass from --help: say so in the program description
+    mt = AV / "src/software/pipeline/main_texturing.cpp"
+    t = mt.read_text(encoding="utf-8")
+    if "CHESHIRE_GPU_TEX" not in t:
+        old_desc = 'CmdLine cmdline("AliceVision texturing");'
+        if old_desc not in t:
+            sys.exit("texturing description not found")
+        t = t.replace(old_desc, 'CmdLine cmdline("AliceVision texturing (cheshire: the per-camera pyramid and rasterisation run on the GPU when a device is present; CHESHIRE_GPU_TEX=0 for the CPU pass)");', 1)
+        mt.write_text(t, encoding="utf-8", newline=NL)
+    mc = AV / "src/aliceVision/mesh/CMakeLists.txt"
+    patch(mc, "alicevision_add_library(aliceVision_mesh" + NL, MARK + """ (GPU texturing)
+set(mesh_gpu_links "")
+if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
+    list(APPEND mesh_files_headers gpu/texturingGPU.hpp)
+    list(APPEND mesh_files_sources gpu/texturingGPU.cu)
+    if (ALICEVISION_HAVE_HIP)
+        set_source_files_properties(gpu/texturingGPU.cu PROPERTIES LANGUAGE HIP)
+    endif()
+    set(mesh_gpu_links ${ALICEVISION_CUDA_LIBRARIES})
+endif()
+
+""", after=False)
+    patch(mc, "        OpenMeshCore" + NL, "        ${mesh_gpu_links}" + NL)
+    t = mc.read_text(encoding="utf-8")
+    if "ALICEVISION_HAVE_GPU_TEX" not in t:
+        i = t.index("alicevision_add_library(aliceVision_mesh")
+        j = t.index(NL + ")" + NL, i) + 3
+        t = t[:j] + MARK + """ (GPU texturing)
+if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
+    target_compile_definitions(aliceVision_mesh PRIVATE ALICEVISION_HAVE_GPU_TEX=1)
+endif()
+""" + t[j:]
+        mc.write_text(t, encoding="utf-8", newline=NL)
 
 
     # 5. regenerate the reviewable patch

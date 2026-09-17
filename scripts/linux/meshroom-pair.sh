@@ -20,7 +20,7 @@ MESHROOM="${1:?Meshroom directory (e.g. ~/apps/Meshroom-2023.3.0)}"
 BIN="$MESHROOM/aliceVision/bin"
 [ -d "$BIN" ] || { echo "$BIN not found: is $MESHROOM a Meshroom 2023.x Linux bundle?"; exit 1; }
 if [ "${2:-}" = "--unpair" ]; then
-  for name in aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_depthMapFiltering aliceVision_meshing; do
+  for name in aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing; do
     if [ -x "$BIN/$name.cuda" ]; then mv -f "$BIN/$name.cuda" "$BIN/$name"; echo "restored $name"; else echo "$name: not paired"; fi
   done
   exit 0
@@ -81,4 +81,11 @@ if grep -q 'CHESHIRE_GPU_VOTE' <<<"$ms_help"; then
   pair aliceVision_meshing
 else
   echo "bundle's aliceVision_meshing has no GPU votes (pre-v0.2.7): not paired"
+fi
+# Texturing (v0.2.8+): the bundle's texturing carries the GPU pyramid + rasterisation (its --help says so)
+tx_help=$(ALICEVISION_ROOT="$BUNDLE" LD_LIBRARY_PATH="$BUNDLE/lib" "$BUNDLE/bin/aliceVision_texturing" --help 2>&1 || true)
+if grep -q 'CHESHIRE_GPU_TEX' <<<"$tx_help"; then
+  pair aliceVision_texturing
+else
+  echo "bundle's aliceVision_texturing has no GPU pass (pre-v0.2.8): not paired"
 fi
