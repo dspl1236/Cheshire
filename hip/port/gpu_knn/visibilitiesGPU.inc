@@ -16,7 +16,7 @@
 //
 // CHESHIRE_GPU_VIS=0 keeps upstream's code. CHESHIRE_GPU_VIS_CHECK=1 also answers every query on
 // the host from the same snapshot tree and counts differences (there are none unless the host
-// compiler contracts the metric differently: CHESHIRE_GPU_KNN_FMA=0 selects the unfused form).
+// compiler contracts the metric differently; the form follows __FMA__, CHESHIRE_GPU_KNN_FMA=0|1 overrides).
 // CHESHIRE_GPU_VIS_LOG=1 prints the timing.
 #ifdef ALICEVISION_HAVE_GPU_FILTER
 namespace {
@@ -117,8 +117,16 @@ void createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
     const auto tStart = Clock::now();
     const bool check = std::getenv("CHESHIRE_GPU_VIS_CHECK") != nullptr;
     const bool logIt = check || std::getenv("CHESHIRE_GPU_VIS_LOG") != nullptr;
+    // the metric's form follows this host build: a compiler allowed to emit FMA (clang-cl under
+    // /arch:AVX2, gcc with -mfma) contracts nanoflann's `result += diff * diff`; a generic x86-64
+    // build (the Linux bundle) cannot. CHESHIRE_GPU_KNN_FMA=0|1 overrides.
+#ifdef __FMA__
+    const bool fmaDefault = true;
+#else
+    const bool fmaDefault = false;
+#endif
     const char* fmaEnv = std::getenv("CHESHIRE_GPU_KNN_FMA");
-    const bool fma = !(fmaEnv != nullptr && *fmaEnv == '0');
+    const bool fma = (fmaEnv != nullptr && *fmaEnv != '\0') ? (*fmaEnv != '0') : fmaDefault;
 
     static_assert(sizeof(Point3d) == 3 * sizeof(double), "Point3d is three contiguous doubles");
     const std::vector<Point3d> snapshot(verticesCoordsPrepare);

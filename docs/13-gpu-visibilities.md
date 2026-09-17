@@ -17,8 +17,9 @@ nodes, point permutation and coordinates. One device thread per query then repla
 side first), the same pruning test on the running lower bound, the same double arithmetic for the
 metric and the split distances, strict `<` when a closer point is found. Because it is the same
 tree walked the same way, the answer is nanoflann's, ties included; the only degree of freedom is
-whether the host compiler fused the metric's `result += diff * diff` into an FMA (clang-cl under
-/arch:AVX2 does), and the kernel has both forms (`CHESHIRE_GPU_KNN_FMA=0` selects the plain one).
+whether the host compiler fused the metric's `result += diff * diff` into an FMA. clang-cl under
+/arch:AVX2 does, gcc on generic x86-64 (the Linux bundle) cannot, and the kernel has both forms:
+the default follows the host build's `__FMA__` macro, `CHESHIRE_GPU_KNN_FMA=0|1` overrides.
 
 Around the search, `gpu/visibilitiesGPU.inc` (textually included by `fuseCut/PointCloud.cpp`)
 changes how the pass is organised, with the same arithmetic per vote:
