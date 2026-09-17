@@ -2456,6 +2456,74 @@ index ed90dd3..0dc1cd8 100644
 +if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
 +    target_compile_definitions(aliceVision_mesh PRIVATE ALICEVISION_HAVE_GPU_TEX=1)
 +endif()
+diff --git a/src/aliceVision/mesh/Mesh.cpp b/src/aliceVision/mesh/Mesh.cpp
+index 235a4ce..bfb1f1e 100644
+--- a/src/aliceVision/mesh/Mesh.cpp
++++ b/src/aliceVision/mesh/Mesh.cpp
+@@ -4,6 +4,9 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <cstdio>  // cheshire
++#include <cstdlib>
++#include <cstring>
+ #include "Mesh.hpp"
+ #include <aliceVision/system/Logger.hpp>
+ #include <aliceVision/utils/filesIO.hpp>
+@@ -92,6 +95,53 @@ void Mesh::save(const std::string& filepath)
+ 
+     ALICEVISION_LOG_INFO("Saving " << fileTypeStr << " mesh file using Assimp.");
+ 
++    // cheshire: OBJ straight to the file (see scripts/apply_hip_patch.py, step 4n)
++    static thread_local bool cheshireForceAssimp = false;
++    if (fileType == EFileType::OBJ && !cheshireForceAssimp && std::getenv("CHESHIRE_OBJ_ASSIMP") == nullptr)
++    {
++        ALICEVISION_LOG_INFO("Saving obj mesh file (cheshire direct writer): " << pts.size() << " vertices, " << tris.size() << " faces.");
++        FILE* f = std::fopen(filepath.c_str(), "wb");
++        if (f == nullptr)
++            throw std::runtime_error("Cannot open mesh file for writing: " + filepath);
++        std::vector<char> buf(1 << 22);
++        std::size_t used = 0;
++        auto flush = [&]() {
++            if (used > 0)
++            {
++                std::fwrite(buf.data(), 1, used, f);
++                used = 0;
++            }
++        };
++        char line[160];
++        int n = std::snprintf(line, sizeof(line), "# %zu vertex positions, %zu faces (cheshire)%c", pts.size(), tris.size(), 10);
++        std::memcpy(buf.data(), line, n);
++        used = n;
++        for (const auto& p : pts)
++        {
++            const float x = p.x, y = -p.y, z = -p.z;
++            n = std::snprintf(line, sizeof(line), "v %.9g %.9g %.9g%c", x, y, z, 10);
++            if (used + n > buf.size()) flush();
++            std::memcpy(buf.data() + used, line, n);
++            used += n;
++        }
++        for (const auto& t : tris)
++        {
++            n = std::snprintf(line, sizeof(line), "f %d %d %d%c", t.v[0] + 1, t.v[1] + 1, t.v[2] + 1, 10);
++            if (used + n > buf.size()) flush();
++            std::memcpy(buf.data() + used, line, n);
++            used += n;
++        }
++        flush();
++        std::fclose(f);
++        if (std::getenv("CHESHIRE_OBJ_CHECK") == nullptr)
++            return;
++        ALICEVISION_LOG_INFO("cheshire: CHESHIRE_OBJ_CHECK: also writing " << filepath << ".assimp.obj through Assimp");
++        cheshireForceAssimp = true;
++        save(filepath + ".assimp.obj");
++        cheshireForceAssimp = false;
++        return;
++    }
++
+     // Assimp scene setup
+     // create scene and root node
+     aiScene scene;
 diff --git a/src/aliceVision/mesh/Texturing.cpp b/src/aliceVision/mesh/Texturing.cpp
 index 76bf7e5..eb5d127 100644
 --- a/src/aliceVision/mesh/Texturing.cpp

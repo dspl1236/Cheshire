@@ -66,6 +66,7 @@ TRACKED = [
     "src/software/pipeline/main_texturing.cpp",
     "src/aliceVision/fuseCut/Tetrahedralization.cpp",
     "src/aliceVision/fuseCut/PointCloud.cpp",
+    "src/aliceVision/mesh/Mesh.cpp",
     "src/aliceVision/fuseCut/Kdtree.hpp",
     "src/aliceVision/fuseCut/GraphFiller.hpp",
     "src/software/pipeline/main_prepareDenseScene.cpp",
@@ -1383,6 +1384,67 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
             sys.exit("end of createVerticesWithVisibilities not found once")
         t = t.replace(end, end + '#include "aliceVision/fuseCut/gpu/visibilitiesGPU.inc"  // cheshire' + NL, 1)
         pc.write_text(t, encoding="utf-8", newline=NL)
+
+    # 4n. Direct OBJ writer in Mesh::save (upstream builds an Assimp scene and exports through it:
+    #     6.6 s for the 1.2 M-vertex engine bay mesh, single-threaded text formatting plus a scene
+    #     copy). The same numbers are written the same way (float, 9 significant digits, y and z
+    #     negated as upstream does, 1-based faces), without the scene: a fraction of a second.
+    #     CHESHIRE_OBJ_ASSIMP=1 keeps upstream; CHESHIRE_OBJ_CHECK=1 also writes upstream's file
+    #     next to it (<file>.assimp.obj) for comparison.
+    mc = AV / "src/aliceVision/mesh/Mesh.cpp"
+    patch(mc, '    ALICEVISION_LOG_INFO("Saving " << fileTypeStr << " mesh file using Assimp.");' + NL, r"""
+    // cheshire: OBJ straight to the file (see scripts/apply_hip_patch.py, step 4n)
+    static thread_local bool cheshireForceAssimp = false;
+    if (fileType == EFileType::OBJ && !cheshireForceAssimp && std::getenv("CHESHIRE_OBJ_ASSIMP") == nullptr)
+    {
+        ALICEVISION_LOG_INFO("Saving obj mesh file (cheshire direct writer): " << pts.size() << " vertices, " << tris.size() << " faces.");
+        FILE* f = std::fopen(filepath.c_str(), "wb");
+        if (f == nullptr)
+            throw std::runtime_error("Cannot open mesh file for writing: " + filepath);
+        std::vector<char> buf(1 << 22);
+        std::size_t used = 0;
+        auto flush = [&]() {
+            if (used > 0)
+            {
+                std::fwrite(buf.data(), 1, used, f);
+                used = 0;
+            }
+        };
+        char line[160];
+        int n = std::snprintf(line, sizeof(line), "# %zu vertex positions, %zu faces (cheshire)%c", pts.size(), tris.size(), 10);
+        std::memcpy(buf.data(), line, n);
+        used = n;
+        for (const auto& p : pts)
+        {
+            const float x = p.x, y = -p.y, z = -p.z;
+            n = std::snprintf(line, sizeof(line), "v %.9g %.9g %.9g%c", x, y, z, 10);
+            if (used + n > buf.size()) flush();
+            std::memcpy(buf.data() + used, line, n);
+            used += n;
+        }
+        for (const auto& t : tris)
+        {
+            n = std::snprintf(line, sizeof(line), "f %d %d %d%c", t.v[0] + 1, t.v[1] + 1, t.v[2] + 1, 10);
+            if (used + n > buf.size()) flush();
+            std::memcpy(buf.data() + used, line, n);
+            used += n;
+        }
+        flush();
+        std::fclose(f);
+        if (std::getenv("CHESHIRE_OBJ_CHECK") == nullptr)
+            return;
+        ALICEVISION_LOG_INFO("cheshire: CHESHIRE_OBJ_CHECK: also writing " << filepath << ".assimp.obj through Assimp");
+        cheshireForceAssimp = true;
+        save(filepath + ".assimp.obj");
+        cheshireForceAssimp = false;
+        return;
+    }
+""")
+    t = mc.read_text(encoding="utf-8")
+    if "#include <cstdio>  // cheshire" not in t:
+        i = t.index("#include")
+        t = t[:i] + "#include <cstdio>  // cheshire" + NL + "#include <cstdlib>" + NL + "#include <cstring>" + NL + t[i:]
+        mc.write_text(t, encoding="utf-8", newline=NL)
 
     # 5. regenerate the reviewable patch
     subprocess.run(["git", "add", "-N", "src/aliceVision/depthMap/cuda/hip"], cwd=AV, check=True)

@@ -66,3 +66,14 @@ its own project; the visibility passes are the next quick one.
   on the 12-thread desktop, the loop being mostly codec and disk work, outputs byte-identical
   (on the 4-core house-pc: 70 s to 68 s, 41 / 41 identical; the filter cache there: 27.5 s to
   20.4 s, 123 / 123 identical).
+
+## The OBJ writer
+
+Meshing's last step writes the mesh through Assimp: a scene is built, copied, and exported by
+single-threaded stream formatting, 6.6 s for the 1.2 M-vertex engine bay mesh. The direct writer
+(`Mesh::save`, apply step 4n) emits the same numbers the same way, float with 9 significant digits,
+y and z negated as upstream does, 1-based faces, straight into a 4 MB buffer: about 0.2 s. The
+file differs only in order: Assimp lists vertices in face-traversal order and renumbers faces,
+the direct writer keeps the mesh's own order. Checked with `CHESHIRE_OBJ_CHECK=1`, which writes
+both files: identical vertex set and identical triangles by coordinates on the 6-view job.
+`CHESHIRE_OBJ_ASSIMP=1` keeps upstream. Engine bay Meshing 158.8 s to 145.1 s.
