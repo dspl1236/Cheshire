@@ -12,6 +12,7 @@ replacement: same numbers, same order, verified in one process against upstream'
 | facet weights for the s-t graph | 30 s | 4.5 s | computed in parallel into a table, edges added in upstream's order |
 | s-t graph build and teardown | 66 s + 25 s | 5.4 s | a compressed sparse row graph instead of `boost::adjacency_list` |
 | Meshing node, end to end | 495.9 s | 296.5 s | |
+| Meshing on the RX 5500 XT node (i3-4330, 41 views), end to end | 413.5 s (v0.2.7) | 302.9 s | same checks, zero differences on 1.80 M lists, 45.7 M facets, 11.4 M cells |
 
 ## The table
 
@@ -62,4 +63,6 @@ its own project; the visibility passes are the next quick one.
   engine bay vote phase 12.5 s to 7.3 s, outputs byte-identical.
 * **PrepareDenseScene** pins its per-image loop (read, exposure, undistort, EXR write) to three
   threads; it now uses every core (`CHESHIRE_PDS_THREADS` overrides): 107 images in 36 s to 30 s
-  on the 12-thread desktop, the loop being mostly codec and disk work, outputs byte-identical.
+  on the 12-thread desktop, the loop being mostly codec and disk work, outputs byte-identical
+  (on the 4-core house-pc: 70 s to 68 s, 41 / 41 identical; the filter cache there: 27.5 s to
+  20.4 s, 123 / 123 identical).
