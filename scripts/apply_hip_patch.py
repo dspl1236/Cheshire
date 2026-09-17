@@ -1353,6 +1353,37 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
         pds.write_text(t, encoding="utf-8", newline=NL)
 
 
+    # 4l. The visibility passes' nearest-neighbour search on the GPU (hip/port/gpu_knn): nanoflann's
+    #     tree copied node for node and walked on the device exactly as nanoflann walks it, every
+    #     query of a pass answered from one snapshot of the coordinates, votes applied in pixel
+    #     order (deterministic, where upstream's locked updates race with its own tree reads).
+    #     CHESHIRE_GPU_VIS=0 keeps upstream, CHESHIRE_GPU_VIS_CHECK=1 compares every query.
+    for f in ("knnGPU.hpp", "knnGPU.cu", "visibilitiesGPU.inc"):
+        shutil.copy2(ROOT / "hip" / "port" / "gpu_knn" / f, gv_dst / f)
+    t = fc.read_text(encoding="utf-8")
+    if "gpu/knnGPU.cu" not in t:
+        t = t.replace("gpu/maxflowGPU.hpp)", "gpu/maxflowGPU.hpp gpu/knnGPU.hpp)", 1)
+        t = t.replace("gpu/maxflowGPU.cu)", "gpu/maxflowGPU.cu gpu/knnGPU.cu)", 1)
+        t = t.replace("gpu/maxflowGPU.cu PROPERTIES LANGUAGE HIP)", "gpu/maxflowGPU.cu gpu/knnGPU.cu PROPERTIES LANGUAGE HIP)", 1)
+        if t.count("gpu/knnGPU.cu") != 2:
+            sys.exit("fuseCut CMake GPU source lists not found for knnGPU")
+        fc.write_text(t, encoding="utf-8", newline=NL)
+    pc = AV / "src/aliceVision/fuseCut/PointCloud.cpp"
+    patch(pc, "#include <aliceVision/fuseCut/Kdtree.hpp>" + NL,
+          '#ifdef ALICEVISION_HAVE_GPU_FILTER' + NL + '#include "aliceVision/fuseCut/gpu/knnGPU.hpp"  // cheshire' + NL
+          + '#include <chrono>' + NL + '#include <future>' + NL + '#include <cstdint>' + NL + '#include <cstdlib>' + NL + '#include <limits>' + NL + '#endif' + NL)
+    t = pc.read_text(encoding="utf-8")
+    if "createVerticesWithVisibilitiesUpstream" not in t:
+        old = "void createVerticesWithVisibilities(const StaticVector<int>& cams,"
+        if t.count(old) != 1:
+            sys.exit("createVerticesWithVisibilities definition not found once")
+        t = t.replace(old, "void createVerticesWithVisibilitiesUpstream(const StaticVector<int>& cams,  // cheshire: gpu/visibilitiesGPU.inc keeps the name", 1)
+        end = '    ALICEVISION_LOG_INFO("Visibilities created.");' + NL + "}" + NL
+        if t.count(end) != 1:
+            sys.exit("end of createVerticesWithVisibilities not found once")
+        t = t.replace(end, end + '#include "aliceVision/fuseCut/gpu/visibilitiesGPU.inc"  // cheshire' + NL, 1)
+        pc.write_text(t, encoding="utf-8", newline=NL)
+
     # 5. regenerate the reviewable patch
     subprocess.run(["git", "add", "-N", "src/aliceVision/depthMap/cuda/hip"], cwd=AV, check=True)
     diff = subprocess.run(["git", "diff", "--no-color"], cwd=AV, check=True, capture_output=True, text=True).stdout

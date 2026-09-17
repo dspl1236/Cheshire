@@ -68,6 +68,7 @@ inline hipError_t cudaFree(void* devPtr) { return cheshire::bridge::free(devPtr)
 #define cudaMallocManaged hipMallocManaged
 #define cudaHostAlloc hipHostMalloc
 #define cudaHostAllocMapped hipHostMallocMapped
+#define cudaHostAllocDefault hipHostMallocDefault
 #define cudaHostGetDevicePointer hipHostGetDevicePointer
 // cudaMallocPitch has a templated overload in cuda_runtime.h (AliceVision calls
 // cudaMallocPitch<Type>(&buf, ...)); HIP only has the C function, so provide both forms.

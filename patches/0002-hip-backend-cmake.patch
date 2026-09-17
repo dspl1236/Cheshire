@@ -727,10 +727,10 @@ index 0000000..b488193
 +}}  // namespace cheshire::bridge
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/cuda_to_hip.h b/src/aliceVision/depthMap/cuda/hip/cheshire/cuda_to_hip.h
 new file mode 100644
-index 0000000..ee7224e
+index 0000000..7bd0800
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshire/cuda_to_hip.h
-@@ -0,0 +1,272 @@
+@@ -0,0 +1,273 @@
 +// Cheshire "conversion API": compile AliceVision's CUDA depth-map sources as HIP
 +// without rewriting them. Force-included (clang -include / clang-cl /FI) or pulled in
 +// through the cuda_runtime.h shim next to this file.
@@ -801,6 +801,7 @@ index 0000000..ee7224e
 +#define cudaMallocManaged hipMallocManaged
 +#define cudaHostAlloc hipHostMalloc
 +#define cudaHostAllocMapped hipHostMallocMapped
++#define cudaHostAllocDefault hipHostMallocDefault
 +#define cudaHostGetDevicePointer hipHostGetDevicePointer
 +// cudaMallocPitch has a templated overload in cuda_runtime.h (AliceVision calls
 +// cudaMallocPitch<Type>(&buf, ...)); HIP only has the C function, so provide both forms.
@@ -1705,7 +1706,7 @@ index 7a671e0..f700fb3 100644
  } // namespace depthMap
  } // namespace aliceVision
 diff --git a/src/aliceVision/fuseCut/CMakeLists.txt b/src/aliceVision/fuseCut/CMakeLists.txt
-index 1b7f39c..f2dc994 100644
+index 1b7f39c..db95ff9 100644
 --- a/src/aliceVision/fuseCut/CMakeLists.txt
 +++ b/src/aliceVision/fuseCut/CMakeLists.txt
 @@ -24,6 +24,17 @@ set(fuseCut_files_sources
@@ -1715,10 +1716,10 @@ index 1b7f39c..f2dc994 100644
 +# --- cheshire HIP backend --- (GPU depth map filter)
 +set(fuseCut_gpu_links "")
 +if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
-+    list(APPEND fuseCut_files_headers gpu/depthMapFilterGPU.hpp gpu/graphVoteGPU.hpp gpu/maxflowGPU.hpp)
-+    list(APPEND fuseCut_files_sources gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu gpu/maxflowGPU.cu)
++    list(APPEND fuseCut_files_headers gpu/depthMapFilterGPU.hpp gpu/graphVoteGPU.hpp gpu/maxflowGPU.hpp gpu/knnGPU.hpp)
++    list(APPEND fuseCut_files_sources gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu gpu/maxflowGPU.cu gpu/knnGPU.cu)
 +    if (ALICEVISION_HAVE_HIP)
-+        set_source_files_properties(gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu gpu/maxflowGPU.cu PROPERTIES LANGUAGE HIP)
++        set_source_files_properties(gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu gpu/maxflowGPU.cu gpu/knnGPU.cu PROPERTIES LANGUAGE HIP)
 +    endif()
 +    set(fuseCut_gpu_links ${ALICEVISION_CUDA_LIBRARIES})
 +endif()
@@ -2205,7 +2206,7 @@ index 1a63489..c8a423c 100644
          ALICEVISION_LOG_INFO("KdTree created for " << verticesCoords.size() << " points.");
      }
 diff --git a/src/aliceVision/fuseCut/PointCloud.cpp b/src/aliceVision/fuseCut/PointCloud.cpp
-index 50a15fd..9575633 100644
+index 50a15fd..92bfa5f 100644
 --- a/src/aliceVision/fuseCut/PointCloud.cpp
 +++ b/src/aliceVision/fuseCut/PointCloud.cpp
 @@ -4,6 +4,8 @@
@@ -2217,7 +2218,22 @@ index 50a15fd..9575633 100644
  #include "PointCloud.hpp"
  
  #include <aliceVision/utils/filesIO.hpp>
-@@ -35,7 +37,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
+@@ -15,6 +17,14 @@
+ #include <aliceVision/mvsData/geometry.hpp>
+ 
+ #include <aliceVision/fuseCut/Kdtree.hpp>
++#ifdef ALICEVISION_HAVE_GPU_FILTER
++#include "aliceVision/fuseCut/gpu/knnGPU.hpp"  // cheshire
++#include <chrono>
++#include <future>
++#include <cstdint>
++#include <cstdlib>
++#include <limits>
++#endif
+ 
+ #include <geogram/mesh/mesh.h>
+ #include <geogram/basic/geometry_nd.h>
+@@ -35,7 +45,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
  
      ALICEVISION_LOG_INFO("Build nanoflann KdTree index.");
      PointVectorAdaptator pointCloudRef(verticesCoordsPrepare);
@@ -2226,7 +2242,16 @@ index 50a15fd..9575633 100644
      kdTree.buildIndex();
  
      ALICEVISION_LOG_INFO("KdTree created for " << verticesCoordsPrepare.size() << " points.");
-@@ -132,7 +134,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
+@@ -119,7 +129,7 @@ void removeInvalidPoints(std::vector<Point3d>& verticesCoordsPrepare,
+     verticesAttrPrepare.swap(verticesAttrTmp);
+ }
+ 
+-void createVerticesWithVisibilities(const StaticVector<int>& cams,
++void createVerticesWithVisibilitiesUpstream(const StaticVector<int>& cams,  // cheshire: gpu/visibilitiesGPU.inc keeps the name
+                                     std::vector<Point3d>& verticesCoordsPrepare,
+                                     std::vector<double>& pixSizePrepare,
+                                     std::vector<float>& simScorePrepare,
+@@ -132,7 +142,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
  {
  
      PointVectorAdaptator pointCloudRef(verticesCoordsPrepare);
@@ -2235,6 +2260,14 @@ index 50a15fd..9575633 100644
      kdTree.buildIndex();
      ALICEVISION_LOG_INFO("NANOFLANN: KdTree created.");
  
+@@ -244,6 +254,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
+ 
+     ALICEVISION_LOG_INFO("Visibilities created.");
+ }
++#include "aliceVision/fuseCut/gpu/visibilitiesGPU.inc"  // cheshire
+ 
+ 
+ PointCloud::PointCloud(mvsUtils::MultiViewParams& mp) : _mp(mp)
 diff --git a/src/aliceVision/fuseCut/Tetrahedralization.cpp b/src/aliceVision/fuseCut/Tetrahedralization.cpp
 index bd5e932..470a2b6 100644
 --- a/src/aliceVision/fuseCut/Tetrahedralization.cpp

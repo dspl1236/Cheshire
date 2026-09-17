@@ -63,7 +63,6 @@ totals.
 
 ## What is left in Meshing
 
-With the cut on the GPU, Meshing on the engine bay is 189 s: the two visibility
-passes (30 s each, per-camera nearest-neighbour lookups of every depth-map pixel), the depth-map
-reads, the kd-tree, the tetrahedralisation, the GPU votes and the post-processing. The visibility
-passes are the next candidate.
+With the cut on the GPU, Meshing on the engine bay was 189 s; the two visibility passes
+(30 s each, per-camera nearest-neighbour lookups of every depth-map pixel) went to the GPU next
+([docs/13](13-gpu-visibilities.md)): 159 s.
