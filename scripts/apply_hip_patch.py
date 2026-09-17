@@ -1549,6 +1549,88 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
         t = t[:i] + "#include <string>  // cheshire" + NL + t[i:]
         pc.write_text(t, encoding="utf-8", newline=NL)
 
+    # 4q. Grid helper points (PointCloud::addGridHelperPoints). Three things make the points differ
+    #     from run to run: the generator is seeded from std::random_device whenever
+    #     --seed is 0 (the default), one shared std::mt19937 is then drawn from inside an omp
+    #     parallel region, so the order of the draws follows the scheduling (and concurrent calls to
+    #     a generator are a data race), and the results are written into a std::vector<bool>, whose
+    #     neighbouring elements share a word. The draws are now made in index order before the loop,
+    #     which is the sequence a single thread produces, an unset seed uses a fixed value, and the
+    #     flags are one byte each. A checksum of the points is logged so runs can be compared.
+    #     CHESHIRE_GRID_RANDOM=1 restores random seeding, CHESHIRE_GRID_OLD=1 restores the shared
+    #     generator (the torn-write fix stays either way).
+    pc = AV / "src/aliceVision/fuseCut/PointCloud.cpp"
+    t = pc.read_text(encoding="utf-8")
+    if "CHESHIRE_GRID_RANDOM" not in t:
+        old = ("    const unsigned int seed = (unsigned int)_mp.userParams.get<unsigned int>(\"delaunaycut.seed\", 0);" + NL
+               + "    std::mt19937 generator(seed != 0 ? seed : std::random_device{}());" + NL)
+        if t.count(old) != 1:
+            sys.exit("addGridHelperPoints generator not found once")
+        new = ("    const unsigned int seed = (unsigned int)_mp.userParams.get<unsigned int>(\"delaunaycut.seed\", 0);" + NL
+               + "    // cheshire: an unset seed drew from std::random_device, so the helper points, and every" + NL
+               + "    // mesh built on them, differed from run to run. A fixed value is used instead;" + NL
+               + "    // --seed and CHESHIRE_GRID_RANDOM=1 both still ask for something else." + NL
+               + "    const bool cheshireGridOld = std::getenv(\"CHESHIRE_GRID_OLD\") != nullptr;" + NL
+               + "    const bool cheshireGridRandom = std::getenv(\"CHESHIRE_GRID_RANDOM\") != nullptr;" + NL
+               + "    const unsigned int cheshireSeed = seed != 0 ? seed : (cheshireGridRandom ? std::random_device{}() : 1u);" + NL
+               + "    std::mt19937 generator(cheshireSeed);" + NL)
+        t = t.replace(old, new, 1)
+
+        old = "    std::vector<bool> valid(gridVerticesCoords.size());" + NL
+        if t.count(old) != 1:
+            sys.exit("grid valid vector not found once")
+        # neighbouring bits of a vector<bool> share a word, so the parallel writes below tear
+        new = ("    std::vector<char> valid(gridVerticesCoords.size(), 0);  // cheshire: one byte each, the bits tore" + NL
+               + "    // cheshire: the noise, drawn in index order before the loop. The loop below consumes three" + NL
+               + "    // draws per grid vertex and visits the vertices in increasing index, so this is the sequence" + NL
+               + "    // one thread produces; upstream drew from the shared generator inside the parallel region." + NL
+               + "    std::vector<Point3d> cheshireNoise;" + NL
+               + "    if (!cheshireGridOld)" + NL
+               + "    {" + NL
+               + "        cheshireNoise.resize(gridVerticesCoords.size());" + NL
+               + "        for (std::size_t k = 0; k < cheshireNoise.size(); ++k)" + NL
+               + "        {" + NL
+               + "            const double nx = maxNoiseSize.x * rand();" + NL
+               + "            const double ny = maxNoiseSize.y * rand();" + NL
+               + "            const double nz = maxNoiseSize.z * rand();" + NL
+               + "            cheshireNoise[k] = Point3d(nx, ny, nz);" + NL
+               + "        }" + NL
+               + "    }" + NL)
+        t = t.replace(old, new, 1)
+
+        old = "                const Point3d noise(maxNoiseSize.x * rand(), maxNoiseSize.y * rand(), maxNoiseSize.z * rand());" + NL
+        if t.count(old) != 1:
+            sys.exit("grid noise expression not found once")
+        new = ("                const Point3d noise = cheshireGridOld" + NL
+               + "                                        ? Point3d(maxNoiseSize.x * rand(), maxNoiseSize.y * rand(), maxNoiseSize.z * rand())" + NL
+               + "                                        : cheshireNoise[i];  // cheshire" + NL)
+        t = t.replace(old, new, 1)
+
+        old = ("        _verticesCoords.push_back(gridVerticesCoords[i]);" + NL)
+        if t.count(old) != 1:
+            sys.exit("grid insert not found once")
+        new = (old
+               + "        {  // cheshire: a checksum of the points, so two runs can be compared" + NL
+               + "            const unsigned char* bytes = reinterpret_cast<const unsigned char*>(gridVerticesCoords[i].m);" + NL
+               + "            for (std::size_t b = 0; b < 3 * sizeof(double); ++b)" + NL
+               + "                cheshireGridHash = (cheshireGridHash ^ (std::uint64_t)bytes[b]) * 1099511628211ull;" + NL
+               + "        }" + NL)
+        t = t.replace(old, new, 1)
+
+        old = ("    _verticesAttr.reserve(_verticesAttr.size() + gridVerticesCoords.size());" + NL
+               + "    int addedPoints = 0;" + NL)
+        if t.count(old) != 1:
+            sys.exit("grid addedPoints not found once")
+        t = t.replace(old, old + "    std::uint64_t cheshireGridHash = 14695981039346656037ull;  // cheshire" + NL, 1)
+
+        old = ('    ALICEVISION_LOG_WARNING("Add " << addedPoints << " new helper points for a 3D grid of "')
+        if t.count(old) != 1:
+            sys.exit("grid log not found once")
+        new = ('    ALICEVISION_LOG_INFO("cheshire: grid helper points: seed " << cheshireSeed << ", " << addedPoints'
+               + ' << " added, checksum " << std::hex << cheshireGridHash << std::dec);' + NL + old)
+        t = t.replace(old, new, 1)
+        pc.write_text(t, encoding="utf-8", newline=NL)
+
     # 5. regenerate the reviewable patch
     subprocess.run(["git", "add", "-N", "src/aliceVision/depthMap/cuda/hip"], cwd=AV, check=True)
     diff = subprocess.run(["git", "diff", "--no-color"], cwd=AV, check=True, capture_output=True, text=True).stdout

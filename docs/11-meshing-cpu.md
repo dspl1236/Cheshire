@@ -129,3 +129,28 @@ upstream: 0 of 18,289,152 and 0 of 664,776 slots differ on the 6-view job, 0 of 
 The dense point cloud is now reproducible, but the mesh is not yet: the grid helper points seed from
 `random_device` unless `delaunaycut.seed` is non-zero, and the GPU vote and min-cut kernels both
 accumulate with float atomics, so two runs still differ by a handful of vertices.
+
+## The grid helper points, and what is still not reproducible
+
+Meshing surrounds the cloud with a grid of helper points, each nudged by uniform noise. Upstream
+seeds that noise from `std::random_device` whenever `--seed` is 0, which is the default, then draws
+from one shared `std::mt19937` inside an `omp parallel for`, and records the results in a
+`std::vector<bool>` whose neighbouring elements share a word. So the helper set differed from run to
+run three times over: a different seed, a scheduling-dependent order of draws, and torn flag writes.
+Apply step 4q draws the noise in index order before the loop, which is the sequence one thread
+produces, uses a fixed seed when none is configured, and gives each flag its own byte. `--seed`
+still chooses a seed and `CHESHIRE_GRID_RANDOM=1` still asks for a random one;
+`CHESHIRE_GRID_OLD=1` restores the shared generator.
+
+The 6-view job, three runs (two on the default, one pinned to a single thread): 1205 helper points
+with checksum `6b7dedaaa9611426` every time. The same build with `CHESHIRE_GRID_OLD=1`, same seed,
+twice: 1204 points and 1200 points, different checksums, which is the parallel draw order alone.
+
+What that leaves. After this step the following are identical run to run on the 6-view job: the
+loaded points, both filter passes, the visibility passes, the final dense point cloud (265,271
+points) and the tetrahedralisation (1,672,312 cells, 16,722,900 edges). The mesh still is not: the
+graph-weight votes accumulate float contributions per cell in parallel, so the weights differ in
+their last bits, and with them the cut. Running with `CHESHIRE_GPU_VOTE=0 CHESHIRE_GPU_MAXFLOW=0`
+changes nothing about that, because upstream's CPU vote loop accumulates the same way. A
+deterministic accumulation for the votes is the next step, and it would make Meshing reproducible
+end to end.
