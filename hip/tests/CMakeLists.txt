@@ -46,3 +46,10 @@ add_executable(host_atomics host_atomics.hip)
 target_link_libraries(host_atomics PRIVATE hip::device)
 add_executable(host_backing host_backing.hip)
 target_link_libraries(host_backing PRIVATE hip::device)
+
+# the GPU min-cut (CUDA dialect through the compat header) against a MaxFlow_CSR dump
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../port/gpu_maxflow/maxflowGPU.cu PROPERTIES LANGUAGE HIP)
+add_executable(maxflow_test maxflow_test.hip ${CMAKE_CURRENT_SOURCE_DIR}/../port/gpu_maxflow/maxflowGPU.cu)
+target_include_directories(maxflow_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../compat/include)
+target_compile_options(maxflow_test PRIVATE "$<$<COMPILE_LANGUAGE:HIP>:-include${CMAKE_CURRENT_SOURCE_DIR}/../compat/include/cheshire/cuda_to_hip.h>")
+target_link_libraries(maxflow_test PRIVATE hip::device)

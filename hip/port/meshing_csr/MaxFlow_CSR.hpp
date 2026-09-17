@@ -18,6 +18,8 @@
 
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
+#include <fstream>
 #include <iterator>
 #include <utility>
 #include <vector>
@@ -89,6 +91,7 @@ class MaxFlow_CSR
             else ++nbGray;
         }
         ALICEVISION_LOG_INFO("Full (white): " << nbWhite << ", Empty (black): " << nbBlack << ", Undefined (gray): " << nbGray);
+        dumpResult(v);
         _graph = Graph();   // the labelling is all that is needed from here on
         return v;
     }
@@ -193,7 +196,34 @@ class MaxFlow_CSR
         fill.clear(); fill.shrink_to_fit();
         _nodes.clear(); _nodes.shrink_to_fit();
         _edges.clear(); _edges.shrink_to_fit();
+        // CHESHIRE_MAXFLOW_DUMP=<file>: the laid-out graph for the standalone max-flow harness
+        // (hip/tests/maxflow): "CHMF", V, E, S, T (uint64), rowstart (uint64 x V+1), target
+        // (uint32 x E), capacity (float x E), partner (uint32 x E); compute() appends the flow
+        // value (float) and the colours (uint8 x V: 0 white, 1 gray, 2 black)
+        if (const char* dumpPath = std::getenv("CHESHIRE_MAXFLOW_DUMP"))
+        {
+            std::ofstream f(dumpPath, std::ios::binary);
+            const std::uint64_t hdr[4] = {std::uint64_t(V), std::uint64_t(E), std::uint64_t(_S), std::uint64_t(_T)};
+            f.write("CHMF", 4);
+            f.write(reinterpret_cast<const char*>(hdr), sizeof(hdr));
+            f.write(reinterpret_cast<const char*>(l.rowstart.data()), std::streamsize(l.rowstart.size() * sizeof(std::size_t)));
+            f.write(reinterpret_cast<const char*>(l.target.data()), std::streamsize(E * sizeof(std::uint32_t)));
+            f.write(reinterpret_cast<const char*>(l.cap.data()), std::streamsize(E * sizeof(ValueType)));
+            f.write(reinterpret_cast<const char*>(l.partner.data()), std::streamsize(E * sizeof(std::uint32_t)));
+            ALICEVISION_LOG_INFO("cheshire: max-flow graph dumped to " << dumpPath << " (" << V << " nodes, " << E << " edges)");
+        }
         _graph = Graph(boost::edges_are_sorted, EdgeIt(&l, 0), EdgeIt(&l, E), PropIt(&l, 0), V, E);
+    }
+
+    void dumpResult(ValueType flow) const
+    {
+        const char* dumpPath = std::getenv("CHESHIRE_MAXFLOW_DUMP");
+        if (!dumpPath) return;
+        std::ofstream f(dumpPath, std::ios::binary | std::ios::app);
+        f.write(reinterpret_cast<const char*>(&flow), sizeof(flow));
+        std::vector<std::uint8_t> c(_color.size());
+        for (std::size_t i = 0; i < _color.size(); ++i) c[i] = _color[i] == boost::black_color ? 2 : (_color[i] == boost::white_color ? 0 : 1);
+        f.write(reinterpret_cast<const char*>(c.data()), std::streamsize(c.size()));
     }
 
     std::size_t _numNodes;
