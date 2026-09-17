@@ -67,6 +67,7 @@ TRACKED = [
     "src/aliceVision/fuseCut/Tetrahedralization.cpp",
     "src/aliceVision/fuseCut/PointCloud.cpp",
     "src/aliceVision/mesh/Mesh.cpp",
+    "src/aliceVision/mesh/MeshClean.cpp",
     "src/aliceVision/fuseCut/Kdtree.hpp",
     "src/aliceVision/fuseCut/GraphFiller.hpp",
     "src/software/pipeline/main_prepareDenseScene.cpp",
@@ -1445,6 +1446,55 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
         i = t.index("#include")
         t = t[:i] + "#include <cstdio>  // cheshire" + NL + "#include <cstdlib>" + NL + "#include <cstring>" + NL + t[i:]
         mc.write_text(t, encoding="utf-8", newline=NL)
+
+    # 4o. Mesh cleaner: MeshClean::cleanMesh(maxIters) runs three consistency tests before the loop
+    #     and after every iteration (14 full passes over the mesh on the engine bay); they only emit
+    #     debug-level log lines and never change state. Off unless CHESHIRE_MESHCLEAN_TESTS=1; the
+    #     iteration timing is logged.
+    mcl = AV / "src/aliceVision/mesh/MeshClean.cpp"
+    t = mcl.read_text(encoding="utf-8")
+    if "CHESHIRE_MESHCLEAN_TESTS" not in t:
+        old = """int MeshClean::cleanMesh(int maxIters)
+{
+    testPtsNeighTrisSortedAsc();
+    testEdgesNeighTris();
+"""
+        if t.count(old) != 1:
+            sys.exit("MeshClean::cleanMesh(int) head not found")
+        new = """int MeshClean::cleanMesh(int maxIters)
+{
+    // cheshire: the consistency tests only log at debug level and never change the mesh; they are
+    // 14 full passes over the mesh per call. CHESHIRE_MESHCLEAN_TESTS=1 keeps them.
+    const bool cheshireTests = std::getenv("CHESHIRE_MESHCLEAN_TESTS") != nullptr;
+    if (cheshireTests)
+    {
+        testPtsNeighTrisSortedAsc();
+        testEdgesNeighTris();
+    }
+"""
+        t = t.replace(old, new, 1)
+        old2 = """        nupd = cleanMesh();
+        testPtsNeighTrisSortedAsc();
+        testEdgesNeighTris();
+        testPtsNeighPtsOrdered();
+"""
+        if t.count(old2) != 1:
+            sys.exit("MeshClean::cleanMesh(int) loop not found")
+        new2 = """        const auto cheshireT0 = std::chrono::steady_clock::now();
+        nupd = cleanMesh();
+        const double cheshireMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cheshireT0).count();
+        ALICEVISION_LOG_INFO("cheshire: cleanMesh iteration " << iter << ": " << cheshireMs << " ms");
+        if (cheshireTests)
+        {
+            testPtsNeighTrisSortedAsc();
+            testEdgesNeighTris();
+            testPtsNeighPtsOrdered();
+        }
+"""
+        t = t.replace(old2, new2, 1)
+        i = t.index("#include")
+        t = t[:i] + "#include <cstdlib>  // cheshire" + NL + "#include <chrono>" + NL + t[i:]
+        mcl.write_text(t, encoding="utf-8", newline=NL)
 
     # 5. regenerate the reviewable patch
     subprocess.run(["git", "add", "-N", "src/aliceVision/depthMap/cuda/hip"], cwd=AV, check=True)

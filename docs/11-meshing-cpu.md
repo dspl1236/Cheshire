@@ -77,3 +77,13 @@ file differs only in order: Assimp lists vertices in face-traversal order and re
 the direct writer keeps the mesh's own order. Checked with `CHESHIRE_OBJ_CHECK=1`, which writes
 both files: identical vertex set and identical triangles by coordinates on the 6-view job.
 `CHESHIRE_OBJ_ASSIMP=1` keeps upstream. Engine bay Meshing 158.8 s to 145.1 s.
+
+## The mesh cleaner's validation passes
+
+`MeshClean::cleanMesh(maxIters)` runs three consistency tests before its loop and after every
+iteration, 14 full passes over the mesh on the engine bay. They only emit debug-level log lines
+and never change the mesh. Apply step 4o turns them off unless `CHESHIRE_MESHCLEAN_TESTS=1` and
+logs each iteration's time. Engine bay: the cleaning step 17.1 s to 12.9 s (setup 6.6 s, then
+4.0, 2.0, 2.1, 2.0 s per iteration, all single-threaded), Meshing 145.1 s to 139.0 s. What is
+left there is the serial per-point loop and the adjacency setup ([docs/13](13-gpu-visibilities.md)
+lists the order of the remaining Meshing work).

@@ -2524,6 +2524,52 @@ index 235a4ce..bfb1f1e 100644
      // Assimp scene setup
      // create scene and root node
      aiScene scene;
+diff --git a/src/aliceVision/mesh/MeshClean.cpp b/src/aliceVision/mesh/MeshClean.cpp
+index b0b5910..8569072 100644
+--- a/src/aliceVision/mesh/MeshClean.cpp
++++ b/src/aliceVision/mesh/MeshClean.cpp
+@@ -4,6 +4,8 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <cstdlib>  // cheshire
++#include <chrono>
+ #include "MeshClean.hpp"
+ #include <aliceVision/system/Logger.hpp>
+ 
+@@ -870,15 +872,27 @@ int MeshClean::cleanMesh()
+ 
+ int MeshClean::cleanMesh(int maxIters)
+ {
+-    testPtsNeighTrisSortedAsc();
+-    testEdgesNeighTris();
++    // cheshire: the consistency tests only log at debug level and never change the mesh; they are
++    // 14 full passes over the mesh per call. CHESHIRE_MESHCLEAN_TESTS=1 keeps them.
++    const bool cheshireTests = std::getenv("CHESHIRE_MESHCLEAN_TESTS") != nullptr;
++    if (cheshireTests)
++    {
++        testPtsNeighTrisSortedAsc();
++        testEdgesNeighTris();
++    }
+     int nupd = 1;
+     for (int iter = 0; (iter < maxIters) && (nupd > 0); ++iter)
+     {
++        const auto cheshireT0 = std::chrono::steady_clock::now();
+         nupd = cleanMesh();
+-        testPtsNeighTrisSortedAsc();
+-        testEdgesNeighTris();
+-        testPtsNeighPtsOrdered();
++        const double cheshireMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cheshireT0).count();
++        ALICEVISION_LOG_INFO("cheshire: cleanMesh iteration " << iter << ": " << cheshireMs << " ms");
++        if (cheshireTests)
++        {
++            testPtsNeighTrisSortedAsc();
++            testEdgesNeighTris();
++            testPtsNeighPtsOrdered();
++        }
+     }
+ 
+     return nupd;
 diff --git a/src/aliceVision/mesh/Texturing.cpp b/src/aliceVision/mesh/Texturing.cpp
 index 76bf7e5..eb5d127 100644
 --- a/src/aliceVision/mesh/Texturing.cpp
