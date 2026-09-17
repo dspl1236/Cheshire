@@ -1082,6 +1082,18 @@ endif()
     #     teardown become a few seconds. CHESHIRE_MAXFLOW_ADJLIST=1 keeps upstream's class,
     #     CHESHIRE_MAXFLOW_CHECK=1 runs both on the same graph and compares.
     shutil.copy2(ROOT / "hip" / "port" / "meshing_csr" / "MaxFlow_CSR.hpp", AV / "src/aliceVision/fuseCut/MaxFlow_CSR.hpp")
+    # the GPU min-cut (hip/port/gpu_maxflow) next to the other fuseCut GPU sources
+    for f in ("maxflowGPU.hpp", "maxflowGPU.cu"):
+        shutil.copy2(ROOT / "hip" / "port" / "gpu_maxflow" / f, gv_dst / f)
+    fc = AV / "src/aliceVision/fuseCut/CMakeLists.txt"
+    t = fc.read_text(encoding="utf-8")
+    if "gpu/maxflowGPU.cu" not in t:
+        t = t.replace("gpu/depthMapFilterGPU.hpp gpu/graphVoteGPU.hpp)", "gpu/depthMapFilterGPU.hpp gpu/graphVoteGPU.hpp gpu/maxflowGPU.hpp)", 1)
+        t = t.replace("gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu)", "gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu gpu/maxflowGPU.cu)", 1)
+        t = t.replace("set_source_files_properties(gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu PROPERTIES LANGUAGE HIP)", "set_source_files_properties(gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu gpu/maxflowGPU.cu PROPERTIES LANGUAGE HIP)", 1)
+        if "gpu/maxflowGPU.cu" not in t:
+            sys.exit("fuseCut CMake GPU source lists not found")
+        fc.write_text(t, encoding="utf-8", newline=NL)
     gfh = AV / "src/aliceVision/fuseCut/GraphFiller.hpp"
     patch(gfh, "    void binarize();" + NL, "    template<class MaxFlowT> float binarizeImpl(std::vector<bool>& cellIsFull);  // cheshire" + NL)
     patch(gfp, "#include <aliceVision/fuseCut/MaxFlow_AdjList.hpp>" + NL, "#include <aliceVision/fuseCut/MaxFlow_CSR.hpp>  // cheshire" + NL)

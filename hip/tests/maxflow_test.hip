@@ -47,7 +47,19 @@ int main(int argc, char** argv)
     std::size_t nbSink = 0;
     for (std::uint8_t v : sinkSide) nbSink += v;
     std::printf("gpu: flow %.7g, sink side %zu of %llu, %d pulses, %d global relabels, %.2f s\n", st.flow, nbSink, (unsigned long long)V, st.pulses, st.globalRelabels, st.seconds);
+    // the value of a cut, in double: capacities of the edges leaving the source side
+    auto cutValue = [&](auto sinkOf) {
+        double v = 0;
+        for (std::uint64_t u = 0; u < V; ++u) {
+            if (sinkOf(u)) continue;
+            for (std::uint32_t e = rowstart[u]; e < rowstart[u + 1]; ++e)
+                if (sinkOf(target[e])) v += double(cap[e]);
+        }
+        return v;
+    };
+    std::printf("gpu: cut value (double, from the labelling) %.10g\n", cutValue([&](std::uint64_t u) { return u == T || (u != S && sinkSide[u]); }));
     if (haveBk) {
+        std::printf("bk : cut value (double, from the labelling) %.10g\n", cutValue([&](std::uint64_t u) { return u == T || (u != S && bkColor[u] == 0); }));
         std::size_t white = 0, gray = 0, diffWhite = 0, diffBlack = 0;
         for (std::uint64_t i = 0; i < V; ++i) {
             if (i == S || i == T) continue;

@@ -1705,7 +1705,7 @@ index 7a671e0..f700fb3 100644
  } // namespace depthMap
  } // namespace aliceVision
 diff --git a/src/aliceVision/fuseCut/CMakeLists.txt b/src/aliceVision/fuseCut/CMakeLists.txt
-index 1b7f39c..7d43ebc 100644
+index 1b7f39c..f2dc994 100644
 --- a/src/aliceVision/fuseCut/CMakeLists.txt
 +++ b/src/aliceVision/fuseCut/CMakeLists.txt
 @@ -24,6 +24,17 @@ set(fuseCut_files_sources
@@ -1715,10 +1715,10 @@ index 1b7f39c..7d43ebc 100644
 +# --- cheshire HIP backend --- (GPU depth map filter)
 +set(fuseCut_gpu_links "")
 +if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
-+    list(APPEND fuseCut_files_headers gpu/depthMapFilterGPU.hpp gpu/graphVoteGPU.hpp)
-+    list(APPEND fuseCut_files_sources gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu)
++    list(APPEND fuseCut_files_headers gpu/depthMapFilterGPU.hpp gpu/graphVoteGPU.hpp gpu/maxflowGPU.hpp)
++    list(APPEND fuseCut_files_sources gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu gpu/maxflowGPU.cu)
 +    if (ALICEVISION_HAVE_HIP)
-+        set_source_files_properties(gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu PROPERTIES LANGUAGE HIP)
++        set_source_files_properties(gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu gpu/maxflowGPU.cu PROPERTIES LANGUAGE HIP)
 +    endif()
 +    set(fuseCut_gpu_links ${ALICEVISION_CUDA_LIBRARIES})
 +endif()

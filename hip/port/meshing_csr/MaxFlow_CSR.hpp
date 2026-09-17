@@ -11,6 +11,9 @@
 #pragma once
 
 #include <aliceVision/system/Logger.hpp>
+#ifdef ALICEVISION_HAVE_GPU_FILTER
+#include "aliceVision/fuseCut/gpu/maxflowGPU.hpp"  // cheshire: the cut on the GPU
+#endif
 
 #include <boost/graph/compressed_sparse_row_graph.hpp>
 #include <boost/graph/boykov_kolmogorov_max_flow.hpp>
@@ -66,7 +69,42 @@ class MaxFlow_CSR
 
     ValueType compute()
     {
-        build();
+        Laid l;
+        layout(l);
+#ifdef ALICEVISION_HAVE_GPU_FILTER
+        // cheshire: the cut on the GPU (push-relabel preflow, see gpu/maxflowGPU.hpp) straight from
+        // the laid-out arrays; CHESHIRE_GPU_MAXFLOW=0 keeps Boykov-Kolmogorov, and
+        // CHESHIRE_MAXFLOW_CHECK=1 in GraphFiller::binarize compares the two labellings
+        if (cheshire::maxflow::available())
+        {
+            const std::size_t V = _numNodes + 2, E = l.rowstart[V];
+            if (E < 0xffffffffull)
+            {
+                std::vector<std::uint32_t> rowstart32(V + 1);
+                for (std::size_t i = 0; i <= V; ++i) rowstart32[i] = std::uint32_t(l.rowstart[i]);
+                cheshire::maxflow::Graph g;
+                g.nbNodes = std::uint32_t(V); g.nbEdges = std::uint32_t(E); g.source = std::uint32_t(_S); g.sink = std::uint32_t(_T);
+                g.rowstart = rowstart32.data(); g.target = l.target.data(); g.capacity = l.cap.data(); g.partner = l.partner.data();
+                ALICEVISION_LOG_INFO("# vertices: " << V << ", edges: " << E << " (CSR, GPU cut)");
+                std::vector<std::uint8_t> sinkSide;
+                cheshire::maxflow::Stats st;
+                const bool log = std::getenv("CHESHIRE_GPU_VOTE_LOG") != nullptr;
+                if (cheshire::maxflow::minCut(g, sinkSide, st, log ? 2 : 0))
+                {
+                    _color.assign(V, boost::black_color);
+                    std::size_t nbWhite = 0;
+                    for (std::size_t i = 0; i < V; ++i)
+                        if (sinkSide[i]) { _color[i] = boost::white_color; ++nbWhite; }
+                    ALICEVISION_LOG_INFO("cheshire: GPU cut: flow " << st.flow << ", " << st.pulses << " sweeps, " << st.globalRelabels << " global relabels, " << st.seconds << " s");
+                    ALICEVISION_LOG_INFO("Full (white): " << nbWhite << ", Empty (black): " << V - nbWhite << ", Undefined (gray): 0");
+                    dumpResult(st.flow);
+                    return st.flow;
+                }
+                ALICEVISION_LOG_WARNING("cheshire: GPU cut failed, falling back to Boykov-Kolmogorov");
+            }
+        }
+#endif
+        buildGraph(l);
         ALICEVISION_LOG_INFO("# vertices: " << boost::num_vertices(_graph) << ", edges: " << boost::num_edges(_graph) << " (CSR)");
         ALICEVISION_LOG_INFO("Compute boykov_kolmogorov_max_flow.");
         const std::size_t nbVertices = boost::num_vertices(_graph);
@@ -150,10 +188,10 @@ class MaxFlow_CSR
         bool operator!=(const PropIt& o) const { return pos != o.pos; }
     };
 
-    void build()
+    // the recorded calls replayed into the CSR arrays, in adjacency-list order
+    void layout(Laid& l)
     {
         const std::size_t V = _numNodes + 2;
-        Laid l;
         // out-degrees: the s/t edge and its reverse, then one edge per addEdge on each side
         std::vector<std::uint32_t> deg(V, 0);
         for (const NodeRec& r : _nodes)
@@ -212,6 +250,11 @@ class MaxFlow_CSR
             f.write(reinterpret_cast<const char*>(l.partner.data()), std::streamsize(E * sizeof(std::uint32_t)));
             ALICEVISION_LOG_INFO("cheshire: max-flow graph dumped to " << dumpPath << " (" << V << " nodes, " << E << " edges)");
         }
+    }
+
+    void buildGraph(const Laid& l)
+    {
+        const std::size_t V = _numNodes + 2, E = l.rowstart[V];
         _graph = Graph(boost::edges_are_sorted, EdgeIt(&l, 0), EdgeIt(&l, E), PropIt(&l, 0), V, E);
     }
 
