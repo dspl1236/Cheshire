@@ -33,7 +33,7 @@ number is why the design is what it is.
 | FeatureMatching | CPU (kd-tree) on every vendor | exact GPU brute-force 2-NN (HIP; the source also builds as CUDA) | validated end to end (v0.2.5): 592 s -> 75 s on 107 photos, same reconstruction |
 | FeatureExtraction | CUDA (PopSift) or CPU | CPU on AMD (`forceCpuExtraction`) | PopSift port not started |
 | DepthMapFilter | CPU | GPU vote pass (HIP / CUDA source) + a shared decoded-map cache | validated (v0.2.6): 123.5 s -> 26.5 s on 107 photos (RX 9070), 317 s -> 26.9 s on 41 views on an i3 + RX 5500 XT, bit-identical; found and replicated an upstream vote-buffer quirk; v0.2.9 cache: 17.8 s -> 12.7 s, byte-identical |
-| Meshing | CPU | GPU graph-weight votes + weakly-supported-surfaces pass (HIP / CUDA source); exact CPU fixes around them: neighbour tables by counting, parallel kd-tree builds and facet weights, a CSR max-flow graph ([docs/11](docs/11-meshing-cpu.md)) | done (v0.2.7 + v0.2.9): 510 s -> 296.5 s on 107 photos (RX 9070), 491 s -> 413 s on 41 views on an i3 + RX 5500 XT (v0.2.7); every change verified identical in-process; what is left is Boykov-Kolmogorov itself (109 s) and the visibility passes |
+| Meshing | CPU | GPU graph-weight votes + weakly-supported-surfaces pass, GPU min-cut (push-relabel, [docs/12](docs/12-gpu-maxflow.md)), exact CPU fixes around them ([docs/11](docs/11-meshing-cpu.md)) | done (v0.2.7, v0.2.9, v0.2.10): 510 s -> 189 s on 107 photos (RX 9070), 491 s -> 270 s on 41 views on an i3 + RX 5500 XT; the cut labelling identical to Boykov-Kolmogorov's on every graph tried, every CPU change verified identical in-process; what is left is the visibility passes and the point-cloud reads |
 | Texturing | CPU | GPU Laplacian pyramid + rasterisation, parallel camera selection (HIP / CUDA source) | done (v0.2.8): 165.8 s -> 79.3 s on 107 photos (RX 9070), 271.5 s -> 102.5 s on 41 views on an i3 + RX 5500 XT, textures inside the CPU's own run-to-run band; what is left is UV unwrap, mesh I/O and padding |
 | PrepareDenseScene | CPU | every core instead of three threads | done (v0.2.9): 36 s -> 30 s on 107 photos, byte-identical; the loop is codec and disk work |
 | SfM, ImageMatching, MeshFiltering | CPU | | stay on the CPU (sequential or tiny) |
@@ -202,7 +202,7 @@ upstream refuses. Details in `docs/02-memory-bridge.md`.
 
 ## Downloads
 
-Binaries are on the [v0.2.9 release](https://github.com/dspl1236/cheshire/releases/tag/v0.2.9)
+Binaries are on the [v0.2.10 release](https://github.com/dspl1236/cheshire/releases/tag/v0.2.10)
 (every package rebuilt with the GPU matcher, the GPU depth map filter, the bridge fixes and the pairing files); the data sets
 and references are on
 [v0.1.0](https://github.com/dspl1236/cheshire/releases/tag/v0.1.0) and unchanged, the depth
@@ -210,10 +210,10 @@ maps being bit-identical between the two:
 
 | asset | size | contents |
 |---|---|---|
-| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-gfx1201.zip` (v0.2.9) | 104 MB | self-contained AliceVision + HIP DepthMap + GPU matcher, depth map filter, meshing votes and texturing for RDNA4 discrete on Windows (HIP 7.2 runtime, vcpkg and MSVC runtimes bundled), `meshroom-pair.cmd` + launcher in the root |
-| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-rdna3-rdna4.zip` (v0.2.9) | ~110 MB | the same with gfx1100/1101/1102/1103, gfx1150/1151/1152/1153, gfx1200/1201 |
-| `cheshire-alicevision-hip6.2-windows-x64-gfx1030-avx.zip`, `-gfx1031-avx.zip`, `-gfx1032-avx.zip` (v0.2.9) | 147 MB each | RX 6000 on Windows through AMD's HIP 6.2 runtime (the one the driver ships): one package per chip because the HIP SDK 6.2 toolchain cannot bundle several. gfx1030 = RX 6800/6900/6950, gfx1031 = RX 6700/6750, gfx1032 = RX 6600/6650. AVX build. Validated on an RX 6750 XT (v0.2.2 build): 28.1 s / 190.3 s |
-| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.2.9) | ~120 MB | relocatable Linux bundle with the GPU matcher, depth map filter, meshing votes, texturing and the packed-slot mipmap sampler, code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested); needs only `amdgpu` + `/dev/kfd`; validated on the RX 6750 XT and RX 5500 XT |
+| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-gfx1201.zip` (v0.2.10) | 104 MB | self-contained AliceVision + HIP DepthMap + GPU matcher, depth map filter, meshing votes and texturing for RDNA4 discrete on Windows (HIP 7.2 runtime, vcpkg and MSVC runtimes bundled), `meshroom-pair.cmd` + launcher in the root |
+| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-rdna3-rdna4.zip` (v0.2.10) | ~110 MB | the same with gfx1100/1101/1102/1103, gfx1150/1151/1152/1153, gfx1200/1201 |
+| `cheshire-alicevision-hip6.2-windows-x64-gfx1030-avx.zip`, `-gfx1031-avx.zip`, `-gfx1032-avx.zip` (v0.2.10) | 147 MB each | RX 6000 on Windows through AMD's HIP 6.2 runtime (the one the driver ships): one package per chip because the HIP SDK 6.2 toolchain cannot bundle several. gfx1030 = RX 6800/6900/6950, gfx1031 = RX 6700/6750, gfx1032 = RX 6600/6650. AVX build. Validated on an RX 6750 XT (v0.2.2 build): 28.1 s / 190.3 s |
+| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.2.10) | ~120 MB | relocatable Linux bundle with the GPU matcher, depth map filter, meshing votes, texturing and the packed-slot mipmap sampler, code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested); needs only `amdgpu` + `/dev/kfd`; validated on the RX 6750 XT and RX 5500 XT |
 | `monstree-mini6-meshroom-cache.tar.gz` (v0.1.0) | 383 MB | 6-view Meshroom 2023.3 cache: CameraInit, SfM, PrepareDenseScene and the CUDA DepthMap reference |
 | `monstree-full-cuda-reference.tar.gz` (v0.1.0) | 680 MB | 41-view SfM + CUDA DepthMap reference (GTX 1080 Ti) |
 | `cheshire-hip-depthmap-outputs.tar.gz` (v0.1.0) | 966 MB | the HIP depth maps behind the table above (RX 9070 6 + 41 views, RX 5500 XT, RX 6750 XT) |
@@ -287,9 +287,10 @@ timed on the 41-view and engine bay sets:
    ray-marching passes on the GPU, 37 s to 18 s on the engine bay job. It was not the majority of
    Meshing: the profile said the Boykov-Kolmogorov max-flow (144 s) and building its graph (63 s)
    were, followed by the dense point cloud (74 s), the neighbour tables (47 s) and the
-   tetrahedralisation (41 s). The graph build, the tables and the kd-tree have since been fixed on
-   the CPU, exactly ([docs/11](docs/11-meshing-cpu.md)); Meshing is 296 s, 109 s of it the
-   max-flow itself. A GPU max-flow is a project of its own.
+   tetrahedralisation (41 s). The graph build, the tables and the kd-tree were then fixed on the
+   CPU, exactly ([docs/11](docs/11-meshing-cpu.md)), and in v0.2.10 the max-flow itself moved to
+   the GPU ([docs/12](docs/12-gpu-maxflow.md)): 109 s to 5.3 s, the same labelling.
+   Meshing is 189 s; what is left is the visibility passes and the reads.
 3. ~~**Texturing.**~~ Done in v0.2.8 ([docs/10](docs/10-gpu-texturing.md)): the per-camera
    Laplacian pyramid and rasterisation on the GPU, the camera selection parallel, images read
    ahead; 165.8 s to 79.3 s on the engine bay job. What is left is UV unwrap, mesh load and save,
