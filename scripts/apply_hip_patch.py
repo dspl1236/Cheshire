@@ -1331,6 +1331,14 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
         i = t.index("#include")
         t = t[:i] + "#include <cstdlib>  // cheshire" + NL + "#include <algorithm>" + NL + t[i:]
         pds.write_text(t, encoding="utf-8", newline=NL)
+    # the pairing scripts detect it from --help
+    t = pds.read_text(encoding="utf-8")
+    if "CHESHIRE_PDS_THREADS for the thread count" not in t:
+        old_desc = 'CmdLine cmdline("AliceVision prepareDenseScene");'
+        if old_desc not in t:
+            sys.exit("prepareDenseScene description not found")
+        t = t.replace(old_desc, 'CmdLine cmdline("AliceVision prepareDenseScene (cheshire: one image per thread on every core; CHESHIRE_PDS_THREADS for the thread count)");', 1)
+        pds.write_text(t, encoding="utf-8", newline=NL)
 
 
     # 5. regenerate the reviewable patch

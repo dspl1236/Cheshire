@@ -20,7 +20,7 @@ MESHROOM="${1:?Meshroom directory (e.g. ~/apps/Meshroom-2023.3.0)}"
 BIN="$MESHROOM/aliceVision/bin"
 [ -d "$BIN" ] || { echo "$BIN not found: is $MESHROOM a Meshroom 2023.x Linux bundle?"; exit 1; }
 if [ "${2:-}" = "--unpair" ]; then
-  for name in aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing; do
+  for name in aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene; do
     if [ -x "$BIN/$name.cuda" ]; then mv -f "$BIN/$name.cuda" "$BIN/$name"; echo "restored $name"; else echo "$name: not paired"; fi
   done
   exit 0
@@ -88,4 +88,11 @@ if grep -q 'CHESHIRE_GPU_TEX' <<<"$tx_help"; then
   pair aliceVision_texturing
 else
   echo "bundle's aliceVision_texturing has no GPU pass (pre-v0.2.8): not paired"
+fi
+# PrepareDenseScene (v0.2.9+): the bundle's prepareDenseScene runs its image loop on every core (its --help says so)
+pd_help=$(ALICEVISION_ROOT="$BUNDLE" LD_LIBRARY_PATH="$BUNDLE/lib" "$BUNDLE/bin/aliceVision_prepareDenseScene" --help 2>&1 || true)
+if grep -q 'CHESHIRE_PDS_THREADS' <<<"$pd_help"; then
+  pair aliceVision_prepareDenseScene
+else
+  echo "bundle's aliceVision_prepareDenseScene is upstream's (pre-v0.2.9): not paired"
 fi

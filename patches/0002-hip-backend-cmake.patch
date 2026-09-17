@@ -2857,7 +2857,7 @@ index 4fe193b..a271a2f 100644
                      fuseCut::Mesher mesher(mp, pc, tetrahedralization, gfiller.getCellsStatus());
                      mesher.graphCutPostProcessing(&hexah[0]);
 diff --git a/src/software/pipeline/main_prepareDenseScene.cpp b/src/software/pipeline/main_prepareDenseScene.cpp
-index a37cb29..9ed87f1 100644
+index a37cb29..1ec8df4 100644
 --- a/src/software/pipeline/main_prepareDenseScene.cpp
 +++ b/src/software/pipeline/main_prepareDenseScene.cpp
 @@ -4,6 +4,8 @@
@@ -2881,6 +2881,15 @@ index a37cb29..9ed87f1 100644
      for (int i = 0; i < viewIds.size(); ++i)
      {
          auto itView = viewIds.begin();
+@@ -335,7 +340,7 @@ int aliceVision_main(int argc, char* argv[])
+          "Correct exposure value.");
+     // clang-format on
+ 
+-    CmdLine cmdline("AliceVision prepareDenseScene");
++    CmdLine cmdline("AliceVision prepareDenseScene (cheshire: one image per thread on every core; CHESHIRE_PDS_THREADS for the thread count)");
+     cmdline.add(requiredParams);
+     cmdline.add(optionalParams);
+     if (!cmdline.execute(argc, argv))
 diff --git a/src/software/pipeline/main_texturing.cpp b/src/software/pipeline/main_texturing.cpp
 index a8714f8..1cf26df 100644
 --- a/src/software/pipeline/main_texturing.cpp

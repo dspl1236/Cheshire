@@ -22,7 +22,7 @@ if "%PKG%"=="" ( echo usage: %~nx0 ^<Meshroom dir^> ^<Cheshire package dir^> ^| 
 set BIN=%MR%\aliceVision\bin
 if not exist "%BIN%\" ( echo %BIN% not found: is %MR% a Meshroom 2023.x Windows install? & exit /b 1 )
 if /i "%PKG%"=="--unpair" (
-  for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing) do call :unpair %%N
+  for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene) do call :unpair %%N
   exit /b 0
 )
 if not exist "%PKG%\bin\aliceVision_depthMapEstimation.exe" ( echo no HIP aliceVision_depthMapEstimation.exe in %PKG%\bin & exit /b 1 )
@@ -67,6 +67,14 @@ if exist "%PKG%\bin\aliceVision_texturing.exe" (
   del /q "%TEMP%\cheshire-tx-help.txt" 2>nul
 )
 if defined TXOK ( call :pair aliceVision_texturing ) else ( echo package's aliceVision_texturing has no GPU pass ^(pre-v0.2.8^): not paired )
+rem PrepareDenseScene (v0.2.9+): the package's prepareDenseScene runs its image loop on every core; gate on its help text
+set PDOK=
+if exist "%PKG%inliceVision_prepareDenseScene.exe" (
+  "%PKG%inliceVision_prepareDenseScene.exe" --help > "%TEMP%\cheshire-pd-help.txt" 2>&1
+  findstr /c:"CHESHIRE_PDS_THREADS" "%TEMP%\cheshire-pd-help.txt" >nul 2>&1 && set PDOK=1
+  del /q "%TEMP%\cheshire-pd-help.txt" 2>nul
+)
+if defined PDOK ( call :pair aliceVision_prepareDenseScene ) else ( echo package's aliceVision_prepareDenseScene is upstream's ^(pre-v0.2.9^): not paired )
 exit /b 0
 
 :pair
