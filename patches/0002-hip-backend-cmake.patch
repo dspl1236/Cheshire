@@ -2205,6 +2205,184 @@ index 1a63489..c8a423c 100644
          _tree->buildIndex();
          ALICEVISION_LOG_INFO("KdTree created for " << verticesCoords.size() << " points.");
      }
+diff --git a/src/aliceVision/fuseCut/Mesher.cpp b/src/aliceVision/fuseCut/Mesher.cpp
+index 38d5a37..87c863a 100644
+--- a/src/aliceVision/fuseCut/Mesher.cpp
++++ b/src/aliceVision/fuseCut/Mesher.cpp
+@@ -4,6 +4,7 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <chrono>  // cheshire
+ #include "Mesher.hpp"
+ 
+ #include <aliceVision/mvsData/Universe.hpp>
+@@ -274,6 +275,14 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
+ {
+     long timer = std::clock();
+     ALICEVISION_LOG_INFO("Graph cut post-processing.");
++    // cheshire: each pass of this block timed separately
++    auto cheshirePostMark = std::chrono::steady_clock::now();
++    auto cheshirePostMs = [&cheshirePostMark]() {
++        const auto now = std::chrono::steady_clock::now();
++        const double ms = std::chrono::duration<double, std::milli>(now - cheshirePostMark).count();
++        cheshirePostMark = now;
++        return ms;
++    };
+ 
+     int minSegmentSize = _mp.userParams.get<int>("hallucinationsFiltering.minSegmentSize", 10);
+     int invertTetrahedronBasedOnNeighborsNbIterations =
+@@ -282,6 +291,7 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
+     int nbSolidAngleFilteringIterations = _mp.userParams.get<double>("hallucinationsFiltering.nbSolidAngleFilteringIterations", 10);
+ 
+     removeBubbles();
++    ALICEVISION_LOG_INFO("cheshire: post-cut removeBubbles: " << cheshirePostMs() << " ms");
+ 
+     if (true)
+     {
+@@ -306,9 +316,12 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
+         }
+     }
+ 
++    ALICEVISION_LOG_INFO("cheshire: post-cut cameraCells: " << cheshirePostMs() << " ms");
+     removeDust(minSegmentSize);
++    ALICEVISION_LOG_INFO("cheshire: post-cut removeDust: " << cheshirePostMs() << " ms");
+ 
+     invertFullStatusForSmallLabels();
++    ALICEVISION_LOG_INFO("cheshire: post-cut invertFullStatusForSmallLabels: " << cheshirePostMs() << " ms");
+ 
+     {
+         // Changed status of cells to improve coherence with neighboring tetrahedrons
+@@ -348,7 +361,9 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
+         }
+     }
+ 
++    ALICEVISION_LOG_INFO("cheshire: post-cut neighbourInversion: " << cheshirePostMs() << " ms");
+     cellsStatusFilteringBySolidAngleRatio(nbSolidAngleFilteringIterations, minSolidAngleRatio);
++    ALICEVISION_LOG_INFO("cheshire: post-cut solidAngleFiltering: " << cheshirePostMs() << " ms");
+ }
+ 
+ int Mesher::removeBubbles()
+@@ -450,13 +465,12 @@ void Mesher::segmentFullOrFree(bool full, StaticVector<int>& out_fullSegsColor,
+             // backtrack all connected interior cells
+             buff.resize(0);
+             buff.push_back(ci);
++            out_fullSegsColor[ci] = col;  // cheshire: colour on push, so a cell enters the stack once
+ 
+             while (buff.size() > 0)
+             {
+                 CellIndex tmp_ci = buff.pop();
+ 
+-                out_fullSegsColor[tmp_ci] = col;
+-
+                 for (int k = 0; k < 4; ++k)
+                 {
+                     const CellIndex nci = _tetrahedralization.cell_adjacent(tmp_ci, k);
+@@ -464,6 +478,7 @@ void Mesher::segmentFullOrFree(bool full, StaticVector<int>& out_fullSegsColor,
+                         continue;
+                     if ((!_tetrahedralization.isInfiniteCell(nci)) && (out_fullSegsColor[nci] == -1) && (_cellIsFull[nci] == full))
+                     {
++                        out_fullSegsColor[nci] = col;  // cheshire
+                         buff.push_back(nci);
+                     }
+                 }
+@@ -473,6 +488,47 @@ void Mesher::segmentFullOrFree(bool full, StaticVector<int>& out_fullSegsColor,
+     }
+ 
+     out_nsegments = col;
++    if (std::getenv("CHESHIRE_SEGMENT_CHECK") != nullptr)
++    {
++        // upstream's order: colour when the cell is popped
++        StaticVector<int> refColour;
++        refColour.reserve(_cellIsFull.size());
++        refColour.resize_with(_cellIsFull.size(), -1);
++        StaticVector<CellIndex> refBuff;
++        refBuff.reserve(_cellIsFull.size());
++        int refCol = 0;
++        for (CellIndex ci = 0; ci < _cellIsFull.size(); ++ci)
++        {
++            if ((!_tetrahedralization.isInfiniteCell(ci)) && (refColour[ci] == -1) && (_cellIsFull[ci] == full))
++            {
++                refBuff.resize(0);
++                refBuff.push_back(ci);
++                while (refBuff.size() > 0)
++                {
++                    CellIndex tci = refBuff.pop();
++                    refColour[tci] = refCol;
++                    for (int k = 0; k < 4; ++k)
++                    {
++                        const CellIndex nci = _tetrahedralization.cell_adjacent(tci, k);
++                        if (nci == GEO::NO_CELL)
++                            continue;
++                        if ((!_tetrahedralization.isInfiniteCell(nci)) && (refColour[nci] == -1) && (_cellIsFull[nci] == full))
++                            refBuff.push_back(nci);
++                    }
++                }
++                ++refCol;
++            }
++        }
++        std::size_t differing = 0;
++        for (CellIndex ci = 0; ci < _cellIsFull.size(); ++ci)
++            differing += (out_fullSegsColor[ci] != refColour[ci]) ? 1 : 0;
++        if (differing == 0 && refCol == col)
++            ALICEVISION_LOG_INFO("cheshire: segmentFullOrFree check: identical to upstream on all "
++                                 << _cellIsFull.size() << " cells (" << col << " segments)");
++        else
++            ALICEVISION_LOG_WARNING("cheshire: segmentFullOrFree check: " << differing << " of "
++                                    << _cellIsFull.size() << " cells differ, segments " << col << " vs " << refCol);
++    }
+ }
+ 
+ void Mesher::invertFullStatusForSmallLabels()
+@@ -576,15 +632,18 @@ void Mesher::cellsStatusFilteringBySolidAngleRatio(int nbSolidAngleFilteringIter
+             }
+                 
+             const std::vector<CellIndex>& neighboringCells = neighboringCellsPerVertex[vi];
+-            std::vector<Facet> neighboringFacets;
++            // cheshire: one buffer per thread, reused across vertices, instead of an allocation each
++            static thread_local std::vector<Facet> neighboringFacets;
++            neighboringFacets.clear();
+             neighboringFacets.reserve(neighboringCells.size());
+             bool borderCase = false;
+             double fullPartSolidAngle = 0.0;
+             for (CellIndex ci : neighboringCells)
+             {
+                 // ALICEVISION_LOG_INFO("full cell: " << ci);
+-                std::vector<VertexIndex> triangle;
+-                triangle.reserve(3);
++                // cheshire: this ran once per neighbouring cell of every surface vertex
++                VertexIndex cheshireTriangle[4];
++                std::size_t cheshireTriangleSize = 0;
+                 GEO::signed_index_t localVertexIndex = 0;
+                 for (int k = 0; k < 4; ++k)
+                 {
+@@ -592,11 +651,15 @@ void Mesher::cellsStatusFilteringBySolidAngleRatio(int nbSolidAngleFilteringIter
+                     if (currentVertex == GEO::NO_VERTEX)
+                         break;
+                     if (currentVertex != vi)
+-                        triangle.push_back(currentVertex);
++                    {
++                        if (cheshireTriangleSize < 4)  // cheshire
++                            cheshireTriangle[cheshireTriangleSize] = currentVertex;
++                        ++cheshireTriangleSize;
++                    }
+                     else
+                         localVertexIndex = k;
+                 }
+-                if (triangle.size() != 3)
++                if (cheshireTriangleSize != 3)
+                 {
+                     borderCase = true;
+                     break;
+@@ -610,7 +673,7 @@ void Mesher::cellsStatusFilteringBySolidAngleRatio(int nbSolidAngleFilteringIter
+                 {
+                     const Point3d& O = _verticesCoords[vi];
+                     const double s =
+-                      tetrahedronSolidAngle(_verticesCoords[triangle[0]] - O, _verticesCoords[triangle[1]] - O, _verticesCoords[triangle[2]] - O);
++                      tetrahedronSolidAngle(_verticesCoords[cheshireTriangle[0]] - O, _verticesCoords[cheshireTriangle[1]] - O, _verticesCoords[cheshireTriangle[2]] - O);
+                     fullPartSolidAngle += s;
+                 }
+             }
 diff --git a/src/aliceVision/fuseCut/PointCloud.cpp b/src/aliceVision/fuseCut/PointCloud.cpp
 index 50a15fd..4c6a480 100644
 --- a/src/aliceVision/fuseCut/PointCloud.cpp

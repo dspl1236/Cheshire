@@ -66,6 +66,7 @@ TRACKED = [
     "src/software/pipeline/main_texturing.cpp",
     "src/aliceVision/fuseCut/Tetrahedralization.cpp",
     "src/aliceVision/fuseCut/PointCloud.cpp",
+    "src/aliceVision/fuseCut/Mesher.cpp",
     "src/aliceVision/mesh/Mesh.cpp",
     "src/aliceVision/mesh/MeshClean.cpp",
     "src/aliceVision/fuseCut/Kdtree.hpp",
@@ -1674,6 +1675,171 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                + old)
         t = t.replace(old, new, 1)
         tz.write_text(t, encoding="utf-8", newline=NL)
+
+    # 4s. Per-pass timing of the graph-cut post-processing block (9.5 s of Meshing on the engine bay,
+    #     and until now one opaque number). Six passes, each timed.
+    ms = AV / "src/aliceVision/fuseCut/Mesher.cpp"
+    t = ms.read_text(encoding="utf-8")
+    if "cheshirePostMark" not in t:
+        old = '    ALICEVISION_LOG_INFO("Graph cut post-processing.");' + NL
+        if t.count(old) != 1:
+            sys.exit("post-processing banner not found once")
+        new = (old
+               + "    // cheshire: each pass of this block timed separately" + NL
+               + "    auto cheshirePostMark = std::chrono::steady_clock::now();" + NL
+               + "    auto cheshirePostMs = [&cheshirePostMark]() {" + NL
+               + "        const auto now = std::chrono::steady_clock::now();" + NL
+               + "        const double ms = std::chrono::duration<double, std::milli>(now - cheshirePostMark).count();" + NL
+               + "        cheshirePostMark = now;" + NL
+               + "        return ms;" + NL
+               + "    };" + NL)
+        t = t.replace(old, new, 1)
+        for call, label in (("    removeBubbles();", "removeBubbles"),
+                            ("    removeDust(minSegmentSize);", "removeDust"),
+                            ("    invertFullStatusForSmallLabels();", "invertFullStatusForSmallLabels"),
+                            ("    cellsStatusFilteringBySolidAngleRatio(nbSolidAngleFilteringIterations, minSolidAngleRatio);", "solidAngleFiltering")):
+            if t.count(call + NL) != 1:
+                sys.exit("post-cut call not found once: " + label)
+            t = t.replace(call + NL,
+                          call + NL + '    ALICEVISION_LOG_INFO("cheshire: post-cut ' + label + ': " << cheshirePostMs() << " ms");' + NL, 1)
+        # the camera-vertex freeing loop and the neighbour-inversion rounds are inline blocks
+        old = "    removeDust(minSegmentSize);" + NL
+        t = t.replace(old, '    ALICEVISION_LOG_INFO("cheshire: post-cut cameraCells: " << cheshirePostMs() << " ms");' + NL + old, 1)
+        old = "    cellsStatusFilteringBySolidAngleRatio(nbSolidAngleFilteringIterations, minSolidAngleRatio);" + NL
+        t = t.replace(old, '    ALICEVISION_LOG_INFO("cheshire: post-cut neighbourInversion: " << cheshirePostMs() << " ms");' + NL + old, 1)
+        if "#include <chrono>" not in t:
+            i = t.index("#include")
+            t = t[:i] + "#include <chrono>  // cheshire" + NL + t[i:]
+        ms.write_text(t, encoding="utf-8", newline=NL)
+
+    # 4t. Two exact reductions in the post-cut block (8.4 s on the engine bay, measured per pass by
+    #     step 4s: solid-angle filtering 3.3 s, the three segmentation passes 4.9 s together).
+    #     (a) segmentFullOrFree colours a cell when it is pushed rather than when it is popped, so a
+    #         cell enters the stack once instead of up to four times. The colouring is identical: the
+    #         seed order is unchanged and a cell's colour is the one its component's seed carries.
+    #     (b) cellsStatusFilteringBySolidAngleRatio stops heap-allocating inside its inner loop. It
+    #         built a three-element std::vector per neighbouring cell per surface vertex, tens of
+    #         millions of allocations per round, and a fresh facet vector per vertex. Same values,
+    #         same order: a fixed array and one buffer reused across the vertex's cells.
+    ms = AV / "src/aliceVision/fuseCut/Mesher.cpp"
+    t = ms.read_text(encoding="utf-8")
+    if "cheshireTriangle" not in t:
+        old = ("            buff.push_back(ci);" + NL + NL
+               + "            while (buff.size() > 0)" + NL
+               + "            {" + NL
+               + "                CellIndex tmp_ci = buff.pop();" + NL + NL
+               + "                out_fullSegsColor[tmp_ci] = col;" + NL)
+        if t.count(old) != 1:
+            sys.exit("segmentFullOrFree flood fill not found once")
+        new = ("            buff.push_back(ci);" + NL
+               + "            out_fullSegsColor[ci] = col;  // cheshire: colour on push, so a cell enters the stack once" + NL + NL
+               + "            while (buff.size() > 0)" + NL
+               + "            {" + NL
+               + "                CellIndex tmp_ci = buff.pop();" + NL)
+        t = t.replace(old, new, 1)
+        old = ("                    if ((!_tetrahedralization.isInfiniteCell(nci)) && (out_fullSegsColor[nci] == -1) && (_cellIsFull[nci] == full))" + NL
+               + "                    {" + NL
+               + "                        buff.push_back(nci);" + NL)
+        if t.count(old) != 1:
+            sys.exit("segmentFullOrFree neighbour push not found once")
+        new = ("                    if ((!_tetrahedralization.isInfiniteCell(nci)) && (out_fullSegsColor[nci] == -1) && (_cellIsFull[nci] == full))" + NL
+               + "                    {" + NL
+               + "                        out_fullSegsColor[nci] = col;  // cheshire" + NL
+               + "                        buff.push_back(nci);" + NL)
+        t = t.replace(old, new, 1)
+
+        old = ("            const std::vector<CellIndex>& neighboringCells = neighboringCellsPerVertex[vi];" + NL
+               + "            std::vector<Facet> neighboringFacets;" + NL
+               + "            neighboringFacets.reserve(neighboringCells.size());" + NL)
+        if t.count(old) != 1:
+            sys.exit("solid angle facet vector not found once")
+        new = ("            const std::vector<CellIndex>& neighboringCells = neighboringCellsPerVertex[vi];" + NL
+               + "            // cheshire: one buffer per thread, reused across vertices, instead of an allocation each" + NL
+               + "            static thread_local std::vector<Facet> neighboringFacets;" + NL
+               + "            neighboringFacets.clear();" + NL
+               + "            neighboringFacets.reserve(neighboringCells.size());" + NL)
+        t = t.replace(old, new, 1)
+
+        old = ("                std::vector<VertexIndex> triangle;" + NL
+               + "                triangle.reserve(3);" + NL)
+        if t.count(old) != 1:
+            sys.exit("solid angle triangle vector not found once")
+        new = ("                // cheshire: this ran once per neighbouring cell of every surface vertex" + NL
+               + "                VertexIndex cheshireTriangle[4];" + NL
+               + "                std::size_t cheshireTriangleSize = 0;" + NL)
+        t = t.replace(old, new, 1)
+        old = ("                    if (currentVertex != vi)" + NL
+               + "                        triangle.push_back(currentVertex);" + NL
+               + "                    else" + NL)
+        if t.count(old) != 1:
+            sys.exit("triangle push_back not found once")
+        new = ("                    if (currentVertex != vi)" + NL
+               + "                    {" + NL
+               + "                        if (cheshireTriangleSize < 4)  // cheshire" + NL
+               + "                            cheshireTriangle[cheshireTriangleSize] = currentVertex;" + NL
+               + "                        ++cheshireTriangleSize;" + NL
+               + "                    }" + NL
+               + "                    else" + NL)
+        t = t.replace(old, new, 1)
+        old = "                if (triangle.size() != 3)" + NL
+        if t.count(old) != 1:
+            sys.exit("triangle size test not found once")
+        t = t.replace(old, "                if (cheshireTriangleSize != 3)" + NL, 1)
+        for k in (0, 1, 2):
+            old = "triangle[%d]" % k
+            if t.count(old) != 1:
+                sys.exit("triangle[%d] not found once" % k)
+            t = t.replace(old, "cheshireTriangle[%d]" % k, 1)
+        # CHESHIRE_SEGMENT_CHECK=1: recompute the segmentation the way upstream does (colour at pop,
+        # so a cell can enter the stack up to four times) and require the same colours and count
+        old = "    out_nsegments = col;" + NL + "}" + NL
+        if t.count(old) != 1:
+            sys.exit("segmentFullOrFree tail not found once")
+        new = ("    out_nsegments = col;" + NL
+               + "    if (std::getenv(\"CHESHIRE_SEGMENT_CHECK\") != nullptr)" + NL
+               + "    {" + NL
+               + "        // upstream's order: colour when the cell is popped" + NL
+               + "        StaticVector<int> refColour;" + NL
+               + "        refColour.reserve(_cellIsFull.size());" + NL
+               + "        refColour.resize_with(_cellIsFull.size(), -1);" + NL
+               + "        StaticVector<CellIndex> refBuff;" + NL
+               + "        refBuff.reserve(_cellIsFull.size());" + NL
+               + "        int refCol = 0;" + NL
+               + "        for (CellIndex ci = 0; ci < _cellIsFull.size(); ++ci)" + NL
+               + "        {" + NL
+               + "            if ((!_tetrahedralization.isInfiniteCell(ci)) && (refColour[ci] == -1) && (_cellIsFull[ci] == full))" + NL
+               + "            {" + NL
+               + "                refBuff.resize(0);" + NL
+               + "                refBuff.push_back(ci);" + NL
+               + "                while (refBuff.size() > 0)" + NL
+               + "                {" + NL
+               + "                    CellIndex tci = refBuff.pop();" + NL
+               + "                    refColour[tci] = refCol;" + NL
+               + "                    for (int k = 0; k < 4; ++k)" + NL
+               + "                    {" + NL
+               + "                        const CellIndex nci = _tetrahedralization.cell_adjacent(tci, k);" + NL
+               + "                        if (nci == GEO::NO_CELL)" + NL
+               + "                            continue;" + NL
+               + "                        if ((!_tetrahedralization.isInfiniteCell(nci)) && (refColour[nci] == -1) && (_cellIsFull[nci] == full))" + NL
+               + "                            refBuff.push_back(nci);" + NL
+               + "                    }" + NL
+               + "                }" + NL
+               + "                ++refCol;" + NL
+               + "            }" + NL
+               + "        }" + NL
+               + "        std::size_t differing = 0;" + NL
+               + "        for (CellIndex ci = 0; ci < _cellIsFull.size(); ++ci)" + NL
+               + "            differing += (out_fullSegsColor[ci] != refColour[ci]) ? 1 : 0;" + NL
+               + "        if (differing == 0 && refCol == col)" + NL
+               + "            ALICEVISION_LOG_INFO(\"cheshire: segmentFullOrFree check: identical to upstream on all \"" + NL
+               + "                                 << _cellIsFull.size() << \" cells (\" << col << \" segments)\");" + NL
+               + "        else" + NL
+               + "            ALICEVISION_LOG_WARNING(\"cheshire: segmentFullOrFree check: \" << differing << \" of \"" + NL
+               + "                                    << _cellIsFull.size() << \" cells differ, segments \" << col << \" vs \" << refCol);" + NL
+               + "    }" + NL
+               + "}" + NL)
+        t = t.replace(old, new, 1)
+        ms.write_text(t, encoding="utf-8", newline=NL)
 
     # 5. regenerate the reviewable patch
     subprocess.run(["git", "add", "-N", "src/aliceVision/depthMap/cuda/hip"], cwd=AV, check=True)

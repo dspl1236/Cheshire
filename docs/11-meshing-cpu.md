@@ -179,3 +179,34 @@ cells reproducibly, deterministic vote accumulation cannot by itself make two ru
 cell numbering is upstream's, inside geogram. Both facts are worth knowing before anyone spends
 effort on fixed-point accumulation: it is still a sound change, but it buys stability of the weights
 given a numbering, not a reproducible mesh.
+
+## The graph-cut post-processing block
+
+The block between the cut and the mesh was one opaque 9.5 s on the engine bay. Apply step 4s times
+its six passes separately, which changed what was worth doing: the 4-neighbour majority inversion,
+ten rounds of a pure boolean stencil and the obvious candidate for the GPU, is 116 ms of 8358 ms.
+The cost is elsewhere.
+
+| pass (engine bay, 21.7 M cells) | before | after |
+|---|---|---|
+| solid-angle filtering, 2 rounds | 3301 ms | 2714 ms |
+| removeBubbles | 2305 ms | 1617 ms |
+| invertFullStatusForSmallLabels | 1773 ms | 1943 ms |
+| removeDust | 862 ms | 667 ms |
+| 4-neighbour inversion, 10 rounds | 116 ms | 98 ms |
+| free the cells holding a camera | 0.25 ms | 0.26 ms |
+
+Apply step 4t makes two exact reductions. `segmentFullOrFree`, the flood fill behind three of these
+passes, colours a cell when it is pushed rather than when it is popped, so a cell enters the stack
+once instead of up to four times; the colouring is unchanged because the seed order is unchanged and
+a cell's colour is still the one its component's seed carries. `CHESHIRE_SEGMENT_CHECK=1` recomputes
+it upstream's way in the same process and compares: identical on all 1,672,310 cells of the 6-view
+job and all 22,078,541 of the engine bay, for both the empty and the full pass. And the solid-angle
+filter stops allocating inside its inner loop, where it built a three-element `std::vector` for every
+neighbouring cell of every surface vertex, tens of millions of allocations per round, plus a fresh
+facet vector per vertex. Same values in the same order, from a fixed array and one buffer reused
+across the vertex's cells.
+
+The block is 7040 ms, and the 6-view job's 753 ms is 655 ms. What is left is dominated by the three
+segmentation passes and the solid-angle geometry, both of which are parallel connected-component or
+per-vertex work rather than anything the GPU would obviously win.
