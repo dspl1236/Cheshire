@@ -10,3 +10,6 @@ __pycache__/
 .idea/
 CMakeUserPresets.json
 data/
+
+# PopSIFT is cloned, not vendored: scripts/apply_popsift_patch.py explains how
+third_party/popsift/
