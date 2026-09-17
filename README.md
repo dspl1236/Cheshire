@@ -33,7 +33,7 @@ number is why the design is what it is.
 | FeatureMatching | CPU (kd-tree) on every vendor | exact GPU brute-force 2-NN (HIP; the source also builds as CUDA) | validated end to end (v0.2.5): 592 s -> 75 s on 107 photos, same reconstruction |
 | FeatureExtraction | CUDA (PopSift) or CPU | CPU on AMD (`forceCpuExtraction`) | PopSift port not started |
 | DepthMapFilter | CPU | GPU vote pass (HIP / CUDA source) | validated (v0.2.6): 123.5 s -> 26.5 s on 107 photos (RX 9070), 317 s -> 26.9 s on 41 views on an i3 + RX 5500 XT, bit-identical; found and replicated an upstream vote-buffer quirk |
-| Meshing | CPU | GPU graph-weight votes + weakly-supported-surfaces pass (HIP / CUDA source) | done (v0.2.7): the two ray passes 37 s -> 18 s on 107 photos (RX 9070), Meshing 491 s -> 413 s on 41 views on an i3 + RX 5500 XT, the weakly-supported-surfaces pass cell-identical to the CPU; the node is bounded by its CPU max-flow (207 s of 495.9 s), which is its own project |
+| Meshing | CPU | GPU graph-weight votes + weakly-supported-surfaces pass (HIP / CUDA source); exact CPU fixes around them: neighbour tables by counting, parallel kd-tree builds and facet weights, a CSR max-flow graph ([docs/11](docs/11-meshing-cpu.md)) | done (v0.2.7 + v0.2.9): 510 s -> 296.5 s on 107 photos (RX 9070), 491 s -> 413 s on 41 views on an i3 + RX 5500 XT (v0.2.7); every change verified identical in-process; what is left is Boykov-Kolmogorov itself (109 s) and the visibility passes |
 | Texturing | CPU | GPU Laplacian pyramid + rasterisation, parallel camera selection (HIP / CUDA source) | done (v0.2.8): 165.8 s -> 79.3 s on 107 photos (RX 9070), 271.5 s -> 102.5 s on 41 views on an i3 + RX 5500 XT, textures inside the CPU's own run-to-run band; what is left is UV unwrap, mesh I/O and padding |
 | PrepareDenseScene | CPU | | small win, when convenient |
 | SfM, ImageMatching, MeshFiltering | CPU | | stay on the CPU (sequential or tiny) |
@@ -285,9 +285,11 @@ timed on the 41-view and engine bay sets:
    is the follow-up.
 2. ~~**Meshing's voting pass.**~~ Done in v0.2.7 ([docs/09](docs/09-gpu-meshing-votes.md)): both
    ray-marching passes on the GPU, 37 s to 18 s on the engine bay job. It was not the majority of
-   Meshing: the profile says the Boykov-Kolmogorov max-flow (144 s) and building its graph (63 s)
-   are, followed by the dense point cloud (74 s), the neighbour tables (47 s) and the
-   tetrahedralisation (41 s). A GPU max-flow is a project of its own and goes after Texturing.
+   Meshing: the profile said the Boykov-Kolmogorov max-flow (144 s) and building its graph (63 s)
+   were, followed by the dense point cloud (74 s), the neighbour tables (47 s) and the
+   tetrahedralisation (41 s). The graph build, the tables and the kd-tree have since been fixed on
+   the CPU, exactly ([docs/11](docs/11-meshing-cpu.md)); Meshing is 296 s, 109 s of it the
+   max-flow itself. A GPU max-flow is a project of its own.
 3. ~~**Texturing.**~~ Done in v0.2.8 ([docs/10](docs/10-gpu-texturing.md)): the per-camera
    Laplacian pyramid and rasterisation on the GPU, the camera selection parallel, images read
    ahead; 165.8 s to 79.3 s on the engine bay job. What is left is UV unwrap, mesh load and save,
