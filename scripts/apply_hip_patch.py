@@ -68,6 +68,7 @@ TRACKED = [
     "src/aliceVision/fuseCut/PointCloud.cpp",
     "src/aliceVision/fuseCut/Kdtree.hpp",
     "src/aliceVision/fuseCut/GraphFiller.hpp",
+    "src/software/pipeline/main_prepareDenseScene.cpp",
 ]
 
 
@@ -1249,6 +1250,87 @@ float GraphFiller::binarizeImpl(std::vector<bool>& cellIsFull)
         gfp.write_text(t, encoding="utf-8", newline=NL)
     elif "facet weight check" not in t:
         sys.exit("binarize edge loop not found")
+
+
+    # 4j. DepthMapFilter depth-map cache: every neighbour depth map is decoded from EXR once per
+    #     process instead of once per reference camera that lists it (about ten times); the values
+    #     are the same bytes. CHESHIRE_FILTER_CACHE_MB caps it (default 4096, 0 disables).
+    fz = AV / "src/aliceVision/fuseCut/Fuser.cpp"
+    t = fz.read_text(encoding="utf-8")
+    if "CheshireDepthMapCache" not in t:
+        i = t.index(NL + "namespace aliceVision")   # after every include
+        t = t[:i] + NL + """#include <memory>
+#include <mutex>
+#include <unordered_map>
+namespace {
+// cheshire: decoded neighbour depth maps shared across the reference cameras of this process
+struct CheshireDepthMapCache
+{
+    struct Entry { std::shared_ptr<std::once_flag> once; std::shared_ptr<aliceVision::image::Image<float>> img; };
+    std::mutex mutex;
+    std::unordered_map<int, Entry> entries;
+    std::size_t bytes = 0;
+    std::size_t capBytes = 4096ull << 20;
+    CheshireDepthMapCache() { if (const char* e = std::getenv("CHESHIRE_FILTER_CACHE_MB")) capBytes = std::size_t(std::atoll(e)) << 20; }
+    std::shared_ptr<aliceVision::image::Image<float>> get(int tc, const aliceVision::mvsUtils::MultiViewParams& mp)
+    {
+        if (capBytes == 0)
+        {
+            auto img = std::make_shared<aliceVision::image::Image<float>>();
+            aliceVision::mvsUtils::readMap(tc, mp, aliceVision::mvsUtils::EFileType::depthMap, *img);
+            return img;
+        }
+        Entry e;
+        {
+            std::lock_guard<std::mutex> g(mutex);
+            Entry& slot = entries[tc];
+            if (!slot.once) { slot.once = std::make_shared<std::once_flag>(); slot.img = std::make_shared<aliceVision::image::Image<float>>(); }
+            e = slot;
+        }
+        std::call_once(*e.once, [&] {
+            aliceVision::mvsUtils::readMap(tc, mp, aliceVision::mvsUtils::EFileType::depthMap, *e.img);
+            std::lock_guard<std::mutex> g(mutex);
+            bytes += std::size_t(e.img->size()) * sizeof(float);
+            if (bytes > capBytes)   // over budget: hand this one out but do not keep it
+            {
+                bytes -= std::size_t(e.img->size()) * sizeof(float);
+                entries.erase(tc);
+            }
+        });
+        return e.img;
+    }
+};
+CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; return c; }
+}  // namespace
+""" + t[i:]
+        fz.write_text(t, encoding="utf-8", newline=NL)
+    t = fz.read_text(encoding="utf-8")
+    import re
+    t2, n = re.subn(r"( +)image::Image<float> tcdepthMap;\n\1mvsUtils::readMap\(tc, _mp, mvsUtils::EFileType::depthMap, tcdepthMap\);\n",
+                    lambda m: f"{m.group(1)}const std::shared_ptr<image::Image<float>> tcdepthMapPtr = cheshireDepthMaps().get(tc, _mp);  // cheshire\n{m.group(1)}image::Image<float>& tcdepthMap = *tcdepthMapPtr;\n", t)
+    if n:
+        fz.write_text(t2, encoding="utf-8", newline=NL)
+    elif "cheshireDepthMaps().get" not in t:
+        sys.exit("tc depth map reads not found in Fuser.cpp")
+
+
+    # 4k. PrepareDenseScene: the per-image loop (read, exposure, undistort, EXR write) is pinned to
+    #     three threads upstream; every image is independent, so run it on every core
+    #     (CHESHIRE_PDS_THREADS overrides). Same bytes out.
+    pds = AV / "src/software/pipeline/main_prepareDenseScene.cpp"
+    t = pds.read_text(encoding="utf-8")
+    if "CHESHIRE_PDS_THREADS" not in t:
+        old = "#pragma omp parallel for num_threads(3)" + NL + "    for (int i = 0; i < viewIds.size(); ++i)" + NL
+        if old not in t:
+            sys.exit("prepareDenseScene loop not found")
+        new = ("    // cheshire: one image per thread on every core (upstream: three threads); CHESHIRE_PDS_THREADS overrides" + NL
+               + "    int cheshirePdsThreads = omp_get_max_threads();" + NL
+               + "    if (const char* e = std::getenv(\"CHESHIRE_PDS_THREADS\")) cheshirePdsThreads = std::max(1, std::atoi(e));" + NL
+               + "#pragma omp parallel for num_threads(cheshirePdsThreads)" + NL + "    for (int i = 0; i < viewIds.size(); ++i)" + NL)
+        t = t.replace(old, new, 1)
+        i = t.index("#include")
+        t = t[:i] + "#include <cstdlib>  // cheshire" + NL + "#include <algorithm>" + NL + t[i:]
+        pds.write_text(t, encoding="utf-8", newline=NL)
 
 
     # 5. regenerate the reviewable patch

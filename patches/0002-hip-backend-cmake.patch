@@ -1742,7 +1742,7 @@ index 1b7f39c..7d43ebc 100644
  # Unit tests
  alicevision_add_test(DelaunayGraphCut_test.cpp
 diff --git a/src/aliceVision/fuseCut/Fuser.cpp b/src/aliceVision/fuseCut/Fuser.cpp
-index 7b385ee..879fbc3 100644
+index 7b385ee..4524283 100644
 --- a/src/aliceVision/fuseCut/Fuser.cpp
 +++ b/src/aliceVision/fuseCut/Fuser.cpp
 @@ -16,6 +16,9 @@
@@ -1755,7 +1755,58 @@ index 7b385ee..879fbc3 100644
  #include <aliceVision/image/io.hpp>
  #include <aliceVision/image/imageAlgo.hpp>
  
-@@ -171,6 +174,78 @@ bool Fuser::filterGroupsRC(int rc, float pixToleranceFactor, int pixSizeBall, in
+@@ -26,6 +29,50 @@
+ 
+ #include <iostream>
+ 
++#include <memory>
++#include <mutex>
++#include <unordered_map>
++namespace {
++// cheshire: decoded neighbour depth maps shared across the reference cameras of this process
++struct CheshireDepthMapCache
++{
++    struct Entry { std::shared_ptr<std::once_flag> once; std::shared_ptr<aliceVision::image::Image<float>> img; };
++    std::mutex mutex;
++    std::unordered_map<int, Entry> entries;
++    std::size_t bytes = 0;
++    std::size_t capBytes = 4096ull << 20;
++    CheshireDepthMapCache() { if (const char* e = std::getenv("CHESHIRE_FILTER_CACHE_MB")) capBytes = std::size_t(std::atoll(e)) << 20; }
++    std::shared_ptr<aliceVision::image::Image<float>> get(int tc, const aliceVision::mvsUtils::MultiViewParams& mp)
++    {
++        if (capBytes == 0)
++        {
++            auto img = std::make_shared<aliceVision::image::Image<float>>();
++            aliceVision::mvsUtils::readMap(tc, mp, aliceVision::mvsUtils::EFileType::depthMap, *img);
++            return img;
++        }
++        Entry e;
++        {
++            std::lock_guard<std::mutex> g(mutex);
++            Entry& slot = entries[tc];
++            if (!slot.once) { slot.once = std::make_shared<std::once_flag>(); slot.img = std::make_shared<aliceVision::image::Image<float>>(); }
++            e = slot;
++        }
++        std::call_once(*e.once, [&] {
++            aliceVision::mvsUtils::readMap(tc, mp, aliceVision::mvsUtils::EFileType::depthMap, *e.img);
++            std::lock_guard<std::mutex> g(mutex);
++            bytes += std::size_t(e.img->size()) * sizeof(float);
++            if (bytes > capBytes)   // over budget: hand this one out but do not keep it
++            {
++                bytes -= std::size_t(e.img->size()) * sizeof(float);
++                entries.erase(tc);
++            }
++        });
++        return e.img;
++    }
++};
++CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; return c; }
++}  // namespace
++
+ namespace aliceVision {
+ namespace fuseCut {
+ 
+@@ -171,6 +218,78 @@ bool Fuser::filterGroupsRC(int rc, float pixToleranceFactor, int pixSizeBall, in
  
      StaticVector<int> tcams = _mp.findNearestCamsFromLandmarks(rc, nNearestCams);
  
@@ -1786,8 +1837,8 @@ index 7b385ee..879fbc3 100644
 +        for (int c = 0; ok && c < tcams.size(); c++)
 +        {
 +            const int tc = tcams[c];
-+            image::Image<float> tcdepthMap;
-+            mvsUtils::readMap(tc, _mp, mvsUtils::EFileType::depthMap, tcdepthMap);
++            const std::shared_ptr<image::Image<float>> tcdepthMapPtr = cheshireDepthMaps().get(tc, _mp);  // cheshire
++            image::Image<float>& tcdepthMap = *tcdepthMapPtr;
 +            if (std::getenv("CHESHIRE_GPU_FILTER_DEBUG") && tcdepthMap.height() > 0)
 +            {
 +                // one tc pixel through both implementations, printed side by side
@@ -1834,7 +1885,7 @@ index 7b385ee..879fbc3 100644
      for (int c = 0; c < tcams.size(); c++)
      {
          numOfPtsMap->resize_with(w * h, 0);
-@@ -201,6 +276,12 @@ bool Fuser::filterGroupsRC(int rc, float pixToleranceFactor, int pixSizeBall, in
+@@ -201,6 +320,12 @@ bool Fuser::filterGroupsRC(int rc, float pixToleranceFactor, int pixSizeBall, in
              {
                  numOfModalsMap(i) += static_cast<int>((*numOfPtsMap)[i] > 0);
              }
@@ -2805,6 +2856,31 @@ index 4fe193b..a271a2f 100644
  
                      fuseCut::Mesher mesher(mp, pc, tetrahedralization, gfiller.getCellsStatus());
                      mesher.graphCutPostProcessing(&hexah[0]);
+diff --git a/src/software/pipeline/main_prepareDenseScene.cpp b/src/software/pipeline/main_prepareDenseScene.cpp
+index a37cb29..9ed87f1 100644
+--- a/src/software/pipeline/main_prepareDenseScene.cpp
++++ b/src/software/pipeline/main_prepareDenseScene.cpp
+@@ -4,6 +4,8 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <cstdlib>  // cheshire
++#include <algorithm>
+ #include <aliceVision/sfmData/SfMData.hpp>
+ #include <aliceVision/alicevision_omp.hpp>
+ #include <aliceVision/sfmDataIO/sfmDataIO.hpp>
+@@ -132,7 +134,10 @@ bool prepareDenseScene(const SfMData& sfmData,
+     const double medianCameraExposure = sfmData.getMedianCameraExposureSetting().getExposure();
+     ALICEVISION_LOG_INFO("Median Camera Exposure: " << medianCameraExposure << ", Median EV: " << std::log2(1.0 / medianCameraExposure));
+ 
+-#pragma omp parallel for num_threads(3)
++    // cheshire: one image per thread on every core (upstream: three threads); CHESHIRE_PDS_THREADS overrides
++    int cheshirePdsThreads = omp_get_max_threads();
++    if (const char* e = std::getenv("CHESHIRE_PDS_THREADS")) cheshirePdsThreads = std::max(1, std::atoi(e));
++#pragma omp parallel for num_threads(cheshirePdsThreads)
+     for (int i = 0; i < viewIds.size(); ++i)
+     {
+         auto itView = viewIds.begin();
 diff --git a/src/software/pipeline/main_texturing.cpp b/src/software/pipeline/main_texturing.cpp
 index a8714f8..1cf26df 100644
 --- a/src/software/pipeline/main_texturing.cpp

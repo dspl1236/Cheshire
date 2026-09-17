@@ -54,3 +54,12 @@ Boykov-Kolmogorov itself, 109 s, single-threaded by nature; the two visibility p
 the depth maps, 21 s; the kd-tree, 22 s; the tetrahedralisation and its tables, 14 s; the GPU
 votes, 18 s; graph-cut and mesh post-processing, 26 s. A GPU max-flow is the next large item and
 its own project; the visibility passes are the next quick one.
+
+## Two more of the same kind, outside Meshing
+
+* **DepthMapFilter** re-read every neighbour depth map from EXR once per reference camera that
+  listed it; the decoded maps are now shared across the process ([docs/08](08-gpu-depth-map-filter.md)):
+  engine bay vote phase 12.5 s to 7.3 s, outputs byte-identical.
+* **PrepareDenseScene** pins its per-image loop (read, exposure, undistort, EXR write) to three
+  threads; it now uses every core (`CHESHIRE_PDS_THREADS` overrides): 107 images in 36 s to 30 s
+  on the 12-thread desktop, the loop being mostly codec and disk work, outputs byte-identical.

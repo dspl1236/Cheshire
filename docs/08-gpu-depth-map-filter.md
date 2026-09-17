@@ -33,9 +33,12 @@ counts, which is how the two findings below were made.
 RX 5500 XT on Linux (house-pc, i3-4330), 41 views with the v0.2.6 bundle: CPU pass 317.0 s, GPU pass
 26.9 s, 123 / 123 output files byte-identical. On a node with a slow CPU the win is 12x.
 
-What is left in the GPU pass is reading: each rc reads its 10 neighbours' depth maps from EXR again,
-1,177 reads for 107 views. A shared cache of decoded depth maps would take most of the remaining
-19 s; it is the next thing to do on this node.
+What was left in the GPU pass was reading: each rc read its 10 neighbours' depth maps from EXR
+again, 1,177 reads for 107 views. Since v0.2.9 the decoded maps are shared across the reference
+cameras of the process (a mutex-guarded table with one `std::call_once` per map, capped by
+`CHESHIRE_FILTER_CACHE_MB`, default 4096, 0 disables): the engine bay's vote phase goes from
+12.5 s to 7.3 s and the node from 17.8 s to 12.7 s, with all 321 output files byte-identical to the
+uncached run.
 
 ## An upstream finding: the vote buffer is never cleared
 

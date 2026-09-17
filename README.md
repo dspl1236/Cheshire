@@ -32,10 +32,10 @@ number is why the design is what it is.
 | DepthMap | CUDA only | HIP port + VRAM-to-RAM memory bridge | validated RDNA1/2/4, Windows + Linux; bit-identical to native across caps |
 | FeatureMatching | CPU (kd-tree) on every vendor | exact GPU brute-force 2-NN (HIP; the source also builds as CUDA) | validated end to end (v0.2.5): 592 s -> 75 s on 107 photos, same reconstruction |
 | FeatureExtraction | CUDA (PopSift) or CPU | CPU on AMD (`forceCpuExtraction`) | PopSift port not started |
-| DepthMapFilter | CPU | GPU vote pass (HIP / CUDA source) | validated (v0.2.6): 123.5 s -> 26.5 s on 107 photos (RX 9070), 317 s -> 26.9 s on 41 views on an i3 + RX 5500 XT, bit-identical; found and replicated an upstream vote-buffer quirk |
+| DepthMapFilter | CPU | GPU vote pass (HIP / CUDA source) + a shared decoded-map cache | validated (v0.2.6): 123.5 s -> 26.5 s on 107 photos (RX 9070), 317 s -> 26.9 s on 41 views on an i3 + RX 5500 XT, bit-identical; found and replicated an upstream vote-buffer quirk; v0.2.9 cache: 17.8 s -> 12.7 s, byte-identical |
 | Meshing | CPU | GPU graph-weight votes + weakly-supported-surfaces pass (HIP / CUDA source); exact CPU fixes around them: neighbour tables by counting, parallel kd-tree builds and facet weights, a CSR max-flow graph ([docs/11](docs/11-meshing-cpu.md)) | done (v0.2.7 + v0.2.9): 510 s -> 296.5 s on 107 photos (RX 9070), 491 s -> 413 s on 41 views on an i3 + RX 5500 XT (v0.2.7); every change verified identical in-process; what is left is Boykov-Kolmogorov itself (109 s) and the visibility passes |
 | Texturing | CPU | GPU Laplacian pyramid + rasterisation, parallel camera selection (HIP / CUDA source) | done (v0.2.8): 165.8 s -> 79.3 s on 107 photos (RX 9070), 271.5 s -> 102.5 s on 41 views on an i3 + RX 5500 XT, textures inside the CPU's own run-to-run band; what is left is UV unwrap, mesh I/O and padding |
-| PrepareDenseScene | CPU | | small win, when convenient |
+| PrepareDenseScene | CPU | every core instead of three threads | done (v0.2.9): 36 s -> 30 s on 107 photos, byte-identical; the loop is codec and disk work |
 | SfM, ImageMatching, MeshFiltering | CPU | | stay on the CPU (sequential or tiny) |
 
 Everything installs by pairing: one script swaps the GPU node binaries (DepthMap, FeatureMatching,
