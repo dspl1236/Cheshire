@@ -1841,6 +1841,43 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
         t = t.replace(old, new, 1)
         ms.write_text(t, encoding="utf-8", newline=NL)
 
+    # 4u. The 4-neighbour inversion count. main_meshing.cpp puts an int under
+    #     hallucinationsFiltering.invertTetrahedronBasedOnNeighborsNbIterations, and Mesher reads it
+    #     back with get<bool>: boost's bool translator rejects "10", the default is returned and
+    #     collapses to true, so the loop runs ONCE however many rounds were asked for. Read as an int.
+    #     CHESHIRE_INVERT_OLD=1 restores upstream's single round. Each round's moves are logged.
+    ms = AV / "src/aliceVision/fuseCut/Mesher.cpp"
+    t = ms.read_text(encoding="utf-8")
+    if "CHESHIRE_INVERT_OLD" not in t:
+        old = ("    int invertTetrahedronBasedOnNeighborsNbIterations =" + NL
+               + '      _mp.userParams.get<bool>("hallucinationsFiltering.invertTetrahedronBasedOnNeighborsNbIterations", 10);' + NL)
+        if t.count(old) != 1:
+            sys.exit("inversion iteration count not found once")
+        new = ("    // cheshire: upstream reads this count with get<bool> while the command line stores an int, so" + NL
+               + "    // boost returns the default and it collapses to 1: the loop below ran once whatever was asked" + NL
+               + "    // for. CHESHIRE_INVERT_OLD=1 restores that." + NL
+               + "    int invertTetrahedronBasedOnNeighborsNbIterations =" + NL
+               + '      (std::getenv("CHESHIRE_INVERT_OLD") != nullptr)' + NL
+               + '        ? (int)_mp.userParams.get<bool>("hallucinationsFiltering.invertTetrahedronBasedOnNeighborsNbIterations", 10)' + NL
+               + '        : _mp.userParams.get<int>("hallucinationsFiltering.invertTetrahedronBasedOnNeighborsNbIterations", 10);' + NL
+               + '    ALICEVISION_LOG_INFO("cheshire: neighbour inversion rounds requested: " << invertTetrahedronBasedOnNeighborsNbIterations);' + NL)
+        t = t.replace(old, new, 1)
+        old = ("                if (_cellIsFull[ci])" + NL
+               + "                    ++movedToFull;" + NL
+               + "                else" + NL
+               + "                    ++movedToEmpty;" + NL
+               + "            }" + NL)
+        if t.count(old) != 1:
+            sys.exit("inversion round tail not found once")
+        new = (old
+               + '            ALICEVISION_LOG_INFO("cheshire: neighbour inversion round " << i << ": " << movedToFull'
+               + ' << " to full, " << movedToEmpty << " to empty");' + NL)
+        t = t.replace(old, new, 1)
+        if "#include <cstdlib>" not in t:
+            i = t.index("#include")
+            t = t[:i] + "#include <cstdlib>  // cheshire" + NL + t[i:]
+        ms.write_text(t, encoding="utf-8", newline=NL)
+
     # 5. regenerate the reviewable patch
     subprocess.run(["git", "add", "-N", "src/aliceVision/depthMap/cuda/hip"], cwd=AV, check=True)
     diff = subprocess.run(["git", "diff", "--no-color"], cwd=AV, check=True, capture_output=True, text=True).stdout

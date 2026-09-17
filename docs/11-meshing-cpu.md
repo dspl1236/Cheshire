@@ -210,3 +210,28 @@ across the vertex's cells.
 The block is 7040 ms, and the 6-view job's 753 ms is 655 ms. What is left is dominated by the three
 segmentation passes and the solid-angle geometry, both of which are parallel connected-component or
 per-vertex work rather than anything the GPU would obviously win.
+
+## The inversion count that was never read
+
+`Mesher::graphCutPostProcessing` reads the number of 4-neighbour inversion rounds with
+`get<bool>`, while `main_meshing` stores an `int` under that key. Boost's bool translator rejects
+"10", the default is returned and collapses to `true`, so the loop ran once however many rounds
+`--invertTetrahedronBasedOnNeighborsNbIterations` asked for. Apply step 4u reads it as the int it
+is; `CHESHIRE_INVERT_OLD=1` restores upstream's single round.
+
+The pass flips a tetrahedron whose status disagrees with three or four of its neighbours, so extra
+rounds remove isolated spikes and pits that the first round exposes. What it costs and what it
+changes, three runs per mode on the 6-view job and one each on the engine bay:
+
+| | one round (upstream) | ten rounds |
+|---|---|---|
+| 6-view faces | 500,572 | 500,057 |
+| 6-view pass time | 6.9 ms | 35 ms |
+| engine bay faces | 2,364,995 | 2,361,583 |
+| engine bay pass time | 92 ms | 918 ms |
+
+The rounds converge on the 6-view job: 10,227 flips in the first, then 446, 8, 1, and nothing more.
+The engine bay does not quite converge, settling into a 2-cycle of six cells each way from round 6
+onward, which the fixed round count simply stops. The cost is 0.8 s of a 130 s Meshing run and the
+effect is 0.14 % of the faces, so this is a small smoothing change rather than a dramatic one, but
+it is the behaviour the parameter has always described.

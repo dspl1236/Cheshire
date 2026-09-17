@@ -2206,18 +2206,19 @@ index 1a63489..c8a423c 100644
          ALICEVISION_LOG_INFO("KdTree created for " << verticesCoords.size() << " points.");
      }
 diff --git a/src/aliceVision/fuseCut/Mesher.cpp b/src/aliceVision/fuseCut/Mesher.cpp
-index 38d5a37..87c863a 100644
+index 38d5a37..0d76dd5 100644
 --- a/src/aliceVision/fuseCut/Mesher.cpp
 +++ b/src/aliceVision/fuseCut/Mesher.cpp
-@@ -4,6 +4,7 @@
+@@ -4,6 +4,8 @@
  // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <cstdlib>  // cheshire
 +#include <chrono>  // cheshire
  #include "Mesher.hpp"
  
  #include <aliceVision/mvsData/Universe.hpp>
-@@ -274,6 +275,14 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
+@@ -274,14 +276,29 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
  {
      long timer = std::clock();
      ALICEVISION_LOG_INFO("Graph cut post-processing.");
@@ -2231,8 +2232,16 @@ index 38d5a37..87c863a 100644
 +    };
  
      int minSegmentSize = _mp.userParams.get<int>("hallucinationsFiltering.minSegmentSize", 10);
++    // cheshire: upstream reads this count with get<bool> while the command line stores an int, so
++    // boost returns the default and it collapses to 1: the loop below ran once whatever was asked
++    // for. CHESHIRE_INVERT_OLD=1 restores that.
      int invertTetrahedronBasedOnNeighborsNbIterations =
-@@ -282,6 +291,7 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
+-      _mp.userParams.get<bool>("hallucinationsFiltering.invertTetrahedronBasedOnNeighborsNbIterations", 10);
++      (std::getenv("CHESHIRE_INVERT_OLD") != nullptr)
++        ? (int)_mp.userParams.get<bool>("hallucinationsFiltering.invertTetrahedronBasedOnNeighborsNbIterations", 10)
++        : _mp.userParams.get<int>("hallucinationsFiltering.invertTetrahedronBasedOnNeighborsNbIterations", 10);
++    ALICEVISION_LOG_INFO("cheshire: neighbour inversion rounds requested: " << invertTetrahedronBasedOnNeighborsNbIterations);
+     double minSolidAngleRatio = _mp.userParams.get<double>("hallucinationsFiltering.minSolidAngleRatio", 0.2);
      int nbSolidAngleFilteringIterations = _mp.userParams.get<double>("hallucinationsFiltering.nbSolidAngleFilteringIterations", 10);
  
      removeBubbles();
@@ -2240,7 +2249,7 @@ index 38d5a37..87c863a 100644
  
      if (true)
      {
-@@ -306,9 +316,12 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
+@@ -306,9 +323,12 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
          }
      }
  
@@ -2253,7 +2262,11 @@ index 38d5a37..87c863a 100644
  
      {
          // Changed status of cells to improve coherence with neighboring tetrahedrons
-@@ -348,7 +361,9 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
+@@ -345,10 +365,13 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
+                 else
+                     ++movedToEmpty;
+             }
++            ALICEVISION_LOG_INFO("cheshire: neighbour inversion round " << i << ": " << movedToFull << " to full, " << movedToEmpty << " to empty");
          }
      }
  
@@ -2263,7 +2276,7 @@ index 38d5a37..87c863a 100644
  }
  
  int Mesher::removeBubbles()
-@@ -450,13 +465,12 @@ void Mesher::segmentFullOrFree(bool full, StaticVector<int>& out_fullSegsColor,
+@@ -450,13 +473,12 @@ void Mesher::segmentFullOrFree(bool full, StaticVector<int>& out_fullSegsColor,
              // backtrack all connected interior cells
              buff.resize(0);
              buff.push_back(ci);
@@ -2278,7 +2291,7 @@ index 38d5a37..87c863a 100644
                  for (int k = 0; k < 4; ++k)
                  {
                      const CellIndex nci = _tetrahedralization.cell_adjacent(tmp_ci, k);
-@@ -464,6 +478,7 @@ void Mesher::segmentFullOrFree(bool full, StaticVector<int>& out_fullSegsColor,
+@@ -464,6 +486,7 @@ void Mesher::segmentFullOrFree(bool full, StaticVector<int>& out_fullSegsColor,
                          continue;
                      if ((!_tetrahedralization.isInfiniteCell(nci)) && (out_fullSegsColor[nci] == -1) && (_cellIsFull[nci] == full))
                      {
@@ -2286,7 +2299,7 @@ index 38d5a37..87c863a 100644
                          buff.push_back(nci);
                      }
                  }
-@@ -473,6 +488,47 @@ void Mesher::segmentFullOrFree(bool full, StaticVector<int>& out_fullSegsColor,
+@@ -473,6 +496,47 @@ void Mesher::segmentFullOrFree(bool full, StaticVector<int>& out_fullSegsColor,
      }
  
      out_nsegments = col;
@@ -2334,7 +2347,7 @@ index 38d5a37..87c863a 100644
  }
  
  void Mesher::invertFullStatusForSmallLabels()
-@@ -576,15 +632,18 @@ void Mesher::cellsStatusFilteringBySolidAngleRatio(int nbSolidAngleFilteringIter
+@@ -576,15 +640,18 @@ void Mesher::cellsStatusFilteringBySolidAngleRatio(int nbSolidAngleFilteringIter
              }
                  
              const std::vector<CellIndex>& neighboringCells = neighboringCellsPerVertex[vi];
@@ -2356,7 +2369,7 @@ index 38d5a37..87c863a 100644
                  GEO::signed_index_t localVertexIndex = 0;
                  for (int k = 0; k < 4; ++k)
                  {
-@@ -592,11 +651,15 @@ void Mesher::cellsStatusFilteringBySolidAngleRatio(int nbSolidAngleFilteringIter
+@@ -592,11 +659,15 @@ void Mesher::cellsStatusFilteringBySolidAngleRatio(int nbSolidAngleFilteringIter
                      if (currentVertex == GEO::NO_VERTEX)
                          break;
                      if (currentVertex != vi)
@@ -2374,7 +2387,7 @@ index 38d5a37..87c863a 100644
                  {
                      borderCase = true;
                      break;
-@@ -610,7 +673,7 @@ void Mesher::cellsStatusFilteringBySolidAngleRatio(int nbSolidAngleFilteringIter
+@@ -610,7 +681,7 @@ void Mesher::cellsStatusFilteringBySolidAngleRatio(int nbSolidAngleFilteringIter
                  {
                      const Point3d& O = _verticesCoords[vi];
                      const double s =
