@@ -220,10 +220,50 @@ keypoint with a valid sigma. That is why the unfiltered path looks clean. Once t
 `copy_if` rewrites `i_ext_off` and those never-written slots become genuine survivors pointing at a
 zeroed `InitialExtremum`, which is where `sigma == 0` comes from.
 
-So the root fault is that `dct.ext_ct[octave]` is about 32x the true extremum count. Octave 0 of a
-504 x 378 image launches 16 x 95 x 3 blocks of four warps, about 18,240 warps, and reports 19,712
-extrema: essentially every warp reports one, and 19,106 of them refine to the same point
-(x 249.815, y 14.030). Detection is over-firing and collapsing to a fixed attractor.
+## The root cause: one uninitialised variable
+
+`extrema_count()` in `s_extrema.cu` reserves output slots like this:
+
+```c
+int write_index;
+if( threadIdx.x == 0 ) {
+    write_index = atomicAdd( extrema_counter, ct );
+}
+write_index = popsift::shuffle( write_index, 0 );   // every lane reads it
+```
+
+Every lane except 0 reads `write_index` without it having been assigned. That is undefined
+behaviour. nvcc leaves the guard alone and the code works; the AMDGPU backend takes the licence and
+**every lane performs the atomic**, so the counter advances by `32 * ct` instead of `ct`.
+
+Adding `= 0` to the declaration fixes it. Measured per octave on a 504 x 378 photograph, counting
+actual writes with a device atomic rather than printf:
+
+| octave | counter, before | counter, after | extrema actually written |
+|---|---|---|---|
+| 0 | 19,712 | 616 | 616 |
+| 1 | 5,056 | 158 | 158 |
+| 2 | 1,216 | 38 | 38 |
+| 3 | 512 | 16 | 16 |
+| 4 | 32 | 1 | 1 |
+| 5 | 32 | 1 | 1 |
+
+Exactly 32x in every octave, and exact agreement after. The whole chain follows from it: the surplus
+slots are never written, so their `i_ext_off` entry stays 0 and they alias their octave's extremum 0
+— which is why the unfiltered path looks clean, and why the run-length histogram is six spikes with
+a median of 1. Once AliceVision's grid filter runs, `copy_if` promotes those never-written slots to
+survivors pointing at a zeroed `InitialExtremum` whose sigma is 0, `ext_desc_loop_sub` returns
+without touching the descriptor, and RootSIFT turns the all-zero descriptor into 128 NaNs.
+
+RootSIFT on the same photograph, before and after, against AliceVision's CPU SIFT:
+
+| | before | after | CPU SIFT |
+|---|---|---|---|
+| zero descriptor bytes | 94.9 % | 4.3 % | 3.3 % |
+| mean descriptor byte | 1.9 | 35.1 | 36.5 |
+| NaN raw floats | 94.7 % | 0 | — |
+| orientations per feature | 3.55 | 1.18 | ~1.15 |
+| duplicate keypoints | 32.5x | 1.0x | — |
 
 ### Ruled out, each by direct measurement
 

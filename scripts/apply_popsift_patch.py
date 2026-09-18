@@ -131,6 +131,33 @@ def main() -> None:
         t = t[:i] + "#include <cstdlib>  // cheshire" + NL + "#include <cstdio>" + NL + t[i:]
         ori.write_text(t, encoding="utf-8", newline=NL)
 
+    # 3c. The extremum counter, and the reason GPU SIFT reconstructed badly. extrema_count() does
+    #
+    #         int write_index;
+    #         if( threadIdx.x == 0 ) { write_index = atomicAdd( extrema_counter, ct ); }
+    #         write_index = popsift::shuffle( write_index, 0 );
+    #
+    #     so every lane but 0 reads write_index uninitialised, which is undefined behaviour. nvcc
+    #     leaves the guard alone. The AMDGPU backend takes the licence and every lane performs the
+    #     atomic, so the counter advances by 32 * ct instead of ct and each octave reports exactly
+    #     32x the extrema it wrote. The surplus slots are never written, their i_ext_off stays 0 and
+    #     they alias the octave's extremum 0; once AliceVision's grid filter runs, copy_if promotes
+    #     them to survivors pointing at a zeroed InitialExtremum, whose sigma is 0, and a keypoint
+    #     with no scale gets no descriptor at all. Initialising the variable removes the UB.
+    extrema = POPSIFT / "src" / "popsift" / "s_extrema.cu"
+    t = extrema.read_text(encoding="utf-8")
+    if "cheshire" not in t:
+        old_decl = ("    int write_index;" + NL
+                    + "    if( threadIdx.x == 0 ) {" + NL)
+        if t.count(old_decl) != 1:
+            sys.exit("write_index declaration not found once in s_extrema.cu")
+        new_decl = ("    // cheshire: lanes other than 0 read this below without it being assigned." + NL
+                    + "    // That is undefined behaviour, and on AMDGPU it costs the guard: every lane" + NL
+                    + "    // performs the atomic and the octave counts come out 32x too large." + NL
+                    + "    int write_index = 0;" + NL
+                    + "    if( threadIdx.x == 0 ) {" + NL)
+        extrema.write_text(t.replace(old_decl, new_decl, 1), encoding="utf-8", newline=NL)
+
     # 3d. CHESHIRE_POPSIFT_DEBUG=1 also reports what the grid filter did per octave. The filter
     #     compacts the surviving extrema with copy_if and separately sets the count with reduce over
     #     the same stencil, so the two must agree; if the count exceeds what copy_if wrote, the

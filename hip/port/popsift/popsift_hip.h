@@ -47,9 +47,13 @@ __device__ inline T cheshirePopsiftShflSync(unsigned int mask, T var, int src, i
 {
     return __shfl_sync((unsigned long long)mask, var, src, width);
 }
-__device__ inline unsigned long long cheshirePopsiftBallotSync(unsigned int mask, int pred)
+__device__ inline unsigned long long cheshirePopsiftBallotSync(unsigned int /*mask*/, int pred)
 {
-    return __ballot_sync((unsigned long long)mask, pred);
+    // HIP's __ballot_sync sets a bit for lanes whose predicate is false: in PopSIFT's extrema
+    // counter it reported about one spurious lane per warp, so every warp reserved a slot and the
+    // extremum count came out around 32x the truth. __ballot is the same operation over the
+    // active lanes and is exact; the mask argument is what CUDA needs and HIP does not use.
+    return __ballot(pred);
 }
 __device__ inline unsigned long long cheshirePopsiftAnySync(unsigned int mask, int pred)
 {
