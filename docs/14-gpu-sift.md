@@ -316,23 +316,48 @@ incremental SfM. "before" is the same build with the uninitialised variable left
 GPU SIFT now recovers 13 % more landmarks than the CPU path at a marginally lower reprojection
 error, with extraction 78x faster.
 
-### The same set on RDNA1
+### The same set on every card here
 
-house-pc, Radeon RX 5500 XT (gfx1012, 8 GB) on Linux, through the bundle — the first execution of
-this port on RDNA1 and of the Linux library at all:
+Four combinations of architecture, runtime and operating system, all on the same 41 photographs
+and the same `cameraInit`, so only the GPU path differs:
 
-| | CPU SIFT | RX 9070 (RDNA4) | RX 5500 XT (RDNA1) |
-|---|---|---|---|
-| descriptors | 820,000 | 968,726 | 968,726 |
-| image pairs matched | 532 | 538 | 538 |
-| mean matches per pair | 1,076 | 1,144 | 1,143 |
-| cameras calibrated | 41 of 41 | 41 of 41 | 41 of 41 |
-| landmarks | 78,372 | 88,463 | 88,562 |
-| residual RMSE | 1.03997 px | 1.0377 px | 1.03903 px |
+| | CPU SIFT | RDNA4 | RDNA1 | RDNA2 | RDNA2 |
+|---|---|---|---|---|---|
+| card | - | RX 9070 | RX 5500 XT | RX 6750 XT | RX 6750 XT |
+| architecture | - | gfx1201 | gfx1012 | gfx1031 | gfx1031 |
+| runtime | - | ROCm 7.2.1 | ROCm 7.2 | ROCm 7.2 | HIP SDK 6.2 |
+| system | - | Windows | Linux | Linux | Windows |
+| descriptors | 820,000 | 968,726 | 968,726 | 968,726 | 968,701 |
+| image pairs | 532 | 538 | 538 | 538 | 538 |
+| mean matches per pair | 1,076 | 1,144 | 1,143 | 1,144 | 1,145 |
+| cameras calibrated | 41 of 41 | 41 of 41 | 41 of 41 | 41 of 41 | 41 of 41 |
+| landmarks | 78,372 | 88,463 | 88,562 | 88,517 | 88,537 |
+| residual RMSE | 1.03997 px | 1.0377 px | 1.03903 px | 1.03744 px | 1.03758 px |
 
-The descriptor count is identical on the two cards and the landmark counts agree to 0.1 %, which is
-what this run was for. The extraction times are not comparable - different operating system, host
-and storage - and were not set up as a timing comparison.
+Landmarks span 88,463 to 88,562 - 0.11 % - across three architectures, two runtimes and two
+operating systems, and every one recovers about 13 % more than the CPU path at a lower
+reprojection error.
+
+The descriptor count tracks the **runtime, not the silicon**. The three ROCm 7.2 builds agree
+exactly at 968,726 on three different architectures, while the same RX 6750 XT under the HIP SDK
+6.2 toolchain gives 968,701. A 25-descriptor difference in 968,700 is not worth chasing, but it is
+worth attributing correctly: it is the toolchain, not the card.
+
+Extraction times are not comparable between these rows - different hosts, operating systems and
+storage - and were not set up as a timing comparison.
+
+### RDNA1 runs on Windows too
+
+Assumed not to, because the ROCm 7.2 runtime does not enumerate RX 5000 cards. The HIP SDK 6.2
+runtime does: a gfx1012 build of `hip/port/popsift/bugreport_layered_surface.hip` on an RX 5500 XT
+under Windows reads every texture layer correctly, exactly as on RDNA2 and RDNA4. So a
+`gfx1012-avx` Windows package looks viable and would add RX 5500/5600/5700 support. Only the
+kernels are proven so far; the full pipeline there is untested.
+
+Note what the wrong package does: the gfx1031 binary on that gfx1012 card enumerated the device,
+ran its host-side calls, and returned wrong data from every kernel **with no error at all** -
+because nothing in that reproducer checks launch status. A single-architecture package handed to
+the wrong card fails like corruption, not like a mismatch.
 
 ### A silent CPU fallback, and how to see it
 
