@@ -17,9 +17,15 @@ AV_DEPS="${AV_DEPS:-/opt/AliceVision_deps}"
 AV_BUILD="${AV_BUILD:-$HOME/av-hip-build}"
 AV_INSTALL="${AV_INSTALL:-/opt/AliceVision_hip}"
 AV_BUNDLE="${AV_BUNDLE:-$AV_INSTALL/bundle}"
+# GPU SIFT: CHESHIRE_POPSIFT=ON with a HIP popsift build (scripts/linux/build-popsift.sh).
+# Its lib directory also joins the bundle search path so libpopsift.so gets packaged.
+CHESHIRE_POPSIFT="${CHESHIRE_POPSIFT:-OFF}"
+POPSIFT_INSTALL="${CHESHIRE_POPSIFT_INSTALL:-$ROOT/build/popsift-linux-install}"
 JOBS="${JOBS:-$(nproc)}"
 
-python3 "$ROOT/scripts/apply_hip_patch.py"
+# The submodule working tree has Windows line endings, so a diff taken here would rewrite the
+# reviewable patch artifact as a 123 MB whole-tree diff. Leave it to the Windows side.
+CHESHIRE_SKIP_PATCH_EXPORT=1 python3 "$ROOT/scripts/apply_hip_patch.py"
 
 mkdir -p "$AV_BUILD"
 cd "$AV_BUILD"
@@ -28,11 +34,12 @@ cmake "$AV_DEV" -G Ninja \
   -DCMAKE_PREFIX_PATH="$AV_DEPS;$ROCM" \
   -DCMAKE_INSTALL_PREFIX="$AV_INSTALL" \
   -DALICEVISION_BUNDLE_PREFIX="$AV_BUNDLE" \
-  "-DALICEVISION_BUNDLE_SEARCH_LIBS_PATHS=$AV_DEPS/lib;$ROCM/lib;$ROCM/lib/llvm/lib" \
+  "-DALICEVISION_BUNDLE_SEARCH_LIBS_PATHS=$AV_DEPS/lib;$ROCM/lib;$ROCM/lib/llvm/lib;$POPSIFT_INSTALL/lib" \
   -DCMAKE_HIP_COMPILER="$ROCM/lib/llvm/bin/clang++" \
   -DCMAKE_HIP_ARCHITECTURES="$ARCHS" \
   -DALICEVISION_USE_CUDA=OFF -DALICEVISION_USE_HIP=ON -DALICEVISION_USE_SYCL=OFF \
-  -DALICEVISION_USE_POPSIFT=OFF -DALICEVISION_USE_CCTAG=OFF -DALICEVISION_USE_APRILTAG=OFF \
+  -DALICEVISION_USE_POPSIFT=$CHESHIRE_POPSIFT "-DPopSift_DIR=$POPSIFT_INSTALL/lib/cmake/PopSift" \
+  -DALICEVISION_USE_CCTAG=OFF -DALICEVISION_USE_APRILTAG=OFF \
   -DALICEVISION_USE_OPENCV=OFF -DALICEVISION_USE_ONNX=OFF -DALICEVISION_USE_ONNX_GPU=OFF \
   -DALICEVISION_USE_USD=OFF -DALICEVISION_USE_ALEMBIC=ON -DALICEVISION_BUILD_LIDAR=OFF \
   -DALICEVISION_BUILD_TESTS=OFF -DALICEVISION_BUILD_DOC=OFF -DALICEVISION_BUILD_SWIG_BINDING=OFF \

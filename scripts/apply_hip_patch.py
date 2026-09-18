@@ -17,6 +17,7 @@ What it does
   * src/aliceVision/depthMap/cuda/hip/  new: compat shims + unity TU (copied from hip/compat, hip/port)
 """
 from __future__ import annotations
+import os
 import shutil
 import subprocess
 import sys
@@ -1900,11 +1901,22 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
         t = t.replace(old, new, 1)
         fc.write_text(t, encoding="utf-8", newline=NL)
 
-    # 5. regenerate the reviewable patch
+    # 5. regenerate the reviewable patch.
+    # CHESHIRE_SKIP_PATCH_EXPORT=1 leaves it alone. The submodule is normally cloned on Windows with
+    # autocrlf, so its working tree has CRLF endings while the index has LF; a git diff taken from
+    # WSL, where autocrlf is off, then reports every line of every file as changed and the artifact
+    # balloons from 180 KB to 123 MB. The Linux build sets this.
+    if os.environ.get("CHESHIRE_SKIP_PATCH_EXPORT"):
+        print("applied; patch export skipped (CHESHIRE_SKIP_PATCH_EXPORT)")
+        return
     subprocess.run(["git", "add", "-N", "src/aliceVision/depthMap/cuda/hip"], cwd=AV, check=True)
-    diff = subprocess.run(["git", "diff", "--no-color"], cwd=AV, check=True, capture_output=True, text=True).stdout
+    # surrogateescape both ways: some upstream sources are not UTF-8 (a 0xf6 in a Latin-1 comment),
+    # and the default decode fails outright on a UTF-8 locale. Windows survived it only because its
+    # preferred encoding accepts the byte. This keeps the byte instead of replacing or dropping it.
+    diff = subprocess.run(["git", "diff", "--no-color"], cwd=AV, check=True, capture_output=True,
+                          text=True, encoding="utf-8", errors="surrogateescape").stdout
     out = ROOT / "patches" / "0002-hip-backend-cmake.patch"
-    out.write_text(diff, encoding="utf-8", newline="\n")
+    out.write_text(diff, encoding="utf-8", errors="surrogateescape", newline="\n")
     print(f"applied; {len(diff.splitlines())} diff lines -> {out.relative_to(ROOT)}")
 
 
