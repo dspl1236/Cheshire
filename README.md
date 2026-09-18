@@ -282,8 +282,10 @@ Expected: mask agreement 1.000, median relative depth error 0.0000, 97-99 % of p
 ## Roadmap
 
 The aim is a small PC with a big GPU that runs a Meshroom job as fast as a workstation and just
-as precisely. In order, each proven on the 6-view set for bit-identity against the CPU output and
-timed on the 41-view and engine bay sets:
+as precisely. In order, each timed on the 41-view and engine bay sets and checked against the CPU
+output - bit-identity where the same computation moved to another device, and equivalence at the
+reconstruction where it could not (SIFT is a different descriptor implementation, not the same
+kernels elsewhere):
 
 1. ~~**DepthMapFilter on the GPU.**~~ Done in v0.2.6 ([docs/08](docs/08-gpu-depth-map-filter.md)):
    123.5 s to 26.5 s on the engine bay job, what remains is EXR reading; a shared decoded-map cache
@@ -303,16 +305,31 @@ timed on the 41-view and engine bay sets:
    ahead; 165.8 s to 79.3 s on the engine bay job. What is left is UV unwrap, mesh load and save,
    padding and the Lanczos downscale (OpenImageIO's `sinf`-based filter, not reproducible bit for
    bit on a GPU).
-4. **One Windows package** carrying the HIP 7.2 and HIP 6.2 builds with the launcher choosing by
+4. ~~**FeatureExtraction (SIFT) on the GPU.**~~ Done in v0.2.13 ([docs/14](docs/14-gpu-sift.md)):
+   PopSift built as HIP, 2021 s to 26 s on the 41-view set. This one is not bit-identical to the
+   CPU and cannot be - it is a different descriptor implementation, not the same kernels on
+   another device - so the test is the reconstruction: 88,463 landmarks against the CPU path's
+   78,372 at a lower reprojection error, and within 0.11 % of each other across RDNA1, RDNA2 and
+   RDNA4 on two runtimes. Found an upstream bug on the way
+   ([popsift#193](https://github.com/alicevision/popsift/issues/193)).
+5. **Geometric verification on the GPU.** Now the largest single cost left in the pipeline
+   outside Meshing: AC-RANSAC is 566 s of FeatureMatching's 644 s on the engine bay, the GPU
+   2-NN matcher having taken the other 78 s. The work is per image pair and already parallel
+   across pairs on the CPU, so the shape is one GPU block per pair rather than batched
+   hypotheses: AC-RANSAC switches its sampling pool to the current inliers once a meaningful
+   model appears, so iterations are not independent and batching them would change the result.
+6. **One Windows package** carrying the HIP 7.2 and HIP 6.2 builds with the launcher choosing by
    card, instead of one zip per toolchain and chip.
-5. **A CUDA build of the same tree** so NVIDIA users get the GPU matcher too (the source already
+7. **A CUDA build of the same tree** so NVIDIA users get the GPU matcher too (the source already
    compiles as CUDA; the packaging does not exist yet), and a Linux bundle built against an older
    glibc for Ubuntu 22.04 / Debian 12 nodes.
-6. **Hardware still unrun:** RDNA3 discrete, the RDNA3.5 APUs, Vega, and a card without the 4-byte
+8. **Hardware still unrun:** RDNA3 discrete, the RDNA3.5 APUs, Vega, and a card without the 4-byte
    dot instruction (RX 5700, original Vega) for the matcher's fallback path.
 
 Not planned: SfM on the GPU (incremental and sequential; Ceres's GPU solvers are CUDA-only and the
-outer loop dominates anyway) and PopSift on HIP until the stages above are done.
+outer loop dominates anyway), and the tetrahedralisation, which would mean replacing geogram -
+that is also what stands between this and a byte-reproducible mesh, since geogram renumbers its
+cells from byte-identical input on every run.
 
 ## Layout
 
@@ -324,6 +341,7 @@ outer loop dominates anyway) and PopSift on HIP until the stages above are done.
 | `scripts/` | Windows build (`build-alicevision.cmd`), Linux superbuild and bundle (`scripts/linux/`), validation runner, comparison tool |
 | `docs/` | findings, toolchain notes, bridge design, port log, validation, performance, Linux build |
 | `third_party/aliceVision` | upstream AliceVision, pinned as a submodule and left untouched; the HIP backend is a patch set |
+| `third_party/popsift` | upstream PopSift, cloned rather than vendored and patched by `scripts/apply_popsift_patch.py`; built as HIP by `scripts/build-popsift.cmd` (`scripts/linux/build-popsift.sh`) |
 
 ## Building
 
@@ -339,8 +357,8 @@ outer loop dominates anyway) and PopSift on HIP until the stages above are done.
 Works end to end on RDNA1, RDNA2 and RDNA4 (Windows and Linux); RDNA3 has its code object in
 every bundle but no hardware run yet. GCN 4 (RX 400/500) is out: the ROCm 7.2 runtime refuses to
 initialise on an RX 570 even though the kernel driver accepts it (docs/06). A production Meshroom
-2023.3 node (house-pc, RX 5500 XT, Linux) runs its PrepareDenseScene, DepthMap, FeatureMatching,
-DepthMapFilter, Meshing and Texturing on the Cheshire bundle through the pairing script; the same works on Windows through
+2023.3 node (house-pc, RX 5500 XT, Linux) runs its PrepareDenseScene, FeatureExtraction,
+FeatureMatching, DepthMap, DepthMapFilter, Meshing and Texturing on the Cheshire bundle through the pairing script; the same works on Windows through
 `meshroom-pair.cmd`. What
 comes next is the roadmap above.
 
