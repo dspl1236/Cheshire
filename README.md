@@ -31,7 +31,7 @@ number is why the design is what it is.
 |---|---|---|---|
 | DepthMap | CUDA only | HIP port + VRAM-to-RAM memory bridge | validated RDNA1/2/4, Windows + Linux; bit-identical to native across caps |
 | FeatureMatching | CPU (kd-tree) on every vendor | exact GPU brute-force 2-NN (HIP; the source also builds as CUDA) | validated end to end (v0.2.5): 592 s -> 75 s on 107 photos, same reconstruction |
-| FeatureExtraction | CUDA (PopSift) or CPU | CPU on AMD (`forceCpuExtraction`) | PopSift port not started |
+| FeatureExtraction | CUDA (PopSift) or CPU | HIP PopSift port ([docs/14](docs/14-gpu-sift.md)) | working, not yet released: 2021 s -> 26 s on 41 views (RX 9070), and better than the CPU path rather than merely faster — 88,463 landmarks against 78,372 and RMSE 1.0377 against 1.03997 px. Built for RDNA1 to RDNA4, but only RDNA4 has run; released packages still need `forceCpuExtraction` |
 | DepthMapFilter | CPU | GPU vote pass (HIP / CUDA source) + a shared decoded-map cache | validated (v0.2.6): 123.5 s -> 26.5 s on 107 photos (RX 9070), 317 s -> 26.9 s on 41 views on an i3 + RX 5500 XT, bit-identical; found and replicated an upstream vote-buffer quirk; v0.2.9 cache: 17.8 s -> 12.7 s, byte-identical |
 | Meshing | CPU | GPU graph-weight votes + weakly-supported-surfaces pass, GPU min-cut (push-relabel, [docs/12](docs/12-gpu-maxflow.md)), GPU nearest-neighbour search for the visibility passes ([docs/13](docs/13-gpu-visibilities.md)), exact CPU fixes around them ([docs/11](docs/11-meshing-cpu.md)) | done (v0.2.7, v0.2.9, v0.2.10, v0.2.11, v0.2.12): 510 s -> 159 s on 107 photos (RX 9070), 491 s -> 270 s on 41 views on an i3 + RX 5500 XT (v0.2.10); the cut labelling identical to Boykov-Kolmogorov's and the nearest neighbours identical to nanoflann's on every query, every CPU change verified identical in-process; what is left is the point-cloud fusion and the tetrahedralisation |
 | Texturing | CPU | GPU Laplacian pyramid + rasterisation, parallel camera selection (HIP / CUDA source) | done (v0.2.8): 165.8 s -> 79.3 s on 107 photos (RX 9070), 271.5 s -> 102.5 s on 41 views on an i3 + RX 5500 XT, textures inside the CPU's own run-to-run band; what is left is UV unwrap, mesh I/O and padding |
@@ -249,8 +249,11 @@ The launcher decides per run: an NVIDIA card present (`nvidia-smi` answers) runs
 otherwise the HIP build from the package, with the package's DLLs and `share/` in front so nothing
 of Meshroom's older AliceVision leaks in. `CHESHIRE_DEPTHMAP=cuda|hip` forces one; the choice is
 printed as the first line of the node's log. Every other node keeps running from Meshroom. On AMD,
-set **FeatureExtraction > forceCpuExtraction** in the graph (PopSift is CUDA-only; the CPU SIFT
-costs nothing measurable on these sets). The same pairing on Linux is `scripts/linux/meshroom-pair.sh`.
+set **FeatureExtraction > forceCpuExtraction** in the graph: the released packages carry no GPU
+SIFT, and upstream PopSift is CUDA-only. The HIP PopSift port works and is faster and more accurate
+than the CPU path ([docs/14](docs/14-gpu-sift.md)), but it has only run on RDNA4 so far and is not
+in a release yet, so this setting is still required. The same pairing on Linux is
+`scripts/linux/meshroom-pair.sh`.
 
 ## Help wanted: RDNA3
 

@@ -314,7 +314,50 @@ incremental SfM. "before" is the same build with the uninitialised variable left
 | residual RMSE | 1.087 px | **1.0377 px** | 1.03997 px |
 
 GPU SIFT now recovers 13 % more landmarks than the CPU path at a marginally lower reprojection
-error, with extraction 78x faster. The descriptor count falling from 2.1 M to 969 k is the 32x
+error, with extraction 78x faster.
+
+### The same set on RDNA1
+
+house-pc, Radeon RX 5500 XT (gfx1012, 8 GB) on Linux, through the bundle — the first execution of
+this port on RDNA1 and of the Linux library at all:
+
+| | CPU SIFT | RX 9070 (RDNA4) | RX 5500 XT (RDNA1) |
+|---|---|---|---|
+| descriptors | 820,000 | 968,726 | 968,726 |
+| image pairs matched | 1,064 | 1,076 | 1,076 |
+| mean matches per pair | 1,076 | 1,144 | 1,143 |
+| cameras calibrated | 41 of 41 | 41 of 41 | 41 of 41 |
+| landmarks | 78,372 | 88,463 | 88,562 |
+| residual RMSE | 1.03997 px | 1.0377 px | 1.03903 px |
+
+The descriptor count is identical on the two cards and the landmark counts agree to 0.1 %, which is
+what this run was for. The extraction times are not comparable - different operating system, host
+and storage - and were not set up as a timing comparison.
+
+### A silent CPU fallback, and how to see it
+
+The first attempt on house-pc produced a complete, plausible reconstruction: 41 of 41 cameras,
+78,052 landmarks, RMSE 1.04082. It had run **CPU SIFT throughout**. The tells were `[cpu]` in the
+extraction log and a descriptor count of exactly 820,000, which is the CPU cap of 20,000 x 41.
+
+`ImageDescriber_SIFT`'s constructor does `setUseCuda(gpu::gpuSupportCUDA(3, 0))`, and our patch
+defines `ALICEVISION_HAVE_CUDA` for HIP builds so that check runs through the shim to
+`hipGetDeviceCount`. When that fails the describer falls back to VLFeat **without a warning that
+GPU SIFT was asked for and denied**. Anyone packaging this can ship a "GPU" build that quietly runs
+on the CPU.
+
+The cause was the bundle: `scripts/linux/build-alicevision.sh` replaces the WSL HSA runtime with
+`hsa-rocr` from AMD's repository *after* the `bundle` target, because the WSL one probes `/dev/dxg`
+and reports no device on a real Linux box. Invoking `cmake --build . --target bundle` directly skips
+that step. Always bundle through the script. To check a bundle before trusting a result:
+
+```bash
+python3 -c "import ctypes;h=ctypes.CDLL('bundle/lib/libamdhip64.so.7');n=ctypes.c_int(0);print(h.hipGetDeviceCount(ctypes.byref(n)),n.value)"
+# 0 1  -> a device is visible;  100 0 -> no device, extraction will silently use the CPU
+```
+
+Note that the size is what distinguishes the two runtimes, not the `/dev/dxg` string: the standard
+one contains it too, at 4,248,208 bytes against the WSL one's 1,439,536. The descriptor count falling from 2.1 M to 969 k is the 32x
 duplication going away; 969 k against the CPU's 820 k is the expected spread, since PopSIFT and
 VLFeat do not agree exactly by design.
 
