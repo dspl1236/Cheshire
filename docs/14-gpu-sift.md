@@ -306,8 +306,8 @@ incremental SfM. "before" is the same build with the uninitialised variable left
 |---|---|---|---|
 | extraction | 26 s | **26 s** | 2021 s |
 | descriptors | 2,100,183 | 968,726 | 820,000 |
-| image pairs matched | - | 1,076 | 1,064 |
-| total matches | 164,241 | 1,231,484 | 1,145,060 |
+| image pairs matched | 436 | 538 | 532 |
+| total matches | 164,241 | 615,742 | 572,530 |
 | mean matches per pair | 377 | **1,144** | 1,076 |
 | cameras calibrated | 41 of 41 | **41 of 41** | 41 of 41 |
 | landmarks | 28,471 | **88,463** | 78,372 |
@@ -324,7 +324,7 @@ this port on RDNA1 and of the Linux library at all:
 | | CPU SIFT | RX 9070 (RDNA4) | RX 5500 XT (RDNA1) |
 |---|---|---|---|
 | descriptors | 820,000 | 968,726 | 968,726 |
-| image pairs matched | 1,064 | 1,076 | 1,076 |
+| image pairs matched | 532 | 538 | 538 |
 | mean matches per pair | 1,076 | 1,144 | 1,143 |
 | cameras calibrated | 41 of 41 | 41 of 41 | 41 of 41 |
 | landmarks | 78,372 | 88,463 | 88,562 |
@@ -390,6 +390,24 @@ here was checked by parsing it for `hipv4-amdgcn-amd-amdhsa--gfx*` rather than t
   one, glibc's never loads, `__GLIBC_USE` is left undefined and every later system header fails.
   That directory is not needed - the sources use quoted includes - so it is gone. Windows never
   sees this because the MSVC STL has no `<features.h>`.
+
+### Counting pairs
+
+`aliceVision_featureMatching` logs each image pair's geometric match count **twice**, with the same
+value both times. Counting log lines therefore doubles both the pair count and the match total; the
+mean per pair is unaffected, since the doubling cancels. Count distinct pairs:
+
+```bash
+python3 -c "
+import re,sys,collections
+t=open(sys.argv[1],errors='ignore').read()
+m=re.findall(r'image pair \((\d+), (\d+)\) contains (\d+) geometric matches',t)
+best={frozenset((a,b)):int(c) for a,b,c in m}
+print(len(best),'pairs,',sum(best.values()),'matches,',sum(best.values())//len(best),'per pair')
+" match.log
+```
+
+538 of a possible 820 pairs on the 41-view set, 4,367 of a possible 5,671 on the engine bay.
 
 ## What is not done
 
