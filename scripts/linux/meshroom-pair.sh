@@ -17,10 +17,23 @@
 # --rangeStart/--rangeSize are accepted by the Cheshire build directly.
 set -euo pipefail
 MESHROOM="${1:?Meshroom directory (e.g. ~/apps/Meshroom-2023.3.0)}"
+# EXTERNAL CONTRACT - the photogrammetry node reads what this script writes.
+# ~/bin/reconstruct and the job runner's app.py both resolve the live bundle from the wrapper
+# below rather than guessing a path, because a stale bundle directory can exist beside the
+# live one. Three things are load-bearing outside this repository, and none of them fail
+# loudly if they change:
+#   1. the wrapper contains a line matching ^export ALICEVISION_ROOT="..."$
+#      -> change it and the bundle resolves empty: reconstruct refuses, the GUI says
+#         "not paired"
+#   2. pairing leaves the original binary as <name>.cuda
+#      -> change it and paired nodes report themselves unpaired
+#   3. libpopsift.so and libaliceVision_feature.so both sit in $BUNDLE/lib/
+#      -> change it and feature extraction silently drops to the CPU
+# If you restructure the wrapper or the bundle layout, say so in the same commit.
 BIN="$MESHROOM/aliceVision/bin"
 [ -d "$BIN" ] || { echo "$BIN not found: is $MESHROOM a Meshroom 2023.x Linux bundle?"; exit 1; }
 if [ "${2:-}" = "--unpair" ]; then
-  for name in aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene; do
+  for name in aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_featureExtraction aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene; do
     if [ -x "$BIN/$name.cuda" ]; then mv -f "$BIN/$name.cuda" "$BIN/$name"; echo "restored $name"; else echo "$name: not paired"; fi
   done
   exit 0
@@ -67,6 +80,21 @@ if grep -q -- '--rangeStart' <<<"$fm_help"; then
   pair aliceVision_featureMatching
 else
   echo "bundle's aliceVision_featureMatching has no GPU matcher (pre-v0.2.5): DepthMap paired only"
+fi
+
+# GPU SIFT (docs/14): only pair featureExtraction when the bundle's binary actually links
+# popsift, otherwise the node would move CPU SIFT from one build to another for nothing.
+# Note the describer falls back to CPU silently when no GPU is visible to HIP, so a paired
+# node that still logs [cpu] means the runtime cannot see the card, not that pairing failed.
+# The executable does not link popsift directly - libaliceVision_feature.so does, and the
+# executable picks it up transitively - so test that library. Not with ldd: the bundle sets
+# RUNPATH $ORIGIN/../lib, and ldd without LD_LIBRARY_PATH reports its siblings as not found,
+# which greps to nothing and would silently refuse to pair a perfectly good bundle.
+if [ -x "$BUNDLE/bin/aliceVision_featureExtraction" ] && [ -f "$BUNDLE/lib/libpopsift.so" ] \
+   && grep -aq libpopsift.so "$BUNDLE/lib/libaliceVision_feature.so" 2>/dev/null; then
+  pair aliceVision_featureExtraction
+else
+  echo "bundle's aliceVision_featureExtraction has no GPU SIFT: not paired"
 fi
 # DepthMapFilter (v0.2.6+): the bundle's depthMapFiltering carries the GPU vote pass (its --help says so)
 df_help=$(ALICEVISION_ROOT="$BUNDLE" LD_LIBRARY_PATH="$BUNDLE/lib" "$BUNDLE/bin/aliceVision_depthMapFiltering" --help 2>&1 || true)
