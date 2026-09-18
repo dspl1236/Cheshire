@@ -297,6 +297,27 @@ driver reset. A synthetic image at the same size is smooth and yields few extrem
 content does not, and with detection over-firing about 32x it is far worse. `smoke.cpp` now caps at
 20,000 by default and only runs uncapped when a cap of 0 is passed explicitly.
 
+## Validated: the 41-view set, end to end
+
+Same images, same settings, GPU SIFT against AliceVision's CPU SIFT, through FeatureMatching and
+incremental SfM. "before" is the same build with the uninitialised variable left alone.
+
+| | GPU, before | GPU, after | CPU SIFT |
+|---|---|---|---|
+| extraction | 26 s | **26 s** | 2021 s |
+| descriptors | 2,100,183 | 968,726 | 820,000 |
+| image pairs matched | - | 1,076 | 1,064 |
+| total matches | 164,241 | 1,231,484 | 1,145,060 |
+| mean matches per pair | 377 | **1,144** | 1,076 |
+| cameras calibrated | 41 of 41 | **41 of 41** | 41 of 41 |
+| landmarks | 28,471 | **88,463** | 78,372 |
+| residual RMSE | 1.087 px | **1.0377 px** | 1.03997 px |
+
+GPU SIFT now recovers 13 % more landmarks than the CPU path at a marginally lower reprojection
+error, with extraction 78x faster. The descriptor count falling from 2.1 M to 969 k is the 32x
+duplication going away; 969 k against the CPU's 820 k is the expected spread, since PopSIFT and
+VLFeat do not agree exactly by design.
+
 ## What is not done
 
 The descriptors have not been judged, only counted. PopSIFT and CPU SIFT do not agree exactly by
