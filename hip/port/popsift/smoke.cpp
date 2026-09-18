@@ -35,8 +35,15 @@ int main(int argc, char** argv)
     config.setThreshold(0.04f / 3.0f);
     config.setEdgeLimit(10.0f);
     config.setNormalizationMultiplier(9);
-    config.setNormMode(popsift::Config::Classic);
+    config.setNormMode(getenv("CHESHIRE_SMOKE_ROOTSIFT") ? popsift::Config::RootSift : popsift::Config::Classic);
     config.setFilterSorting(popsift::Config::LargestScaleFirst);
+    if (argc > 4) { config.setDescMode(argv[4]); std::printf("[smoke] desc mode %s%c", argv[4], 10); }
+    const int cap = (argc > 3) ? std::atoi(argv[3]) : 0;
+    if (cap > 0)
+    {
+        config.setFilterMaxExtrema(cap);
+        std::printf("[smoke] filter max extrema %d%c", cap, 10);
+    }
     if (getenv("CHESHIRE_POPSIFT_DUMP"))
         config.setLogMode(popsift::Config::All);  // writes the pyramid to disk
 
@@ -69,6 +76,26 @@ int main(int argc, char** argv)
         return 1;
     }
     std::printf("[smoke] %d features, %d descriptors\n", features->getFeatureCount(), features->getDescriptorCount());
+
+    // what AliceVision will see: each float cast to unsigned char. A healthy SIFT descriptor has
+    // few empty bins; mostly-zero descriptors match badly however many of them there are.
+    {
+        long long total = 0, zeros = 0, sum = 0, mx = 0;
+        for (const auto& feat : *features)
+            for (int o = 0; o < feat.num_ori; ++o)
+            {
+                const popsift::Descriptor* d = feat.desc[o];
+                if (d == nullptr) continue;
+                for (int k = 0; k < 128; ++k)
+                {
+                    const int v = (int)(unsigned char)d->features[k];
+                    ++total; sum += v; if (v == 0) ++zeros; if (v > mx) mx = v;
+                }
+            }
+        if (total > 0)
+            std::printf("[smoke] descriptor bytes: mean %.1f, zeros %.1f%%, max %lld%c",
+                        (double)sum / total, 100.0 * zeros / total, mx, 10);
+    }
 
     std::printf("[smoke] uninit\n");
     std::fflush(stdout);

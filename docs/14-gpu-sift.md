@@ -130,6 +130,58 @@ is why its keypoint counts are two to three times higher. Matching the configura
 judging the descriptors by match counts through FeatureMatching and the reconstruction that follows,
 is the next step.
 
+## Quality: it reconstructs, but sparsely, and the descriptors are the reason
+
+The 41-view set through matching and incremental reconstruction, GPU features against CPU features,
+same images and same settings:
+
+| | GPU SIFT | CPU SIFT |
+|---|---|---|
+| extraction | 26 s | 2021 s |
+| descriptors | 2,100,183 | 820,000 |
+| image pairs matched | 436 | 532 |
+| matches | 164,241 | 572,530 |
+| mean matches per pair | 377 | 1,076 |
+| cameras calibrated | 41 of 41 | 41 of 41 |
+| landmarks | 28,471 | 78,372 |
+| observations | 94,147 | 301,170 |
+| reprojection RMSE | 1.087 px | 1.040 px |
+
+So the port reconstructs the whole scene at a comparable reprojection error, and does the extraction
+seventy times faster, but it recovers a third of the landmarks. That is not "as good or better", so
+it is not ready to ship.
+
+The cause is descriptor sparsity, not keypoint count. Comparing the descriptor bytes AliceVision
+actually stores, for the same image:
+
+| | mean byte | empty bins | max |
+|---|---|---|---|
+| GPU | 11.2 | 71.4 % | 254 |
+| CPU | 36.5 | 3.3 % | 161 |
+
+A descriptor whose bins are 71 % empty carries little of the information matching depends on, which
+is exactly the collapse the match counts show. What has been ruled out, each by measurement rather
+than reasoning:
+
+- **The pyramid.** Dumped with `Config::All`: every level of every octave is fully populated, with
+  maxima decreasing smoothly as the blur increases.
+- **The keypoint budget.** Raising the cap from 20,000 to 50,000 extrema tripled the descriptors and
+  moved matching from 377 to 397 per pair. More keypoints do not help.
+- **The descriptor implementation.** PopSIFT ships six for the same algorithm. `loop` (the default),
+  `iloop` and `grid` all give 71.4 % empty bins on real images.
+- **The filter's sort order.** Keeping the smallest-scale extrema instead of the largest gives
+  71.4 % against 71.3 %.
+- **The normalisation mode.** RootSIFT and Classic both produce healthy descriptors on synthetic
+  input (0 % empty bins, mean 43).
+
+That last line is the useful clue: on smooth synthetic input the descriptors are fine, and on real
+photographs they are not. So the fault is in how the descriptor stage samples the pyramid for real
+image content. The next suspect is the layer index used when the descriptor samples a pyramid level,
+since sampling an over-blurred level would empty the histogram bins exactly this way and would be
+invisible to the desc-mode and sort-order tests. `hip/port/popsift/smoke.cpp` prints descriptor byte
+statistics and reproduces the healthy synthetic case in seconds; the missing piece is feeding it a
+real image so the failing case can be bisected without the pipeline.
+
 ## What is not done
 
 The descriptors have not been judged, only counted. PopSIFT and CPU SIFT do not agree exactly by

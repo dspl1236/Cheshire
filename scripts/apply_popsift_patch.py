@@ -53,6 +53,61 @@ def main() -> None:
                + "    cudaTextureObject_t tex;" + NL + "};")
         octave.write_text(t.replace(old, new, 1), encoding="utf-8", newline=NL)
 
+    # 3a. CHESHIRE_POPSIFT_SORT overrides the extrema filter's sort order. AliceVision asks for
+    #     LargestScaleFirst, which keeps the biggest-scale extrema; those live in the most blurred
+    #     pyramid levels, so their descriptors can come out sparse. The setter honours the override
+    #     so the choice can be measured without rebuilding AliceVision.
+    conf = POPSIFT / "src" / "popsift" / "sift_conf.cu"
+    t = conf.read_text(encoding="utf-8")
+    if "CHESHIRE_POPSIFT_SORT" not in t:
+        old_set = "void Config::setFilterSorting( GridFilterMode m )" + NL + "{" + NL
+        if t.count(old_set) != 1:
+            sys.exit("setFilterSorting(GridFilterMode) not found once")
+        new_set = (old_set
+                   + "    if( const char* s = getenv( \"CHESHIRE_POPSIFT_SORT\" ) )  // cheshire" + NL
+                   + "    {" + NL
+                   + "        if( s[0] == 's' ) m = SmallestScaleFirst;" + NL
+                   + "        else if( s[0] == 'r' ) m = RandomScale;" + NL
+                   + "        else if( s[0] == 'l' ) m = LargestScaleFirst;" + NL
+                   + "    }" + NL)
+        t = t.replace(old_set, new_set, 1)
+        if "#include <cstdlib>  // cheshire" not in t:
+            i = t.index("#include")
+            t = t[:i] + "#include <cstdlib>  // cheshire" + NL + t[i:]
+        conf.write_text(t, encoding="utf-8", newline=NL)
+
+    # 3. CHESHIRE_POPSIFT_DESCMODE picks the descriptor implementation. PopSIFT ships six of them
+    #    for the same algorithm and defaults to Loop; on HIP they do not agree, so this makes the
+    #    choice testable without rebuilding AliceVision.
+    conf = POPSIFT / "src" / "popsift" / "sift_conf.cu"
+    t = conf.read_text(encoding="utf-8")
+    if "CHESHIRE_POPSIFT_DESCMODE" not in t:
+        old_ctor = "    , _desc_mode( Config::Loop )" + NL
+        if t.count(old_ctor) != 1:
+            sys.exit("desc mode default not found once")
+        t = t.replace(old_ctor, "    , _desc_mode( Config::Loop )  // cheshire: overridden below" + NL, 1)
+        # set it at the end of the constructor body, where the member list has been applied
+        marker = "Config::Config( )" + NL
+        if marker not in t:
+            sys.exit("Config constructor not found")
+        head, rest = t.split(marker, 1)
+        brace = rest.index("{")
+        depth = 0
+        for k in range(brace, len(rest)):
+            if rest[k] == "{":
+                depth += 1
+            elif rest[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+        inject = ("    if( const char* m = getenv( \"CHESHIRE_POPSIFT_DESCMODE\" ) )  // cheshire" + NL
+                  + "        setDescMode( m );" + NL)
+        rest = rest[:k] + inject + rest[k:]
+        t = head + marker + rest
+        i = t.index("#include")
+        t = t[:i] + "#include <cstdlib>  // cheshire" + NL + t[i:]
+        conf.write_text(t, encoding="utf-8", newline=NL)
+
     # 3. CHESHIRE_POPSIFT_DEBUG=1 prints the per-octave extrema counts as they arrive on the host,
     #    which splits the pipeline: zero everywhere means detection or earlier, non-zero with no
     #    descriptors means orientation or the descriptor pass.
