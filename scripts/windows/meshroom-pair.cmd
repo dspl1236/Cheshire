@@ -14,7 +14,9 @@ rem   meshroom-pair.cmd <Meshroom dir> --unpair
 rem
 rem <Cheshire package dir> is an unzipped release zip (the folder holding bin\, lib\, share\). A package
 rem without aliceVision_featureMatching.exe (v0.2.4 and older) pairs DepthMap only.
-rem On AMD, Meshroom's FeatureExtraction node must run with forceCpuExtraction=True (PopSift is CUDA-only).
+rem FeatureExtraction is paired too when the package carries GPU SIFT (popsift.dll in bin\). With
+rem such a package, leave Meshroom's forceCpuExtraction unticked; an older package has no GPU SIFT
+rem and the node must keep forceCpuExtraction=True.
 setlocal
 set MR=%~1
 set PKG=%~2
@@ -22,7 +24,7 @@ if "%PKG%"=="" ( echo usage: %~nx0 ^<Meshroom dir^> ^<Cheshire package dir^> ^| 
 set BIN=%MR%\aliceVision\bin
 if not exist "%BIN%\" ( echo %BIN% not found: is %MR% a Meshroom 2023.x Windows install? & exit /b 1 )
 if /i "%PKG%"=="--unpair" (
-  for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene) do call :unpair %%N
+  for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_featureExtraction aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene) do call :unpair %%N
   exit /b 0
 )
 if not exist "%PKG%\bin\aliceVision_depthMapEstimation.exe" ( echo no HIP aliceVision_depthMapEstimation.exe in %PKG%\bin & exit /b 1 )
@@ -75,6 +77,13 @@ if exist "%PKG%\bin\aliceVision_prepareDenseScene.exe" (
   del /q "%TEMP%\cheshire-pd-help.txt" 2>nul
 )
 if defined PDOK ( call :pair aliceVision_prepareDenseScene ) else ( echo package's aliceVision_prepareDenseScene is upstream's ^(pre-v0.2.9^): not paired )
+rem GPU SIFT (v0.2.13+, docs\14-gpu-sift.md): gate on popsift.dll being in the package, since
+rem without it this node would move CPU SIFT from one build to another for nothing. Note the
+rem describer falls back to the CPU silently when no GPU is visible to HIP, so a paired node that
+rem still logs [cpu] means the runtime cannot see the card, not that pairing failed.
+set FEOK=
+if exist "%PKG%\bin\aliceVision_featureExtraction.exe" if exist "%PKG%\bin\popsift.dll" set FEOK=1
+if defined FEOK ( call :pair aliceVision_featureExtraction ) else ( echo package has no GPU SIFT ^(no popsift.dll^): featureExtraction not paired )
 exit /b 0
 
 :pair
