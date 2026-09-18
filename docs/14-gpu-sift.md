@@ -318,30 +318,41 @@ error, with extraction 78x faster.
 
 ### The same set on every card here
 
-Four combinations of architecture, runtime and operating system, all on the same 41 photographs
+Five combinations of architecture, runtime and operating system, all on the same 41 photographs
 and the same `cameraInit`, so only the GPU path differs:
 
-| | CPU SIFT | RDNA4 | RDNA1 | RDNA2 | RDNA2 |
-|---|---|---|---|---|---|
-| card | - | RX 9070 | RX 5500 XT | RX 6750 XT | RX 6750 XT |
-| architecture | - | gfx1201 | gfx1012 | gfx1031 | gfx1031 |
-| runtime | - | ROCm 7.2.1 | ROCm 7.2 | ROCm 7.2 | HIP SDK 6.2 |
-| system | - | Windows | Linux | Linux | Windows |
-| descriptors | 820,000 | 968,726 | 968,726 | 968,726 | 968,701 |
-| image pairs | 532 | 538 | 538 | 538 | 538 |
-| mean matches per pair | 1,076 | 1,144 | 1,143 | 1,144 | 1,145 |
-| cameras calibrated | 41 of 41 | 41 of 41 | 41 of 41 | 41 of 41 | 41 of 41 |
-| landmarks | 78,372 | 88,463 | 88,562 | 88,517 | 88,537 |
-| residual RMSE | 1.03997 px | 1.0377 px | 1.03903 px | 1.03744 px | 1.03758 px |
+| | CPU SIFT | RDNA4 | RDNA1 | RDNA2 | RDNA2 | RDNA1 |
+|---|---|---|---|---|---|---|
+| card | - | RX 9070 | RX 5500 XT | RX 6750 XT | RX 6750 XT | RX 5500 XT |
+| architecture | - | gfx1201 | gfx1012 | gfx1031 | gfx1031 | gfx1012 |
+| runtime | - | ROCm 7.2.1 | ROCm 7.2 | ROCm 7.2 | HIP SDK 6.2 | HIP SDK 6.2 |
+| system | - | Windows | Linux | Linux | Windows | Windows |
+| descriptors | 820,000 | 968,726 | 968,726 | 968,726 | 968,701 | 968,701 |
+| image pairs | 532 | 538 | 538 | 538 | 538 | 538 |
+| mean matches per pair | 1,076 | 1,144 | 1,143 | 1,144 | 1,145 | 1,145 |
+| cameras calibrated | 41 of 41 | 41 of 41 | 41 of 41 | 41 of 41 | 41 of 41 | 41 of 41 |
+| landmarks | 78,372 | 88,463 | 88,562 | 88,517 | 88,537 | 88,513 |
+| residual RMSE | 1.03997 px | 1.0377 px | 1.03903 px | 1.03744 px | 1.03758 px | 1.03727 px |
 
 Landmarks span 88,463 to 88,562 - 0.11 % - across three architectures, two runtimes and two
 operating systems, and every one recovers about 13 % more than the CPU path at a lower
 reprojection error.
 
-The descriptor count tracks the **runtime, not the silicon**. The three ROCm 7.2 builds agree
-exactly at 968,726 on three different architectures, while the same RX 6750 XT under the HIP SDK
-6.2 toolchain gives 968,701. A 25-descriptor difference in 968,700 is not worth chasing, but it is
-worth attributing correctly: it is the toolchain, not the card.
+Part of that span is not the hardware. `incrementalSfM` is not deterministic: the same binary on the
+same inputs, run four times, gives 88,463, 88,468, 88,469 and 88,472
+([docs/15](15-acransac-cpu.md) has the measurement and the likely cause, multi-threaded Ceres). A
+spread of 9 on one machine against 99 across five configurations means the cross-configuration
+differences are mostly real - the descriptor counts differ by toolchain, and the mean matches per
+pair by one or two - but no single row here is reproducible to the landmark, and none of these
+numbers should be read as one.
+
+The descriptor count tracks the **runtime, not the silicon**, and the fifth column is what
+settles it. The three ROCm 7.2 builds agree exactly at 968,726 on three different
+architectures; the two HIP SDK 6.2 builds agree exactly at 968,701 on two different
+architectures. Grouping by card explains nothing - the same RX 5500 XT gives 968,726 under one
+toolchain and 968,701 under the other, and the same figure as an RX 6750 XT when the toolchain
+matches. A 25-descriptor difference in 968,700 is not worth chasing, but it is worth
+attributing correctly.
 
 Extraction times are not comparable between these rows - different hosts, operating systems and
 storage - and were not set up as a timing comparison.
@@ -351,8 +362,12 @@ storage - and were not set up as a timing comparison.
 Assumed not to, because the ROCm 7.2 runtime does not enumerate RX 5000 cards. The HIP SDK 6.2
 runtime does: a gfx1012 build of `hip/port/popsift/bugreport_layered_surface.hip` on an RX 5500 XT
 under Windows reads every texture layer correctly, exactly as on RDNA2 and RDNA4. So a
-`gfx1012-avx` Windows package looks viable and would add RX 5500/5600/5700 support. Only the
-kernels are proven so far; the full pipeline there is untested.
+`gfx1012-avx` Windows package looks viable and would add RX 5500/5600/5700 support.
+
+It does: the fifth column of the table above is that package, running the whole pipeline on an
+RX 5500 XT under Windows. 968,701 descriptors in 60 s, 538 pairs matched in 357 s, and SfM
+calibrated all 41 cameras to 88,513 landmarks at 1.03727 px - inside the same 0.11 % band as
+every other card.
 
 Note what the wrong package does: the gfx1031 binary on that gfx1012 card enumerated the device,
 ran its host-side calls, and returned wrong data from every kernel **with no error at all** -

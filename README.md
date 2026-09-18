@@ -30,7 +30,7 @@ number is why the design is what it is.
 | Meshroom node | upstream | Cheshire | status |
 |---|---|---|---|
 | DepthMap | CUDA only | HIP port + VRAM-to-RAM memory bridge | validated RDNA1/2/4, Windows + Linux; bit-identical to native across caps |
-| FeatureMatching | CPU (kd-tree) on every vendor | exact GPU brute-force 2-NN (HIP; the source also builds as CUDA) | validated end to end (v0.2.5): 592 s -> 75 s on 107 photos, same reconstruction |
+| FeatureMatching | CPU (kd-tree) on every vendor | exact GPU brute-force 2-NN (HIP; the source also builds as CUDA), plus exact CPU work in AC-RANSAC ([docs/15](docs/15-acransac-cpu.md)) | validated end to end (v0.2.5): 592 s -> 75 s on 107 photos, same reconstruction. Geometric verification followed in v0.2.14: 566 s -> 351 s, byte-identical match file, and the profile is why it stayed on the CPU |
 | FeatureExtraction | CUDA (PopSift) or CPU | HIP PopSift port ([docs/14](docs/14-gpu-sift.md)) | done (v0.2.13): 2021 s -> 26 s on 41 views (RX 9070), and better than the CPU path rather than merely faster — 88,463 landmarks against 78,372 and RMSE 1.0377 against 1.03997 px. Validated on RDNA4, RDNA1 and RDNA2 across two runtimes and both systems, landmarks within 0.11 %; found and reported an upstream PopSift bug ([popsift#193](https://github.com/alicevision/popsift/issues/193)) |
 | DepthMapFilter | CPU | GPU vote pass (HIP / CUDA source) + a shared decoded-map cache | validated (v0.2.6): 123.5 s -> 26.5 s on 107 photos (RX 9070), 317 s -> 26.9 s on 41 views on an i3 + RX 5500 XT, bit-identical; found and replicated an upstream vote-buffer quirk; v0.2.9 cache: 17.8 s -> 12.7 s, byte-identical |
 | Meshing | CPU | GPU graph-weight votes + weakly-supported-surfaces pass, GPU min-cut (push-relabel, [docs/12](docs/12-gpu-maxflow.md)), GPU nearest-neighbour search for the visibility passes ([docs/13](docs/13-gpu-visibilities.md)), exact CPU fixes around them ([docs/11](docs/11-meshing-cpu.md)) | done (v0.2.7, v0.2.9, v0.2.10, v0.2.11, v0.2.12): 510 s -> 159 s on 107 photos (RX 9070), 491 s -> 270 s on 41 views on an i3 + RX 5500 XT (v0.2.10); the cut labelling identical to Boykov-Kolmogorov's and the nearest neighbours identical to nanoflann's on every query, every CPU change verified identical in-process; what is left is the point-cloud fusion and the tetrahedralisation |
@@ -312,12 +312,17 @@ kernels elsewhere):
    78,372 at a lower reprojection error, and within 0.11 % of each other across RDNA1, RDNA2 and
    RDNA4 on two runtimes. Found an upstream bug on the way
    ([popsift#193](https://github.com/alicevision/popsift/issues/193)).
-5. **Geometric verification on the GPU.** Now the largest single cost left in the pipeline
-   outside Meshing: AC-RANSAC is 566 s of FeatureMatching's 644 s on the engine bay, the GPU
-   2-NN matcher having taken the other 78 s. The work is per image pair and already parallel
-   across pairs on the CPU, so the shape is one GPU block per pair rather than batched
-   hypotheses: AC-RANSAC switches its sampling pool to the current inliers once a meaningful
-   model appears, so iterations are not independent and batching them would change the result.
+5. ~~**Geometric verification on the GPU.**~~ Done in v0.2.14, on the CPU, and the profile is
+   the whole story ([docs/15](docs/15-acransac-cpu.md)). AC-RANSAC was 566 s of
+   FeatureMatching's 644 s, so it looked like the next port. Measuring first put 48 % of it in
+   one `std::sort` - of `(residual, index)` pairs whose indices are read on 0.026 % of sorts -
+   and only 8 % in the per-element virtual dispatch a code read had blamed. Sorting 8-byte keys
+   with a radix on the double's bit pattern, and going straight to the error functor, gives
+   566 s -> 351 s with a byte-identical match file and identical iteration, sort and
+   improved-model counts. The port is not planned: iterations are not independent (the sampling
+   pool becomes the current inliers once a meaningful model appears), so the only parallelism is
+   across pairs, and 111.7 M sequential iterations against a per-workgroup budget of about a
+   microsecond make 2-3x a lot of device code for less than two functions bought.
 6. **One Windows package** carrying the HIP 7.2 and HIP 6.2 builds with the launcher choosing by
    card, instead of one zip per toolchain and chip.
 7. **A CUDA build of the same tree** so NVIDIA users get the GPU matcher too (the source already

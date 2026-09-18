@@ -74,6 +74,8 @@ TRACKED = [
     "src/aliceVision/fuseCut/Kdtree.hpp",
     "src/aliceVision/fuseCut/GraphFiller.hpp",
     "src/software/pipeline/main_prepareDenseScene.cpp",
+    "src/aliceVision/robustEstimation/ACRansac.hpp",
+    "src/aliceVision/multiview/RelativePoseKernel.hpp",
 ]
 
 
@@ -1904,6 +1906,238 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                + "    endif()" + NL)
         t = t.replace(old, new, 1)
         fc.write_text(t, encoding="utf-8", newline=NL)
+
+    # 4w. AC-RANSAC's residual sort. Geometric filtering is 95 % of FeatureMatching's wall clock on
+    #     the engine bay, and profiling AC-RANSAC put 48 % of that in one std::sort: the loop builds
+    #     a std::pair<double,size_t> array per candidate model and sorts it so bestNFA can read the
+    #     residuals in order. bestNFA reads e[k-1].first alone. The indices matter only when the
+    #     model improves on minNFA, which is 72,381 of 278,454,716 sorts - 0.026 %.
+    #
+    #     So sort 8-byte keys on the common path and fall into the original pair sort on the rare
+    #     one. Sorting the values alone gives the same value sequence as sorting the pairs, because
+    #     pair ordering breaks ties by index and tied values are equal. The sort itself is a stable
+    #     LSD radix over the double's bit pattern, valid because squared epipolar distances are
+    #     non-negative; a sign bit anywhere falls back to std::sort.
+    #
+    #     Measured on the 107-photo engine bay, byte-identical match file: the sort phase 3437 s ->
+    #     1035 s of CPU time and the stage 597 s -> 370 s. Iterations, sorts and improving models
+    #     all came out identical, so the search followed the same path, not merely the same result.
+    #     CHESHIRE_ACR_PAIRSORT=1 restores upstream's per-model pair sort.
+    ac = AV / "src/aliceVision/robustEstimation/ACRansac.hpp"
+    t = ac.read_text(encoding="utf-8")
+    if "cheshireRadixSortResiduals" not in t:
+        old = "#include <algorithm>" + NL
+        if t.count(old) != 1:
+            sys.exit("<algorithm> include not found once in ACRansac.hpp")
+        t = t.replace(old, "#include <atomic>  // cheshire" + NL + "#include <bit>  // cheshire" + NL
+                      + "#include <cstdint>  // cheshire" + NL + "#include <cstdio>  // cheshire" + NL
+                      + "#include <cstdlib>  // cheshire" + NL + old, 1)
+
+        old = ("/**" + NL + " * @brief Find best NFA and its index wrt square error threshold in e." + NL + " */" + NL)
+        if t.count(old) != 1:
+            sys.exit("bestNFA doc comment not found once")
+        new = ("/**" + NL
+               + " * @brief cheshire: sort squared residuals ascending, as their IEEE bit patterns." + NL
+               + " *" + NL
+               + " * A non-negative double orders the same as its bit pattern read as a uint64_t, so a stable" + NL
+               + " * LSD radix over the eight bytes sorts the values with no comparisons and no branches to" + NL
+               + " * mispredict. Byte positions where every key agrees are skipped, which covers most of the" + NL
+               + " * exponent for a typical residual spread." + NL
+               + " *" + NL
+               + " * Anything the bit-pattern order cannot represent goes to std::sort instead: a negative" + NL
+               + " * value, -0.0 or a NaN, all of which have a key above 0x7FF0000000000000 (+inf is exactly" + NL
+               + " * equal to it and orders correctly). NaN is the one that matters. It breaks the strict weak" + NL
+               + " * ordering std::sort requires, so upstream's order on such an array is unspecified - but it" + NL
+               + " * is what upstream produces, and reproducing it is the point. Geometric filtering never sees" + NL
+               + " * one (4.7 M residuals, zero non-finite); SfM's relative pose does, through" + NL
+               + " * RelativePoseKernel_K, which builds F from E and can divide by a zero squaredNorm." + NL
+               + " */" + NL
+               + "/// cheshire: how many arrays went to std::sort instead. CHESHIRE_ACR_NANLOG=1 reports it." + NL
+               + "struct CheshireAcrDeferred" + NL
+               + "{" + NL
+               + "    std::atomic<long long> n{0};" + NL
+               + "    ~CheshireAcrDeferred()" + NL
+               + "    {" + NL
+               + "        if (std::getenv(\"CHESHIRE_ACR_NANLOG\") && n.load())" + NL
+               + "            std::fprintf(stderr, \"[cheshire acransac] %lld residual arrays deferred to std::sort\\n\", n.load());" + NL
+               + "    }" + NL
+               + "};" + NL
+               + "inline std::atomic<long long>& cheshireAcrDeferred() { static CheshireAcrDeferred d; return d.n; }" + NL
+               + NL
+               + "inline void cheshireRadixSortResiduals(std::vector<std::uint64_t>& keys, std::vector<std::uint64_t>& scratch)" + NL
+               + "{" + NL
+               + "    const std::size_t n = keys.size();" + NL
+               + "    if (n < 2)" + NL
+               + "        return;" + NL
+               + NL
+               + "    std::uint64_t* a = keys.data();" + NL
+               + "    std::uint32_t hist[8][256] = {};" + NL
+               + "    bool defer = false;" + NL
+               + "    for (std::size_t i = 0; i < n; ++i)" + NL
+               + "    {" + NL
+               + "        const std::uint64_t k = a[i];" + NL
+               + "        defer |= (k > 0x7FF0000000000000ULL);  // negative, -0.0 or NaN" + NL
+               + "        for (int p = 0; p < 8; ++p)" + NL
+               + "            ++hist[p][(k >> (p * 8)) & 0xFF];" + NL
+               + "    }" + NL
+               + NL
+               + "    if (defer)" + NL
+               + "    {" + NL
+               + "        cheshireAcrDeferred().fetch_add(1, std::memory_order_relaxed);" + NL
+               + "        std::sort(keys.begin(), keys.end(), [](std::uint64_t x, std::uint64_t y) {" + NL
+               + "            return std::bit_cast<double>(x) < std::bit_cast<double>(y);" + NL
+               + "        });" + NL
+               + "        return;" + NL
+               + "    }" + NL
+               + NL
+               + "    scratch.resize(n);" + NL
+               + "    std::uint64_t* b = scratch.data();" + NL
+               + "    for (int p = 0; p < 8; ++p)" + NL
+               + "    {" + NL
+               + "        if (hist[p][(a[0] >> (p * 8)) & 0xFF] == n)  // every key agrees: the pass is the identity" + NL
+               + "            continue;" + NL
+               + NL
+               + "        std::uint32_t off[256];" + NL
+               + "        std::uint32_t sum = 0;" + NL
+               + "        for (int d = 0; d < 256; ++d)" + NL
+               + "        {" + NL
+               + "            off[d] = sum;" + NL
+               + "            sum += hist[p][d];" + NL
+               + "        }" + NL
+               + "        for (std::size_t i = 0; i < n; ++i)" + NL
+               + "        {" + NL
+               + "            const std::uint64_t k = a[i];" + NL
+               + "            b[off[(k >> (p * 8)) & 0xFF]++] = k;" + NL
+               + "        }" + NL
+               + "        std::swap(a, b);" + NL
+               + "    }" + NL
+               + "    if (a != keys.data())" + NL
+               + "        std::copy(a, a + n, keys.data());" + NL
+               + "}" + NL
+               + NL
+               + "/// cheshire: residual of a sorted entry, whether it carries its index or is a bare key." + NL
+               + "inline double acrResidual(const ErrorIndex& e) { return e.first; }" + NL
+               + "inline double acrResidual(std::uint64_t e) { return std::bit_cast<double>(e); }" + NL
+               + NL
+               + old)
+        t = t.replace(old, new, 1)
+
+        # bestNFA reads through acrResidual, so it takes either array
+        old = ("inline ErrorIndex bestNFA(int startIndex,  // number of point required for estimation" + NL
+               + "                          double logalpha0," + NL
+               + "                          const std::vector<ErrorIndex>& e," + NL)
+        if t.count(old) != 1:
+            sys.exit("bestNFA signature not found once")
+        t = t.replace(old,
+                      "template<typename ResidualT>  // cheshire: ErrorIndex, or a bare residual key" + NL
+                      + "inline ErrorIndex bestNFA(int startIndex,  // number of point required for estimation" + NL
+                      + "                          double logalpha0," + NL
+                      + "                          const std::vector<ResidualT>& e," + NL, 1)
+
+        old = ("    for (size_t k = startIndex + 1; k <= n && e[k - 1].first <= maxThreshold; ++k)" + NL
+               + "    {" + NL
+               + "        double squaredResidual = e[k - 1].first;" + NL)
+        if t.count(old) != 1:
+            sys.exit("bestNFA loop not found once")
+        t = t.replace(old,
+                      "    for (size_t k = startIndex + 1; k <= n && acrResidual(e[k - 1]) <= maxThreshold; ++k)" + NL
+                      + "    {" + NL
+                      + "        double squaredResidual = acrResidual(e[k - 1]);" + NL, 1)
+
+        old = ("    std::vector<ErrorIndex> vec_residuals(nData);  // [residual,index]" + NL
+               + "    std::vector<double> vec_residuals_(nData);" + NL)
+        if t.count(old) != 1:
+            sys.exit("residual buffers not found once")
+        t = t.replace(old,
+                      "    std::vector<ErrorIndex> vec_residuals(nData);  // [residual,index], cheshire: only for a better model" + NL
+                      + "    std::vector<double> vec_residuals_(nData);" + NL
+                      + "    // cheshire: residual bits, sorted for every model; see cheshireRadixSortResiduals" + NL
+                      + "    std::vector<std::uint64_t> vec_keys(nData), vec_keysScratch;" + NL
+                      + "    const bool cheshirePairSort = (std::getenv(\"CHESHIRE_ACR_PAIRSORT\") != nullptr);" + NL, 1)
+
+        # the common path
+        old = ("                for (size_t i = 0; i < nData; ++i)" + NL
+               + "                {" + NL
+               + "                    const double error = vec_residuals_[i];" + NL
+               + "                    vec_residuals[i] = ErrorIndex(error, i);" + NL
+               + "                }" + NL
+               + "                std::sort(vec_residuals.begin(), vec_residuals.end());" + NL
+               + NL
+               + "                // Most meaningful discrimination inliers/outliers" + NL
+               + "                const ErrorIndex best =" + NL
+               + "                  bestNFA(sizeSample, kernel.logalpha0(), vec_residuals, loge0, maxThreshold, vec_logc_n, vec_logc_k, kernel.errorVectorDimension());" + NL)
+        if t.count(old) != 1:
+            sys.exit("residual ordering block not found once")
+        new = ("                // cheshire: bestNFA reads residuals only, so sort 8-byte keys rather than" + NL
+               + "                // (residual, index) pairs. The value sequence is the same either way." + NL
+               + "                ErrorIndex best;" + NL
+               + "                if (cheshirePairSort)" + NL
+               + "                {" + NL
+               + "                    for (size_t i = 0; i < nData; ++i)" + NL
+               + "                    {" + NL
+               + "                        const double error = vec_residuals_[i];" + NL
+               + "                        vec_residuals[i] = ErrorIndex(error, i);" + NL
+               + "                    }" + NL
+               + "                    std::sort(vec_residuals.begin(), vec_residuals.end());" + NL
+               + "                    best = bestNFA(sizeSample, kernel.logalpha0(), vec_residuals, loge0, maxThreshold, vec_logc_n, vec_logc_k, kernel.errorVectorDimension());" + NL
+               + "                }" + NL
+               + "                else" + NL
+               + "                {" + NL
+               + "                    for (size_t i = 0; i < nData; ++i)" + NL
+               + "                        vec_keys[i] = std::bit_cast<std::uint64_t>(vec_residuals_[i]);" + NL
+               + "                    cheshireRadixSortResiduals(vec_keys, vec_keysScratch);" + NL
+               + "                    // Most meaningful discrimination inliers/outliers" + NL
+               + "                    best = bestNFA(sizeSample, kernel.logalpha0(), vec_keys, loge0, maxThreshold, vec_logc_n, vec_logc_k, kernel.errorVectorDimension());" + NL
+               + "                }" + NL)
+        t = t.replace(old, new, 1)
+
+        # the rare path: the inlier indices have to come out in (residual, index) order
+        old = ("                    // A better model was found" + NL
+               + "                    better = true;" + NL)
+        if t.count(old) != 1:
+            sys.exit("better-model branch not found once")
+        new = ("                    // A better model was found" + NL
+               + "                    // cheshire: the inlier indices below have to come out in (residual, index)" + NL
+               + "                    // order, which the key sort does not carry. Pay for the pair sort here, on" + NL
+               + "                    // the 0.026 % of models that reach this branch." + NL
+               + "                    if (!cheshirePairSort)" + NL
+               + "                    {" + NL
+               + "                        for (size_t i = 0; i < nData; ++i)" + NL
+               + "                            vec_residuals[i] = ErrorIndex(vec_residuals_[i], i);" + NL
+               + "                        std::sort(vec_residuals.begin(), vec_residuals.end());" + NL
+               + "                    }" + NL
+               + "                    better = true;" + NL)
+        t = t.replace(old, new, 1)
+        ac.write_text(t, encoding="utf-8", newline=NL)
+
+    # 4x. The residual loop itself. PointFittingKernel::errors() calls the virtual error() once per
+    #     correspondence, which stops the compiler inlining a ~15-flop epipolar distance and stops it
+    #     vectorising the loop. RelativePoseKernel does not override error(), so going straight to the
+    #     estimator is the same arithmetic in the same order: 558 s -> 383 s of CPU time on the engine
+    #     bay, match file unchanged.
+    rp = AV / "src/aliceVision/multiview/RelativePoseKernel.hpp"
+    t = rp.read_text(encoding="utf-8")
+    if "cheshire: the inherited errors()" not in t:
+        old = ("    double logalpha0() const override { return _logalpha0; }" + NL
+               + "    double errorVectorDimension() const override { return (_pointToLine) ? 1.0 : 2.0; }" + NL)
+        if t.count(old) != 1:
+            sys.exit("RelativePoseKernel accessors not found once")
+        new = ("    // cheshire: the inherited errors() calls the virtual error() once per correspondence," + NL
+               + "    // which stops the compiler inlining a ~15-flop functor and stops it vectorising the" + NL
+               + "    // loop. This class does not override error(), so going straight to the estimator is the" + NL
+               + "    // same arithmetic." + NL
+               + "    void errors(const ModelT_& model, std::vector<double>& errors) const override" + NL
+               + "    {" + NL
+               + "        const std::size_t n = PFRansacKernel::PFKernel::_x1.cols();" + NL
+               + "        errors.resize(n);" + NL
+               + "        for (std::size_t i = 0; i < n; ++i)" + NL
+               + "            errors[i] = PFRansacKernel::PFKernel::_errorEstimator.error(" + NL
+               + "              model, PFRansacKernel::PFKernel::_x1.col(i), PFRansacKernel::PFKernel::_x2.col(i));" + NL
+               + "    }" + NL
+               + NL
+               + old)
+        t = t.replace(old, new, 1)
+        rp.write_text(t, encoding="utf-8", newline=NL)
 
     # 5. regenerate the reviewable patch.
     # CHESHIRE_SKIP_PATCH_EXPORT=1 leaves it alone. The submodule is normally cloned on Windows with

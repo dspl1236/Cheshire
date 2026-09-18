@@ -3155,6 +3155,30 @@ index 76bf7e5..eb5d127 100644
  
      // pyramid of atlases frequency bands
      std::map<AtlasIndex, AccuPyramid> accuPyramids;
+diff --git a/src/aliceVision/multiview/RelativePoseKernel.hpp b/src/aliceVision/multiview/RelativePoseKernel.hpp
+index c0a3ab3..643f300 100644
+--- a/src/aliceVision/multiview/RelativePoseKernel.hpp
++++ b/src/aliceVision/multiview/RelativePoseKernel.hpp
+@@ -79,6 +79,19 @@ class RelativePoseKernel : public robustEstimation::PointFittingRansacKernel<Sol
+         model.setMatrix(H);
+     }
+ 
++    // cheshire: the inherited errors() calls the virtual error() once per correspondence,
++    // which stops the compiler inlining a ~15-flop functor and stops it vectorising the
++    // loop. This class does not override error(), so going straight to the estimator is the
++    // same arithmetic.
++    void errors(const ModelT_& model, std::vector<double>& errors) const override
++    {
++        const std::size_t n = PFRansacKernel::PFKernel::_x1.cols();
++        errors.resize(n);
++        for (std::size_t i = 0; i < n; ++i)
++            errors[i] = PFRansacKernel::PFKernel::_errorEstimator.error(
++              model, PFRansacKernel::PFKernel::_x1.col(i), PFRansacKernel::PFKernel::_x2.col(i));
++    }
++
+     double logalpha0() const override { return _logalpha0; }
+     double errorVectorDimension() const override { return (_pointToLine) ? 1.0 : 2.0; }
+     Mat3 normalizer1() const override { return _N1; }
 diff --git a/src/aliceVision/mvsData/ROI.hpp b/src/aliceVision/mvsData/ROI.hpp
 index e3b2880..b4e5c7b 100644
 --- a/src/aliceVision/mvsData/ROI.hpp
@@ -3237,6 +3261,194 @@ index 8849153..05ac303 100644
      std::vector<std::string> _imagesNames;
  
      std::list<std::future<void>> _asyncObjects;
+diff --git a/src/aliceVision/robustEstimation/ACRansac.hpp b/src/aliceVision/robustEstimation/ACRansac.hpp
+index bb91d4e..1043533 100644
+--- a/src/aliceVision/robustEstimation/ACRansac.hpp
++++ b/src/aliceVision/robustEstimation/ACRansac.hpp
+@@ -12,6 +12,11 @@
+ #include <aliceVision/robustEstimation/randSampling.hpp>
+ #include <aliceVision/system/Logger.hpp>
+ 
++#include <atomic>  // cheshire
++#include <bit>  // cheshire
++#include <cstdint>  // cheshire
++#include <cstdio>  // cheshire
++#include <cstdlib>  // cheshire
+ #include <algorithm>
+ #include <cmath>
+ #include <iostream>
+@@ -79,12 +84,96 @@ void makelogcombi(std::size_t k, std::size_t n, std::vector<Type>& vec_logc_k, s
+  */
+ using ErrorIndex = std::pair<double, size_t>;
+ 
++/**
++ * @brief cheshire: sort squared residuals ascending, as their IEEE bit patterns.
++ *
++ * A non-negative double orders the same as its bit pattern read as a uint64_t, so a stable
++ * LSD radix over the eight bytes sorts the values with no comparisons and no branches to
++ * mispredict. Byte positions where every key agrees are skipped, which covers most of the
++ * exponent for a typical residual spread.
++ *
++ * Anything the bit-pattern order cannot represent goes to std::sort instead: a negative
++ * value, -0.0 or a NaN, all of which have a key above 0x7FF0000000000000 (+inf is exactly
++ * equal to it and orders correctly). NaN is the one that matters. It breaks the strict weak
++ * ordering std::sort requires, so upstream's order on such an array is unspecified - but it
++ * is what upstream produces, and reproducing it is the point. Geometric filtering never sees
++ * one (4.7 M residuals, zero non-finite); SfM's relative pose does, through
++ * RelativePoseKernel_K, which builds F from E and can divide by a zero squaredNorm.
++ */
++/// cheshire: how many arrays went to std::sort instead. CHESHIRE_ACR_NANLOG=1 reports it.
++struct CheshireAcrDeferred
++{
++    std::atomic<long long> n{0};
++    ~CheshireAcrDeferred()
++    {
++        if (std::getenv("CHESHIRE_ACR_NANLOG") && n.load())
++            std::fprintf(stderr, "[cheshire acransac] %lld residual arrays deferred to std::sort\n", n.load());
++    }
++};
++inline std::atomic<long long>& cheshireAcrDeferred() { static CheshireAcrDeferred d; return d.n; }
++
++inline void cheshireRadixSortResiduals(std::vector<std::uint64_t>& keys, std::vector<std::uint64_t>& scratch)
++{
++    const std::size_t n = keys.size();
++    if (n < 2)
++        return;
++
++    std::uint64_t* a = keys.data();
++    std::uint32_t hist[8][256] = {};
++    bool defer = false;
++    for (std::size_t i = 0; i < n; ++i)
++    {
++        const std::uint64_t k = a[i];
++        defer |= (k > 0x7FF0000000000000ULL);  // negative, -0.0 or NaN
++        for (int p = 0; p < 8; ++p)
++            ++hist[p][(k >> (p * 8)) & 0xFF];
++    }
++
++    if (defer)
++    {
++        cheshireAcrDeferred().fetch_add(1, std::memory_order_relaxed);
++        std::sort(keys.begin(), keys.end(), [](std::uint64_t x, std::uint64_t y) {
++            return std::bit_cast<double>(x) < std::bit_cast<double>(y);
++        });
++        return;
++    }
++
++    scratch.resize(n);
++    std::uint64_t* b = scratch.data();
++    for (int p = 0; p < 8; ++p)
++    {
++        if (hist[p][(a[0] >> (p * 8)) & 0xFF] == n)  // every key agrees: the pass is the identity
++            continue;
++
++        std::uint32_t off[256];
++        std::uint32_t sum = 0;
++        for (int d = 0; d < 256; ++d)
++        {
++            off[d] = sum;
++            sum += hist[p][d];
++        }
++        for (std::size_t i = 0; i < n; ++i)
++        {
++            const std::uint64_t k = a[i];
++            b[off[(k >> (p * 8)) & 0xFF]++] = k;
++        }
++        std::swap(a, b);
++    }
++    if (a != keys.data())
++        std::copy(a, a + n, keys.data());
++}
++
++/// cheshire: residual of a sorted entry, whether it carries its index or is a bare key.
++inline double acrResidual(const ErrorIndex& e) { return e.first; }
++inline double acrResidual(std::uint64_t e) { return std::bit_cast<double>(e); }
++
+ /**
+  * @brief Find best NFA and its index wrt square error threshold in e.
+  */
++template<typename ResidualT>  // cheshire: ErrorIndex, or a bare residual key
+ inline ErrorIndex bestNFA(int startIndex,  // number of point required for estimation
+                           double logalpha0,
+-                          const std::vector<ErrorIndex>& e,
++                          const std::vector<ResidualT>& e,
+                           double loge0,
+                           double maxThreshold,
+                           const std::vector<float>& logc_n,
+@@ -94,9 +183,9 @@ inline ErrorIndex bestNFA(int startIndex,  // number of point required for estim
+     ErrorIndex bestIndex(std::numeric_limits<double>::infinity(), startIndex);
+     const size_t n = e.size();
+ 
+-    for (size_t k = startIndex + 1; k <= n && e[k - 1].first <= maxThreshold; ++k)
++    for (size_t k = startIndex + 1; k <= n && acrResidual(e[k - 1]) <= maxThreshold; ++k)
+     {
+-        double squaredResidual = e[k - 1].first;
++        double squaredResidual = acrResidual(e[k - 1]);
+         double residual = sqrt(squaredResidual) + std::numeric_limits<float>::epsilon();
+ 
+         const double logalpha = logalpha0 + errorVectorDimension * log10(residual);
+@@ -161,8 +250,11 @@ std::pair<double, double> ACRANSAC(const Kernel& kernel,
+                                   ? std::numeric_limits<double>::infinity()
+                                   : precision * precision * kernel.thresholdNormalizer() * kernel.thresholdNormalizer();
+ 
+-    std::vector<ErrorIndex> vec_residuals(nData);  // [residual,index]
++    std::vector<ErrorIndex> vec_residuals(nData);  // [residual,index], cheshire: only for a better model
+     std::vector<double> vec_residuals_(nData);
++    // cheshire: residual bits, sorted for every model; see cheshireRadixSortResiduals
++    std::vector<std::uint64_t> vec_keys(nData), vec_keysScratch;
++    const bool cheshirePairSort = (std::getenv("CHESHIRE_ACR_PAIRSORT") != nullptr);
+ 
+     // Possible sampling indices [0,..,nData] (will change in the optimization phase)
+     std::vector<size_t> vec_index(nData);
+@@ -215,20 +307,40 @@ std::pair<double, double> ACRANSAC(const Kernel& kernel,
+             }
+             if (bACRansacMode)
+             {
+-                for (size_t i = 0; i < nData; ++i)
++                // cheshire: bestNFA reads residuals only, so sort 8-byte keys rather than
++                // (residual, index) pairs. The value sequence is the same either way.
++                ErrorIndex best;
++                if (cheshirePairSort)
+                 {
+-                    const double error = vec_residuals_[i];
+-                    vec_residuals[i] = ErrorIndex(error, i);
++                    for (size_t i = 0; i < nData; ++i)
++                    {
++                        const double error = vec_residuals_[i];
++                        vec_residuals[i] = ErrorIndex(error, i);
++                    }
++                    std::sort(vec_residuals.begin(), vec_residuals.end());
++                    best = bestNFA(sizeSample, kernel.logalpha0(), vec_residuals, loge0, maxThreshold, vec_logc_n, vec_logc_k, kernel.errorVectorDimension());
++                }
++                else
++                {
++                    for (size_t i = 0; i < nData; ++i)
++                        vec_keys[i] = std::bit_cast<std::uint64_t>(vec_residuals_[i]);
++                    cheshireRadixSortResiduals(vec_keys, vec_keysScratch);
++                    // Most meaningful discrimination inliers/outliers
++                    best = bestNFA(sizeSample, kernel.logalpha0(), vec_keys, loge0, maxThreshold, vec_logc_n, vec_logc_k, kernel.errorVectorDimension());
+                 }
+-                std::sort(vec_residuals.begin(), vec_residuals.end());
+-
+-                // Most meaningful discrimination inliers/outliers
+-                const ErrorIndex best =
+-                  bestNFA(sizeSample, kernel.logalpha0(), vec_residuals, loge0, maxThreshold, vec_logc_n, vec_logc_k, kernel.errorVectorDimension());
+ 
+                 if (best.first < minNFA /*&& vec_residuals[best.second-1].first < errorMax*/)
+                 {
+                     // A better model was found
++                    // cheshire: the inlier indices below have to come out in (residual, index)
++                    // order, which the key sort does not carry. Pay for the pair sort here, on
++                    // the 0.026 % of models that reach this branch.
++                    if (!cheshirePairSort)
++                    {
++                        for (size_t i = 0; i < nData; ++i)
++                            vec_residuals[i] = ErrorIndex(vec_residuals_[i], i);
++                        std::sort(vec_residuals.begin(), vec_residuals.end());
++                    }
+                     better = true;
+                     minNFA = best.first;
+                     vec_inliers.resize(best.second);
 diff --git a/src/aliceVision/sfm/pipeline/expanding/DistanceWeighting.cpp b/src/aliceVision/sfm/pipeline/expanding/DistanceWeighting.cpp
 index 1f23958..5491985 100644
 --- a/src/aliceVision/sfm/pipeline/expanding/DistanceWeighting.cpp
