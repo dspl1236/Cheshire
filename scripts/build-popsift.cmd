@@ -31,6 +31,14 @@ rem the kernel. Off for release builds; on when bringing up a new architecture.
 set ERRCHK=OFF
 if defined CHESHIRE_POPSIFT_ERRCHK set ERRCHK=%CHESHIRE_POPSIFT_ERRCHK%
 
+rem CHESHIRE_EXTRA_CXXFLAGS reaches the host compiler through the environment, the way
+rem build-alicevision.cmd does it, because CMake reads CFLAGS/CXXFLAGS only on the first configure.
+rem The HIP SDK 6.2 toolchain needs -D__builtin_verbose_trap(x,y)=__builtin_trap() here and in
+rem CHESHIRE_HIP_EXTRA_FLAGS: clang 19 against the MSVC 14.50 STL, and a force-included shim does
+rem not reach HIP translation units, whose runtime wrapper includes the STL first.
+set CFLAGS=%CHESHIRE_EXTRA_CXXFLAGS%
+set CXXFLAGS=%CHESHIRE_EXTRA_CXXFLAGS%
+
 rem the generated sift_config.h, the source fixes and the unity translation unit
 python "%R%/scripts/apply_popsift_patch.py" || exit /b 1
 

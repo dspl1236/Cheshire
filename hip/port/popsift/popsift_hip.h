@@ -7,9 +7,11 @@
 // surfaces and 2D textures natively, so the pyramid keeps its original shape.
 //
 // What is here, and why:
-//   - the warp shuffles. HIP's *_sync forms require a 64-bit lane mask (a wavefront can be 64 wide);
-//     PopSIFT passes the 32-bit CUDA mask, which HIP rejects with a static assertion. The wrappers
-//     widen it. On RDNA the wavefront is 32 wide, so the mask values themselves carry over.
+//   - the warp shuffles. PopSIFT calls CUDA's *_sync forms with a 32-bit lane mask. HIP's *_sync
+//     forms want a 64-bit mask (a wavefront can be 64 wide) and do not exist at all in the HIP SDK
+//     6.2 toolchain used for RDNA2. The wrappers drop the mask and call the non-sync intrinsics,
+//     which exist in both and which the *_sync forms resolve to anyway; PopSIFT only uses them on
+//     converged warps. Measured identical on ROCm 7.2.1/gfx1201.
 //   - surf2DLayeredwrite. HIP's takes no boundary-mode argument; PopSIFT passes cudaBoundaryModeZero.
 //     The overload drops it, which is what HIP does anyway for an in-range write.
 //   - the round-toward-positive-infinity multiply and fused multiply-add. HIP has only the
@@ -28,40 +30,36 @@
 // ---------------------------------------------------------------- warp shuffles
 // Defined before the macros below so the macros do not rewrite the calls inside them.
 template<typename T>
-__device__ inline T cheshirePopsiftShflDownSync(unsigned int mask, T var, unsigned int delta, int width = warpSize)
+__device__ inline T cheshirePopsiftShflDownSync(unsigned int /*mask*/, T var, unsigned int delta, int width = warpSize)
 {
-    return __shfl_down_sync((unsigned long long)mask, var, delta, width);
+    return __shfl_down(var, delta, width);
 }
 template<typename T>
-__device__ inline T cheshirePopsiftShflUpSync(unsigned int mask, T var, unsigned int delta, int width = warpSize)
+__device__ inline T cheshirePopsiftShflUpSync(unsigned int /*mask*/, T var, unsigned int delta, int width = warpSize)
 {
-    return __shfl_up_sync((unsigned long long)mask, var, delta, width);
+    return __shfl_up(var, delta, width);
 }
 template<typename T>
-__device__ inline T cheshirePopsiftShflXorSync(unsigned int mask, T var, int lane, int width = warpSize)
+__device__ inline T cheshirePopsiftShflXorSync(unsigned int /*mask*/, T var, int lane, int width = warpSize)
 {
-    return __shfl_xor_sync((unsigned long long)mask, var, lane, width);
+    return __shfl_xor(var, lane, width);
 }
 template<typename T>
-__device__ inline T cheshirePopsiftShflSync(unsigned int mask, T var, int src, int width = warpSize)
+__device__ inline T cheshirePopsiftShflSync(unsigned int /*mask*/, T var, int src, int width = warpSize)
 {
-    return __shfl_sync((unsigned long long)mask, var, src, width);
+    return __shfl(var, src, width);
 }
 __device__ inline unsigned long long cheshirePopsiftBallotSync(unsigned int /*mask*/, int pred)
 {
-    // HIP's __ballot_sync sets a bit for lanes whose predicate is false: in PopSIFT's extrema
-    // counter it reported about one spurious lane per warp, so every warp reserved a slot and the
-    // extremum count came out around 32x the truth. __ballot is the same operation over the
-    // active lanes and is exact; the mask argument is what CUDA needs and HIP does not use.
     return __ballot(pred);
 }
-__device__ inline unsigned long long cheshirePopsiftAnySync(unsigned int mask, int pred)
+__device__ inline int cheshirePopsiftAnySync(unsigned int /*mask*/, int pred)
 {
-    return __any_sync((unsigned long long)mask, pred);
+    return __any(pred);
 }
-__device__ inline unsigned long long cheshirePopsiftAllSync(unsigned int mask, int pred)
+__device__ inline int cheshirePopsiftAllSync(unsigned int /*mask*/, int pred)
 {
-    return __all_sync((unsigned long long)mask, pred);
+    return __all(pred);
 }
 
 #define __shfl_down_sync(...) cheshirePopsiftShflDownSync(__VA_ARGS__)
@@ -81,14 +79,17 @@ __device__ inline unsigned long long cheshirePopsiftAllSync(unsigned int mask, i
 // is correct: it uses __ockl_image_sample_2Da, the 2D-array sampler. That asymmetry is what left
 // PopSIFT's Gaussian pyramid with a correct level 0 and nothing above it.
 // This writes through the matching 2D-array store, with the layer in the coordinate vector.
+// The two toolchains spell the coordinate vector differently: ROCm 7.2's header passes it through
+// get_native_vector(), the HIP SDK 6.2 one uses int2(x, y).data, and neither spelling compiles on
+// the other. Both define HIP_vector_type::Native_vec_, so the native vector is built directly.
 template<typename T>
 __device__ inline void cheshirePopsiftSurf2DLayeredWrite(T data, hipSurfaceObject_t surf, int x, int y, int layer, int /*boundary*/)
 {
     unsigned int ADDRESS_SPACE_CONSTANT* i = (unsigned int ADDRESS_SPACE_CONSTANT*)surf;
     const int px = __hipGetPixelAddr(x, __ockl_image_channel_data_type_2Da(i), __ockl_image_channel_order_2Da(i));
-    int4 coords{px, y, layer, 0};
     auto payload = __hipMapTo<float4::Native_vec_>(data);
-    __ockl_image_store_2Da(i, get_native_vector(coords), payload);
+    typename int4::Native_vec_ coords = {px, y, layer, 0};
+    __ockl_image_store_2Da(i, coords, payload);
 }
 #define surf2DLayeredwrite(...) cheshirePopsiftSurf2DLayeredWrite(__VA_ARGS__)
 
