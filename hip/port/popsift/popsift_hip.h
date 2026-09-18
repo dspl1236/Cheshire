@@ -69,11 +69,22 @@ __device__ inline unsigned long long cheshirePopsiftAllSync(unsigned int mask, i
 #define __all_sync(...) cheshirePopsiftAllSync(__VA_ARGS__)
 
 // ---------------------------------------------------------------- layered surface write
-// HIP's surf2DLayeredwrite(data, surf, x, y, layer) has no boundary-mode parameter.
+// Two problems with HIP's surf2DLayeredwrite. It takes no boundary-mode parameter, which is
+// cosmetic, and it writes to the wrong place, which is not: amd_surface_functions.h implements it
+// as __ockl_image_store_lod_2D(i, coords, layer, data), the MIP-LEVEL store on a plain 2D image,
+// passing the layer as a level of detail. Layer 0 therefore lands on the base level and every other
+// layer is written to a mip level that does not exist, silently. Its read counterpart tex2DLayered
+// is correct: it uses __ockl_image_sample_2Da, the 2D-array sampler. That asymmetry is what left
+// PopSIFT's Gaussian pyramid with a correct level 0 and nothing above it.
+// This writes through the matching 2D-array store, with the layer in the coordinate vector.
 template<typename T>
 __device__ inline void cheshirePopsiftSurf2DLayeredWrite(T data, hipSurfaceObject_t surf, int x, int y, int layer, int /*boundary*/)
 {
-    surf2DLayeredwrite(data, surf, x, y, layer);
+    unsigned int ADDRESS_SPACE_CONSTANT* i = (unsigned int ADDRESS_SPACE_CONSTANT*)surf;
+    const int px = __hipGetPixelAddr(x, __ockl_image_channel_data_type_2Da(i), __ockl_image_channel_order_2Da(i));
+    int4 coords{px, y, layer, 0};
+    auto payload = __hipMapTo<float4::Native_vec_>(data);
+    __ockl_image_store_2Da(i, get_native_vector(coords), payload);
 }
 #define surf2DLayeredwrite(...) cheshirePopsiftSurf2DLayeredWrite(__VA_ARGS__)
 

@@ -53,6 +53,28 @@ def main() -> None:
                + "    cudaTextureObject_t tex;" + NL + "};")
         octave.write_text(t.replace(old, new, 1), encoding="utf-8", newline=NL)
 
+    # 3. CHESHIRE_POPSIFT_DEBUG=1 prints the per-octave extrema counts as they arrive on the host,
+    #    which splits the pipeline: zero everywhere means detection or earlier, non-zero with no
+    #    descriptors means orientation or the descriptor pass.
+    ori = POPSIFT / "src" / "popsift" / "s_orientation.cu"
+    t = ori.read_text(encoding="utf-8")
+    if "CHESHIRE_POPSIFT_DEBUG" not in t:
+        old_call = "    readDescCountersFromDevice( );" + NL
+        if t.count(old_call) != 1:
+            sys.exit("readDescCountersFromDevice call not found once")
+        new_call = (old_call
+                    + "    if( getenv( \"CHESHIRE_POPSIFT_DEBUG\" ) ) {  // cheshire" + NL
+                    + "        fprintf( stderr, \"[popsift] extrema per octave:\" );" + NL
+                    + "        for( int o=0; o<MAX_OCTAVES; o++ ) fprintf( stderr, \" %d\", hct.ext_ct[o] );" + NL
+                    + "        fprintf( stderr, \" | ori per octave:\" );" + NL
+                    + "        for( int o=0; o<MAX_OCTAVES; o++ ) fprintf( stderr, \" %d\", hct.ori_ct[o] );" + NL
+                    + "        fprintf( stderr, \"%c\", 10 );" + NL
+                    + "    }" + NL)
+        t = t.replace(old_call, new_call, 1)
+        i = t.index("#include")
+        t = t[:i] + "#include <cstdlib>  // cheshire" + NL + "#include <cstdio>" + NL + t[i:]
+        ori.write_text(t, encoding="utf-8", newline=NL)
+
     # 3. one translation unit. HIP cannot produce relocatable device code with COFF objects on
     #    Windows, and PopSIFT shares __constant__ and __device__ globals across its sources, so the
     #    device link that -fgpu-rdc would need is unavailable. Compiling the sources together

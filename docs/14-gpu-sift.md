@@ -71,20 +71,58 @@ Four things had to be solved to get there, none of them in the kernels:
   calls `cudaDeviceReset()`. Apply step 4v hands `aliceVision_feature` the ROCm include directory
   and the HIP runtime import library.
 
+## The bug that made it extract nothing: HIP's layered surface write
+
+The port built, linked and ran while returning zero keypoints. Dumping the Gaussian pyramid
+(`Config::All` writes it to `dir-octave`) located it exactly: octave 0 level 0 held the image, and
+**every level above it was entirely zero**, in every octave.
+
+All those levels are written by the same call, `surf2DLayeredwrite`, differing only in the layer
+index. HIP's implementation is the reason:
+
+```cpp
+// hip/amd_detail/amd_surface_functions.h
+static __device__ void surf2DLayeredwrite(T data, hipSurfaceObject_t surfObj, int x, int y, int layer) {
+  ...
+  __ockl_image_store_lod_2D(i, get_native_vector(coords), layer, tmp);   // a MIP LEVEL, not a layer
+}
+```
+
+It calls the mip-level store on a plain 2D image and passes the array layer as the level of detail.
+Layer 0 lands on the base level, which is why the input image survived, and every other layer is
+written to a mip level that was never allocated. Nothing reports an error. Its read counterpart is
+correct: `tex2DLayered` uses `__ockl_image_sample_2Da`, the 2D-array sampler. That asymmetry is the
+whole bug.
+
+The shim writes through the matching 2D-array store instead, with the layer in the coordinate
+vector:
+
+```cpp
+int4 coords{px, y, layer, 0};
+__ockl_image_store_2Da(i, get_native_vector(coords), payload);
+```
+
+This is a HIP defect rather than a PopSIFT one, and it will affect any CUDA code that writes layered
+surfaces. It is worth reporting to ROCm.
+
+## Measured
+
+The 6-view set, 4032 x 3024, same describer settings, on an RX 9070:
+
+| | wall | keypoints |
+|---|---|---|
+| GPU SIFT (PopSIFT on HIP) | 9 s | 316,304 |
+| CPU SIFT (vlfeat) | 410 s | 120,000 |
+
+45 times faster. The keypoint counts are not comparable as they stand: the CPU path returns exactly
+20,000 per image, a cap, while the GPU path is uncapped. Matching the configurations, and then
+judging the descriptors by match counts through FeatureMatching and the reconstruction that follows,
+is the next step.
+
 ## What is not done
 
-Running is not working. The pipeline completes and returns **zero keypoints**, on real photographs
-and on synthetic input, at every image size. `hip/port/popsift/smoke.cpp` is the shortest way to see
-it: it does exactly what the describer does, prints each stage, and ends with `0 features, 0
-descriptors`. Nothing reports an error, including with `CHESHIRE_POPSIFT_ERRCHK=ON`, which checks
-after every kernel launch.
-
-So the next question is which stage produces nothing: the Gaussian pyramid, the difference of
-Gaussians, extrema detection, or the descriptor pass. The leads worth taking first are the places
-where the shim changed semantics rather than spelling. The warp intrinsics are the obvious suspects,
-since `__ballot`, `__any` and `__all` return a 64-bit mask in HIP where PopSIFT's code expects 32
-bits, and lane arithmetic derived from them would then be wrong. After that, the round-up
-arithmetic, and the layered surface writes.
-
-Once features appear, the acceptance test is not byte equality: PopSIFT and CPU SIFT do not agree
-exactly by design. It is match counts through FeatureMatching and the reconstruction that follows.
+The descriptors have not been judged, only counted. PopSIFT and CPU SIFT do not agree exactly by
+design, so the acceptance test is match counts through FeatureMatching and the reconstruction that
+follows, with the keypoint caps matched first. Nothing has run on RDNA1, RDNA2 or Linux yet, and the
+library is built for one architecture at a time. `CHESHIRE_POPSIFT_DEBUG=1` prints the per-octave
+extrema and orientation counts, which is the fastest way to see whether a change broke detection.

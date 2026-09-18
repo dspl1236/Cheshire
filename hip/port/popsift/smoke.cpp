@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <vector>
 
@@ -36,6 +37,8 @@ int main(int argc, char** argv)
     config.setNormalizationMultiplier(9);
     config.setNormMode(popsift::Config::Classic);
     config.setFilterSorting(popsift::Config::LargestScaleFirst);
+    if (getenv("CHESHIRE_POPSIFT_DUMP"))
+        config.setLogMode(popsift::Config::All);  // writes the pyramid to disk
 
     // a synthetic image with enough structure to produce keypoints
     std::vector<float> pixels((size_t)width * height);
