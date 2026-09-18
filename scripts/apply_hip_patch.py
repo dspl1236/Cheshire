@@ -1896,7 +1896,11 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                + "    if (DEFINED ENV{ROCM_PATH})" + NL
                + "        target_include_directories(aliceVision_feature PRIVATE \"$ENV{ROCM_PATH}/include\")" + NL
                + "        # and the runtime itself: the describer calls cudaDeviceReset()" + NL
-               + "        target_link_libraries(aliceVision_feature PRIVATE \"$ENV{ROCM_PATH}/lib/amdhip64.lib\")" + NL
+               + "        if (WIN32)" + NL
+               + "            target_link_libraries(aliceVision_feature PRIVATE \"$ENV{ROCM_PATH}/lib/amdhip64.lib\")" + NL
+               + "        else()" + NL
+               + "            target_link_libraries(aliceVision_feature PRIVATE \"$ENV{ROCM_PATH}/lib/libamdhip64.so\")" + NL
+               + "        endif()" + NL
                + "    endif()" + NL)
         t = t.replace(old, new, 1)
         fc.write_text(t, encoding="utf-8", newline=NL)

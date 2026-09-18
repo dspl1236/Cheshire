@@ -13,6 +13,9 @@ AV_DEV="$ROOT/third_party/aliceVision"
 STEP="${1:-install}"
 ARCHS="${2:-gfx900;gfx906;gfx1010;gfx1012;gfx1030;gfx1031;gfx1032;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201}"
 ROCM="${ROCM_PATH:-/opt/rocm}"
+# exported because apply_hip_patch.py's GPU SIFT step reads $ENV{ROCM_PATH} from CMake to put
+# ROCm's headers and runtime on aliceVision_feature, which the popsift describer needs.
+export ROCM_PATH="$ROCM"
 AV_DEPS="${AV_DEPS:-/opt/AliceVision_deps}"
 AV_BUILD="${AV_BUILD:-$HOME/av-hip-build}"
 AV_INSTALL="${AV_INSTALL:-/opt/AliceVision_hip}"
