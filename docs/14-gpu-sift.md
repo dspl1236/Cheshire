@@ -109,13 +109,24 @@ surfaces. It is worth reporting to ROCm.
 
 The 6-view set, 4032 x 3024, same describer settings, on an RX 9070:
 
-| | wall | keypoints |
-|---|---|---|
-| GPU SIFT (PopSIFT on HIP) | 9 s | 316,304 |
-| CPU SIFT (vlfeat) | 410 s | 120,000 |
+| whole set, GPU | images | wall | keypoints |
+|---|---|---|---|
+| 6-view | 6 | 9 s | 316,304 |
+| monstree, 41 views | 41 | 24 s | 2,100,099 |
+| engine bay | 107 | 41 s | 5,947,356 |
 
-45 times faster. The keypoint counts are not comparable as they stand: the CPU path returns exactly
-20,000 per image, a cap, while the GPU path is uncapped. Matching the configurations, and then
+Against the CPU path on the same images and settings, measured over the first four of each set so
+the comparison is like for like:
+
+| four images | CPU | GPU |
+|---|---|---|
+| monstree | 317 s | 10 s |
+| engine bay | 121 s | 9 s |
+
+At those CPU rates either full set takes about 54 minutes, against 24 s and 41 s, so between 80 and
+135 times faster depending on the set. The GPU is also doing more work than the CPU in these runs:
+the CPU path returns exactly 20,000 keypoints per image, a cap, and the GPU path is uncapped, which
+is why its keypoint counts are two to three times higher. Matching the configurations, and then
 judging the descriptors by match counts through FeatureMatching and the reconstruction that follows,
 is the next step.
 
