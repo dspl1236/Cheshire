@@ -60,9 +60,10 @@ def main() -> None:
     conf = POPSIFT / "src" / "popsift" / "sift_conf.cu"
     t = conf.read_text(encoding="utf-8")
     if "CHESHIRE_POPSIFT_SORT" not in t:
-        old_set = "void Config::setFilterSorting( GridFilterMode m )" + NL + "{" + NL
+        # the enum is spelled with its class qualifier in the definition
+        old_set = "void Config::setFilterSorting( Config::GridFilterMode m )" + NL + "{" + NL
         if t.count(old_set) != 1:
-            sys.exit("setFilterSorting(GridFilterMode) not found once")
+            sys.exit("setFilterSorting(Config::GridFilterMode) not found once")
         new_set = (old_set
                    + "    if( const char* s = getenv( \"CHESHIRE_POPSIFT_SORT\" ) )  // cheshire" + NL
                    + "    {" + NL
@@ -129,6 +130,41 @@ def main() -> None:
         i = t.index("#include")
         t = t[:i] + "#include <cstdlib>  // cheshire" + NL + "#include <cstdio>" + NL + t[i:]
         ori.write_text(t, encoding="utf-8", newline=NL)
+
+    # 3d. CHESHIRE_POPSIFT_DEBUG=1 also reports what the grid filter did per octave. The filter
+    #     compacts the surviving extrema with copy_if and separately sets the count with reduce over
+    #     the same stencil, so the two must agree; if the count exceeds what copy_if wrote, the
+    #     orientation stage reads offsets nothing filled in and the keypoints come out with sigma 0.
+    filt = POPSIFT / "src" / "popsift" / "s_filtergrid.cu"
+    t = filt.read_text(encoding="utf-8")
+    if "CHESHIRE_POPSIFT_DEBUG" not in t:
+        old_copy = ("            thrust::copy_if( thrust::make_counting_iterator(0)," + NL
+                    + "                             thrust::make_counting_iterator(ocount)," + NL
+                    + "                             grid.begin()," + NL
+                    + "                             off_ptr," + NL
+                    + "                             fun_id );" + NL
+                    + NL
+                    + "            hct.ext_ct[o] = thrust::reduce( grid.begin(), grid.end() );" + NL)
+        if t.count(old_copy) != 1:
+            sys.exit("copy_if/reduce pair not found once in s_filtergrid.cu")
+        new_copy = ("            thrust::device_ptr<int> off_end = thrust::copy_if(  // cheshire" + NL
+                    + "                             thrust::make_counting_iterator(0)," + NL
+                    + "                             thrust::make_counting_iterator(ocount)," + NL
+                    + "                             grid.begin()," + NL
+                    + "                             off_ptr," + NL
+                    + "                             fun_id );" + NL
+                    + NL
+                    + "            hct.ext_ct[o] = thrust::reduce( grid.begin(), grid.end() );" + NL
+                    + "            if( getenv( \"CHESHIRE_POPSIFT_DEBUG\" ) ) {  // cheshire" + NL
+                    + "                const int wrote = (int)( off_end - off_ptr );" + NL
+                    + "                fprintf( stderr, \"[popsift] filter octave %d: in %d, copy_if wrote %d, count set to %d%s%c\"," + NL
+                    + "                         o, ocount, wrote, hct.ext_ct[o]," + NL
+                    + "                         wrote == hct.ext_ct[o] ? \"\" : \"   <-- MISMATCH\", 10 );" + NL
+                    + "            }" + NL)
+        t = t.replace(old_copy, new_copy, 1)
+        i = t.index("#include")
+        t = t[:i] + "#include <cstdlib>  // cheshire" + NL + "#include <cstdio>" + NL + t[i:]
+        filt.write_text(t, encoding="utf-8", newline=NL)
 
     # 3. one translation unit. HIP cannot produce relocatable device code with COFF objects on
     #    Windows, and PopSIFT shares __constant__ and __device__ globals across its sources, so the

@@ -174,13 +174,88 @@ than reasoning:
 - **The normalisation mode.** RootSIFT and Classic both produce healthy descriptors on synthetic
   input (0 % empty bins, mean 43).
 
-That last line is the useful clue: on smooth synthetic input the descriptors are fine, and on real
-photographs they are not. So the fault is in how the descriptor stage samples the pyramid for real
-image content. The next suspect is the layer index used when the descriptor samples a pyramid level,
-since sampling an over-blurred level would empty the histogram bins exactly this way and would be
-invisible to the desc-mode and sort-order tests. `hip/port/popsift/smoke.cpp` prints descriptor byte
-statistics and reproduces the healthy synthetic case in seconds; the missing piece is feeding it a
-real image so the failing case can be bisected without the pipeline.
+That last line turned out to be a red herring, and the reason is worth recording: Classic
+normalisation was hiding the fault rather than escaping it. Feeding `smoke.cpp` a real photograph
+(`CHESHIRE_SMOKE_IMAGE` takes the raw float buffer `scripts`' `to_raw.py` writes) located it in one
+run.
+
+## What is actually wrong
+
+AliceVision's SIFT defaults to `_rootSift = true`, so the describer asks for RootSIFT and every
+measurement above that used Classic was measuring the wrong path. On the same 1008 x 756 photograph:
+
+| normalisation | descriptor bytes | dead descriptors |
+|---|---|---|
+| Classic | mean 44.1, 0.8 % zero | 0 of 70,946 |
+| RootSIFT | mean 1.9, 94.9 % zero | 67,176 of 70,946 |
+
+94.7 % of the raw descriptor floats are NaN, and none are infinite. RootSIFT computes
+`sqrt(bin / sum)`, so a descriptor whose bins are all zero divides 0 by 0 and every bin becomes NaN,
+which AliceVision's `static_cast<unsigned char>` turns into 0. Classic instead computes
+`__frsqrt_rn(0)` = inf, multiplies to get NaN, and then `min(NaN, 0.2f)` returns 0.2 — so a dead
+descriptor comes out as a uniform ~45 in every bin. It looks healthy in aggregate and matches
+nothing. Both modes receive the same dead input; only RootSIFT admits it.
+
+The dead descriptors are dead before normalisation. `ext_desc_loop_sub` returns without touching the
+descriptor when `DESC_MAGNIFY * sigma` is zero, and 84 % of the keypoints have `sigma` exactly zero.
+Sigma is initialised to 0 on entry to `find_extrema_in_dog_sub` and only set on the accept path, so
+those are rejected extrema being read as accepted ones.
+
+They arrive through the grid filter, which AliceVision always enables via
+`setFilterMaxExtrema(_params._maxTotalKeypoints)`:
+
+| cap | keypoints | sigma == 0 | live keypoints |
+|---|---|---|---|
+| 25000 (above the total, filter never runs) | 26,560 | 0 | 26,560 |
+| 24000 | 24,000 | 23,183 | 817 |
+| 22000 | 22,000 | 21,183 | 817 |
+| 20000 | 20,000 | 19,183 | 817 |
+
+Exactly 817 keypoints survive whatever the cap, and the rest is padding. 817 is the real number:
+unfiltered, the same run reports 26,560 keypoints at **817 distinct positions**, and the run-length
+histogram is six huge runs — 19,106 / 4,903 / 1,179 / 497 / 32 / 32, one per octave, sized like the
+per-octave extrema counts — with a median run of 1. Each octave's surplus slots were never written,
+so their `i_ext_off` entry is still 0 and they all alias that octave's extremum 0, which is a real
+keypoint with a valid sigma. That is why the unfiltered path looks clean. Once the filter runs,
+`copy_if` rewrites `i_ext_off` and those never-written slots become genuine survivors pointing at a
+zeroed `InitialExtremum`, which is where `sigma == 0` comes from.
+
+So the root fault is that `dct.ext_ct[octave]` is about 32x the true extremum count. Octave 0 of a
+504 x 378 image launches 16 x 95 x 3 blocks of four warps, about 18,240 warps, and reports 19,712
+extrema: essentially every warp reports one, and 19,106 of them refine to the same point
+(x 249.815, y 14.030). Detection is over-firing and collapsing to a fixed attractor.
+
+### Ruled out, each by direct measurement
+
+- **The warp shuffles.** `warpSize` is 32 on the RX 9070, host and device agree, and
+  `hip/port/popsift/norm_test.cpp` replicates `normalize_histogram`'s (32,32) block and its
+  width-less butterfly reduction: 0 of 64 rows wrong, identical to the same reduction pinned to
+  width 32.
+- **The ballot and popcount.** `hip/port/popsift/ballot_test.cpp` checks the shim's
+  `__ballot_sync` and HIP's native `__ballot` against known lane patterns; both exact. In the real
+  kernel the masks are single-bit and spread across lanes 0-25, and `ct` is only ever 1 or 2.
+- **The atomicAdd leader election.** Instrumenting the counter showed all 447 sampled calls come
+  from `lane=0`; the `if (threadIdx.x == 0)` guard holds.
+- **Thread-index degeneracy.** `x = block_x + threadIdx.x + 1` is intact, and the median run length
+  of 1 rules out whole warps landing on one pixel.
+- **The layered pyramid reads.** `hip/port/popsift/layered_rw_test.cpp` writes a distinct value to
+  every layer and reads it back through the exact texture descriptors `sift_octave.cu` builds:
+  correct on all four layers, point and linear, with the layer as float or int.
+
+### A second HIP defect
+
+That same test found `surf2DLayeredread` broken the way `surf2DLayeredwrite` was: correct on layer 0
+and zero on every layer above it, 1536 of 2048 cells wrong. PopSIFT does not use it, so it is not
+this bug, but it is the same `__ockl_image_load_lod_2D` against `__ockl_image_load_2Da` mistake and
+belongs in the same ROCm report.
+
+### Do not run PopSIFT uncapped on a full-resolution photograph
+
+Leaving `setFilterMaxExtrema` unset and handing PopSIFT a 4032 x 3024 photograph took the host
+machine down hard on 2026-09-18 — an unexpected shutdown with no bugcheck, no crash dump and no
+driver reset. A synthetic image at the same size is smooth and yields few extrema; real photographic
+content does not, and with detection over-firing about 32x it is far worse. `smoke.cpp` now caps at
+20,000 by default and only runs uncapped when a cap of 0 is passed explicitly.
 
 ## What is not done
 
