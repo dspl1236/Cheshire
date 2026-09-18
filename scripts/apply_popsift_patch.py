@@ -53,7 +53,20 @@ def main() -> None:
                + "    cudaTextureObject_t tex;" + NL + "};")
         octave.write_text(t.replace(old, new, 1), encoding="utf-8", newline=NL)
 
-    print(f"popsift prepared; config header -> {GEN / 'sift_config.h'}")
+    # 3. one translation unit. HIP cannot produce relocatable device code with COFF objects on
+    #    Windows, and PopSIFT shares __constant__ and __device__ globals across its sources, so the
+    #    device link that -fgpu-rdc would need is unavailable. Compiling the sources together
+    #    removes the need for it: every global is defined in the unit that references it.
+    src = POPSIFT / "src"
+    sources = sorted((src / "popsift").glob("*.cu")) + sorted((src / "popsift" / "common").glob("*.cu"))
+    if not sources:
+        sys.exit("no popsift sources found")
+    lines = ["// Cheshire: PopSIFT as one translation unit; see scripts/apply_popsift_patch.py.", ""]
+    for f in sources:
+        lines.append('#include "%s"' % f.relative_to(src).as_posix())
+    (GEN.parent / "popsift_unity.cu").write_text(NL.join(lines) + NL, encoding="utf-8", newline=NL)
+
+    print(f"popsift prepared; {len(sources)} sources in one unit -> {GEN.parent / 'popsift_unity.cu'}")
 
 
 if __name__ == "__main__":

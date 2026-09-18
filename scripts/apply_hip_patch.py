@@ -66,6 +66,7 @@ TRACKED = [
     "src/software/pipeline/main_texturing.cpp",
     "src/aliceVision/fuseCut/Tetrahedralization.cpp",
     "src/aliceVision/fuseCut/PointCloud.cpp",
+    "src/aliceVision/feature/CMakeLists.txt",
     "src/aliceVision/fuseCut/Mesher.cpp",
     "src/aliceVision/mesh/Mesh.cpp",
     "src/aliceVision/mesh/MeshClean.cpp",
@@ -1877,6 +1878,27 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
             i = t.index("#include")
             t = t[:i] + "#include <cstdlib>  // cheshire" + NL + t[i:]
         ms.write_text(t, encoding="utf-8", newline=NL)
+
+    # 4v. GPU SIFT. PopSIFT's public headers include <cuda_runtime.h>, which resolves to this
+    #     project's shim in depthMap/cuda/hip, and that pulls in <hip/hip_runtime.h>.
+    #     ImageDescriber_SIFT_popSIFT.cpp is ordinary host C++, so the ROCm include directory is not
+    #     on its path and the shim cannot be resolved. Hand it to the target that compiles the file.
+    fc = AV / "src/aliceVision/feature/CMakeLists.txt"
+    t = fc.read_text(encoding="utf-8")
+    if "cheshire: GPU SIFT" not in t:
+        old = "    target_link_libraries(aliceVision_feature PRIVATE PopSift::popsift)" + NL
+        if t.count(old) != 1:
+            sys.exit("PopSift link line not found once in feature/CMakeLists.txt")
+        new = (old
+               + "    # cheshire: GPU SIFT. PopSIFT's headers reach <cuda_runtime.h>, which is this project's" + NL
+               + "    # shim, and that needs the HIP headers; this file is host C++, so add them here." + NL
+               + "    if (DEFINED ENV{ROCM_PATH})" + NL
+               + "        target_include_directories(aliceVision_feature PRIVATE \"$ENV{ROCM_PATH}/include\")" + NL
+               + "        # and the runtime itself: the describer calls cudaDeviceReset()" + NL
+               + "        target_link_libraries(aliceVision_feature PRIVATE \"$ENV{ROCM_PATH}/lib/amdhip64.lib\")" + NL
+               + "    endif()" + NL)
+        t = t.replace(old, new, 1)
+        fc.write_text(t, encoding="utf-8", newline=NL)
 
     # 5. regenerate the reviewable patch
     subprocess.run(["git", "add", "-N", "src/aliceVision/depthMap/cuda/hip"], cwd=AV, check=True)

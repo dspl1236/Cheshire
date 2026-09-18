@@ -1705,6 +1705,24 @@ index 7a671e0..f700fb3 100644
 +
  } // namespace depthMap
  } // namespace aliceVision
+diff --git a/src/aliceVision/feature/CMakeLists.txt b/src/aliceVision/feature/CMakeLists.txt
+index 514487d..fbe15e5 100644
+--- a/src/aliceVision/feature/CMakeLists.txt
++++ b/src/aliceVision/feature/CMakeLists.txt
+@@ -97,6 +97,13 @@ endif()
+ # Link PopSIFT library
+ if (ALICEVISION_HAVE_POPSIFT)
+     target_link_libraries(aliceVision_feature PRIVATE PopSift::popsift)
++    # cheshire: GPU SIFT. PopSIFT's headers reach <cuda_runtime.h>, which is this project's
++    # shim, and that needs the HIP headers; this file is host C++, so add them here.
++    if (DEFINED ENV{ROCM_PATH})
++        target_include_directories(aliceVision_feature PRIVATE "$ENV{ROCM_PATH}/include")
++        # and the runtime itself: the describer calls cudaDeviceReset()
++        target_link_libraries(aliceVision_feature PRIVATE "$ENV{ROCM_PATH}/lib/amdhip64.lib")
++    endif()
+ endif()
+ 
+ # Link OpenCV library
 diff --git a/src/aliceVision/fuseCut/CMakeLists.txt b/src/aliceVision/fuseCut/CMakeLists.txt
 index 1b7f39c..db95ff9 100644
 --- a/src/aliceVision/fuseCut/CMakeLists.txt

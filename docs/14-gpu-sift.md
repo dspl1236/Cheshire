@@ -43,10 +43,48 @@ One upstream bug turned up: `LinearTexture` holds a handle created by `cudaCreat
 read with `tex2D`, but declares it `cudaSurfaceObject_t`. CUDA makes both types `unsigned long long`
 so it compiles there; HIP has them as distinct pointer types.
 
+## It builds, links and runs
+
+`hip/port/popsift/CMakeLists.txt` builds the library and installs a `PopSiftConfig.cmake` exporting
+`PopSift::popsift`. `scripts/build-alicevision.cmd` takes `CHESHIRE_POPSIFT=ON` and points
+`PopSift_DIR` at it, and AliceVision's configure reports `PopSIFT found`. The resulting
+`popsift.dll` imports `amdhip64_7.dll` where the vcpkg one imports `nvcuda.dll`. Feature extraction
+runs to completion on the 6-view set and writes its files.
+
+Four things had to be solved to get there, none of them in the kernels:
+
+- **No relocatable device code on Windows.** PopSIFT shares `__constant__` and `__device__` globals
+  across translation units, so upstream switches on separable compilation. HIP cannot embed the
+  device IR into a COFF object, and the failure surfaces as `llvm-objcopy: the file was not
+  recognized as a valid object file`. `scripts/apply_popsift_patch.py` writes one translation unit
+  that includes all 29 sources, which removes the need for the device link entirely.
+- **clang-cl does not take `-include`.** It reads the header as a second source file and reports
+  "cannot specify /Fo when compiling multiple source files". The MSVC spelling `/FI` works.
+- **PopSIFT's own size check rejects the image.** `checkLimit_2DtexLinear` and its surface twin read
+  `maxTexture2DLayered` and `maxSurface2DLayered`, which HIP reports as 2048 on RDNA, so `enqueue`
+  returned nothing and AliceVision dereferenced the null job: that was the segmentation fault. The
+  limit is not real. `hip/port/popsift/layered_test.cpp` allocates a layered array at 4032 x 3024
+  and at 8192 x 8192 on the same device without error, so the shim raises the reported layered
+  limits to the plain 2D limit the device itself reports.
+- **The describer is host C++ that reaches CUDA headers.** PopSIFT's public headers include
+  `<cuda_runtime.h>`, which resolves to this project's shim and needs the HIP headers, and the file
+  calls `cudaDeviceReset()`. Apply step 4v hands `aliceVision_feature` the ROCm include directory
+  and the HIP runtime import library.
+
 ## What is not done
 
-Compiling is not running. Still ahead: a library target with the device link step, building
-AliceVision with `ALICEVISION_USE_POPSIFT=ON` against it, and then the part that decides whether the
-port is correct, comparing descriptors against the CPU SIFT path on the same images. PopSIFT and
-CPU SIFT do not agree exactly by design, so the acceptance test is match quality through
-FeatureMatching and the resulting reconstruction, not byte equality.
+Running is not working. The pipeline completes and returns **zero keypoints**, on real photographs
+and on synthetic input, at every image size. `hip/port/popsift/smoke.cpp` is the shortest way to see
+it: it does exactly what the describer does, prints each stage, and ends with `0 features, 0
+descriptors`. Nothing reports an error, including with `CHESHIRE_POPSIFT_ERRCHK=ON`, which checks
+after every kernel launch.
+
+So the next question is which stage produces nothing: the Gaussian pyramid, the difference of
+Gaussians, extrema detection, or the descriptor pass. The leads worth taking first are the places
+where the shim changed semantics rather than spelling. The warp intrinsics are the obvious suspects,
+since `__ballot`, `__any` and `__all` return a 64-bit mask in HIP where PopSIFT's code expects 32
+bits, and lane arithmetic derived from them would then be wrong. After that, the round-up
+arithmetic, and the layered surface writes.
+
+Once features appear, the acceptance test is not byte equality: PopSIFT and CPU SIFT do not agree
+exactly by design. It is match counts through FeatureMatching and the reconstruction that follows.

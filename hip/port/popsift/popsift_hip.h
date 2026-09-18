@@ -178,3 +178,31 @@ namespace thrust {
 namespace cuda = ::thrust::hip;
 }
 
+// ---------------------------------------------------------------- device limits
+// HIP reports maxTexture2DLayered as 2048 on RDNA, and PopSIFT reads that field to decide whether an
+// image fits (common/device_prop.cu checkLimit_2DtexLinear), so it refuses anything wider than 2048
+// and enqueue() returns nothing. The limit is not real: hipMalloc3DArray with hipArrayLayered
+// succeeds at 4032 x 3024 and at 8192 x 8192 on this device (hip/port/popsift/layered_test.cpp).
+// Raise the reported layered limit to the plain 2D limit the same device reports, leaving the layer
+// count alone, so PopSIFT's own check reflects what the hardware does.
+inline hipError_t cheshirePopsiftGetDeviceProperties(hipDeviceProp_t* prop, int device)
+{
+    const hipError_t err = hipGetDeviceProperties(prop, device);
+    if (err == hipSuccess && prop != nullptr)
+    {
+        for (int i = 0; i < 2; ++i)
+        {
+            if (prop->maxTexture2DLayered[i] < prop->maxTexture2D[i])
+                prop->maxTexture2DLayered[i] = prop->maxTexture2D[i];
+            // PopSIFT checks the layered SURFACE limit separately for the pyramid it writes into
+            if (prop->maxSurface2DLayered[i] < prop->maxTexture2D[i])
+                prop->maxSurface2DLayered[i] = prop->maxTexture2D[i];
+        }
+    }
+    return err;
+}
+#ifdef cudaGetDeviceProperties
+#undef cudaGetDeviceProperties
+#endif
+#define cudaGetDeviceProperties cheshirePopsiftGetDeviceProperties
+
