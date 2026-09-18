@@ -318,10 +318,56 @@ error, with extraction 78x faster. The descriptor count falling from 2.1 M to 96
 duplication going away; 969 k against the CPU's 820 k is the expected spread, since PopSIFT and
 VLFeat do not agree exactly by design.
 
+## Builds
+
+One library per runtime, not per card. `scripts/build-popsift.cmd` (Windows) and
+`scripts/linux/build-popsift.sh` take the architecture set; the name selects the build and install
+directories.
+
+| artifact | code objects | covers |
+|---|---|---|
+| `popsift-rdna3-rdna4` | gfx1100/1101/1102/1103, gfx1150/1151/1152/1153, gfx1200/1201 | RDNA3, RDNA3.5 APUs, RDNA4 |
+| `popsift-gfx1030`, `-gfx1031`, `-gfx1032` | one each | RDNA2, through the HIP SDK 6.2 toolchain |
+| `popsift-linux` | gfx1010 through gfx1201, 15 objects | RDNA1 to RDNA4 in one file |
+
+`rocm-sdk targets` lists only what the runtime wheel ships prebuilt; the compiler accepts more, so
+gfx1103/1152/1153 and the RDNA1 and RDNA2 targets all build. RDNA2 on Windows still needs the
+separate HIP SDK 6.2 toolchain, because the ROCm 7.2 runtime does not enumerate RX 6000 cards at
+all, and that toolchain writes an offload bundle whose entries are all the same code object when
+given several architectures — hence one build per chip. Linux has neither problem. Every bundle
+here was checked by parsing it for `hipv4-amdgcn-amd-amdhsa--gfx*` rather than trusting the build.
+
+### Three things the Linux build needed that Windows did not
+
+- The shim was force-included with clang-cl's `/FI`, which clang++ reads as a filename. It is now
+  the first line of the unity source instead, so no flag is needed on either driver.
+- Forcing it in ahead of clang's HIP runtime wrapper broke glibc's feature detection.
+- **PopSIFT ships a header called `features.h`.** With `third_party/popsift/src/popsift` on the
+  include path, libstdc++'s `bits/os_defines.h` resolves its own `#include <features.h>` to that
+  one, glibc's never loads, `__GLIBC_USE` is left undefined and every later system header fails.
+  That directory is not needed - the sources use quoted includes - so it is gone. Windows never
+  sees this because the MSVC STL has no `<features.h>`.
+
 ## What is not done
 
 The descriptors have not been judged, only counted. PopSIFT and CPU SIFT do not agree exactly by
 design, so the acceptance test is match counts through FeatureMatching and the reconstruction that
-follows, with the keypoint caps matched first. Nothing has run on RDNA1, RDNA2 or Linux yet, and the
-library is built for one architecture at a time. `CHESHIRE_POPSIFT_DEBUG=1` prints the per-octave
-extrema and orientation counts, which is the fastest way to see whether a change broke detection.
+follows, which is what the 41-view table above reports.
+
+**Only the RDNA4 library has run.** The RDNA2 and Linux libraries have been built and their offload
+bundles verified, which is not the same as working: no kernel from either has executed. house-pc
+has the RX 5500 XT (RDNA1) for the Linux leg and bench-pc takes the RDNA2 cards for the Windows
+leg. bench-pc is an FX-8120, so it needs the `/arch:AVX` packages - Bulldozer has AVX but not AVX2,
+and an AVX2 build dies on an illegal instruction before any GPU code runs.
+
+**The CUDA reference is two AliceVision versions behind.** Every "matches CUDA" comparison in this
+repository comes from the Meshroom 2023.3.0 bundle, which ships AliceVision 3.2.0, while Cheshire
+builds 3.4.0 from source. Meshroom 2025.1.0 ships 3.3.0, so neither release matches what we build.
+A difference against that reference could be the version rather than the backend. Building a CUDA
+AliceVision from our own 3.4.0 source would remove the confound - the vcpkg dependency set already
+carries a CUDA PopSIFT and the CUDA OpenCV modules, so the only missing piece is a CUDA toolkit -
+and it would give a matched reference for GPU SIFT as well as the depth map. Deferred deliberately,
+2026-09-18, behind the hardware validation above.
+
+`CHESHIRE_POPSIFT_DEBUG=1` prints the per-octave extrema and orientation counts, plus what the grid
+filter kept, which is the fastest way to see whether a change broke detection.

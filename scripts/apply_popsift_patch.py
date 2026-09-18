@@ -201,7 +201,15 @@ def main() -> None:
     sources = sorted((src / "popsift").glob("*.cu")) + sorted((src / "popsift" / "common").glob("*.cu"))
     if not sources:
         sys.exit("no popsift sources found")
-    lines = ["// Cheshire: PopSIFT as one translation unit; see scripts/apply_popsift_patch.py.", ""]
+    lines = ["// Cheshire: PopSIFT as one translation unit; see scripts/apply_popsift_patch.py.",
+             "//",
+             "// The shim is included here rather than forced in from the command line. The two",
+             "// drivers spell that flag differently (/FI against -include), and on Linux forcing a",
+             "// header in ahead of clang's HIP runtime wrapper breaks glibc's feature detection",
+             "// (__GLIBC_USE undefined). As the first line of the only translation unit it lands",
+             "// after the wrapper and before every popsift source, which is what it needs.",
+             '#include "popsift_hip.h"',
+             ""]
     for f in sources:
         lines.append('#include "%s"' % f.relative_to(src).as_posix())
     (GEN.parent / "popsift_unity.cu").write_text(NL.join(lines) + NL, encoding="utf-8", newline=NL)

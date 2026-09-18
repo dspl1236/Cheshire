@@ -48,16 +48,21 @@ target_include_directories(popsift PUBLIC
     "$<BUILD_INTERFACE:${POPSIFT_SRC}>"
     "$<BUILD_INTERFACE:${POPSIFT_GEN}>"
     "$<INSTALL_INTERFACE:include>")
+# Deliberately NOT ${POPSIFT_SRC}/popsift. PopSIFT has a header called features.h, and with that
+# directory on the include path libstdc++'s bits/os_defines.h picks it up for its own
+# #include <features.h>, so glibc's never loads, __GLIBC_USE is left undefined and every later
+# system header fails. Windows does not see this because the MSVC STL has no <features.h>. Nothing
+# needs it: the sources use quoted includes, which resolve relative to the including file.
+# ${POPSIFT_GEN}/popsift is needed and is safe - popsift.h includes "sift_config.h" by bare name,
+# and that directory holds only the generated sift_config.h.
 target_include_directories(popsift PRIVATE
-    "${POPSIFT_SRC}/popsift"
     "${POPSIFT_GEN}/popsift"
     "${CHESHIRE_ROOT}/hip/compat/include"
     "${CMAKE_CURRENT_SOURCE_DIR}")
 
-# the shim in front of every translation unit
-# clang-cl takes the MSVC spelling; the GCC -include form is read as another source file.
-target_compile_options(popsift PRIVATE
-    "$<$<COMPILE_LANGUAGE:HIP>:SHELL:/FI ${CMAKE_CURRENT_SOURCE_DIR}/popsift_hip.h>")
+# The shim is included by the unity source itself (scripts/apply_popsift_patch.py writes it), not
+# forced in here: clang-cl and clang++ spell that flag differently, and on Linux forcing a header
+# ahead of clang's HIP runtime wrapper breaks glibc's feature detection.
 
 # CHESHIRE_POPSIFT_ERRCHK=ON checks every kernel launch (upstream's ERRCHK_AFTER_KERNEL), which turns
 # a silent device fault into a message naming the kernel.
