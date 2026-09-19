@@ -1,0 +1,134 @@
+# One Windows package (2026-09-19)
+
+Six Windows downloads today, one per toolchain and chip, and picking the wrong one does not fail:
+the package enumerates the device, runs every kernel and returns wrong data with no error. That is
+the worst failure mode in the project and it is a packaging problem, not a code one. gfx1010
+(RX 5600/5700), gfx1034 (RX 6500 XT / 6400) and every APU have no Windows package at all.
+
+This is the measurement behind collapsing them into one.
+
+## Only five DLLs are per-chip
+
+Hash-diffing the gfx1030 and gfx1031 packages, which differ by nothing but the GPU target:
+
+| | files | size |
+|---|---|---|
+| identical | 856 | 384 MB |
+| differing | 152 | 43 MB |
+
+The 43 MB overstates it. `aliceVision_sfm.dll` is in the differing set and differs by **one byte**, at
+offset 129 - inside the PE header, a build timestamp. Grepping the binaries for the target name finds
+the DLLs that actually carry code objects:
+
+    aliceVision_matching.dll   1163 KB
+    popsift.dll                1135 KB
+    aliceVision_fuseCut.dll    1072 KB
+    aliceVision_mesh.dll        715 KB
+    aliceVision_depthMap_cuda.dll 669 KB
+
+**4.7 MB per chip**, not 427. A chip is an overlay on a shared base, and adding one - RDNA5, an APU,
+whatever appears next - is a 5-DLL rebuild rather than another whole package.
+
+## The two runtime families share more than they differ
+
+hip6.2 (gfx1030) against rocm7.2.1 (rdna3-rdna4):
+
+| | files | size |
+|---|---|---|
+| bit-identical in both | 820 | 132 MB |
+| same path, different build | 185 | 59 MB per side |
+| only in hip6.2 (`amdhip64_6` + two comgr) | 3 | 236 MB |
+| only in rocm7.2 (`amdhip64_7` + comgr) | 2 | 119 MB |
+
+The vcpkg DLLs and the `share/` tree are bit-identical across toolchains - they are prebuilt vcpkg
+binaries, not rebuilt per compiler. Only AliceVision's own DLLs differ, because clang 19 / `/arch:AVX`
+and clang 22 / `/arch:AVX2` are different builds.
+
+**`amd_comgr0602.dll` is 107 MB of dead weight.** `amdhip64_6.dll` references `amd_comgr_2.dll`, and
+nothing in the package mentions `amd_comgr0602` at all. `package_windows.py` copies it because it
+globs `amd_comgr*.dll` - the glob is there because HIP loads comgr through `LoadLibrary` and it is in
+no import table, which is correct, but it takes both copies.
+
+Deduplicated, minus the dead comgr, plus the per-chip overlays: **about 540 MB for one package
+covering every card from an RX 5500 to an RX 9070**, against 747 MB for just two of the six today.
+
+## Generic targets: yes for RDNA3/4, no for RDNA1/2
+
+Both toolchains carry `gfx10-1-generic`, `gfx10-3-generic`, `gfx11-generic` and `gfx12-generic`
+bitcode. One generic code object runs on every chip in its family, including chips released after
+the compiler - which is the whole point for a future architecture.
+
+Confirmed on ROCm 7.2: a probe built `--offload-arch=gfx12-generic` runs on gfx1201 and returns
+correct results, same as the chip-specific build. So RDNA3/3.5 and RDNA4 collapse to
+`gfx11-generic` + `gfx12-generic`, and ROCm 7.2 already carries gfx1250/1251 bitcode for what comes
+after.
+
+RDNA1 and RDNA2 cannot follow, for two stacked reasons:
+
+1. They need the HIP 6 runtime. The 7.2 runtime answers `hipErrorNoDevice` for an RX 6750 XT even on
+   Adrenalin 26.8, and AMD's Windows support table marks every RX 6000 card unsupported by the
+   current HIP SDK (docs/01).
+2. HIP SDK 6.2 emits a generic target only under code object v6 - the default v5 fails with
+   "gfx10-3-generic is only available on code object version 6 or better" - and with
+   `-mcode-object-version=6` clang answers *"code object v6 is still in development and not ready
+   for production use yet; use at your own risk"*. The runtime that would load it is the driver's,
+   not ours.
+
+Shipping a not-ready object format to hardware whose failure mode is silent wrong output is not a
+trade worth making, and it buys nothing: the per-chip overlay is 4.7 MB.
+
+## Detection
+
+The launcher has to know the card before it can pick a payload, and the obvious route - a PCI device
+ID table - needs maintaining for exactly the hardware that does not exist yet.
+
+Instead: one small probe per runtime family, each loading its own `amdhip64` and reporting
+`gcnArchName`. **Whichever runtime enumerates the card is the family to use**, and the arch name
+picks the chip directory inside it. Detection and family selection are the same question, and a new
+chip in an existing family needs no table entry at all.
+
+## Layout
+
+AliceVision's own binaries cannot be shared between the families - clang 19 `/arch:AVX` and
+clang 22 `/arch:AVX2` are different builds - but the vcpkg runtime and `share/` tree can, and they
+are the larger half.
+
+    cheshire-detect.exe      the card probe
+    common/bin/, common/share/   bit-identical across every input (132 MB)
+    fam/hip6.2/bin/, lib/    AliceVision's binaries, clang 19 /arch:AVX
+    fam/rocm7.2/bin/, lib/   AliceVision's binaries, clang 22 /arch:AVX2
+    gpu/hip6.2/              amdhip64_6 + amd_comgr_2 (no amd_comgr0602)
+      gfx1010/ gfx1012/      5 DLLs   RX 5600/5700, RX 5500
+      gfx1030/ gfx1031/ gfx1032/ gfx1034/
+      gfx1033/ gfx1035/ gfx1036/      RDNA2 APUs
+    gpu/rocm7.2/             amdhip64_7 + amd_comgr0702
+      gfx11-generic/         5 DLLs   RDNA3, RDNA3.5, future gfx11xx
+      gfx12-generic/         5 DLLs   RDNA4, future gfx12xx
+
+Nothing is copied or materialised on the user's disk. The launcher sets
+
+    PATH = gpu/<fam>/<target>;gpu/<fam>;fam/<fam>/bin;common/bin
+    ALICEVISION_ROOT = common
+
+and Windows resolves each DLL from `PATH`, with the GPU directory first so its five win over any
+same-named file behind them.
+
+## The overlay model, confirmed on hardware
+
+The design rests on one assumption: that a base built for one chip, plus another chip's five GPU
+DLLs, is a correct package. Tested on bench-pc's RX 6750 XT with a deliberately harsher case than
+the bundle needs - the base taken from the **gfx1012 (RDNA1)** package, the five DLLs from the
+**gfx1031 (RDNA2)** package, `amd_comgr0602.dll` deleted - against the pure gfx1031 package on the
+same machine and inputs:
+
+| | size | tetrahedralisation input checksum |
+|---|---|---|
+| pure gfx1031 package | 427 MB | `6e0eb6cb7e58208` |
+| RDNA1 base + RDNA2 GPU DLLs, no dead comgr | 320 MB | `6e0eb6cb7e58208` |
+
+Identical, and equal to the v0.2.16 fleet result for this card. The hybrid's
+`CHESHIRE_GPU_BLUR_CHECK` reports 53 of 124,975,872 pixels, worst 4.77e-07 - also identical - which
+confirms the overlaid DLLs are doing the work rather than quietly falling back.
+
+Compare the tetrahedralisation **input** checksum, never the output: geogram renumbers its cells
+from byte-identical input on every run.

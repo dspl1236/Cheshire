@@ -22,8 +22,19 @@ while todo:
         if dep in have or dep not in search: continue
         dst = stage / 'bin' / search[dep].name; shutil.copy2(search[dep], dst); have.add(dep); copied.append(dep); todo.append(dst)
 # HIP loads the code-object manager with LoadLibrary at runtime (same as libamd_comgr on Linux):
-# without it hipGetDeviceCount reports no GPU. Not in any import table, so copy it explicitly.
-for c in rbin.glob('amd_comgr*.dll'):
+# without it hipGetDeviceCount reports no GPU. Not in any import table, so copy it explicitly - but
+# copy only the ones actually named, not every amd_comgr*.dll in the toolchain. The HIP SDK 6.2 bin
+# holds two, amd_comgr_2.dll and amd_comgr0602.dll, 107 MB each; amdhip64_6.dll names the first and
+# nothing in the package mentions the second, so globbing shipped a quarter of the zip as dead
+# weight. A LoadLibrary name is a plain string in the binary, so grep for it (docs/16).
+cand = list(rbin.glob('amd_comgr*.dll'))
+wanted = set()
+for pe in list((stage / 'bin').glob('*.dll')) + list((stage / 'bin').glob('*.exe')):
+    blob = pe.read_bytes().lower()
+    wanted |= {c.name for c in cand if c.name.encode().lower() in blob}
+for c in cand:
+    if c.name not in wanted:
+        print(f"skipping unreferenced {c.name} ({c.stat().st_size >> 20} MB)"); continue
     if c.name.lower() not in have: shutil.copy2(c, stage / 'bin' / c.name); copied.append(c.name.lower())
 # MSVC runtime + LLVM OpenMP runtime: present on a developer's PC (Visual Studio drops them into
 # System32) and absent on a clean one, where the exe dies with 0xC0000135 and no message. Both
