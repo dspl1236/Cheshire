@@ -76,8 +76,13 @@ def main(argv):
         if not (p / 'bin').is_dir():
             kids = [c for c in p.iterdir() if c.is_dir() and (c / 'bin').is_dir()]
             if len(kids) == 1: p = kids[0]
+        # A directory with no bin/ is a bare payload from build_targets.py: the five GPU DLLs and
+        # nothing else. Only the first input of a family needs to be a full package, since that is
+        # where the shared and per-family files come from.
         if not (p / 'bin').is_dir():
-            print(f"error: no bin/ under {p}"); return 1
+            if any(f.suffix.lower() == '.dll' for f in p.iterdir() if f.is_file()):
+                inputs.append((family, target, p)); continue
+            print(f"error: {p} is neither a package (no bin/) nor a payload (no DLLs)"); return 1
         inputs.append((family, target, p))
 
     stage = outzip.with_suffix('')
@@ -99,8 +104,17 @@ def main(argv):
     for family, target, root in inputs:
         base_for_family = family not in seen_family
         seen_family.add(family)
+        # A bare payload dir carries the five DLLs and the build logs that produced them; only the
+        # DLLs belong in the bundle. It also cannot be a family's base, because the shared and
+        # per-family files have to come from a real package.
+        is_payload = not (root / 'bin').is_dir()
+        if is_payload and base_for_family:
+            print(f"error: {root} is a payload, but it is the first input for family '{family}' - "
+                  f"the first must be a full package so the bundle gets its CPU and runtime files")
+            return 1
         for f in sorted(root.rglob('*')):
             if not f.is_file(): continue
+            if is_payload and f.suffix.lower() != '.dll': continue
             rel = f.relative_to(root).as_posix()
             name = f.name
             if is_runtime(name):
@@ -162,9 +176,14 @@ def main(argv):
 
     for k in sorted(counts): print(f"  {k:<34} {counts[k]:5} files")
     total = sum(f.stat().st_size for f in stage.rglob('*') if f.is_file())
-    naive = sum(sum(f.stat().st_size for f in r.rglob('*') if f.is_file()) for _, _, r in inputs)
-    print(f"bundle {total >> 20} MB, against {naive >> 20} MB as separate packages "
-          f"({len(inputs)} payloads, {len(families)} runtime famil{'y' if len(families)==1 else 'ies'})")
+    # What this replaces is one full package per target, so compare against that - not against the
+    # inputs, most of which are bare five-DLL payloads and would understate it wildly.
+    pkgs = [r for _, _, r in inputs if (r / 'bin').is_dir()]
+    per_pkg = max((sum(f.stat().st_size for f in r.rglob('*') if f.is_file()) for r in pkgs),
+                  default=0)
+    print(f"bundle {total >> 20} MB, against {(per_pkg * len(inputs)) >> 20} MB as one package per "
+          f"target ({len(inputs)} targets, {len(families)} runtime "
+          f"famil{'y' if len(families)==1 else 'ies'})")
 
     with zipfile.ZipFile(outzip, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for p in sorted(stage.rglob('*')):
