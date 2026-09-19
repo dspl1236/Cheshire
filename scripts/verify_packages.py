@@ -26,6 +26,9 @@ MARKERS = {
     "gpu-matcher": (b"CHESHIRE_GPU_MATCHER",
                     ("aliceVision_matching", "aliceVision_featureMatching")),
     "gpu-sift": (b"popsift", ("aliceVision_feature", "aliceVision_featureExtraction")),
+    # v0.2.16: the similarity-map gaussian on the device
+    "gpu-sim-blur": (b"CHESHIRE_GPU_BLUR",
+                     ("aliceVision_fuseCut", "aliceVision_meshing")),
 }
 
 
