@@ -52,6 +52,18 @@ echo [popsift] install=%INST%
 
 if /i "%STEP%"=="configure" goto :configure
 if not exist "%BLD%/CMakeCache.txt" goto :configure
+rem Reconfigure when the requested architecture is not the one the cache holds. Only :configure
+rem passes -DCHESHIRE_POPSIFT_ARCH, so without this a build that asks for a different target keeps
+rem the cached one and still reports the requested value in the echo above - it says gfx12-generic
+rem and ships gfx1201. Regenerating the unity source touches its timestamp, so the HIP object does
+rem rebuild, which makes the wrong build look like a real one. Wrong architecture is precisely the
+rem failure that returns wrong data with no error (docs/16).
+set CACHED=
+for /f "usebackq tokens=2 delims==" %%V in (`findstr /b /c:"CHESHIRE_POPSIFT_ARCH:STRING=" "%BLD%\CMakeCache.txt"`) do set CACHED=%%V
+if /i not "%CACHED%"=="%ARCHS%" (
+  echo [popsift] cache has %CACHED%, want %ARCHS% - reconfiguring
+  goto :configure
+)
 goto :build
 
 :configure

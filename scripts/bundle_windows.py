@@ -28,21 +28,28 @@ At run time the launcher sets
 so nothing is copied or materialised on the user's disk - Windows resolves each DLL from PATH, and
 the GPU directory comes first so its five win over anything with the same name.
 """
-import hashlib, os, shutil, sys, zipfile
+import hashlib, os, re, shutil, sys, zipfile
 from collections import defaultdict
 from pathlib import Path
 
-# A DLL carries GPU code if the target name appears in it; that is how the five were found in the
-# first place (docs/16). Detecting rather than hard-coding means a new GPU-bearing DLL is picked up
-# without anyone remembering to add it here.
-def gpu_bearing(path: Path, target: str) -> bool:
+# Which GPU targets a binary carries, read from its offload bundle entry IDs
+# ("...amdhsa--gfx1031", "...amdhsa--gfx12-generic"). Detecting rather than hard-coding a list of
+# five means a newly GPU-bearing DLL is picked up without anyone remembering to add it.
+#
+# Read the bundle rather than just searching for the expected target name: a stale DLL built for
+# another architecture would simply not contain the name, so a substring test files it as a plain
+# CPU file and ships it - the wrong code object, silently, in a package that looks right. That is
+# not hypothetical; it is what a reused build tree did here (docs/16).
+OFFLOAD = re.compile(rb'amdhsa--([0-9a-z:+\-]+)')
+
+def offload_targets(path: Path) -> set:
     if path.suffix.lower() not in ('.dll', '.exe'):
-        return False
-    needle = target.encode().lower()
+        return set()
     try:
-        return needle in path.read_bytes().lower()
+        blob = path.read_bytes()
     except OSError:
-        return False
+        return set()
+    return {m.decode() for m in OFFLOAD.findall(blob)}
 
 def is_runtime(name: str) -> bool:
     n = name.lower()
@@ -78,10 +85,20 @@ def main(argv):
     stage.mkdir(parents=True)
 
     # Pass 1: classify every file of every input, and hash the ones that might be shared.
+    #
+    # Only the first input of a family contributes non-GPU files. Every target in a family is built
+    # from one source tree with one toolchain, so their CPU binaries are the same build - measured:
+    # between the gfx1030 and gfx1031 packages aliceVision_sfm.dll differs by ONE byte, a PE
+    # timestamp at offset 129 (docs/16). Taking them from each target would add a copy per chip and
+    # let a meaningless timestamp decide whether a file looks "shared".
+    seen_family = set()
     shared_hashes = defaultdict(dict)     # relpath -> {family: hash}
     shared_src = {}                       # (family, relpath) -> Path
     counts = defaultdict(int)
+    mismatched = []                       # (family, target, relpath, targets actually found)
     for family, target, root in inputs:
+        base_for_family = family not in seen_family
+        seen_family.add(family)
         for f in sorted(root.rglob('*')):
             if not f.is_file(): continue
             rel = f.relative_to(root).as_posix()
@@ -92,13 +109,29 @@ def main(argv):
                     dst.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(f, dst)
                     counts[f'gpu/{family} runtime'] += 1
                 continue
-            if gpu_bearing(f, target):
+            tgts = offload_targets(f)
+            if tgts:
+                # Every GPU-bearing binary in this payload must carry the target it is filed under.
+                # Anything else is a stale artifact from another architecture, and shipping it would
+                # put the wrong code object in a package that looks correct.
+                if target not in tgts:
+                    mismatched.append((family, target, rel, sorted(tgts)))
+                    continue
                 dst = stage / 'gpu' / family / target / name
                 dst.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(f, dst)
                 counts[f'gpu/{family}/{target}'] += 1
                 continue
+            if not base_for_family: continue
             shared_hashes[rel][family] = sha(f)
             shared_src[(family, rel)] = f
+
+    if mismatched:
+        print("error: GPU binaries carrying the wrong architecture - refusing to bundle")
+        for fam, tgt, rel, found in mismatched:
+            print(f"  {fam}/{tgt}: {rel} carries {', '.join(found)}")
+        print("a stale build tree is the usual cause; rebuild that target and check the offload "
+              "bundle before retrying")
+        return 1
 
     families = sorted({fam for fam, _, _ in inputs})
     # Pass 2: a file identical in every family goes in once; anything else goes per family.
