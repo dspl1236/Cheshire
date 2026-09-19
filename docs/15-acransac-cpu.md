@@ -125,6 +125,35 @@ with the reference produced by the unmodified build:
 cmp build/bay-acrfinal/0.matches.txt build/bay-sift/match/0.matches.txt   # 16,730,688 bytes
 ```
 
+The radix is integer code and the residual loop is ordinary floating point, so the risk is the
+compiler and the instruction set rather than the GPU. Both builds were run against **one** feature
+set on each host and the output diffed:
+
+| host | compiler, instruction set | matching before | after | matches file |
+|---|---|---|---|---|
+| RX 9070, Ryzen 5600X, Windows | clang-cl, AVX2 | 565.8 s | 351.0 s | identical (107 photos and 41 views) |
+| RX 5500 XT, FX-8120, Windows | clang-cl, AVX only | 356 s | 290 s | identical |
+| RX 5500 XT, i3-4330, Linux | GCC 13.3 | 371 s | 280 s | identical |
+
+The FX-8120 is the reason the `hip6.2` packages are built `/arch:AVX`: it is a Bulldozer part with
+AVX and no AVX2, so it is the only host in the fleet that exercises that build. The gain is larger
+on the newer processor, which is what a branch-misprediction story predicts - a deeper pipeline
+pays more for each mispredicted comparison.
+
+## Nothing downstream of matching can check this
+
+Two stages either side of FeatureMatching are not reproducible, and both produced a false alarm
+during this work before being pinned down.
+
+**Feature extraction.** Two runs on one machine with one binary give identical descriptor counts and
+41 of 41 differing `.feat` files. Sorting the lines of one file and comparing shows why: 23,781
+lines against 23,781, same lines in a different order. PopSift allocates keypoint slots with
+atomics, so the ordering follows warp scheduling. Any comparison that re-extracts features on each
+side is therefore comparing two different inputs - which is what made an early bench-pc run look
+like a regression.
+
+**incrementalSfM**, measured below.
+
 ## incrementalSfM cannot validate this, and that is worth knowing on its own
 
 The obvious end-to-end check is the landmark count, and it does not work. Running the **same binary

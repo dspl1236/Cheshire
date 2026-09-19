@@ -338,13 +338,20 @@ Landmarks span 88,463 to 88,562 - 0.11 % - across three architectures, two runti
 operating systems, and every one recovers about 13 % more than the CPU path at a lower
 reprojection error.
 
-Part of that span is not the hardware. `incrementalSfM` is not deterministic: the same binary on the
-same inputs, run four times, gives 88,463, 88,468, 88,469 and 88,472
-([docs/15](15-acransac-cpu.md) has the measurement and the likely cause, multi-threaded Ceres). A
-spread of 9 on one machine against 99 across five configurations means the cross-configuration
+Part of that span is not the hardware. Two stages here are not reproducible
+([docs/15](15-acransac-cpu.md) has both measurements):
+
+- `incrementalSfM` gives 88,463, 88,468, 88,469 and 88,472 from the same binary on the same inputs.
+  The likely cause is multi-threaded Ceres; `randomSeed` is fixed, so it is not the RNG.
+- **Extraction itself** is only reproducible in its totals. Two runs on one machine agree exactly on
+  the descriptor count and differ in all 41 `.feat` files - the same 23,781 lines per file in a
+  different order, because PopSift allocates keypoint slots with atomics.
+
+A spread of 9 on one machine against 99 across five configurations means the cross-configuration
 differences are mostly real - the descriptor counts differ by toolchain, and the mean matches per
 pair by one or two - but no single row here is reproducible to the landmark, and none of these
-numbers should be read as one.
+numbers should be read as one. Exactness claims elsewhere in this project are checked against
+FeatureMatching's output, which is deterministic given fixed features.
 
 The descriptor count tracks the **runtime, not the silicon**, and the fifth column is what
 settles it. The three ROCm 7.2 builds agree exactly at 968,726 on three different
