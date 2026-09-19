@@ -148,3 +148,22 @@ What is left in `createCharts` is 2.44 s in `computeTrisCamsFromPtsCams` and abo
 12-thread projection loop. Making the per-triangle camera list a reference rather than a copy is in
 (it was copying a `StaticVector<int>` 2.34 M times to read values it never modifies) but it is
 within run-to-run noise: those lists are short and the loop is parallel.
+
+### Validated on three configurations
+
+The unwrap changes are host C++, so what matters is the compiler and the instruction set rather than
+the card. Each machine ran the v0.2.15 package and the v0.2.16 package over the same mesh and the
+outputs were diffed:
+
+| host | build | unwrap before | after | texturedMesh.obj |
+|---|---|---|---|---|
+| RX 9070, Ryzen 5600X | Windows, clang-cl, AVX2 | 14.41 s | 8.56 s | identical, 231,380,500 B |
+| RX 5500 XT, FX-8120 | Windows, clang-cl, **AVX only** | 51.85 s | 16.77 s | identical, 225,118,407 B |
+| RX 5500 XT, i3-4330 | **Linux, GCC 13.3** | 21.6 s | 17.3 s | identical, 182,233,928 B |
+
+The Windows RDNA4 leg ran the shipping zip rather than a build tree, so packaging is covered as well
+as the code.
+
+Note how the gain scales: 3.1x on a 2011 Bulldozer against 1.7x on Zen 3. Seven million heap
+allocations and an O(n^2) pointer-chasing walk cost a slow memory subsystem far more than a fast one,
+so the machine with the least to spare gains the most.

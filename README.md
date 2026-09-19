@@ -30,19 +30,20 @@ number is why the design is what it is.
 | Meshroom node | upstream | Cheshire | status |
 |---|---|---|---|
 | DepthMap | CUDA only | HIP port + VRAM-to-RAM memory bridge | validated RDNA1/2/4, Windows + Linux; bit-identical to native across caps |
-| FeatureMatching | CPU (kd-tree) on every vendor | exact GPU brute-force 2-NN (HIP; the source also builds as CUDA), plus exact CPU work in AC-RANSAC ([docs/15](docs/15-acransac-cpu.md)) | validated end to end (v0.2.5): 592 s -> 75 s on 107 photos, same reconstruction. Geometric verification followed in v0.2.14: 566 s -> 351 s, byte-identical match file, and the profile is why it stayed on the CPU |
+| FeatureMatching | CPU (kd-tree) on every vendor | exact GPU brute-force 2-NN (HIP; the source also builds as CUDA), plus exact CPU work in AC-RANSAC ([docs/15](docs/15-acransac-cpu.md)) | validated end to end (v0.2.5): 592 s -> 75 s on 107 photos, same reconstruction. Geometric verification followed in v0.2.15: 566 s -> 351 s, byte-identical match file, and the profile is why it stayed on the CPU |
 | FeatureExtraction | CUDA (PopSift) or CPU | HIP PopSift port ([docs/14](docs/14-gpu-sift.md)) | done (v0.2.13): 2021 s -> 26 s on 41 views (RX 9070), and better than the CPU path rather than merely faster — 88,463 landmarks against 78,372 and RMSE 1.0377 against 1.03997 px. Validated on RDNA4, RDNA1 and RDNA2 across two runtimes and both systems, landmarks within 0.11 %; found and reported an upstream PopSift bug ([popsift#193](https://github.com/alicevision/popsift/issues/193)) |
 | DepthMapFilter | CPU | GPU vote pass (HIP / CUDA source) + a shared decoded-map cache | validated (v0.2.6): 123.5 s -> 26.5 s on 107 photos (RX 9070), 317 s -> 26.9 s on 41 views on an i3 + RX 5500 XT, bit-identical; found and replicated an upstream vote-buffer quirk; v0.2.9 cache: 17.8 s -> 12.7 s, byte-identical |
-| Meshing | CPU | GPU graph-weight votes + weakly-supported-surfaces pass, GPU min-cut (push-relabel, [docs/12](docs/12-gpu-maxflow.md)), GPU nearest-neighbour search for the visibility passes ([docs/13](docs/13-gpu-visibilities.md)), exact CPU fixes around them ([docs/11](docs/11-meshing-cpu.md)) | done (v0.2.7, v0.2.9, v0.2.10, v0.2.11, v0.2.12): 510 s -> 159 s on 107 photos (RX 9070), 491 s -> 270 s on 41 views on an i3 + RX 5500 XT (v0.2.10); the cut labelling identical to Boykov-Kolmogorov's and the nearest neighbours identical to nanoflann's on every query, every CPU change verified identical in-process; what is left is the point-cloud fusion and the tetrahedralisation |
-| Texturing | CPU | GPU Laplacian pyramid + rasterisation, parallel camera selection (HIP / CUDA source) | done (v0.2.8): 165.8 s -> 79.3 s on 107 photos (RX 9070), 271.5 s -> 102.5 s on 41 views on an i3 + RX 5500 XT, textures inside the CPU's own run-to-run band; what is left is UV unwrap, mesh I/O and padding |
+| Meshing | CPU | GPU graph-weight votes + weakly-supported-surfaces pass, GPU min-cut (push-relabel, [docs/12](docs/12-gpu-maxflow.md)), GPU nearest-neighbour search for the visibility passes ([docs/13](docs/13-gpu-visibilities.md)), exact CPU fixes around them ([docs/11](docs/11-meshing-cpu.md)) | done (v0.2.7 through v0.2.12, v0.2.16): 510 s -> 101 s on 107 photos (RX 9070), 491 s -> 111 s on 41 views on an i3 + RX 5500 XT; the cut labelling identical to Boykov-Kolmogorov's and the nearest neighbours identical to nanoflann's on every query, every CPU change verified identical in-process; what is left is the tetrahedralisation |
+| Texturing | CPU | GPU Laplacian pyramid + rasterisation, parallel camera selection (HIP / CUDA source), exact CPU fixes in the UV unwrap ([docs/10](docs/10-gpu-texturing.md)) | done (v0.2.8, v0.2.16): 165.8 s -> 79.3 s on 107 photos (RX 9070), 271.5 s -> 102.5 s on 41 views on an i3 + RX 5500 XT, textures inside the CPU's own run-to-run band; v0.2.16 took the UV unwrap 14.4 s -> 8.6 s with a byte-identical `texturedMesh.obj`, and gains most on the slowest hardware (51.9 s -> 16.8 s on a 2011 Bulldozer); what is left is mesh I/O and padding |
 | PrepareDenseScene | CPU | every core instead of three threads | done (v0.2.9): 36 s -> 30 s on 107 photos, byte-identical; the loop is codec and disk work |
 | SfM, ImageMatching, MeshFiltering | CPU | | stay on the CPU (sequential or tiny) |
 
 Everything installs by pairing: one script swaps the node binaries (DepthMap, FeatureExtraction,
 FeatureMatching, DepthMapFilter, Meshing, Texturing, PrepareDenseScene) in an existing Meshroom 2023.3 install and keeps Meshroom's own beside
 them, choosing per run by the card present. On a
-12-thread desktop the 107-photo engine bay job went from 39 minutes with the CUDA-era layout to 30,
-and the two GPU stages together are now larger than the remaining CPU work on the RX 9070.
+12-thread desktop the 107-photo engine bay job went from 39 minutes with the CUDA-era layout to 30
+as measured at v0.2.13, before the geometric verification, point-cloud fusion and UV unwrap work in
+v0.2.15 and v0.2.16 took another 230 s off the stages it covers.
 
 ## Results
 
@@ -202,29 +203,38 @@ upstream refuses. Details in `docs/02-memory-bridge.md`.
 
 ## Downloads
 
-Binaries are on the [v0.2.13 release](https://github.com/dspl1236/Cheshire/releases/tag/v0.2.13)
-(every package rebuilt with GPU SIFT linked in, and FeatureExtraction added to the Meshroom pairing); the data sets
+Binaries are on the [v0.2.16 release](https://github.com/dspl1236/Cheshire/releases/tag/v0.2.16)
+(every package carries every stage; `scripts/verify_packages.py` checks an archive actually
+contains the current work rather than an older build); the data sets
 and references are on
 [v0.1.0](https://github.com/dspl1236/Cheshire/releases/tag/v0.1.0) and unchanged, the depth
 maps being bit-identical between the two:
 
 | asset | size | contents |
 |---|---|---|
-| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-gfx1201.zip` (v0.2.13) | 105 MB | self-contained AliceVision + HIP DepthMap + GPU matcher, depth map filter, meshing votes and texturing for RDNA4 discrete on Windows (HIP 7.2 runtime, vcpkg and MSVC runtimes bundled), `meshroom-pair.cmd` + launcher in the root |
-| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-rdna3-rdna4.zip` (v0.2.13) | 109 MB | the same with gfx1100/1101/1102/1103, gfx1150/1151/1152/1153, gfx1200/1201 |
-| `cheshire-alicevision-hip6.2-windows-x64-gfx1030-avx.zip`, `-gfx1031-avx.zip`, `-gfx1032-avx.zip` (v0.2.13) | 148 MB each | RX 6000 on Windows through AMD's HIP 6.2 runtime (the one the driver ships): one package per chip because the HIP SDK 6.2 toolchain cannot bundle several. gfx1030 = RX 6800/6900/6950, gfx1031 = RX 6700/6750, gfx1032 = RX 6600/6650. AVX build. Validated on an RX 6750 XT (v0.2.2 build): 28.1 s / 190.3 s |
-| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.2.13) | 123 MB | relocatable Linux bundle with the GPU matcher, depth map filter, meshing votes, texturing and the packed-slot mipmap sampler, depth-map code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested) - 19 in all; GPU SIFT covers 15 of those, not the RDNA2 APUs or Vega, which fall back to CPU SIFT; needs only `amdgpu` + `/dev/kfd`; validated on the RX 6750 XT and RX 5500 XT |
+| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-gfx1201.zip` (v0.2.16) | 104 MB | self-contained AliceVision + HIP DepthMap + GPU SIFT, matcher, depth map filter, meshing votes and texturing for RDNA4 discrete on Windows (HIP 7.2 runtime, vcpkg and MSVC runtimes bundled), `meshroom-pair.cmd` + launcher in the root |
+| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-rdna3-rdna4.zip` (v0.2.16) | 108 MB | the same with gfx1100/1101/1102/1103, gfx1150/1151/1152/1153, gfx1200/1201 |
+| `cheshire-alicevision-hip6.2-windows-x64-gfx1030-avx.zip`, `-gfx1031-avx.zip`, `-gfx1032-avx.zip`, `-gfx1012-avx.zip` (v0.2.16) | 147 MB each | RX 5000 / RX 6000 on Windows through AMD's HIP 6.2 runtime (the one the driver ships): one package per chip because the HIP SDK 6.2 toolchain cannot bundle several. gfx1012 = RX 5500/5500 XT, gfx1030 = RX 6800/6900/6950, gfx1031 = RX 6700/6750, gfx1032 = RX 6600/6650. Built `/arch:AVX`, so they also run on pre-Haswell CPUs. Validated on an RX 6750 XT and an RX 5500 XT |
+| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.2.16) | 123 MB | relocatable Linux bundle with the GPU matcher, depth map filter, meshing votes, texturing and the packed-slot mipmap sampler, depth-map code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested) - 19 in all; GPU SIFT covers 15 of those, not the RDNA2 APUs or Vega, which fall back to CPU SIFT; needs only `amdgpu` + `/dev/kfd`; validated on the RX 6750 XT and RX 5500 XT |
 | `monstree-mini6-meshroom-cache.tar.gz` (v0.1.0) | 383 MB | 6-view Meshroom 2023.3 cache: CameraInit, SfM, PrepareDenseScene and the CUDA DepthMap reference |
 | `monstree-full-cuda-reference.tar.gz` (v0.1.0) | 680 MB | 41-view SfM + CUDA DepthMap reference (GTX 1080 Ti) |
 | `cheshire-hip-depthmap-outputs.tar.gz` (v0.1.0) | 966 MB | the HIP depth maps behind the table above (RX 9070 6 + 41 views, RX 5500 XT, RX 6750 XT) |
 
+**Pick by `gfx` number, not by series.** RDNA1 and RDNA2 are each several architectures, and a
+package built for one does not refuse to run on another - it enumerates the device, runs every
+kernel and returns wrong data with no error at all. gfx1010 (RX 5600/5700), gfx1034 (RX 6500 XT /
+6400) and the APUs have no Windows package yet; the Linux bundle covers them. Folding the lot into
+one launcher-selected Windows package is the next packaging item.
+
 Windows packages carry every DLL they need, the MSVC and OpenMP runtimes included (until
 2026-09-15 they did not, and a machine without Visual Studio died with exit code 0xC0000135
-and no message). They are compiled for AVX2; a pre-2013 CPU dies with 0xC000001D (illegal
-instruction), and an AVX-only build is available on request or via `CHESHIRE_ARCH_FLAG=/arch:AVX`.
-They need **Adrenalin 26.2.2 or newer**: the packages carry the HIP 7.2 runtime, and a 2025
-driver (which ships the HIP 6 runtime) answers `hipErrorNoDevice`, shown by the tools as
-"No CUDA-Enabled GPU" even though the card is fine.
+and no message). The `rocm7.2.1` packages are compiled for AVX2, so a pre-2013 CPU dies with
+0xC000001D (illegal instruction); the `hip6.2` packages are built `/arch:AVX` and run on
+anything from Sandy Bridge and Bulldozer onwards (`CHESHIRE_ARCH_FLAG` sets this at build time).
+The `rocm7.2.1` packages need **Adrenalin 26.2.2 or newer**: they carry the HIP 7.2 runtime, and
+a 2025 driver (which ships the HIP 6 runtime) answers `hipErrorNoDevice`, shown by the tools as
+"No CUDA-Enabled GPU" even though the card is fine. The `hip6.2` packages use the runtime the
+driver ships and have no such floor.
 
 Reproduce a row: unpack a cache under `data/ref/<dataset>/`, then `scripts\run-depthmap.cmd <dataset>`
 (Windows, set `CHESHIRE_INSTALL` to the unzipped folder) or `scripts/linux/run-depthmap.sh` (Linux).
@@ -298,13 +308,24 @@ kernels elsewhere):
    CPU, exactly ([docs/11](docs/11-meshing-cpu.md)), in v0.2.10 the max-flow itself moved to
    the GPU ([docs/12](docs/12-gpu-maxflow.md)): 109 s to 5.3 s, the same labelling, and the two
    visibility passes followed ([docs/13](docs/13-gpu-visibilities.md)): 56 s to 13 s, nanoflann's
-   own tree walked on the device. Meshing is 159 s; what is left is the point-cloud fusion and
-   the tetrahedralisation.
+   own tree walked on the device. The fusion went last, in v0.2.16, and again the name was
+   misleading: "Load depth maps and add points" spent 60 % of its time in a gaussian blur, not
+   loading anything - 108.7 of 180.8 thread-seconds against 65.5 for all three EXR reads. On the
+   device it is 17.69 s to 3.06 s, reproducing OpenImageIO rather than approximating it, which
+   needed the edge policy, the accumulation order and FMA contraction all matched (HIP defines
+   `__fmul_rn` and `__fadd_rn` as the plain operators, so the compiler contracts them right back
+   unless told not to). Meshing is 101 s; what is left is the tetrahedralisation.
 3. ~~**Texturing.**~~ Done in v0.2.8 ([docs/10](docs/10-gpu-texturing.md)): the per-camera
    Laplacian pyramid and rasterisation on the GPU, the camera selection parallel, images read
-   ahead; 165.8 s to 79.3 s on the engine bay job. What is left is UV unwrap, mesh load and save,
-   padding and the Lanczos downscale (OpenImageIO's `sinf`-based filter, not reproducible bit for
-   bit on a GPU).
+   ahead; 165.8 s to 79.3 s on the engine bay job. The UV unwrap followed in v0.2.16, on the CPU
+   and byte-identical: `ChartRect::insert` walked the whole tree for each of 69,565 charts
+   because occupied leaves return `nullptr` but are still visited (6.28 s to 0.66 s, each node
+   now carrying the largest free extent beneath it), and `packCharts` built 7,029,609
+   single-element `std::vector`s where one contiguous array of 12-byte PODs does (3.31 s to
+   1.90 s). Together 14.41 s to 8.56 s, and 51.9 s to 16.8 s on a 2011 Bulldozer - seven million
+   allocations and an O(n^2) pointer chase punish a slow memory subsystem hardest. What is left
+   is mesh load and save, padding and the Lanczos downscale (OpenImageIO's `sinf`-based filter,
+   not reproducible bit for bit on a GPU).
 4. ~~**FeatureExtraction (SIFT) on the GPU.**~~ Done in v0.2.13 ([docs/14](docs/14-gpu-sift.md)):
    PopSift built as HIP, 2021 s to 26 s on the 41-view set. This one is not bit-identical to the
    CPU and cannot be - it is a different descriptor implementation, not the same kernels on
@@ -312,7 +333,7 @@ kernels elsewhere):
    78,372 at a lower reprojection error, and within 0.11 % of each other across RDNA1, RDNA2 and
    RDNA4 on two runtimes. Found an upstream bug on the way
    ([popsift#193](https://github.com/alicevision/popsift/issues/193)).
-5. ~~**Geometric verification on the GPU.**~~ Done in v0.2.14, on the CPU, and the profile is
+5. ~~**Geometric verification on the GPU.**~~ Done in v0.2.15, on the CPU, and the profile is
    the whole story ([docs/15](docs/15-acransac-cpu.md)). AC-RANSAC was 566 s of
    FeatureMatching's 644 s, so it looked like the next port. Measuring first put 48 % of it in
    one `std::sort` - of `(residual, index)` pairs whose indices are read on 0.026 % of sorts -
@@ -323,12 +344,20 @@ kernels elsewhere):
    pool becomes the current inliers once a meaningful model appears), so the only parallelism is
    across pairs, and 111.7 M sequential iterations against a per-workgroup budget of about a
    microsecond make 2-3x a lot of device code for less than two functions bought.
-6. **One Windows package** carrying the HIP 7.2 and HIP 6.2 builds with the launcher choosing by
-   card, instead of one zip per toolchain and chip.
-7. **A CUDA build of the same tree** so NVIDIA users get the GPU matcher too (the source already
+6. **The SVD in `Nullspace2`**, about 137 s of FeatureMatching and the largest single item left
+   anywhere. Eigen's `JacobiSVD` is solving a 9x9 for the fundamental matrix's null space when
+   only the last singular vector is wanted; the cheaper routes (a fixed-iteration Jacobi, or
+   `LDLT` on the normal equations) all give a *different* vector within rounding, so unlike
+   everything above this one cannot be byte-identical and has to be argued on reconstruction
+   quality instead. Held until that is measured.
+7. **One Windows package** carrying the HIP 7.2 and HIP 6.2 builds with the launcher choosing by
+   card, instead of one zip per toolchain and chip - which is also what would close the gfx1010,
+   gfx1034 and APU gaps. Alongside it, x86-64 tiers (v1 / AVX / v3) for the Linux bundle, which is
+   SSE2-only today.
+8. **A CUDA build of the same tree** so NVIDIA users get the GPU matcher too (the source already
    compiles as CUDA; the packaging does not exist yet), and a Linux bundle built against an older
    glibc for Ubuntu 22.04 / Debian 12 nodes.
-8. **Hardware still unrun:** RDNA3 discrete, the RDNA3.5 APUs, Vega, and a card without the 4-byte
+9. **Hardware still unrun:** RDNA3 discrete, the RDNA3.5 APUs, Vega, and a card without the 4-byte
    dot instruction (RX 5700, original Vega) for the matcher's fallback path.
 
 Not planned: SfM on the GPU (incremental and sequential; Ceres's GPU solvers are CUDA-only and the

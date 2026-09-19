@@ -294,3 +294,34 @@ points as OIIO does, the second 3,388,702, and the tetrahedralisation input chec
 `CHESHIRE_GPU_BLUR_CHECK=1` runs OIIO as well and reports the divergence, so that is checkable on
 other data instead of asserted; it roughly doubles the block, since it does the work twice.
 `CHESHIRE_GPU_BLUR=0` keeps OIIO.
+
+### Validated on four configurations
+
+The device gaussian is the only new GPU code in the release, so each machine runs Meshing both ways
+and compares the point cloud it produced against its own CPU reference - `CHESHIRE_GPU_BLUR=0` keeps
+OIIO. Nothing has to be shipped between machines, and a failure points at one host rather than
+needing triage.
+
+| | card | host | build | tetrahedralisation input | blur check |
+|---|---|---|---|---|---|
+| RDNA4 | RX 9070 | Ryzen 5600X | Windows, AVX2 | `af3a3cce376e3f12` | 129 of 244,617,408 |
+| RDNA2 | RX 6750 XT | FX-8120 | Windows, AVX | `6e0eb6cb7e58208` | 53 of 124,975,872 |
+| RDNA1 | RX 5500 XT | FX-8120 | Windows, AVX only | `6e0eb6cb7e58208` | - |
+| RDNA1 | RX 5500 XT | i3-4330 | Linux, GCC 13.3 | `2f0e9773fb427046` | 129 of 244,617,408 |
+
+RDNA1 and RDNA2 on the same host, from the same inputs, give the same checksum - that is agreement
+across architectures rather than each card merely agreeing with itself. The worst divergence anywhere
+is 4.77e-07 and none of it changes a decision.
+
+Compare the tetrahedralisation **input** checksum, which is the point cloud. The **output** checksum
+differs between any two runs whatever you do, because geogram renumbers its cells from byte-identical
+input; a comparison that picks the last `checksum` line in the log will report a difference that is
+not there.
+
+Timings, same job on each host:
+
+| host | Meshing, OIIO gaussian | Meshing, device gaussian |
+|---|---|---|
+| RX 9070, Ryzen 5600X | 117 s | 101 s |
+| RX 5500 XT, FX-8120 | 219 s | 202 s |
+| RX 5500 XT, i3-4330 | 141 s | 111 s |
