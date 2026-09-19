@@ -77,6 +77,26 @@ RDNA1 and RDNA2 cannot follow, for two stacked reasons:
 Shipping a not-ready object format to hardware whose failure mode is silent wrong output is not a
 trade worth making, and it buys nothing: the per-chip overlay is 4.7 MB.
 
+## Linux
+
+Linux is already one bundle, so it has no selection problem - but it carries 19 hand-listed code
+objects, and every new chip needs another entry. Generics apply cleanly there because Linux uses
+ROCm 7.2 for everything: the Linux runtime enumerates RDNA1 and RDNA2 natively, so none of the
+HIP 6.2 constraint above applies. `gfx10-1-generic`, `gfx10-3-generic`, `gfx11-generic` and
+`gfx12-generic` replace 17 of the 19 and cover future chips in each family.
+
+Two things to keep straight when doing it:
+
+- **Vega is not a free addition.** PopSift's Linux list omits gfx900/906 and the RDNA2 APUs, and
+  the README records the effect (CPU SIFT there) without a reason. Vega has an architectural one:
+  it is wave64 where all of RDNA is wave32, and the PopSift kernels have only ever run wave32. So
+  `gfx9-generic` must not be folded into the PopSift list on the strength of "generics are
+  cheaper". The RDNA2 APUs are a different case - same wave32 as the rest of RDNA2 - so
+  `gfx10-3-generic` picking them up is architecturally sound, and it gives those APUs GPU SIFT for
+  free.
+- Check a generic build on the card before trusting the collapse, the same way the Windows half
+  was checked: an identical point-cloud checksum from the same inputs, not merely a successful run.
+
 ## Detection
 
 The launcher has to know the card before it can pick a payload, and the obvious route - a PCI device
