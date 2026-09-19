@@ -163,6 +163,28 @@ is not safety, it is nothing. Every target outside the first row is listed in
 Two of these were already shipping unflagged: v0.2.16 released gfx1030 and gfx1032 packages that
 have never run on an RX 6800 or an RX 6600. Marking them is more honest than the status quo.
 
+## Fleet results (v0.2.17)
+
+Every row compares against a value the same host produced before, so nothing is shipped between
+machines and a failure names one host. The point cloud is the tetrahedralisation **input**
+checksum; the output differs between any two runs because geogram renumbers its cells.
+
+| | card | host | payload chosen | point cloud | blur check |
+|---|---|---|---|---|---|
+| RDNA4 | RX 9070 | Ryzen 5600X, Windows | `rocm7.2/gfx12-generic` | `af3a3cce376e3f12` | 129 of 244,617,408 |
+| RDNA2 | RX 6750 XT | FX-8120, Windows | `hip6.2/gfx1031` | `6e0eb6cb7e58208` | 53 of 124,975,872 |
+| RDNA1 | RX 5500 XT | FX-8120, Windows | `hip6.2/gfx1012` | `6e0eb6cb7e58208` | 53 of 124,975,872 |
+| RDNA2 | RX 6750 XT | i3-4330, Linux | (Linux bundle) | `2f0e9773fb427046` | 78 of 124,975,872 |
+| none | Intel UHD 630 | i5-8500, Windows | - | clean exit 1 | - |
+
+Two of those are cross-architecture rather than self-consistency checks. On the FX-8120 the RDNA1
+and RDNA2 cards give the same checksum **through the same bundle**, and on the i3-4330 the RDNA2
+card reproduces what the RDNA1 card produced for v0.2.16. Worst divergence anywhere is 4.77e-07 and
+none of it changes a decision.
+
+The last row matters more than it looks: a machine with no AMD card must fail cleanly rather than
+crash or choose something arbitrary, and it is the only way to test that.
+
 ## Layout
 
 AliceVision's own binaries cannot be shared between the families - clang 19 `/arch:AVX` and

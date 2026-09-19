@@ -203,38 +203,42 @@ upstream refuses. Details in `docs/02-memory-bridge.md`.
 
 ## Downloads
 
-Binaries are on the [v0.2.16 release](https://github.com/dspl1236/Cheshire/releases/tag/v0.2.16)
-(every package carries every stage; `scripts/verify_packages.py` checks an archive actually
-contains the current work rather than an older build); the data sets
-and references are on
+Binaries are on the [v0.2.17 release](https://github.com/dspl1236/Cheshire/releases/tag/v0.2.17);
+the data sets and references are on
 [v0.1.0](https://github.com/dspl1236/Cheshire/releases/tag/v0.1.0) and unchanged, the depth
 maps being bit-identical between the two:
 
 | asset | size | contents |
 |---|---|---|
-| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-gfx1201.zip` (v0.2.16) | 104 MB | self-contained AliceVision + HIP DepthMap + GPU SIFT, matcher, depth map filter, meshing votes and texturing for RDNA4 discrete on Windows (HIP 7.2 runtime, vcpkg and MSVC runtimes bundled), `meshroom-pair.cmd` + launcher in the root |
-| `cheshire-alicevision-hip-windows-x64-rocm7.2.1-rdna3-rdna4.zip` (v0.2.16) | 108 MB | the same with gfx1100/1101/1102/1103, gfx1150/1151/1152/1153, gfx1200/1201 |
-| `cheshire-alicevision-hip6.2-windows-x64-gfx1030-avx.zip`, `-gfx1031-avx.zip`, `-gfx1032-avx.zip`, `-gfx1012-avx.zip` (v0.2.16) | 147 MB each | RX 5000 / RX 6000 on Windows through AMD's HIP 6.2 runtime (the one the driver ships): one package per chip because the HIP SDK 6.2 toolchain cannot bundle several. gfx1012 = RX 5500/5500 XT, gfx1030 = RX 6800/6900/6950, gfx1031 = RX 6700/6750, gfx1032 = RX 6600/6650. Built `/arch:AVX`, so they also run on pre-Haswell CPUs. Validated on an RX 6750 XT and an RX 5500 XT |
-| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.2.16) | 123 MB | relocatable Linux bundle with the GPU matcher, depth map filter, meshing votes, texturing and the packed-slot mipmap sampler, depth-map code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested) - 19 in all; GPU SIFT covers 15 of those, not the RDNA2 APUs or Vega, which fall back to CPU SIFT; needs only `amdgpu` + `/dev/kfd`; validated on the RX 6750 XT and RX 5500 XT |
+| `cheshire-alicevision-windows-x64.zip` (v0.2.17) | 181 MB | **one Windows package for every AMD card.** Eleven GPU payloads across both HIP runtimes - gfx1010/1012 (RX 5500-5700), gfx1030/1031/1032/1034 (RX 6000), gfx1033/1035/1036 (RDNA2 APUs), and `gfx11-generic` + `gfx12-generic` for RDNA3/RDNA4 and future chips in those families. `cheshire-detect.exe` asks the card which it needs, so there is nothing to choose; `cheshire-run.cmd` runs a node straight from it, `meshroom-pair.cmd` + launcher pair it into Meshroom |
+| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.2.17) | 123 MB | relocatable Linux bundle with the GPU matcher, depth map filter, meshing votes, texturing and the packed-slot mipmap sampler, depth-map code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested) - 19 in all; GPU SIFT covers 15 of those, not the RDNA2 APUs or Vega, which fall back to CPU SIFT; needs only `amdgpu` + `/dev/kfd`; validated on the RX 6750 XT and RX 5500 XT |
 | `monstree-mini6-meshroom-cache.tar.gz` (v0.1.0) | 383 MB | 6-view Meshroom 2023.3 cache: CameraInit, SfM, PrepareDenseScene and the CUDA DepthMap reference |
 | `monstree-full-cuda-reference.tar.gz` (v0.1.0) | 680 MB | 41-view SfM + CUDA DepthMap reference (GTX 1080 Ti) |
 | `cheshire-hip-depthmap-outputs.tar.gz` (v0.1.0) | 966 MB | the HIP depth maps behind the table above (RX 9070 6 + 41 views, RX 5500 XT, RX 6750 XT) |
 
-**Pick by `gfx` number, not by series.** RDNA1 and RDNA2 are each several architectures, and a
-package built for one does not refuse to run on another - it enumerates the device, runs every
-kernel and returns wrong data with no error at all. gfx1010 (RX 5600/5700), gfx1034 (RX 6500 XT /
-6400) and the APUs have no Windows package yet; the Linux bundle covers them. Folding the lot into
-one launcher-selected Windows package is the next packaging item.
+**There is nothing to pick any more.** Until v0.2.17 there were six Windows downloads and choosing
+the wrong one did not fail: a package built for one chip enumerates another, runs every kernel and
+returns wrong data with no error at all. The bundle carries every payload and
+`cheshire-detect.exe` asks the card which one it needs - the arch name the runtime reports, never a
+table of PCI IDs, because a table needs an entry for hardware that does not exist yet. Run
+`cheshire-run.cmd --which` to see what it chose ([docs/16](docs/16-bundling.md)).
 
-Windows packages carry every DLL they need, the MSVC and OpenMP runtimes included (until
-2026-09-15 they did not, and a machine without Visual Studio died with exit code 0xC0000135
-and no message). The `rocm7.2.1` packages are compiled for AVX2, so a pre-2013 CPU dies with
-0xC000001D (illegal instruction); the `hip6.2` packages are built `/arch:AVX` and run on
-anything from Sandy Bridge and Bulldozer onwards (`CHESHIRE_ARCH_FLAG` sets this at build time).
-The `rocm7.2.1` packages need **Adrenalin 26.2.2 or newer**: they carry the HIP 7.2 runtime, and
-a 2025 driver (which ships the HIP 6 runtime) answers `hipErrorNoDevice`, shown by the tools as
-"No CUDA-Enabled GPU" even though the card is fine. The `hip6.2` packages use the runtime the
-driver ships and have no such floor.
+**Three of the eleven targets have been run on a real card** - gfx1012, gfx1031 and
+`gfx12-generic`. The rest are listed in `gpu/<family>/UNTESTED` and say so on every run that
+selects them; four are the same architecture as a tested sibling (gfx1010, gfx1030, gfx1032,
+gfx1034) and four are hardware nobody here owns (the three APUs and `gfx11-generic`). The APUs are
+the row to watch: they are unified-memory parts, and the memory bridge was designed and measured
+against a discrete card behind PCIe. If you run one, please say how it went.
+
+The package carries every DLL it needs, the MSVC and OpenMP runtimes included (until 2026-09-15 it
+did not, and a machine without Visual Studio died with exit code 0xC0000135 and no message). The
+RDNA1/RDNA2 half is built `/arch:AVX` and runs on anything from Sandy Bridge and Bulldozer onwards;
+the RDNA3/RDNA4 half is AVX2, so a pre-2013 CPU with a new card dies with 0xC000001D (illegal
+instruction). The RDNA3/RDNA4 half also needs **Adrenalin 26.2.2 or newer**, since it carries the
+HIP 7.2 runtime and a 2025 driver answers `hipErrorNoDevice`, shown by the tools as "No
+CUDA-Enabled GPU" even though the card is fine. The RDNA1/RDNA2 half uses the runtime the driver
+ships and has no such floor - and the probe tries them in that order, so a card the HIP 7 runtime
+refuses simply falls through to the one that works.
 
 Reproduce a row: unpack a cache under `data/ref/<dataset>/`, then `scripts\run-depthmap.cmd <dataset>`
 (Windows, set `CHESHIRE_INSTALL` to the unzipped folder) or `scripts/linux/run-depthmap.sh` (Linux).
@@ -251,7 +255,7 @@ the older zips) replaces that one binary with a launcher and keeps the CUDA one 
 `.cuda.exe`:
 
 ```
-meshroom-pair.cmd C:\Meshroom-2023.3.0 C:\cheshire-alicevision-hip-windows-x64-rocm7.2.1-gfx1201
+meshroom-pair.cmd C:\Meshroom-2023.3.0 C:\cheshire-alicevision-windows-x64
 meshroom-pair.cmd C:\Meshroom-2023.3.0 --unpair
 ```
 
@@ -259,6 +263,10 @@ The launcher decides per run: an NVIDIA card present (`nvidia-smi` answers) runs
 otherwise the HIP build from the package, with the package's DLLs and `share/` in front so nothing
 of Meshroom's older AliceVision leaks in. `CHESHIRE_DEPTHMAP=cuda|hip` forces one; the choice is
 printed as the first line of the node's log. Every other node keeps running from Meshroom.
+
+Given a bundle it also picks the payload for the card and prints that too
+(`bundle payload hip6.2/gfx1031`), composing the layered `PATH` per run. A flat single-chip package
+from an older release still works exactly as before - the shape is detected, not configured.
 
 From v0.2.13 the pairing also covers **FeatureExtraction**, so GPU SIFT reaches the graph: leave
 **forceCpuExtraction** unticked ([docs/14](docs/14-gpu-sift.md)). With an older package, or one
@@ -354,10 +362,18 @@ kernels elsewhere):
    cannot be byte-identical and has to be argued on reconstruction quality instead. That is why
    it is the first item that would be a minor bump rather than a patch, and it is held until the
    quality measurement exists.
-7. **One Windows package** carrying the HIP 7.2 and HIP 6.2 builds with the launcher choosing by
-   card, instead of one zip per toolchain and chip - which is also what would close the gfx1010,
-   gfx1034 and APU gaps. Alongside it, x86-64 tiers (v1 / AVX / v3) for the Linux bundle, which is
-   SSE2-only today.
+7. ~~**One Windows package**~~ Done in v0.2.17 ([docs/16](docs/16-bundling.md)): eleven payloads
+   across both HIP runtimes in 181 MB, against 3,520 MB as one package per target, because only
+   five DLLs carry GPU code - 4.7 MB per chip - and the vcpkg runtime and `share/` tree are
+   bit-identical across toolchains. It closed the gfx1010, gfx1034 and APU gaps, and RDNA3/RDNA4
+   collapsed to `gfx11-generic` + `gfx12-generic`, which cover future chips in those families;
+   RDNA1/RDNA2 cannot follow, because HIP SDK 6.2 emits generics only under a code-object version
+   clang calls not production-ready. The probe runs each runtime family in its own process: loading
+   a HIP runtime the installed driver does not support can exit 0xC0000005 rather than report no
+   device, and only in a non-interactive session, which is how Meshroom runs a node. Still to do:
+   x86-64 tiers (v1 / AVX / v3) for the Linux bundle, which is SSE2-only today, and the same
+   generic collapse there - 19 hand-listed code objects become four, though Vega must stay explicit
+   since it is wave64 where all of RDNA is wave32.
 8. **A CUDA build of the same tree** so NVIDIA users get the GPU matcher too (the source already
    compiles as CUDA; the packaging does not exist yet), and a Linux bundle built against an older
    glibc for Ubuntu 22.04 / Debian 12 nodes.
