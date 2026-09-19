@@ -346,10 +346,14 @@ kernels elsewhere):
    microsecond make 2-3x a lot of device code for less than two functions bought.
 6. **The SVD in `Nullspace2`**, about 137 s of FeatureMatching and the largest single item left
    anywhere. Eigen's `JacobiSVD` is solving a 9x9 for the fundamental matrix's null space when
-   only the last singular vector is wanted; the cheaper routes (a fixed-iteration Jacobi, or
-   `LDLT` on the normal equations) all give a *different* vector within rounding, so unlike
-   everything above this one cannot be byte-identical and has to be argued on reconstruction
-   quality instead. Held until that is measured.
+   only the last two singular vectors are wanted. There is no free lunch in it: the two changes
+   that would be byte-identical are already upstream, since `Nullspace`/`Nullspace2` ask for
+   `ComputeFullV` alone and the minimal solver already hands them a fixed-size `Mat9`. Every
+   cheaper route left (a fixed-iteration Jacobi, `LDLT` on the normal equations, inverse
+   iteration) gives a *different* vector within rounding, so unlike everything above this one
+   cannot be byte-identical and has to be argued on reconstruction quality instead. That is why
+   it is the first item that would be a minor bump rather than a patch, and it is held until the
+   quality measurement exists.
 7. **One Windows package** carrying the HIP 7.2 and HIP 6.2 builds with the launcher choosing by
    card, instead of one zip per toolchain and chip - which is also what would close the gfx1010,
    gfx1034 and APU gaps. Alongside it, x86-64 tiers (v1 / AVX / v3) for the Linux bundle, which is
