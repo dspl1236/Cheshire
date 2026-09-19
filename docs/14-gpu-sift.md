@@ -369,7 +369,9 @@ storage - and were not set up as a timing comparison.
 Assumed not to, because the ROCm 7.2 runtime does not enumerate RX 5000 cards. The HIP SDK 6.2
 runtime does: a gfx1012 build of `hip/port/popsift/bugreport_layered_surface.hip` on an RX 5500 XT
 under Windows reads every texture layer correctly, exactly as on RDNA2 and RDNA4. So a
-`gfx1012-avx` Windows package looks viable and would add RX 5500/5600/5700 support.
+`gfx1012-avx` Windows package looks viable and would add RX 5500 and 5500 XT support. Not the
+RX 5600 or 5700: those are Navi 10, `gfx1010`, a different architecture that needs its own
+package.
 
 It does: the fifth column of the table above is that package, running the whole pipeline on an
 RX 5500 XT under Windows. 968,701 descriptors in 60 s, 538 pairs matched in 357 s, and SfM
