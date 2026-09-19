@@ -107,6 +107,34 @@ Instead: one small probe per runtime family, each loading its own `amdhip64` and
 picks the chip directory inside it. Detection and family selection are the same question, and a new
 chip in an existing family needs no table entry at all.
 
+### Each family has to be probed in its own process
+
+Loading a HIP runtime that does not support the installed driver is not guaranteed to report no
+device. It can take the process down. On bench-pc's RX 6750 XT, **under a scheduled task**, loading
+`amdhip64_7.dll` exits `0xC0000005` before printing anything; the identical call in an interactive
+SSH session returns "no device" politely and carries on.
+
+That split is why this survived several rounds of testing. Every interactive check passed. The
+failure needs a non-interactive session - which is how Meshroom runs a node, and how anything in CI
+would run. Worse, the symptom is not a crash report: the wrapper sees a missing answer and says
+"no AMD GPU with a matching payload", so the bundle would look broken on exactly the cards that
+need the HIP 6 fallback, for a reason the message actively misdirects you away from.
+
+So `cheshireSelectPayload` spawns `cheshire-detect.exe --family <n>` once per family and reads the
+one line it prints. A child that crashes is a family that did not answer:
+
+    [detect] family 0: no answer (exit 0xC0000005)
+    [detect] hip6.2: 1 device(s), arch gfx1031
+    hip6.2 gfx1031
+
+The rule is unchanged; what changed is that a vendor runtime can no longer decide whether the
+caller survives. A child that hangs is killed after 60 seconds, because a wedged runtime must not
+wedge a node run.
+
+One debugging note, since it cost two rounds: under `-v` stderr is unbuffered. The lines naming the
+failing step were sitting in a block buffer when the process died, so the first two attempts to
+localise the crash produced an exit code and no output at all.
+
 ## What is actually validated
 
 Eleven targets, three run on a real card. That ratio is worth stating plainly rather than burying,
