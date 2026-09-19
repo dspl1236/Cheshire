@@ -107,6 +107,34 @@ Instead: one small probe per runtime family, each loading its own `amdhip64` and
 picks the chip directory inside it. Detection and family selection are the same question, and a new
 chip in an existing family needs no table entry at all.
 
+## What is actually validated
+
+Eleven targets, three run on a real card. That ratio is worth stating plainly rather than burying,
+because the failure mode for a wrong code object is not a crash - it is wrong data with no error.
+
+| tier | targets | basis |
+|---|---|---|
+| run on hardware here | gfx1012, gfx1031, gfx12-generic | point-cloud checksum matching a reference the same machine produced |
+| same architecture as a validated chip, not run | gfx1010, gfx1030, gfx1032, gfx1034 | compiled, differs from a tested sibling only in chip configuration |
+| architecturally different, not run | gfx1033, gfx1035, gfx1036 (RDNA2 APUs), gfx11-generic | no such hardware here |
+
+The APUs are the row to be careful about. They are unified-memory parts, and the memory bridge -
+the one genuinely novel piece of this project - was designed and measured against a discrete card
+behind PCIe: 22x for texture-sampled images, 4.7x for streamed volumes, 1.0x once the images are
+coarse-grained. None of those numbers mean anything when system RAM *is* the video memory. The
+bridge should degrade to something harmless there, but "should" is exactly the word this project
+has twice been wrong about (HIP dropping `surf2Dwrite` into fp16 arrays; GPU atomics into mapped
+host memory silently wrong on Linux unless the memory is non-coherent).
+
+They ship anyway, for two reasons. The probe matches on the exact `gcnArchName`, so an APU payload
+can only ever be handed to an APU - there is no path by which an unvalidated target reaches
+hardware that is tested. And those users have no Windows package at all today, so the alternative
+is not safety, it is nothing. Every target outside the first row is listed in
+`gpu/<family>/UNTESTED` and announced on every run that selects it.
+
+Two of these were already shipping unflagged: v0.2.16 released gfx1030 and gfx1032 packages that
+have never run on an RX 6800 or an RX 6600. Marking them is more honest than the status quo.
+
 ## Layout
 
 AliceVision's own binaries cannot be shared between the families - clang 19 `/arch:AVX` and
