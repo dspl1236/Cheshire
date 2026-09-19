@@ -16,12 +16,18 @@ if not exist "%ROOT%\cheshire-detect.exe" (
   echo [cheshire] cheshire-detect.exe missing from %ROOT%
   exit /b 2
 )
+rem Capture through a temp file: `for /f usebackq` with a quoted executable AND a quoted argument
+rem mis-parses ("The filename, directory name, or volume label syntax is incorrect"), and the
+rem failure looks like a missing GPU rather than a quoting problem.
 set FAM=
 set TGT=
-for /f "usebackq tokens=1,2" %%A in (`"%ROOT%\cheshire-detect.exe" "%ROOT%"`) do (
+set DETOUT=%TEMP%\cheshire-detect-%RANDOM%.txt
+"%ROOT%\cheshire-detect.exe" "%ROOT%" > "%DETOUT%" 2>nul
+for /f "usebackq tokens=1,2" %%A in ("%DETOUT%") do (
   set FAM=%%A
   set TGT=%%B
 )
+del "%DETOUT%" 2>nul
 if not defined FAM (
   echo [cheshire] no AMD GPU with a matching payload; run cheshire-detect.exe -v for detail
   exit /b 2
@@ -50,7 +56,10 @@ for /f "tokens=1,*" %%A in ("%*") do set REST=%%B
 
 set ALICEVISION_ROOT=%ROOT%\common
 set PATH=%ROOT%\gpu\%FAM%\%TGT%;%ROOT%\gpu\%FAM%;%ROOT%\fam\%FAM%\bin;%ROOT%\common\bin;%PATH%
+rem The node lives under fam\<family>\bin when the families differ, and under common\bin when the
+rem bundle holds only one family - then nothing differs, so everything deduplicates into common.
 set EXE=%ROOT%\fam\%FAM%\bin\%~1.exe
+if not exist "%EXE%" set EXE=%ROOT%\common\bin\%~1.exe
 if not exist "%EXE%" (
   echo [cheshire] no such node in the %FAM% payload: %~1
   exit /b 2

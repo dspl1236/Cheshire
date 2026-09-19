@@ -182,11 +182,19 @@ static bool cheshireSelectPayload(const std::wstring& root, bool verbose,
                                   std::wstring* family, std::wstring* target,
                                   bool* layoutMismatch = nullptr) {
     if (layoutMismatch) *layoutMismatch = false;
-    const std::wstring gpu = root + L"\gpu";
+    // AddDllDirectory takes absolute paths only, and LoadLibraryExW with the SEARCH flags will not
+    // take a relative one either: a relative root fails with ERROR_MOD_NOT_FOUND, which reads like
+    // a missing dependency rather than a bad argument. Normalise instead of failing obscurely.
+    wchar_t full[MAX_PATH * 4];
+    const DWORD fn = GetFullPathNameW(root.c_str(), MAX_PATH * 4, full, nullptr);
+    const std::wstring base = (fn > 0 && fn < MAX_PATH * 4) ? std::wstring(full, fn) : root;
+    const std::wstring gpu = base + L"\\gpu";
     for (const auto& fam : kFamilies) {
         const std::wstring famDir = gpu + L"\\" + fam.dir;
-        if (!dirExists(famDir)) { if (verbose) fwprintf(stderr, L"[detect] %ls: no payload
-", fam.dir); continue; }
+        if (!dirExists(famDir)) {
+            if (verbose) fwprintf(stderr, L"[detect] %ls: no payload\n", fam.dir);
+            continue;
+        }
 
         // The runtime LoadLibrary's its code-object manager from beside itself, so add the family
         // directory to the search path before loading rather than relying on the working directory.
@@ -194,34 +202,39 @@ static bool cheshireSelectPayload(const std::wstring& root, bool verbose,
         SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS);
         HMODULE h = LoadLibraryExW((famDir + L"\\" + fam.dll).c_str(), nullptr,
                                    LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS);
-        if (!h) { if (verbose) fwprintf(stderr, L"[detect] %ls: %ls did not load (%lu)
-", fam.dir, fam.dll, GetLastError()); continue; }
+        if (!h) {
+            if (verbose) fwprintf(stderr, L"[detect] %ls: %ls did not load (%lu)\n",
+                                  fam.dir, fam.dll, GetLastError());
+            continue;
+        }
 
         FnCount count = (FnCount)GetProcAddress(h, "hipGetDeviceCount");
         FnProps props = (FnProps)GetProcAddress(h, "hipGetDevicePropertiesR0600");
         int n = 0;
         if (!count || !props || count(&n) != 0 || n <= 0) {
-            if (verbose) fwprintf(stderr, L"[detect] %ls: no device (%d)
-", fam.dir, n);
+            if (verbose) fwprintf(stderr, L"[detect] %ls: no device (%d)\n", fam.dir, n);
             FreeLibrary(h);
             continue;
         }
         DevProp0600 p{};
-        if (props(&p, 0) != 0) { if (verbose) fwprintf(stderr, L"[detect] %ls: properties failed
-", fam.dir); FreeLibrary(h); continue; }
+        if (props(&p, 0) != 0) {
+            if (verbose) fwprintf(stderr, L"[detect] %ls: properties failed\n", fam.dir);
+            FreeLibrary(h);
+            continue;
+        }
 
         const std::string arch = baseArch(p.gcnArchName);
-        if (verbose) fwprintf(stderr, L"[detect] %ls: %d device(s), arch %ls
-", fam.dir, n, widen(arch).c_str());
-        // DevProp0600 is transcribed from hip_runtime_api.h, and a future runtime that moved a field
-        // would have gcnArchName read some unrelated bytes. Every AMD arch name starts with "gfx",
-        // so anything else means the layout no longer matches - fail loudly rather than pick a
-        // payload from garbage, which is the exact failure this exists to prevent.
+        if (verbose) fwprintf(stderr, L"[detect] %ls: %d device(s), arch %ls\n",
+                              fam.dir, n, widen(arch).c_str());
+
+        // DevProp0600 is transcribed from hip_runtime_api.h, and a future runtime that moved a
+        // field would have gcnArchName read some unrelated bytes. Every AMD arch name starts with
+        // "gfx", so anything else means the layout no longer matches - fail loudly rather than pick
+        // a payload out of garbage, which is the exact failure this exists to prevent.
         if (arch.rfind("gfx", 0) != 0) {
             fwprintf(stderr, L"[detect] %ls: arch name \"%ls\" is not a gfx target - the runtime's "
-                             L"device-property layout no longer matches this build; refusing to guess
-",
-                     fam.dir, widen(arch).c_str());
+                             L"device-property layout no longer matches this build; refusing to "
+                             L"guess\n", fam.dir, widen(arch).c_str());
             FreeLibrary(h);
             if (layoutMismatch) *layoutMismatch = true;
             return false;
@@ -239,8 +252,8 @@ static bool cheshireSelectPayload(const std::wstring& root, bool verbose,
                 return true;
             }
         }
-        if (verbose) fwprintf(stderr, L"[detect] %ls: no payload for %ls
-", fam.dir, widen(arch).c_str());
+        if (verbose) fwprintf(stderr, L"[detect] %ls: no payload for %ls\n",
+                              fam.dir, widen(arch).c_str());
         FreeLibrary(h);
         // Fall through: another family may carry this chip.
     }

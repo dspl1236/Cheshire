@@ -32,8 +32,12 @@ wanted = set()
 for pe in list((stage / 'bin').glob('*.dll')) + list((stage / 'bin').glob('*.exe')):
     blob = pe.read_bytes().lower()
     wanted |= {c.name for c in cand if c.name.encode().lower() in blob}
+# Prune only on positive evidence. amdhip64_6.dll names amd_comgr_2.dll, so the HIP SDK 6.2 tree's
+# other 107 MB copy (amd_comgr0602.dll) is provably dead. amdhip64_7.dll names no comgr at all -
+# it resolves one some other way - so there the evidence set is empty and everything is copied,
+# because pruning the only comgr would ship a package whose runtime cannot start.
 for c in cand:
-    if c.name not in wanted:
+    if wanted and c.name not in wanted:
         print(f"skipping unreferenced {c.name} ({c.stat().st_size >> 20} MB)"); continue
     if c.name.lower() not in have: shutil.copy2(c, stage / 'bin' / c.name); copied.append(c.name.lower())
 # MSVC runtime + LLVM OpenMP runtime: present on a developer's PC (Visual Studio drops them into
