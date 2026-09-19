@@ -216,12 +216,19 @@ static bool cheshireSelectPayload(const std::wstring& root, bool verbose,
             FreeLibrary(h);
             continue;
         }
-        DevProp0600 p{};
-        if (props(&p, 0) != 0) {
+        // The runtime writes the WHOLE hipDeviceProp_t, and DevProp0600 above stops at gcnArchName
+        // because that is the last field anything here reads. Handing it a DevProp0600 on the stack
+        // therefore lets it write past the end - which segfaulted the launcher while the standalone
+        // probe survived on stack-layout luck. Give it a buffer far larger than the struct can be,
+        // so the size of the tail never matters; the "gfx" check below still catches a layout that
+        // moved gcnArchName itself.
+        std::vector<unsigned char> propbuf(16384, 0);
+        if (props(reinterpret_cast<DevProp0600*>(propbuf.data()), 0) != 0) {
             if (verbose) fwprintf(stderr, L"[detect] %ls: properties failed\n", fam.dir);
             FreeLibrary(h);
             continue;
         }
+        const DevProp0600& p = *reinterpret_cast<const DevProp0600*>(propbuf.data());
 
         const std::string arch = baseArch(p.gcnArchName);
         if (verbose) fwprintf(stderr, L"[detect] %ls: %d device(s), arch %ls\n",

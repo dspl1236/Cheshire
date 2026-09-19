@@ -18,6 +18,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+// Payload selection for a bundled package, shared with cheshire-detect.exe so the two cannot
+// disagree about which payload a card gets. Brings in windows.h itself, and exeDir/dirExists.
+#include "cheshire-gpu-select.h"
 #include <string>
 #include <vector>
 #include <cstdio>
@@ -28,11 +31,7 @@ static std::wstring exePath() {
     DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH * 4);
     return std::wstring(buf, n);
 }
-static std::wstring exeDir() {
-    const std::wstring p = exePath();
-    size_t i = p.find_last_of(L"\\/");
-    return i == std::wstring::npos ? L"." : p.substr(0, i);
-}
+// exeDir() and dirExists() come from cheshire-gpu-select.h.
 // "aliceVision_depthMapEstimation" from ...\aliceVision_depthMapEstimation.exe
 static std::wstring exeStem() {
     const std::wstring p = exePath();
@@ -124,9 +123,37 @@ int wmain() {
         fwprintf(stderr, L"[cheshire] no NVIDIA card and no Cheshire package path in %ls\\%ls.cheshire.txt\n", dir.c_str(), stem.c_str());
         return 2;
     }
-    const std::wstring hip = pkg + L"\\bin\\" + stem + L".exe";
-    SetEnvironmentVariableW(L"ALICEVISION_ROOT", pkg.c_str());
-    SetEnvironmentVariableW(L"PATH", (pkg + L"\\bin;" + envVar(L"PATH")).c_str());
+    // Two package shapes. A flat package has bin/ at its root and one GPU target compiled in. A
+    // bundle (docs/16) has gpu/<family>/<target>/ and picks the payload from the card, so the
+    // layered PATH has to be composed per run. Tell them apart by the gpu/ directory rather than by
+    // a setting, so an existing paired install keeps working untouched.
+    std::wstring hip = pkg + L"\\bin\\" + stem + L".exe";
+    std::wstring root = pkg, path = pkg + L"\\bin";
+    if (dirExists(pkg + L"\\gpu")) {
+        std::wstring fam, tgt;
+        bool layoutMismatch = false;
+        if (!cheshireSelectPayload(pkg, false, &fam, &tgt, &layoutMismatch)) {
+            fwprintf(stderr, layoutMismatch
+                ? L"[cheshire] %ls: the HIP runtime's device-property layout is not the one this "
+                  L"launcher was built against; refusing to guess a payload\n"
+                : L"[cheshire] %ls: no AMD GPU with a matching payload in %ls\\gpu "
+                  L"(cheshire-detect.exe -v explains)\n",
+                stem.c_str(), pkg.c_str());
+            return 2;
+        }
+        // The GPU directory first: its five DLLs must win over the same names behind them.
+        const std::wstring famBin = pkg + L"\\fam\\" + fam + L"\\bin";
+        root = pkg + L"\\common";
+        path = pkg + L"\\gpu\\" + fam + L"\\" + tgt + L";" + pkg + L"\\gpu\\" + fam + L";"
+             + famBin + L";" + pkg + L"\\common\\bin";
+        // A bundle carrying one family has nothing to differ against, so everything lands in common.
+        hip = famBin + L"\\" + stem + L".exe";
+        if (GetFileAttributesW(hip.c_str()) == INVALID_FILE_ATTRIBUTES)
+            hip = pkg + L"\\common\\bin\\" + stem + L".exe";
+        fwprintf(stderr, L"[cheshire] %ls: bundle payload %ls/%ls\n", stem.c_str(), fam.c_str(), tgt.c_str());
+    }
+    SetEnvironmentVariableW(L"ALICEVISION_ROOT", root.c_str());
+    SetEnvironmentVariableW(L"PATH", (path + L";" + envVar(L"PATH")).c_str());
     std::vector<std::wstring> kept;
     for (size_t i = 0; i < args.size(); ++i) {
         if (isDepthMap && args[i] == L"--sgmFilteringAxes") { ++i; continue; }   // removed upstream; YX is the only behaviour
