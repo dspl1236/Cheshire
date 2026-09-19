@@ -174,14 +174,21 @@ static std::string genericFor(const std::string& arch) {
 
 static std::wstring widen(const std::string& s) { return std::wstring(s.begin(), s.end()); }
 
-// Choose the payload for the card in this machine. Returns true and fills family/target, or false
-// if no family enumerated a device it has a payload for. Reasons go to stderr when verbose.
-// Returns false with *layoutMismatch set if a runtime answered but its property layout no longer
-// matches DevProp0600 - the caller must not fall back to guessing in that case.
-static bool cheshireSelectPayload(const std::wstring& root, bool verbose,
+// Probe the families in this process. `onlyFamily`, when not -1, restricts it to one - which is how
+// the isolated path below uses it, one family per child process.
+//
+// Do not call this with more than one family available unless you are the child: loading a HIP
+// runtime that does not support the installed driver can take the process down rather than report
+// no device. On an RX 6750 XT under a scheduled task, loading amdhip64_7.dll exits 0xC0000005
+// before a single line of output; the same call over an interactive session returns "no device"
+// politely. That is why cheshireSelectPayload spawns instead (docs/16).
+static bool cheshireProbeFamilies(const std::wstring& root, bool verbose, int onlyFamily,
                                   std::wstring* family, std::wstring* target,
                                   bool* layoutMismatch = nullptr) {
     if (layoutMismatch) *layoutMismatch = false;
+    // Unbuffered: when this is redirected to a file and something below dies inside a vendor
+    // runtime, block buffering loses every line that would say where. The volume is a few lines.
+    if (verbose) setvbuf(stderr, nullptr, _IONBF, 0);
     // AddDllDirectory takes absolute paths only, and LoadLibraryExW with the SEARCH flags will not
     // take a relative one either: a relative root fails with ERROR_MOD_NOT_FOUND, which reads like
     // a missing dependency rather than a bad argument. Normalise instead of failing obscurely.
@@ -189,7 +196,9 @@ static bool cheshireSelectPayload(const std::wstring& root, bool verbose,
     const DWORD fn = GetFullPathNameW(root.c_str(), MAX_PATH * 4, full, nullptr);
     const std::wstring base = (fn > 0 && fn < MAX_PATH * 4) ? std::wstring(full, fn) : root;
     const std::wstring gpu = base + L"\\gpu";
-    for (const auto& fam : kFamilies) {
+    for (int fi = 0; fi < (int)(sizeof(kFamilies) / sizeof(kFamilies[0])); ++fi) {
+        if (onlyFamily >= 0 && fi != onlyFamily) continue;
+        const Family& fam = kFamilies[fi];
         const std::wstring famDir = gpu + L"\\" + fam.dir;
         if (!dirExists(famDir)) {
             if (verbose) fwprintf(stderr, L"[detect] %ls: no payload\n", fam.dir);
@@ -263,6 +272,104 @@ static bool cheshireSelectPayload(const std::wstring& root, bool verbose,
                               fam.dir, widen(arch).c_str());
         FreeLibrary(h);
         // Fall through: another family may carry this chip.
+    }
+    return false;
+}
+
+// Run "<root>\cheshire-detect.exe --family <n> <root>" and read its one line of stdout.
+// Returns true and fills `line` when the child exits 0 with output. A child that crashes, hangs or
+// exits non-zero is simply "this family did not answer".
+static bool cheshireAskChild(const std::wstring& root, int famIndex, bool verbose, std::wstring* line) {
+    const std::wstring exe = root + L"\\cheshire-detect.exe";
+    if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return false;
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+
+    std::wstring cmd = L"\"" + exe + L"\" --family " + std::to_wstring(famIndex) + L" \"" + root + L"\"";
+    if (verbose) cmd += L" -v";   // so the child says why, not just whether
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+    buf.push_back(0);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = wr;
+    // The child's stderr goes to ours when verbose, and to nothing otherwise, so a crash message
+    // from a vendor runtime does not land in the middle of a Meshroom node's log.
+    si.hStdError = verbose ? GetStdHandle(STD_ERROR_HANDLE) : nullptr;
+    si.hStdInput = nullptr;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe.c_str(), buf.data(), nullptr, nullptr, TRUE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(rd); CloseHandle(wr);
+        return false;
+    }
+    CloseHandle(wr);   // our copy, so the read below ends when the child exits
+
+    std::string out;
+    char chunk[512];
+    DWORD got = 0;
+    while (ReadFile(rd, chunk, sizeof chunk, &got, nullptr) && got) out.append(chunk, got);
+    CloseHandle(rd);
+
+    // A runtime that wedges must not wedge the caller: a node run would hang with no output.
+    DWORD code = 1;
+    if (WaitForSingleObject(pi.hProcess, 60000) == WAIT_TIMEOUT) {
+        if (verbose) fwprintf(stderr, L"[detect] family %d: timed out, killed\n", famIndex);
+        TerminateProcess(pi.hProcess, 1);
+    }
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    if (code != 0) {
+        if (verbose) {
+            // 0xC0000005 and friends: the runtime took the child down. That is a normal answer
+            // here, not an error to report - it means this family cannot drive this card.
+            fwprintf(stderr, L"[detect] family %d: no answer (exit 0x%08lX)\n", famIndex, code);
+        }
+        return false;
+    }
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+    if (out.empty()) return false;
+    *line = std::wstring(out.begin(), out.end());
+    return true;
+}
+
+// Choose the payload for the card in this machine, one family per child process. Returns true and
+// fills family/target, or false if no family answered.
+//
+// Isolation is the point: a HIP runtime built for a driver that is not installed can crash on load
+// instead of reporting no device, and the family that would have worked is the one after it. In
+// this process that is fatal; in a child it is just a non-zero exit.
+static bool cheshireSelectPayload(const std::wstring& root, bool verbose,
+                                  std::wstring* family, std::wstring* target,
+                                  bool* layoutMismatch = nullptr) {
+    if (layoutMismatch) *layoutMismatch = false;
+    wchar_t full[MAX_PATH * 4];
+    const DWORD fn = GetFullPathNameW(root.c_str(), MAX_PATH * 4, full, nullptr);
+    const std::wstring base = (fn > 0 && fn < MAX_PATH * 4) ? std::wstring(full, fn) : root;
+
+    const int n = (int)(sizeof(kFamilies) / sizeof(kFamilies[0]));
+    bool spawned = false;
+    for (int fi = 0; fi < n; ++fi) {
+        std::wstring line;
+        if (!cheshireAskChild(base, fi, verbose, &line)) continue;
+        spawned = true;
+        const size_t sp = line.find(L' ');
+        if (sp == std::wstring::npos) continue;
+        *family = line.substr(0, sp);
+        *target = line.substr(sp + 1);
+        return true;
+    }
+    // No child produced an answer. Either none could, or cheshire-detect.exe is not beside us - in
+    // which case fall back to probing here, accepting the crash risk rather than refusing to run.
+    if (!spawned && GetFileAttributesW((base + L"\\cheshire-detect.exe").c_str()) == INVALID_FILE_ATTRIBUTES) {
+        if (verbose) fwprintf(stderr, L"[detect] no cheshire-detect.exe beside the package; probing in-process\n");
+        return cheshireProbeFamilies(base, verbose, -1, family, target, layoutMismatch);
     }
     return false;
 }
