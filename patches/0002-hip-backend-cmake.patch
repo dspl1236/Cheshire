@@ -3275,10 +3275,104 @@ index 76bf7e5..eb5d127 100644
      // pyramid of atlases frequency bands
      std::map<AtlasIndex, AccuPyramid> accuPyramids;
 diff --git a/src/aliceVision/mesh/UVAtlas.cpp b/src/aliceVision/mesh/UVAtlas.cpp
-index 626e638..a6a7164 100644
+index 626e638..248beab 100644
 --- a/src/aliceVision/mesh/UVAtlas.cpp
 +++ b/src/aliceVision/mesh/UVAtlas.cpp
-@@ -261,6 +261,7 @@ void UVAtlas::createTextureAtlases(std::vector<Chart>& charts, mvsUtils::MultiVi
+@@ -49,7 +49,8 @@ void UVAtlas::createCharts(std::vector<Chart>& charts, mvsUtils::MultiViewParams
+         std::vector<std::pair<float, int>> commonCameraIDs;
+ 
+         // project triangle in all cams
+-        auto cameras = trisCams[i];
++        // cheshire: a reference, not a copy of the camera list per triangle
++        const auto& cameras = trisCams[i];
+         for (int c = 0; c < cameras.size(); ++c)
+         {
+             int cameraID = cameras[c];
+@@ -100,52 +101,52 @@ void UVAtlas::packCharts(std::vector<Chart>& charts, mvsUtils::MultiViewParams&
+         return cid;
+     };
+ 
+-    // list mesh edges (with duplicates)
+-    std::vector<Edge> alledges;
++    // cheshire: one contiguous array of 12-byte PODs rather than 7,029,609 Edge objects each
++    // holding a std::vector<int> with a single element. Same keys, same initial order, so
++    // std::sort makes the same comparisons and produces the same permutation - which matters
++    // because the merge below only compares adjacent entries, so on a non-manifold edge the
++    // tie order decides which pairs are emitted.
++    struct RawEdge
++    {
++        int p0, p1, tri;
++    };
++    std::vector<RawEdge> alledges;
++    alledges.reserve(static_cast<std::size_t>(_mesh.tris.size()) * 3);
+     for (int i = 0; i < _mesh.tris.size(); ++i)
+     {
+         int a = _mesh.tris[i].v[0];
+         int b = _mesh.tris[i].v[1];
+         int c = _mesh.tris[i].v[2];
+-        Edge e1;
+-        e1.pointIDs = std::make_pair(std::min(a, b), std::max(a, b));
+-        e1.triangleIDs.emplace_back(i);
+-        alledges.emplace_back(e1);
+-        Edge e2;
+-        e2.pointIDs = std::make_pair(std::min(b, c), std::max(b, c));
+-        e2.triangleIDs.emplace_back(i);
+-        alledges.emplace_back(e2);
+-        Edge e3;
+-        e3.pointIDs = std::make_pair(std::min(c, a), std::max(c, a));
+-        e3.triangleIDs.emplace_back(i);
+-        alledges.emplace_back(e3);
++        alledges.push_back({std::min(a, b), std::max(a, b), i});
++        alledges.push_back({std::min(b, c), std::max(b, c), i});
++        alledges.push_back({std::min(c, a), std::max(c, a), i});
+     }
+-    std::sort(alledges.begin(), alledges.end());
++    // the same lexicographic order std::pair<int,int> gave
++    std::sort(alledges.begin(), alledges.end(), [](const RawEdge& x, const RawEdge& y) {
++        return x.p0 != y.p0 ? x.p0 < y.p0 : x.p1 < y.p1;
++    });
+ 
+     // merge edges (no duplicate)
+-    std::vector<Edge> edges;
+-    auto eit = alledges.begin() + 1;
+-    while (eit != alledges.end())
++    // cheshire: upstream appended b's single id to a's list, sorted the two, and pushed a.
++    // Each entry is the left of a pair exactly once and the right exactly once, and is read
++    // before it is written, so every emitted edge held exactly two ids in ascending order -
++    // the size() != 2 test below never fired. Store the pair directly.
++    std::vector<std::pair<int, int>> edges;
++    for (std::size_t i = 1; i < alledges.size(); ++i)
+     {
+-        auto& a = *(eit - 1);
+-        auto& b = *eit;
+-        if (a == b)
+-        {
+-            a.triangleIDs.insert(a.triangleIDs.end(), b.triangleIDs.begin(), b.triangleIDs.end());
+-            sort(a.triangleIDs.begin(), a.triangleIDs.end());
+-            edges.push_back(a);
+-        }
+-        ++eit;
++        const RawEdge& a = alledges[i - 1];
++        const RawEdge& b = alledges[i];
++        if (a.p0 == b.p0 && a.p1 == b.p1)
++            edges.emplace_back(std::min(a.tri, b.tri), std::max(a.tri, b.tri));
+     }
+     alledges.clear();
++    alledges.shrink_to_fit();
+ 
+     // merge charts
+     for (auto& e : edges)
+     {
+-        if (e.triangleIDs.size() != 2)
+-            continue;
+-        int chartIDA = findChart(e.triangleIDs[0]);
+-        int chartIDB = findChart(e.triangleIDs[1]);
++        int chartIDA = findChart(e.first);
++        int chartIDB = findChart(e.second);
+         if (chartIDA == chartIDB)
+             continue;
+         Chart& a = charts[chartIDA];
+@@ -261,6 +262,7 @@ void UVAtlas::createTextureAtlases(std::vector<Chart>& charts, mvsUtils::MultiVi
          root->LU.y = 0;
          root->RD.x = _textureSide - 1;
          root->RD.y = _textureSide - 1;
@@ -3286,7 +3380,7 @@ index 626e638..a6a7164 100644
  
          const auto insertChart = [&](size_t idx) -> bool {
              Chart& chart = charts[idx];
-@@ -310,16 +311,47 @@ void UVAtlas::ChartRect::clear()
+@@ -310,16 +312,47 @@ void UVAtlas::ChartRect::clear()
      delete child[1];
  }
  
@@ -3334,7 +3428,7 @@ index 626e638..a6a7164 100644
          return nullptr;
      }
      else
-@@ -375,6 +407,10 @@ UVAtlas::ChartRect* UVAtlas::ChartRect::insert(Chart& chart, size_t gutter)
+@@ -375,6 +408,10 @@ UVAtlas::ChartRect* UVAtlas::ChartRect::insert(Chart& chart, size_t gutter)
          }
          // insert chart
          c = &chart;

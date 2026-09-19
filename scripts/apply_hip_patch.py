@@ -2419,6 +2419,113 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
         if t.count(old) != 1:
             sys.exit("atlas root extent not found once")
         t = t.replace(old, old + "        root->refreshFree();  // cheshire: seed the bound" + NL, 1)
+
+        # packCharts: seven million single-element vectors, and an unreserved array that
+        # reallocates its way to 7 M elements. See the comments the replacement carries.
+        old = ("    // list mesh edges (with duplicates)" + NL
+               + "    std::vector<Edge> alledges;" + NL
+               + "    for (int i = 0; i < _mesh.tris.size(); ++i)" + NL
+               + "    {" + NL
+               + "        int a = _mesh.tris[i].v[0];" + NL
+               + "        int b = _mesh.tris[i].v[1];" + NL
+               + "        int c = _mesh.tris[i].v[2];" + NL
+               + "        Edge e1;" + NL
+               + "        e1.pointIDs = std::make_pair(std::min(a, b), std::max(a, b));" + NL
+               + "        e1.triangleIDs.emplace_back(i);" + NL
+               + "        alledges.emplace_back(e1);" + NL
+               + "        Edge e2;" + NL
+               + "        e2.pointIDs = std::make_pair(std::min(b, c), std::max(b, c));" + NL
+               + "        e2.triangleIDs.emplace_back(i);" + NL
+               + "        alledges.emplace_back(e2);" + NL
+               + "        Edge e3;" + NL
+               + "        e3.pointIDs = std::make_pair(std::min(c, a), std::max(c, a));" + NL
+               + "        e3.triangleIDs.emplace_back(i);" + NL
+               + "        alledges.emplace_back(e3);" + NL
+               + "    }" + NL
+               + "    std::sort(alledges.begin(), alledges.end());" + NL)
+        if t.count(old) != 1:
+            sys.exit("packCharts edge list not found once")
+        new = ("    // cheshire: one contiguous array of 12-byte PODs rather than 7,029,609 Edge objects each" + NL
+               + "    // holding a std::vector<int> with a single element. Same keys, same initial order, so" + NL
+               + "    // std::sort makes the same comparisons and produces the same permutation - which matters" + NL
+               + "    // because the merge below only compares adjacent entries, so on a non-manifold edge the" + NL
+               + "    // tie order decides which pairs are emitted." + NL
+               + "    struct RawEdge" + NL
+               + "    {" + NL
+               + "        int p0, p1, tri;" + NL
+               + "    };" + NL
+               + "    std::vector<RawEdge> alledges;" + NL
+               + "    alledges.reserve(static_cast<std::size_t>(_mesh.tris.size()) * 3);" + NL
+               + "    for (int i = 0; i < _mesh.tris.size(); ++i)" + NL
+               + "    {" + NL
+               + "        int a = _mesh.tris[i].v[0];" + NL
+               + "        int b = _mesh.tris[i].v[1];" + NL
+               + "        int c = _mesh.tris[i].v[2];" + NL
+               + "        alledges.push_back({std::min(a, b), std::max(a, b), i});" + NL
+               + "        alledges.push_back({std::min(b, c), std::max(b, c), i});" + NL
+               + "        alledges.push_back({std::min(c, a), std::max(c, a), i});" + NL
+               + "    }" + NL
+               + "    // the same lexicographic order std::pair<int,int> gave" + NL
+               + "    std::sort(alledges.begin(), alledges.end(), [](const RawEdge& x, const RawEdge& y) {" + NL
+               + "        return x.p0 != y.p0 ? x.p0 < y.p0 : x.p1 < y.p1;" + NL
+               + "    });" + NL)
+        t = t.replace(old, new, 1)
+
+        old = ("    // merge edges (no duplicate)" + NL
+               + "    std::vector<Edge> edges;" + NL
+               + "    auto eit = alledges.begin() + 1;" + NL
+               + "    while (eit != alledges.end())" + NL
+               + "    {" + NL
+               + "        auto& a = *(eit - 1);" + NL
+               + "        auto& b = *eit;" + NL
+               + "        if (a == b)" + NL
+               + "        {" + NL
+               + "            a.triangleIDs.insert(a.triangleIDs.end(), b.triangleIDs.begin(), b.triangleIDs.end());" + NL
+               + "            sort(a.triangleIDs.begin(), a.triangleIDs.end());" + NL
+               + "            edges.push_back(a);" + NL
+               + "        }" + NL
+               + "        ++eit;" + NL
+               + "    }" + NL
+               + "    alledges.clear();" + NL)
+        if t.count(old) != 1:
+            sys.exit("packCharts merge not found once")
+        new = ("    // merge edges (no duplicate)" + NL
+               + "    // cheshire: upstream appended b's single id to a's list, sorted the two, and pushed a." + NL
+               + "    // Each entry is the left of a pair exactly once and the right exactly once, and is read" + NL
+               + "    // before it is written, so every emitted edge held exactly two ids in ascending order -" + NL
+               + "    // the size() != 2 test below never fired. Store the pair directly." + NL
+               + "    std::vector<std::pair<int, int>> edges;" + NL
+               + "    for (std::size_t i = 1; i < alledges.size(); ++i)" + NL
+               + "    {" + NL
+               + "        const RawEdge& a = alledges[i - 1];" + NL
+               + "        const RawEdge& b = alledges[i];" + NL
+               + "        if (a.p0 == b.p0 && a.p1 == b.p1)" + NL
+               + "            edges.emplace_back(std::min(a.tri, b.tri), std::max(a.tri, b.tri));" + NL
+               + "    }" + NL
+               + "    alledges.clear();" + NL
+               + "    alledges.shrink_to_fit();" + NL)
+        t = t.replace(old, new, 1)
+
+        old = ("    for (auto& e : edges)" + NL
+               + "    {" + NL
+               + "        if (e.triangleIDs.size() != 2)" + NL
+               + "            continue;" + NL
+               + "        int chartIDA = findChart(e.triangleIDs[0]);" + NL
+               + "        int chartIDB = findChart(e.triangleIDs[1]);" + NL)
+        if t.count(old) != 1:
+            sys.exit("packCharts chart merge not found once")
+        new = ("    for (auto& e : edges)" + NL
+               + "    {" + NL
+               + "        int chartIDA = findChart(e.first);" + NL
+               + "        int chartIDB = findChart(e.second);" + NL)
+        t = t.replace(old, new, 1)
+
+        old = "        auto cameras = trisCams[i];" + NL
+        if t.count(old) != 1:
+            sys.exit("createCharts camera list not found once")
+        t = t.replace(old, "        // cheshire: a reference, not a copy of the camera list per triangle" + NL
+               + "        const auto& cameras = trisCams[i];" + NL, 1)
+
         uc.write_text(t, encoding="utf-8", newline=NL)
 
     # 5. regenerate the reviewable patch.

@@ -89,8 +89,11 @@ constructor instead:
 | createCharts | 4.34 s | 4.81 s |
 | packCharts | 3.31 s | 3.63 s |
 | finalizeCharts | 0.06 s | 0.07 s |
-| **createTextureAtlases** | **6.28 s** | **0.66 s** |
-| UVAtlas total | 14.01 s | 9.20 s |
+| **createTextureAtlases** | **6.28 s** | **0.70 s** |
+| **packCharts** | **3.31 s** | **1.90 s** |
+| UVAtlas total | 14.01 s | 8.07 s |
+
+Unwrap end to end: 14.41 s to 8.56 s.
 
 (The two unchanged phases move by about 10 % between runs; that is the machine, not the change.)
 
@@ -111,3 +114,37 @@ The structure is deliberately not replaced. A quadtree or a grid would pack fast
 pack *differently* - the leaf that wins is the packing - and the output would no longer be
 upstream's. As it is, the 231 MB `texturedMesh.obj` is byte for byte the one the unmodified build
 produces, which is the whole test.
+
+### packCharts
+
+Every triangle contributed three `Edge` objects, each holding a `std::vector<int>` with exactly one
+element: 7,029,609 heap allocations and as many frees, an array that reallocated its way to 7 M
+elements because it was never reserved, and a sort moving 40-byte objects through a non-trivial move
+constructor instead of memcpying 12-byte PODs. It is one contiguous array of
+`struct RawEdge { int p0, p1, tri; }` now, reserved up front. 3.31 s to 1.90 s.
+
+That the result is unchanged rests on something narrower than it looks. The merge compares only
+*adjacent* entries, so on a non-manifold edge - three or more triangles sharing one - which entries
+end up adjacent decides which pairs are emitted, and that is decided by how the sort ordered ties.
+`std::sort`'s control flow depends only on comparison outcomes, so the same keys in the same initial
+positions give the same permutation, ties included; the keys and their order are preserved exactly.
+
+The merge itself simplifies once written out: upstream appended b's single id to a's list, sorted
+the two, and pushed a. Each entry is the left of a pair exactly once and the right exactly once, and
+is read before it is written, so every emitted edge held exactly two ids in ascending order - the
+`size() != 2` test downstream never fired. The pair is stored directly.
+
+### An upstream bug, left alone
+
+`createCharts` collects `std::vector<std::pair<float, int>>` of (projected area, camera) and sorts
+it with `std::greater<std::pair<int, int>>`. The types do not match, so every comparison constructs
+two temporary `pair<int, int>` and **truncates the area to an integer**: projected areas of 10.9 and
+10.1 compare equal, and cameras are ordered by whatever the sort does with a tie.
+
+That is a defect, not a performance question, and correcting it would change which cameras each
+chart keeps and therefore the packing. It is reported rather than patched.
+
+What is left in `createCharts` is 2.44 s in `computeTrisCamsFromPtsCams` and about 2.96 s in a
+12-thread projection loop. Making the per-triangle camera list a reference rather than a copy is in
+(it was copying a `StaticVector<int>` 2.34 M times to read values it never modifies) but it is
+within run-to-run noise: those lists are short and the loop is parallel.
