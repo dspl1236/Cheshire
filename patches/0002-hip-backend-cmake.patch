@@ -3274,6 +3274,97 @@ index 76bf7e5..eb5d127 100644
  
      // pyramid of atlases frequency bands
      std::map<AtlasIndex, AccuPyramid> accuPyramids;
+diff --git a/src/aliceVision/mesh/UVAtlas.cpp b/src/aliceVision/mesh/UVAtlas.cpp
+index 626e638..a6a7164 100644
+--- a/src/aliceVision/mesh/UVAtlas.cpp
++++ b/src/aliceVision/mesh/UVAtlas.cpp
+@@ -261,6 +261,7 @@ void UVAtlas::createTextureAtlases(std::vector<Chart>& charts, mvsUtils::MultiVi
+         root->LU.y = 0;
+         root->RD.x = _textureSide - 1;
+         root->RD.y = _textureSide - 1;
++        root->refreshFree();  // cheshire: seed the bound
+ 
+         const auto insertChart = [&](size_t idx) -> bool {
+             Chart& chart = charts[idx];
+@@ -310,16 +311,47 @@ void UVAtlas::ChartRect::clear()
+     delete child[1];
+ }
+ 
++// cheshire: recompute this node's bound from its children, or from itself when a leaf.
++void UVAtlas::ChartRect::refreshFree()
++{
++    if (child[0] || child[1])
++    {
++        maxFreeW = 0;
++        maxFreeH = 0;
++        for (ChartRect* ch : child)
++            if (ch)
++            {
++                maxFreeW = std::max(maxFreeW, ch->maxFreeW);
++                maxFreeH = std::max(maxFreeH, ch->maxFreeH);
++            }
++    }
++    else
++    {
++        maxFreeW = c ? 0 : (std::size_t)(RD.x - LU.x);
++        maxFreeH = c ? 0 : (std::size_t)(RD.y - LU.y);
++    }
++}
++
+ UVAtlas::ChartRect* UVAtlas::ChartRect::insert(Chart& chart, size_t gutter)
+ {
++    // cheshire: nothing below is big enough, so do not walk it
++    if (chart.targetWidth() + gutter * 2 > maxFreeW || chart.targetHeight() + gutter * 2 > maxFreeH)
++        return nullptr;
++
+     if (child[0] || child[1])  // not a leaf
+     {
+         if (child[0])
+             if (ChartRect* rect = child[0]->insert(chart, gutter))
++            {
++                refreshFree();
+                 return rect;
++            }
+         if (child[1])
+             if (ChartRect* rect = child[1]->insert(chart, gutter))
++            {
++                refreshFree();
+                 return rect;
++            }
+         return nullptr;
+     }
+     else
+@@ -375,6 +407,10 @@ UVAtlas::ChartRect* UVAtlas::ChartRect::insert(Chart& chart, size_t gutter)
+         }
+         // insert chart
+         c = &chart;
++        for (ChartRect* ch : child)
++            if (ch)
++                ch->refreshFree();
++        refreshFree();
+         return this;
+     }
+ }
+diff --git a/src/aliceVision/mesh/UVAtlas.hpp b/src/aliceVision/mesh/UVAtlas.hpp
+index 54a051c..73aae06 100644
+--- a/src/aliceVision/mesh/UVAtlas.hpp
++++ b/src/aliceVision/mesh/UVAtlas.hpp
+@@ -52,7 +52,15 @@ class UVAtlas
+         ChartRect* child[2]{nullptr, nullptr};
+         Pixel LU;
+         Pixel RD;
++        // cheshire: the largest free extent anywhere in this subtree. insert() walked the
++        // whole tree for every chart, visiting thousands of already-full leaves, which is
++        // O(n^2) over 69,565 charts. These bound every free rectangle below, so a chart
++        // bigger than either cannot fit in any of them and the branch can be skipped. The
++        // same leaves are visited in the same order otherwise, so the packing is unchanged.
++        std::size_t maxFreeW = 0;
++        std::size_t maxFreeH = 0;
+         void clear();
++        void refreshFree();
+         ChartRect* insert(Chart& chart, size_t gutter);
+     };
+ 
 diff --git a/src/aliceVision/multiview/RelativePoseKernel.hpp b/src/aliceVision/multiview/RelativePoseKernel.hpp
 index c0a3ab3..643f300 100644
 --- a/src/aliceVision/multiview/RelativePoseKernel.hpp

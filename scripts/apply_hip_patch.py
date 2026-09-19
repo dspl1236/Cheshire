@@ -75,6 +75,8 @@ TRACKED = [
     "src/aliceVision/fuseCut/GraphFiller.hpp",
     "src/software/pipeline/main_prepareDenseScene.cpp",
     "src/software/pipeline/main_meshing.cpp",
+    "src/aliceVision/mesh/UVAtlas.hpp",
+    "src/aliceVision/mesh/UVAtlas.cpp",
     "src/aliceVision/robustEstimation/ACRansac.hpp",
     "src/aliceVision/multiview/RelativePoseKernel.hpp",
     "src/aliceVision/image/imageAlgo.hpp",
@@ -2307,6 +2309,117 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                 t = t.replace("#include <thread>  // cheshire" + NL,
                               "#include <thread>  // cheshire" + NL + inc + "  // cheshire" + NL, 1)
         pc.write_text(t, encoding="utf-8", newline=NL)
+
+    # 4z. The chart packer. Texturing's Basic UV unwrap is 14 s, of which 6.28 s is
+    #     createTextureAtlases: ChartRect::insert descends the whole tree for every chart, and
+    #     occupied leaves return nullptr but are still visited, so each of 69,565 inserts re-walks
+    #     thousands of full nodes. That is O(n^2) and about 90 us per insert for a tree descent.
+    #
+    #     Each node now carries the largest free extent anywhere beneath it, so the descent skips
+    #     branches that provably cannot hold the chart. It is an upper bound - every free rectangle
+    #     below has width <= maxFreeW and height <= maxFreeH - so no branch that could have fitted is
+    #     ever skipped, and the same leaves are visited in the same depth-first order otherwise. The
+    #     first fit is therefore the same one: createTextureAtlases 6.28 s -> 0.655 s, UVAtlas 14.01 s
+    #     -> 9.20 s, and the 231 MB texturedMesh.obj is byte for byte the one upstream produces.
+    uh = AV / "src/aliceVision/mesh/UVAtlas.hpp"
+    t = uh.read_text(encoding="utf-8")
+    if "maxFreeW" not in t:
+        old = ("        Pixel LU;" + NL + "        Pixel RD;" + NL
+               + "        void clear();" + NL
+               + "        ChartRect* insert(Chart& chart, size_t gutter);" + NL)
+        if t.count(old) != 1:
+            sys.exit("ChartRect members not found once in UVAtlas.hpp")
+        new = ("        Pixel LU;" + NL + "        Pixel RD;" + NL
+               + "        // cheshire: the largest free extent anywhere in this subtree. insert() walked the" + NL
+               + "        // whole tree for every chart, visiting thousands of already-full leaves, which is" + NL
+               + "        // O(n^2) over 69,565 charts. These bound every free rectangle below, so a chart" + NL
+               + "        // bigger than either cannot fit in any of them and the branch can be skipped. The" + NL
+               + "        // same leaves are visited in the same order otherwise, so the packing is unchanged." + NL
+               + "        std::size_t maxFreeW = 0;" + NL
+               + "        std::size_t maxFreeH = 0;" + NL
+               + "        void clear();" + NL
+               + "        void refreshFree();" + NL
+               + "        ChartRect* insert(Chart& chart, size_t gutter);" + NL)
+        uh.write_text(t.replace(old, new, 1), encoding="utf-8", newline=NL)
+
+    uc = AV / "src/aliceVision/mesh/UVAtlas.cpp"
+    t = uc.read_text(encoding="utf-8")
+    if "refreshFree" not in t:
+        anchor = "UVAtlas::ChartRect* UVAtlas::ChartRect::insert(Chart& chart, size_t gutter)" + NL + "{" + NL
+        if t.count(anchor) != 1:
+            sys.exit("ChartRect::insert not found once")
+        t = t.replace(anchor,
+                      "// cheshire: recompute this node's bound from its children, or from itself when a leaf." + NL
+                      + "void UVAtlas::ChartRect::refreshFree()" + NL
+                      + "{" + NL
+                      + "    if (child[0] || child[1])" + NL
+                      + "    {" + NL
+                      + "        maxFreeW = 0;" + NL
+                      + "        maxFreeH = 0;" + NL
+                      + "        for (ChartRect* ch : child)" + NL
+                      + "            if (ch)" + NL
+                      + "            {" + NL
+                      + "                maxFreeW = std::max(maxFreeW, ch->maxFreeW);" + NL
+                      + "                maxFreeH = std::max(maxFreeH, ch->maxFreeH);" + NL
+                      + "            }" + NL
+                      + "    }" + NL
+                      + "    else" + NL
+                      + "    {" + NL
+                      + "        maxFreeW = c ? 0 : (std::size_t)(RD.x - LU.x);" + NL
+                      + "        maxFreeH = c ? 0 : (std::size_t)(RD.y - LU.y);" + NL
+                      + "    }" + NL
+                      + "}" + NL + NL
+                      + anchor, 1)
+
+        old = ("    if (child[0] || child[1])  // not a leaf" + NL
+               + "    {" + NL
+               + "        if (child[0])" + NL
+               + "            if (ChartRect* rect = child[0]->insert(chart, gutter))" + NL
+               + "                return rect;" + NL
+               + "        if (child[1])" + NL
+               + "            if (ChartRect* rect = child[1]->insert(chart, gutter))" + NL
+               + "                return rect;" + NL
+               + "        return nullptr;" + NL
+               + "    }" + NL)
+        if t.count(old) != 1:
+            sys.exit("insert descent not found once")
+        new = ("    // cheshire: nothing below is big enough, so do not walk it" + NL
+               + "    if (chart.targetWidth() + gutter * 2 > maxFreeW || chart.targetHeight() + gutter * 2 > maxFreeH)" + NL
+               + "        return nullptr;" + NL + NL
+               + "    if (child[0] || child[1])  // not a leaf" + NL
+               + "    {" + NL
+               + "        if (child[0])" + NL
+               + "            if (ChartRect* rect = child[0]->insert(chart, gutter))" + NL
+               + "            {" + NL
+               + "                refreshFree();" + NL
+               + "                return rect;" + NL
+               + "            }" + NL
+               + "        if (child[1])" + NL
+               + "            if (ChartRect* rect = child[1]->insert(chart, gutter))" + NL
+               + "            {" + NL
+               + "                refreshFree();" + NL
+               + "                return rect;" + NL
+               + "            }" + NL
+               + "        return nullptr;" + NL
+               + "    }" + NL)
+        t = t.replace(old, new, 1)
+
+        old = ("        // insert chart" + NL + "        c = &chart;" + NL + "        return this;" + NL)
+        if t.count(old) != 1:
+            sys.exit("insert tail not found once")
+        new = ("        // insert chart" + NL + "        c = &chart;" + NL
+               + "        for (ChartRect* ch : child)" + NL
+               + "            if (ch)" + NL
+               + "                ch->refreshFree();" + NL
+               + "        refreshFree();" + NL
+               + "        return this;" + NL)
+        t = t.replace(old, new, 1)
+
+        old = ("        root->RD.x = _textureSide - 1;" + NL + "        root->RD.y = _textureSide - 1;" + NL)
+        if t.count(old) != 1:
+            sys.exit("atlas root extent not found once")
+        t = t.replace(old, old + "        root->refreshFree();  // cheshire: seed the bound" + NL, 1)
+        uc.write_text(t, encoding="utf-8", newline=NL)
 
     # 5. regenerate the reviewable patch.
     # CHESHIRE_SKIP_PATCH_EXPORT=1 leaves it alone. The submodule is normally cloned on Windows with

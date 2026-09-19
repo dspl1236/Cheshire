@@ -75,3 +75,39 @@ our CPU runs at the ulp level. Run-to-run of one binary is the right baseline.
 `meshroom-pair.cmd` / `meshroom-pair.sh` pair `aliceVision_texturing` next to the other four,
 gated on the binary's `--help` naming the GPU pass. Meshroom 2023.3's Texturing node options are
 accepted unchanged.
+
+## The chart packer (v0.2.16)
+
+Basic UV unwrapping was 14.4 s of Texturing's 79 s, and the obvious suspect was wrong. The walk that
+assigns UVs keeps a `std::map<int,int>` per chart - the pattern that cost 47 s elsewhere in this
+codebase ([docs/11](11-meshing-cpu.md)) - and it does 7,029,609 lookups over 69,565 charts and
+2,343,203 triangles in **0.47 s**. It is not the cost. Timing the four phases of the `UVAtlas`
+constructor instead:
+
+| phase | before | after |
+|---|---|---|
+| createCharts | 4.34 s | 4.81 s |
+| packCharts | 3.31 s | 3.63 s |
+| finalizeCharts | 0.06 s | 0.07 s |
+| **createTextureAtlases** | **6.28 s** | **0.66 s** |
+| UVAtlas total | 14.01 s | 9.20 s |
+
+(The two unchanged phases move by about 10 % between runs; that is the machine, not the change.)
+
+`createTextureAtlases` packs charts into texture atlases with a binary tree of free rectangles, and
+`ChartRect::insert` descends the *whole* tree for every chart. Occupied leaves return `nullptr` but
+are still visited, so as the tree grows each of 69,565 inserts re-walks thousands of full nodes -
+O(n^2), about 90 us per insert for what is nominally a tree descent.
+
+Each node now carries `maxFreeW` and `maxFreeH`, the largest free extent anywhere beneath it, and
+the descent skips branches that cannot hold the chart. That is an upper bound rather than an exact
+one: a subtree might hold a wide-short rectangle and a narrow-tall one, so the pair describes no
+single rectangle. It does not need to. Every free rectangle below the node has width <= `maxFreeW`
+and height <= `maxFreeH`, so a chart exceeding either cannot fit in any of them, and no branch that
+could have fitted is ever skipped. Everything else is untouched, so the same leaves are visited in
+the same depth-first order and the first fit is the same one.
+
+The structure is deliberately not replaced. A quadtree or a grid would pack faster still and would
+pack *differently* - the leaf that wins is the packing - and the output would no longer be
+upstream's. As it is, the 231 MB `texturedMesh.obj` is byte for byte the one the unmodified build
+produces, which is the whole test.
