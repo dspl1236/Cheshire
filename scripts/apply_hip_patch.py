@@ -76,6 +76,8 @@ TRACKED = [
     "src/software/pipeline/main_prepareDenseScene.cpp",
     "src/aliceVision/robustEstimation/ACRansac.hpp",
     "src/aliceVision/multiview/RelativePoseKernel.hpp",
+    "src/aliceVision/image/imageAlgo.hpp",
+    "src/aliceVision/image/imageAlgo.cpp",
 ]
 
 
@@ -2138,6 +2140,172 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                + old)
         t = t.replace(old, new, 1)
         rp.write_text(t, encoding="utf-8", newline=NL)
+
+    # 4y. The similarity-map gaussian of point-cloud fusion, on the GPU. Profiling the block it sits
+    #     in (CHESHIRE_FUSION_PROFILE=1) put 108.7 of 180.8 thread-seconds there - 60 %, against 65.5
+    #     for all three EXR reads together, in a block named "Load depth maps and add points". OIIO's
+    #     ImageBufAlgo::convolve does not exploit separability, so it is 121 taps per pixel over
+    #     2016x1134 maps, 107 times, and at twelve threads it is memory bound: 0.144 s isolated
+    #     against about 1.0 thread-second in the pipeline. See hip/port/gpu_blur/simBlurGPU.hpp for
+    #     what had to be matched to reproduce OIIO's output. CHESHIRE_GPU_BLUR=0 keeps OIIO.
+    gb_dst = AV / "src/aliceVision/fuseCut/gpu"
+    gb_dst.mkdir(parents=True, exist_ok=True)
+    for f in ("simBlurGPU.hpp", "simBlurGPU.cu"):
+        shutil.copy2(ROOT / "hip" / "port" / "gpu_blur" / f, gb_dst / f)
+
+    # the weights OIIO builds, exposed so fuseCut can reproduce the convolution without OIIO
+    ia = AV / "src/aliceVision/image/imageAlgo.hpp"
+    t = ia.read_text(encoding="utf-8")
+    if "gaussianKernelWeights" not in t:
+        old = "void convolveImage(const image::Image<float>& inBuffer," + NL
+        if t.count(old) != 1:
+            sys.exit("convolveImage(float) declaration not found once in imageAlgo.hpp")
+        new = ("// cheshire: the weights OIIO's make_kernel produces, so a caller can reproduce" + NL
+               + "// convolveImage on another device without depending on OpenImageIO. The origin is" + NL
+               + "// relative to the output pixel and is negative, as OIIO centres the kernel." + NL
+               + "void gaussianKernelWeights(float kernelWidth," + NL
+               + "                           float kernelHeight," + NL
+               + "                           std::vector<float>& weights," + NL
+               + "                           int& kw," + NL
+               + "                           int& kh," + NL
+               + "                           int& kx0," + NL
+               + "                           int& ky0);" + NL
+               + NL
+               + old)
+        t = t.replace(old, new, 1)
+        if "#include <vector>" not in t:
+            t = t.replace("#pragma once" + NL, "#pragma once" + NL + "#include <vector>  // cheshire" + NL, 1)
+        ia.write_text(t, encoding="utf-8", newline=NL)
+
+    ic = AV / "src/aliceVision/image/imageAlgo.cpp"
+    t = ic.read_text(encoding="utf-8")
+    if "gaussianKernelWeights" not in t:
+        old = "void convolveImage(const image::Image<unsigned char>& inBuffer," + NL
+        if t.count(old) != 1:
+            sys.exit("convolveImage(uchar) definition not found once in imageAlgo.cpp")
+        new = ("// cheshire: see the header." + NL
+               + "void gaussianKernelWeights(float kernelWidth, float kernelHeight," + NL
+               + "                           std::vector<float>& weights, int& kw, int& kh, int& kx0, int& ky0)" + NL
+               + "{" + NL
+               + "    oiio::ImageBuf K = oiio::ImageBufAlgo::make_kernel(\"gaussian\", kernelWidth, kernelHeight);" + NL
+               + "    const oiio::ImageSpec& s = K.spec();" + NL
+               + "    kw = s.width;" + NL
+               + "    kh = s.height;" + NL
+               + "    kx0 = s.x;" + NL
+               + "    ky0 = s.y;" + NL
+               + "    weights.resize(static_cast<std::size_t>(kw) * kh);" + NL
+               + "    K.get_pixels(oiio::ROI(kx0, kx0 + kw, ky0, ky0 + kh, 0, 1, 0, 1), oiio::TypeDesc::FLOAT, weights.data());" + NL
+               + "}" + NL
+               + NL
+               + old)
+        t = t.replace(old, new, 1)
+        ic.write_text(t, encoding="utf-8", newline=NL)
+
+    # fuseCut builds the new device source alongside the existing ones
+    fc = AV / "src/aliceVision/fuseCut/CMakeLists.txt"
+    t = fc.read_text(encoding="utf-8")
+    if "simBlurGPU" not in t:
+        # earlier steps append their own sources to these lists, so add to whatever is there rather
+        # than matching a fixed set: insert before the closing paren of each line.
+        def appendTo(text, prefix, item, before=")"):
+            i = text.index(prefix)
+            j = text.index(before, i)
+            return text[:j] + " " + item + text[j:]
+
+        # the properties line ends with "... PROPERTIES LANGUAGE HIP)", so the file goes before the
+        # keyword, not before the paren
+        for prefix, item, before in (("    list(APPEND fuseCut_files_headers gpu/", "gpu/simBlurGPU.hpp", ")"),
+                                     ("    list(APPEND fuseCut_files_sources gpu/", "gpu/simBlurGPU.cu", ")"),
+                                     ("        set_source_files_properties(gpu/", "gpu/simBlurGPU.cu", " PROPERTIES")):
+            if prefix not in t:
+                sys.exit(f"fuseCut CMake line not found: {prefix.strip()}")
+            t = appendTo(t, prefix, item, before)
+        fc.write_text(t, encoding="utf-8", newline=NL)
+
+    # and the call site
+    pc = AV / "src/aliceVision/fuseCut/PointCloud.cpp"
+    t = pc.read_text(encoding="utf-8")
+    if "simBlurGPU.hpp" not in t:
+        old = '#include "aliceVision/fuseCut/gpu/knnGPU.hpp"  // cheshire' + NL
+        if t.count(old) != 1:
+            sys.exit("knnGPU include not found once in PointCloud.cpp")
+        t = t.replace(old, old + '#include "aliceVision/fuseCut/gpu/simBlurGPU.hpp"  // cheshire' + NL, 1)
+
+        # build the kernel once: simGaussianSizeInit does not change between cameras
+        old = '        ALICEVISION_LOG_INFO("cheshire: loading depth maps on " << cheshireFusionThreads << " threads.");' + NL
+        if t.count(old) != 1:
+            sys.exit("fusion thread log line not found once")
+        new = (old
+               + "        // cheshire: the gaussian below is 60 % of this block. Take the weights OIIO would" + NL
+               + "        // build, once, and let the device apply them; CHESHIRE_GPU_BLUR=0 keeps OIIO." + NL
+               + "        std::vector<float> chBlurKern;" + NL
+               + "        int chBlurKw = 0, chBlurKh = 0, chBlurKx0 = 0, chBlurKy0 = 0;" + NL
+               + "        const bool chBlurGpu = gpu::blurAvailable();" + NL
+               + "        // CHESHIRE_GPU_BLUR_CHECK=1 also runs OIIO and reports how far apart they were." + NL
+               + "        const bool chBlurCheck = std::getenv(\"CHESHIRE_GPU_BLUR_CHECK\") != nullptr;" + NL
+               + "        std::atomic<long long> chBlurPix{0}, chBlurDiff{0};" + NL
+               + "        double chBlurWorst = 0.0;" + NL
+               + "        if (chBlurGpu)" + NL
+               + "            imageAlgo::gaussianKernelWeights(params.simGaussianSizeInit, params.simGaussianSizeInit," + NL
+               + "                                             chBlurKern, chBlurKw, chBlurKh, chBlurKx0, chBlurKy0);" + NL)
+        t = t.replace(old, new, 1)
+
+        old = ("                    image::Image<float> simMapTmp;" + NL
+               + "                    imageAlgo::convolveImage(simMap, simMapTmp, \"gaussian\", params.simGaussianSizeInit, params.simGaussianSizeInit);" + NL
+               + "                    simMap.swap(simMapTmp);" + NL)
+        if t.count(old) != 1:
+            sys.exit("sim map convolution not found once")
+        new = ("                    image::Image<float> simMapTmp;" + NL
+               + "                    bool chBlurred = false;" + NL
+               + "                    if (chBlurGpu)" + NL
+               + "                    {" + NL
+               + "                        simMapTmp.resize(simMap.width(), simMap.height());" + NL
+               + "                        chBlurred = gpu::blurGaussian(simMap.data(), simMapTmp.data()," + NL
+               + "                                                      simMap.width(), simMap.height()," + NL
+               + "                                                      chBlurKern.data(), chBlurKw, chBlurKh," + NL
+               + "                                                      chBlurKx0, chBlurKy0);" + NL
+               + "                    }" + NL
+               + "                    if (!chBlurred)" + NL
+               + "                        imageAlgo::convolveImage(simMap, simMapTmp, \"gaussian\", params.simGaussianSizeInit, params.simGaussianSizeInit);" + NL
+               + "                    else if (chBlurCheck)" + NL
+               + "                    {" + NL
+               + "                        image::Image<float> chRef;" + NL
+               + "                        imageAlgo::convolveImage(simMap, chRef, \"gaussian\", params.simGaussianSizeInit, params.simGaussianSizeInit);" + NL
+               + "                        const std::size_t nPix = static_cast<std::size_t>(simMap.width()) * simMap.height();" + NL
+               + "                        long long diff = 0;" + NL
+               + "                        double worst = 0.0;" + NL
+               + "                        for (std::size_t i = 0; i < nPix; ++i)" + NL
+               + "                        {" + NL
+               + "                            const float g = simMapTmp(i), o = chRef(i);" + NL
+               + "                            if (std::memcmp(&g, &o, sizeof(float)) != 0)" + NL
+               + "                            {" + NL
+               + "                                ++diff;" + NL
+               + "                                worst = std::max(worst, std::fabs((double)g - (double)o));" + NL
+               + "                            }" + NL
+               + "                        }" + NL
+               + "                        chBlurPix.fetch_add((long long)nPix, std::memory_order_relaxed);" + NL
+               + "                        chBlurDiff.fetch_add(diff, std::memory_order_relaxed);" + NL
+               + "                        _Pragma(\"omp critical(cheshireBlurCheck)\")" + NL
+               + "                        chBlurWorst = std::max(chBlurWorst, worst);" + NL
+               + "                    }" + NL
+               + "                    simMap.swap(simMapTmp);" + NL)
+        t = t.replace(old, new, 1)
+
+        old = "        omp_set_nested(0);" + NL
+        if t.count(old) != 1:
+            sys.exit("fusion block tail not found once")
+        new = (old
+               + "        if (chBlurCheck && chBlurPix.load() > 0)" + NL
+               + "            ALICEVISION_LOG_INFO(\"cheshire: sim blur check: \" << chBlurDiff.load() << \" of \""
+               + " << chBlurPix.load()" + NL
+               + "                                 << \" pixels differ from OIIO, worst \" << chBlurWorst);" + NL)
+        t = t.replace(old, new, 1)
+
+        for inc in ("#include <atomic>", "#include <cstring>", "#include <cmath>"):
+            if inc not in t:
+                t = t.replace("#include <thread>  // cheshire" + NL,
+                              "#include <thread>  // cheshire" + NL + inc + "  // cheshire" + NL, 1)
+        pc.write_text(t, encoding="utf-8", newline=NL)
 
     # 5. regenerate the reviewable patch.
     # CHESHIRE_SKIP_PATCH_EXPORT=1 leaves it alone. The submodule is normally cloned on Windows with

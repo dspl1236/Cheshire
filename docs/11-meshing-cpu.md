@@ -235,3 +235,62 @@ The engine bay does not quite converge, settling into a 2-cycle of six cells eac
 onward, which the fixed round count simply stops. The cost is 0.8 s of a 130 s Meshing run and the
 effect is 0.14 % of the faces, so this is a small smoothing change rather than a dramatic one, but
 it is the behaviour the parameter has always described.
+
+## The similarity-map gaussian (v0.2.16)
+
+Fusion's "Load depth maps and add points" was 17.7 s of Meshing, and the loading is not what it
+spends it on. Timing the block's parts (`CHESHIRE_FUSION_PROFILE=1`) gives, in thread-seconds across
+twelve threads:
+
+| part | thread-seconds |
+|---|---|
+| **similarity-map gaussian** | **108.7** |
+| depth map read | 26.6 |
+| similarity map read | 25.5 |
+| nmod map read | 13.3 |
+| point loop | 6.7 |
+
+60 % of a block named after the other 36 %. `imageAlgo::convolveImage` hands OIIO a
+`make_kernel("gaussian", 10, 10)` - an 11x11 kernel, 121 taps - and calls the general
+`ImageBufAlgo::convolve`, which does not exploit separability. Isolated, one call is 0.144 s
+single-threaded; in the pipeline it costs about 1.0 thread-second per camera, because twelve threads
+each sweep that stencil over a 9 MB image at once and the memory system is the limit rather than the
+arithmetic. Moving it to the device removes the contention as much as the work: **17.69 s to 3.06 s**.
+
+### Reproducing OIIO rather than approximating it
+
+The blurred values feed a `score > bestScore` comparison that selects points, so a filter that is
+merely close is a different filter. OIIO ships here as headers and a binary, so its arithmetic could
+not be read and had to be matched empirically - `scratchpad/gaussbench.cpp` takes OIIO's own output
+on a real similarity map as the reference and counts the pixels each candidate gets wrong.
+
+Three things had to be right, and the count says which:
+
+| candidate | pixels differing of 2,286,144 |
+|---|---|
+| **float accumulator, kernel-major, true divide** | **2** |
+| reciprocal multiply instead of divide | 4,269 |
+| fused multiply-add | 731,102 |
+| double accumulator | 1,845,868 |
+
+and separately, the borders: OIIO divides by the kernel weight that actually landed inside the
+image, so a window of constant 1.0 returns exactly 1.0 rather than 0.343151. Without that, 25,136
+border pixels are wrong and no interior pixel is - which is how the edge policy was identified, by
+splitting the differences into border and interior rather than looking at a maximum.
+
+The third was found by the device disagreeing with the harness. `__fmul_rn` and `__fadd_rn` look
+like they prevent fusion; in HIP they are defined as the plain operators, so the compiler contracted
+them anyway and 74.3 M of 244.6 M pixels came out a few ULP off. That is 30 %, and the harness had
+already measured 32 % for a fused CPU variant - the number identified the cause. `#pragma clang fp
+contract(off)`, as `depthMapFilterGPU.cu` already uses, fixes it.
+
+### What it produces
+
+244,617,279 of 244,617,408 pixels match bit for bit across the 107-photo engine bay. The other 129
+differ by at most 4.77e-07 and none of them changes a decision: the first filter gives 6,896,447
+points as OIIO does, the second 3,388,702, and the tetrahedralisation input checksums
+`af3a3cce376e3f12` either way. The point cloud is the same one.
+
+`CHESHIRE_GPU_BLUR_CHECK=1` runs OIIO as well and reports the divergence, so that is checkable on
+other data instead of asserted; it roughly doubles the block, since it does the work twice.
+`CHESHIRE_GPU_BLUR=0` keeps OIIO.

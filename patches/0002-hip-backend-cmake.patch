@@ -1728,7 +1728,7 @@ index 514487d..8f5fb98 100644
  
  # Link OpenCV library
 diff --git a/src/aliceVision/fuseCut/CMakeLists.txt b/src/aliceVision/fuseCut/CMakeLists.txt
-index 1b7f39c..db95ff9 100644
+index 1b7f39c..4cd0f1e 100644
 --- a/src/aliceVision/fuseCut/CMakeLists.txt
 +++ b/src/aliceVision/fuseCut/CMakeLists.txt
 @@ -24,6 +24,17 @@ set(fuseCut_files_sources
@@ -1738,10 +1738,10 @@ index 1b7f39c..db95ff9 100644
 +# --- cheshire HIP backend --- (GPU depth map filter)
 +set(fuseCut_gpu_links "")
 +if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
-+    list(APPEND fuseCut_files_headers gpu/depthMapFilterGPU.hpp gpu/graphVoteGPU.hpp gpu/maxflowGPU.hpp gpu/knnGPU.hpp)
-+    list(APPEND fuseCut_files_sources gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu gpu/maxflowGPU.cu gpu/knnGPU.cu)
++    list(APPEND fuseCut_files_headers gpu/depthMapFilterGPU.hpp gpu/graphVoteGPU.hpp gpu/maxflowGPU.hpp gpu/knnGPU.hpp gpu/simBlurGPU.hpp)
++    list(APPEND fuseCut_files_sources gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu gpu/maxflowGPU.cu gpu/knnGPU.cu gpu/simBlurGPU.cu)
 +    if (ALICEVISION_HAVE_HIP)
-+        set_source_files_properties(gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu gpu/maxflowGPU.cu gpu/knnGPU.cu PROPERTIES LANGUAGE HIP)
++        set_source_files_properties(gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu gpu/maxflowGPU.cu gpu/knnGPU.cu gpu/simBlurGPU.cu PROPERTIES LANGUAGE HIP)
 +    endif()
 +    set(fuseCut_gpu_links ${ALICEVISION_CUDA_LIBRARIES})
 +endif()
@@ -2419,25 +2419,29 @@ index 38d5a37..0d76dd5 100644
                  }
              }
 diff --git a/src/aliceVision/fuseCut/PointCloud.cpp b/src/aliceVision/fuseCut/PointCloud.cpp
-index 50a15fd..4c6a480 100644
+index 50a15fd..b0df1b0 100644
 --- a/src/aliceVision/fuseCut/PointCloud.cpp
 +++ b/src/aliceVision/fuseCut/PointCloud.cpp
-@@ -4,6 +4,9 @@
+@@ -4,6 +4,12 @@
  // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
 +#include <string>  // cheshire
 +#include <thread>  // cheshire
++#include <cmath>  // cheshire
++#include <cstring>  // cheshire
++#include <atomic>  // cheshire
 +#include <algorithm>
  #include "PointCloud.hpp"
  
  #include <aliceVision/utils/filesIO.hpp>
-@@ -15,6 +18,14 @@
+@@ -15,6 +21,15 @@
  #include <aliceVision/mvsData/geometry.hpp>
  
  #include <aliceVision/fuseCut/Kdtree.hpp>
 +#ifdef ALICEVISION_HAVE_GPU_FILTER
 +#include "aliceVision/fuseCut/gpu/knnGPU.hpp"  // cheshire
++#include "aliceVision/fuseCut/gpu/simBlurGPU.hpp"  // cheshire
 +#include <chrono>
 +#include <future>
 +#include <cstdint>
@@ -2447,7 +2451,7 @@ index 50a15fd..4c6a480 100644
  
  #include <geogram/mesh/mesh.h>
  #include <geogram/basic/geometry_nd.h>
-@@ -27,7 +38,7 @@ namespace fuseCut {
+@@ -27,7 +42,7 @@ namespace fuseCut {
  namespace fs = std::filesystem;
  
  /// Filter by pixSize
@@ -2456,7 +2460,7 @@ index 50a15fd..4c6a480 100644
                       std::vector<double>& pixSizePrepare,
                       double pixSizeMarginCoef,
                       std::vector<float>& simScorePrepare)
-@@ -35,7 +46,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
+@@ -35,7 +50,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
  
      ALICEVISION_LOG_INFO("Build nanoflann KdTree index.");
      PointVectorAdaptator pointCloudRef(verticesCoordsPrepare);
@@ -2465,7 +2469,7 @@ index 50a15fd..4c6a480 100644
      kdTree.buildIndex();
  
      ALICEVISION_LOG_INFO("KdTree created for " << verticesCoordsPrepare.size() << " points.");
-@@ -64,6 +75,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
+@@ -64,6 +79,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
      }
      ALICEVISION_LOG_INFO("Filtering done.");
  }
@@ -2473,7 +2477,7 @@ index 50a15fd..4c6a480 100644
  
  /// Remove invalid points based on invalid pixSize
  void removeInvalidPoints(std::vector<Point3d>& verticesCoordsPrepare, std::vector<double>& pixSizePrepare, std::vector<float>& simScorePrepare)
-@@ -119,7 +131,7 @@ void removeInvalidPoints(std::vector<Point3d>& verticesCoordsPrepare,
+@@ -119,7 +135,7 @@ void removeInvalidPoints(std::vector<Point3d>& verticesCoordsPrepare,
      verticesAttrPrepare.swap(verticesAttrTmp);
  }
  
@@ -2482,7 +2486,7 @@ index 50a15fd..4c6a480 100644
                                      std::vector<Point3d>& verticesCoordsPrepare,
                                      std::vector<double>& pixSizePrepare,
                                      std::vector<float>& simScorePrepare,
-@@ -132,7 +144,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
+@@ -132,7 +148,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
  {
  
      PointVectorAdaptator pointCloudRef(verticesCoordsPrepare);
@@ -2491,7 +2495,7 @@ index 50a15fd..4c6a480 100644
      kdTree.buildIndex();
      ALICEVISION_LOG_INFO("NANOFLANN: KdTree created.");
  
-@@ -244,6 +256,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
+@@ -244,6 +260,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
  
      ALICEVISION_LOG_INFO("Visibilities created.");
  }
@@ -2499,7 +2503,7 @@ index 50a15fd..4c6a480 100644
  
  
  PointCloud::PointCloud(mvsUtils::MultiViewParams& mp) : _mp(mp)
-@@ -294,8 +307,16 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
+@@ -294,8 +311,28 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
  
      ALICEVISION_LOG_INFO("Load depth maps and add points.");
      {
@@ -2513,12 +2517,74 @@ index 50a15fd..4c6a480 100644
 +        if (const char* e = std::getenv("CHESHIRE_FUSION_THREADS"))
 +            cheshireFusionThreads = std::max(1, std::atoi(e));
 +        ALICEVISION_LOG_INFO("cheshire: loading depth maps on " << cheshireFusionThreads << " threads.");
++        // cheshire: the gaussian below is 60 % of this block. Take the weights OIIO would
++        // build, once, and let the device apply them; CHESHIRE_GPU_BLUR=0 keeps OIIO.
++        std::vector<float> chBlurKern;
++        int chBlurKw = 0, chBlurKh = 0, chBlurKx0 = 0, chBlurKy0 = 0;
++        const bool chBlurGpu = gpu::blurAvailable();
++        // CHESHIRE_GPU_BLUR_CHECK=1 also runs OIIO and reports how far apart they were.
++        const bool chBlurCheck = std::getenv("CHESHIRE_GPU_BLUR_CHECK") != nullptr;
++        std::atomic<long long> chBlurPix{0}, chBlurDiff{0};
++        double chBlurWorst = 0.0;
++        if (chBlurGpu)
++            imageAlgo::gaussianKernelWeights(params.simGaussianSizeInit, params.simGaussianSizeInit,
++                                             chBlurKern, chBlurKw, chBlurKh, chBlurKx0, chBlurKy0);
 +        omp_set_nested(cheshireFusionThreads > 1 ? 0 : 1);
 +#pragma omp parallel for num_threads(cheshireFusionThreads)
          for (int c = 0; c < cams.size(); c++)
          {
              image::Image<float> depthMap;
-@@ -769,7 +790,13 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
+@@ -320,7 +357,38 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
+                 {
+                     mvsUtils::readMap(c, _mp, mvsUtils::EFileType::simMapFiltered, simMap);
+                     image::Image<float> simMapTmp;
+-                    imageAlgo::convolveImage(simMap, simMapTmp, "gaussian", params.simGaussianSizeInit, params.simGaussianSizeInit);
++                    bool chBlurred = false;
++                    if (chBlurGpu)
++                    {
++                        simMapTmp.resize(simMap.width(), simMap.height());
++                        chBlurred = gpu::blurGaussian(simMap.data(), simMapTmp.data(),
++                                                      simMap.width(), simMap.height(),
++                                                      chBlurKern.data(), chBlurKw, chBlurKh,
++                                                      chBlurKx0, chBlurKy0);
++                    }
++                    if (!chBlurred)
++                        imageAlgo::convolveImage(simMap, simMapTmp, "gaussian", params.simGaussianSizeInit, params.simGaussianSizeInit);
++                    else if (chBlurCheck)
++                    {
++                        image::Image<float> chRef;
++                        imageAlgo::convolveImage(simMap, chRef, "gaussian", params.simGaussianSizeInit, params.simGaussianSizeInit);
++                        const std::size_t nPix = static_cast<std::size_t>(simMap.width()) * simMap.height();
++                        long long diff = 0;
++                        double worst = 0.0;
++                        for (std::size_t i = 0; i < nPix; ++i)
++                        {
++                            const float g = simMapTmp(i), o = chRef(i);
++                            if (std::memcmp(&g, &o, sizeof(float)) != 0)
++                            {
++                                ++diff;
++                                worst = std::max(worst, std::fabs((double)g - (double)o));
++                            }
++                        }
++                        chBlurPix.fetch_add((long long)nPix, std::memory_order_relaxed);
++                        chBlurDiff.fetch_add(diff, std::memory_order_relaxed);
++                        _Pragma("omp critical(cheshireBlurCheck)")
++                        chBlurWorst = std::max(chBlurWorst, worst);
++                    }
+                     simMap.swap(simMapTmp);
+                 }
+                 catch (const std::exception& e)
+@@ -425,6 +493,9 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
+             }
+         }
+         omp_set_nested(0);
++        if (chBlurCheck && chBlurPix.load() > 0)
++            ALICEVISION_LOG_INFO("cheshire: sim blur check: " << chBlurDiff.load() << " of " << chBlurPix.load()
++                                 << " pixels differ from OIIO, worst " << chBlurWorst);
+     }
+ 
+     ALICEVISION_LOG_INFO("Filter initial 3D points by pixel size to remove duplicates.");
+@@ -769,7 +840,13 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
      Point3d center = (voxel[0] + voxel[1] + voxel[2] + voxel[3] + voxel[4] + voxel[5] + voxel[6] + voxel[7]) / 8.0;
  
      const unsigned int seed = (unsigned int)_mp.userParams.get<unsigned int>("delaunaycut.seed", 0);
@@ -2533,7 +2599,7 @@ index 50a15fd..4c6a480 100644
      auto rand = std::bind(std::uniform_real_distribution<float>{-1.0, 1.0}, generator);
  
      const double minDist2 = minDist * minDist;
-@@ -778,7 +805,22 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
+@@ -778,7 +855,22 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
  
      ALICEVISION_LOG_TRACE("GRID: Allocate vertices");
      std::vector<Point3d> gridVerticesCoords(std::pow(float(ns + 1), 3.f));
@@ -2557,7 +2623,7 @@ index 50a15fd..4c6a480 100644
  
      ALICEVISION_LOG_TRACE("Create helper points.");
  #pragma omp parallel for
-@@ -790,7 +832,9 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
+@@ -790,7 +882,9 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
              {
                  int i = x * (ns + 1) * (ns + 1) + y * (ns + 1) + z;
                  const Point3d pt = voxel[0] + vx * ((double)x / double(ns)) + vy * ((double)y / double(ns)) + vz * ((double)z / double(ns));
@@ -2568,7 +2634,7 @@ index 50a15fd..4c6a480 100644
                  const Point3d p = pt + noise;
                  std::size_t vi{};
                  double sq_dist{};
-@@ -812,17 +856,24 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
+@@ -812,17 +906,24 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
      _verticesCoords.reserve(_verticesCoords.size() + gridVerticesCoords.size());
      _verticesAttr.reserve(_verticesAttr.size() + gridVerticesCoords.size());
      int addedPoints = 0;
@@ -2701,6 +2767,59 @@ index bd5e932..1e5b724 100644
      _neighboringCellsPerVertex.clear();
  
      std::map<VertexIndex, std::set<CellIndex>> neighboringCellsPerVertexTmp;
+diff --git a/src/aliceVision/image/imageAlgo.cpp b/src/aliceVision/image/imageAlgo.cpp
+index d6b69fb..6fc2651 100644
+--- a/src/aliceVision/image/imageAlgo.cpp
++++ b/src/aliceVision/image/imageAlgo.cpp
+@@ -548,6 +548,20 @@ void convolveImage(oiio::TypeDesc typeDesc,
+     oiio::ImageBufAlgo::convolve(outBuf, inBuf, K);
+ }
+ 
++// cheshire: see the header.
++void gaussianKernelWeights(float kernelWidth, float kernelHeight,
++                           std::vector<float>& weights, int& kw, int& kh, int& kx0, int& ky0)
++{
++    oiio::ImageBuf K = oiio::ImageBufAlgo::make_kernel("gaussian", kernelWidth, kernelHeight);
++    const oiio::ImageSpec& s = K.spec();
++    kw = s.width;
++    kh = s.height;
++    kx0 = s.x;
++    ky0 = s.y;
++    weights.resize(static_cast<std::size_t>(kw) * kh);
++    K.get_pixels(oiio::ROI(kx0, kx0 + kw, ky0, ky0 + kh, 0, 1, 0, 1), oiio::TypeDesc::FLOAT, weights.data());
++}
++
+ void convolveImage(const image::Image<unsigned char>& inBuffer,
+                    image::Image<unsigned char>& outBuffer,
+                    const std::string& kernel,
+diff --git a/src/aliceVision/image/imageAlgo.hpp b/src/aliceVision/image/imageAlgo.hpp
+index 1f29fe2..7055c2a 100644
+--- a/src/aliceVision/image/imageAlgo.hpp
++++ b/src/aliceVision/image/imageAlgo.hpp
+@@ -1,4 +1,5 @@
+ #pragma once
++#include <vector>  // cheshire
+ 
+ #include <string>
+ 
+@@ -183,6 +184,17 @@ void convolveImage(const image::Image<unsigned char>& inBuffer,
+                    float kernelWidth = 5.0f,
+                    float kernelHeight = 5.0f);
+ 
++// cheshire: the weights OIIO's make_kernel produces, so a caller can reproduce
++// convolveImage on another device without depending on OpenImageIO. The origin is
++// relative to the output pixel and is negative, as OIIO centres the kernel.
++void gaussianKernelWeights(float kernelWidth,
++                           float kernelHeight,
++                           std::vector<float>& weights,
++                           int& kw,
++                           int& kh,
++                           int& kx0,
++                           int& ky0);
++
+ void convolveImage(const image::Image<float>& inBuffer,
+                    image::Image<float>& outBuffer,
+                    const std::string& kernel = "gaussian",
 diff --git a/src/aliceVision/matching/CMakeLists.txt b/src/aliceVision/matching/CMakeLists.txt
 index a7544f6..af70d7c 100644
 --- a/src/aliceVision/matching/CMakeLists.txt
