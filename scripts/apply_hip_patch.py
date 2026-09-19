@@ -74,6 +74,7 @@ TRACKED = [
     "src/aliceVision/fuseCut/Kdtree.hpp",
     "src/aliceVision/fuseCut/GraphFiller.hpp",
     "src/software/pipeline/main_prepareDenseScene.cpp",
+    "src/software/pipeline/main_meshing.cpp",
     "src/aliceVision/robustEstimation/ACRansac.hpp",
     "src/aliceVision/multiview/RelativePoseKernel.hpp",
     "src/aliceVision/image/imageAlgo.hpp",
@@ -2323,6 +2324,18 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                           text=True, encoding="utf-8", errors="surrogateescape").stdout
     out = ROOT / "patches" / "0002-hip-backend-cmake.patch"
     out.write_text(diff, encoding="utf-8", errors="surrogateescape", newline="\n")
+    # The export is a blanket diff of the submodule, so anything edited by hand ends up in it. Step 0
+    # resets TRACKED, which makes those safe; a file outside that list keeps whatever was done to it
+    # and ships silently. A UVAtlas.cpp profiler reached the patch that way. Name them.
+    touched = {l[len("+++ b/"):].strip() for l in diff.splitlines() if l.startswith("+++ b/")}
+    generated = ("src/aliceVision/depthMap/cuda/hip", "src/aliceVision/fuseCut/gpu")
+    stray = sorted(f for f in touched
+                   if f not in TRACKED and not any(f.startswith(g + "/") for g in generated))
+    if stray:
+        print("  WARNING: in the patch but not reset by step 0, so hand edits persist:")
+        for f in stray:
+            print(f"    {f}")
+
     print(f"applied; {len(diff.splitlines())} diff lines -> {out.relative_to(ROOT)}")
 
 
