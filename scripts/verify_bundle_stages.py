@@ -46,6 +46,7 @@ def main(argv):
     im = node_dir(cache, "ImageMatching") + "/imageMatches.txt"
     sfm = node_dir(cache, "StructureFromMotion") + "/sfm.abc"
     pds = node_dir(cache, "PrepareDenseScene")
+    dm = node_dir(cache, "DepthMap")
     dmf = node_dir(cache, "DepthMapFilter")
 
     # Every stage that carries GPU code. FeatureExtraction must use "sift": dspsift goes through
@@ -60,11 +61,16 @@ def main(argv):
     # (found 2026-09-21 on the CUDA bundle). A bundle whose texturing is entirely dead would have
     # passed. Where a stage carries one of our GPU ports, the regex is that port announcing itself,
     # so this also catches a silent fall back to the CPU path.
-    # Markers must be lines the port emits UNCONDITIONALLY. Three of these were wrong when
+    # Markers must be lines the port emits UNCONDITIONALLY, and must not also appear on the port's
+    # DISABLED path - the ports announce both, a few words apart. Five of these were wrong when
     # first written and none had been run: 'filter votes GPU' and 'knn check: identical'
-    # only appear under CHESHIRE_GPU_FILTER_DEBUG / CHESHIRE_GPU_VIS_CHECK, so both would
-    # have reported a healthy GPU run as a failure, and '(?i)popsift|gpu' matched any path
-    # containing 'gpu' - a directory named gpusift was enough to pass a broken stage.
+    # only appear under CHESHIRE_GPU_FILTER_DEBUG / CHESHIRE_GPU_VIS_CHECK and 'cheshire texturing
+    # profile' only under CHESHIRE_GPU_TEX_LOG, so all three would have reported a healthy GPU run
+    # as a failure; '(?i)popsift|gpu' matched any path containing 'gpu' - a directory named gpusift
+    # was enough to pass a broken stage - and bare 'GPU brute-force' matches
+    # "GPU brute-force disabled by CHESHIRE_GPU_MATCHER=0", so a CPU-matcher run passed as a GPU one.
+    # The rule that catches all five: take the marker from the success branch of the port's
+    # available(), and include enough of it that the disabled branch cannot match.
     stages = [
         ("FeatureExtraction (sift/PopSIFT)", "aliceVision_featureExtraction", [
             "--input", ci, "--describerTypes", "sift", "--describerPreset", "normal",
@@ -75,12 +81,15 @@ def main(argv):
             "--input", ci, "--featuresFolders", fe, "--imagePairsList", im,
             "--describerTypes", "dspsift", "--geometricEstimator", "acransac",
             "--geometricFilterType", "fundamental_matrix",
-            "--rangeStart", "0", "--rangeSize", "40"], "*.txt", None, r"GPU brute-force"),
+            "--rangeStart", "0", "--rangeSize", "40"], "*.txt", None, r"GPU brute-force L2 2-NN on"),
         ("DepthMap", "aliceVision_depthMapEstimation", [
             "--input", sfm, "--imagesFolder", pds, "--downscale", "2",
             "--rangeStart", "0", "--rangeSize", "2"], "*.exr", None, r"Number of GPU devices"),
+        # Filtering consumes the RAW maps from DepthMap; Meshing below consumes the filtered ones.
+        # This passed dmf for both, which still ran (filtering already-filtered maps) and so would
+        # have reported ok while never feeding the stage the input it actually sees in a pipeline.
         ("DepthMapFilter", "aliceVision_depthMapFiltering", [
-            "--input", sfm, "--depthMapsFolder", dmf,
+            "--input", sfm, "--depthMapsFolder", dm,
             "--rangeStart", "0", "--rangeSize", "2"], "*.exr", None, r"depth map filter: group votes on"),
         # Meshing and Texturing have no range option, so these are full runs and the slow part of
         # this script. They are here anyway: leaving out the stages that happened to be validated
@@ -96,7 +105,7 @@ def main(argv):
             "--input", str(ROOT / "build/bundle-stages/aliceVision_meshing/densePointCloud.abc"),
             "--inputMesh", str(ROOT / "build/bundle-stages/aliceVision_meshing/mesh.obj"),
             "--imagesFolder", pds, "--colorMappingFileType", "png"], "texture_*.png", None,
-            r"cheshire texturing profile"),
+            r"texturing: pyramid \+ rasterisation on"),
     ]
 
     results = []
