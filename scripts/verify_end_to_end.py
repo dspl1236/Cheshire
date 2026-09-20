@@ -56,21 +56,30 @@ CPU_MARKERS = {
 # were at fault.
 SIFT = ["FeatureExtraction:describerTypes=sift", "FeatureExtraction:forceCpuExtraction=False"]
 
+# Override paths are Meshroom ATTRIBUTE paths, not AliceVision command-line flags, and the two are
+# not the same: some of a node's parameters sit in a group, so --sgmDepthListPerTile on the command
+# line is sgm.sgmDepthListPerTile here and --tileBufferWidth is tiling.tileBufferWidth, while others
+# are top level whatever they look like - Meshing's maxPoints is declared with advanced=True, which
+# is a kwarg and not a group, so Meshing:advanced.maxPoints is a KeyError and Meshing:maxPoints is
+# right. A wrong path is a KeyError before any node runs and shows up as a 0s FAIL with every port
+# missing, so a config that fails instantly with ports=0/6 is a naming problem, not a GPU one; the
+# failure prints the Overrides lines for that reason. The authority is the node definition in
+# <Meshroom>/lib/meshroom/nodes/aliceVision/<Node>.pyc, not the AliceVision --help text.
 CONFIGS = {
     # Stock settings, to establish that the paired pipeline works at all.
     "base": dict(overrides=SIFT, env={}),
     # Many small tiles: the tiled path is where the memory bridge and the per-tile depth lists live,
     # and a 42-tile run behaves differently from a 1-tile one.
     "tiles": dict(overrides=SIFT + [
-        "DepthMap:tileWidth=512", "DepthMap:tileHeight=512", "DepthMap:tileOverlapPercentage=10",
-        "DepthMap:autoAdjustSmallImage=False", "DepthMap:downscale=2"], env={}),
-    # The other end: one coarse tile, fewer cameras, a smaller point budget.
+        "DepthMap:tiling.tileBufferWidth=512", "DepthMap:tiling.tileBufferHeight=512",
+        "DepthMap:tiling.autoAdjustSmallImage=False", "DepthMap:downscale=2"], env={}),
+    # The other end: coarse, one depth list for the whole image, a smaller point budget.
     "coarse": dict(overrides=SIFT + [
-        "DepthMap:downscale=4", "DepthMap:sgmDepthListPerTile=False", "DepthMap:nbNearestCams=6",
+        "DepthMap:downscale=4", "DepthMap:sgm.sgmDepthListPerTile=False",
         "Meshing:maxPoints=300000"], env={}),
-    # A bigger atlas and more frequency bands, which moves the texturing port's allocations.
+    # A bigger atlas at full resolution, which moves the texturing port's allocations.
     "texbig": dict(overrides=SIFT + [
-        "Texturing:textureSide=8192", "Texturing:nbBand=3"], env={}),
+        "Texturing:textureSide=8192", "Texturing:downscale=1"], env={}),
     # Every GPU port switched off. Must still produce a mesh, and must say it went to the CPU.
     "cpufallback": dict(overrides=SIFT, markers="cpu", env={
         "CHESHIRE_GPU_MATCHER": "0", "CHESHIRE_GPU_FILTER": "0",

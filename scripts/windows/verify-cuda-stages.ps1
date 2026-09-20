@@ -50,11 +50,13 @@ $out = "C:\cheshire\stages-cuda-win"
 if (Test-Path $out) { Remove-Item $out -Recurse -Force }
 New-Item -ItemType Directory $out | Out-Null
 $env:ALICEVISION_ROOT = $Package
-$exeDir = $Package
+# Packages built before the bin\ layout staged everything flat at the root; accept either, so this
+# keeps working against an unpacked older package.
+$exeDir = if (Test-Path (Join-Path $Package "bin\aliceVision_meshing.exe")) { Join-Path $Package "bin" } else { $Package }
 
 Write-Output "=== package: $Package"
 Write-Output "=== cache:   $Cache"
-$ps = Get-Item (Join-Path $Package "popsift.dll") -ErrorAction SilentlyContinue
+$ps = Get-Item (Join-Path $exeDir "popsift.dll") -ErrorAction SilentlyContinue
 if ($ps) {
     $mb = [math]::Round($ps.Length/1MB,2)
     $v = if ($mb -gt 10) { "*** 15.7 MB = the vcpkg prebuilt, NOT a CUDA build ***" } else { "ok (CUDA build)" }

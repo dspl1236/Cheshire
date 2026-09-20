@@ -1,4 +1,4 @@
-# Assemble a portable Windows CUDA package for bench-pc's GTX 1050 Ti.
+# Assemble a portable Windows CUDA package.
 #
 # The build output dir already co-locates every AliceVision and vcpkg DLL. The only thing missing
 # for a machine without the toolkit is cudart64_12.dll - dumpbin says aliceVision_depthMap_cuda.dll
@@ -13,12 +13,20 @@ $tarball = "D:\MMI\cheshire\build\cheshire-alicevision-cuda-windows-x64-cuda12.9
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Path $stage | Out-Null
 
+# bin\ + share\, the same shape as the HIP packages. This used to stage the build output flat at
+# the package root, because it began as a one-off for bench-pc rather than a release artifact.
+# Everything downstream assumes bin\: meshroom-pair.cmd probes <pkg>\bin\aliceVision_*.exe and the
+# launcher runs <pkg>\bin\<node>.exe, so a flat package cannot be paired with Meshroom at all - it
+# had to be faked with a directory junction to be tested end to end.
+$bin = Join-Path $stage "bin"
+New-Item -ItemType Directory -Path $bin | Out-Null
+
 Write-Output "=== staging build output"
-robocopy $src $stage /E /NFL /NDL /NJH /NJS /NP | Out-Null
+robocopy $src $bin /E /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE)" }
 
 Write-Output "=== adding the CUDA runtime"
-Copy-Item "$cuda\cudart64_12.dll" $stage
+Copy-Item "$cuda\cudart64_12.dll" $bin
 "  cudart64_12.dll"
 
 # PopSIFT, taken from its own install tree rather than from the build output.
@@ -32,7 +40,7 @@ Copy-Item "$cuda\cudart64_12.dll" $stage
 # if what lands here is 15.7 MB, the wrong one has won again.
 $popsift = "D:\MMI\cheshire\build\popsift-cuda-install\bin\popsift.dll"
 if (Test-Path $popsift) {
-    Copy-Item $popsift $stage -Force
+    Copy-Item $popsift $bin -Force
     Write-Output ("=== PopSIFT from its install tree ({0:N2} MB)" -f ((Get-Item $popsift).Length/1MB))
 } else {
     Write-Output "=== no CUDA PopSIFT install - GPU SIFT will fall back to the CPU extractor"
@@ -48,7 +56,7 @@ $vs = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Redist\MS
 $crt = Get-ChildItem "$vs\*\x64\Microsoft.VC*.CRT" -Directory | Sort-Object Name | Select-Object -Last 1
 if (-not $crt) { throw "could not locate the MSVC CRT redistributable under $vs" }
 Write-Output "=== adding the MSVC runtime"
-Copy-Item "$($crt.FullName)\*.dll" $stage -Force
+Copy-Item "$($crt.FullName)\*.dll" $bin -Force
 Write-Output "  from $($crt.Name)"
 
 # OpenMP runtime: LLVM's own build, NOT Microsoft's. Microsoft's copy of the same runtime lives
@@ -63,7 +71,7 @@ $ompSrc = "D:\MMI\cheshire\third_party\llvm-openmp"
 if (-not (Test-Path "$ompSrc\libomp.dll")) {
     throw "no LLVM OpenMP runtime at $ompSrc - see its README for how to fetch one"
 }
-Copy-Item "$ompSrc\libomp.dll" (Join-Path $stage "libomp140.x86_64.dll") -Force
+Copy-Item "$ompSrc\libomp.dll" (Join-Path $bin "libomp140.x86_64.dll") -Force
 Copy-Item "$ompSrc\LICENSE.TXT" (Join-Path $stage "LICENSE.llvm-openmp.txt") -Force
 Write-Output ("  LLVM OpenMP runtime {0:N2} MB + its licence" -f ((Get-Item "$ompSrc\libomp.dll").Length/1MB))
 
