@@ -3484,14 +3484,14 @@ index c0a3ab3..643f300 100644
      double errorVectorDimension() const override { return (_pointToLine) ? 1.0 : 2.0; }
      Mat3 normalizer1() const override { return _N1; }
 diff --git a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
-index 298c9d2..1443a77 100644
+index 298c9d2..f477778 100644
 --- a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
 +++ b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
 @@ -8,6 +8,7 @@
  
  #include "Fundamental7PSolver.hpp"
  #include <aliceVision/numeric/polynomial.hpp>
-+#include <cstdlib>  // cheshire: CHESHIRE_SVD_NULLSPACE
++#include <cstdlib>  // cheshire: CHESHIRE_QR_NULLSPACE
  #include <aliceVision/multiview/epipolarEquation.hpp>
  #include <aliceVision/numeric/algebra.hpp>
  namespace aliceVision {
@@ -3505,11 +3505,11 @@ index 298c9d2..1443a77 100644
 +        // exactly two-dimensional - a Householder QR of the transpose gives a basis for it
 +        // without an iterative SVD. A different basis of the same nullspace spans the same
 +        // pencil, so det(F1 + a*F2) = 0 has the same solutions to rounding.
-+        static const bool cheshireSvdNullspace = (std::getenv("CHESHIRE_SVD_NULLSPACE") != nullptr);
-+        if (cheshireSvdNullspace)
-+            Nullspace2(A, f1, f2);
-+        else
++        static const bool cheshireQrNullspace = (std::getenv("CHESHIRE_QR_NULLSPACE") != nullptr);
++        if (cheshireQrNullspace)
 +            Nullspace2RankDeficient(A, f1, f2);
++        else
++            Nullspace2(A, f1, f2);
  
          // @fixme here there is a potential error, we should check that the size of
          // null(A) is 2. Otherwise we have a family of possible solutions for the

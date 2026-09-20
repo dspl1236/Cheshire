@@ -110,24 +110,44 @@ to the change.
 ### Does it help or hurt the reconstruction?
 
 SfM is not deterministic - `incrementalSfM` drifts because Ceres splits work across
-`omp_get_max_threads()` - so a single comparison would read that jitter as an effect. Three
+`omp_get_max_threads()` - so a single comparison reads that jitter as an effect. **Ten**
 reconstructions per leg, same match folder each time:
 
 | | landmarks | RMSE | poses |
 |---|---|---|---|
-| upstream | 141,000 - 141,160 (spread **160**) | 1.68273 - 1.68472 (spread 0.0020) | 107 every run |
-| QR | 140,867 - 141,063 (spread 196) | 1.68370 - 1.69184 (spread 0.0081) | 107 every run |
+| upstream | 141,118 ± 131 | 1.68407 ± 0.00137 | 107 every run |
+| QR | 140,953 ± 84 | 1.68650 ± 0.00331 | 107 every run |
 
-Mean difference: **-106 landmarks, +0.0044 RMSE.**
+Welch's t-test, which does not assume equal variance (QR's RMSE spread is more than twice
+upstream's):
 
-The landmark difference is inside upstream's own 160-landmark spread, so it is not resolvable at
-this sample size. The RMSE difference is about twice upstream's spread, and QR's own spread is
-wider, so a small increase in reprojection error is plausible but sits at the edge of what three
-runs can establish. Every run reconstructed all 107 cameras.
+| | delta | t | p |
+|---|---|---|---|
+| landmarks | **-165** | -3.36 | **0.0008** |
+| RMSE | **+0.0024** | +2.14 | **0.032** |
 
-**The honest summary: 1.86x on geometric filtering, no measurable change in landmark count, and a
-possible +0.26 % in RMSE that more runs would be needed to confirm or dismiss.** That is why it is
-behind a flag and in a minor release rather than a patch.
+**Both are real.** QR loses about 0.12 % of landmarks and adds about 0.14 % to reprojection error.
+
+Three runs per leg said the opposite - the landmark difference looked like it sat inside upstream's
+own spread, and this document said so before the sweep was run. It did not: at n=3 the means were
+141,081 and 140,975 with a 160-landmark range, which is exactly the situation where a spread and a
+difference of similar size are indistinguishable without more samples. **A difference that is
+"within the noise" at n=3 can be the strongest signal in the experiment at n=10**, and a 20-minute
+sweep is cheap next to shipping the wrong conclusion.
+
+## So it is off by default
+
+1.86x on geometric filtering against 0.12 % of landmarks and 0.14 % of reprojection error is a
+trade, not a free win, and this project's entire claim is that nothing it produces changes. Turning
+that off silently for a speedup on one phase would be the wrong default, so upstream's `JacobiSVD`
+stays the default and the QR path is opt-in:
+
+    CHESHIRE_QR_NULLSPACE=1
+
+For scale: the difference is far smaller than the gap between GPU and CPU SIFT (88,463 landmarks
+against 78,372 on the 41-view set, 13 %), which is accepted as an improvement. Someone matching
+thousands of pairs may well want the 1.86x and never notice 0.12 %. The point is that it should be
+their decision, made against a measured number, rather than one taken on their behalf.
 
 ## What ships
 

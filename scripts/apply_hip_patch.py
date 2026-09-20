@@ -2559,8 +2559,11 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
     #                            difference is 1.183e-04 for QR against 1.176e-04 for the control.
     #                            The instability is the ill-conditioned system's, not the method's.
     #
-    #     CHESHIRE_SVD_NULLSPACE=1 restores upstream's JacobiSVD. The flag is read through a
-    #     function-local static: solve() runs 111.7 M times and a getenv per call would cost more
+    #     Ten reconstructions per leg settled the quality question, and reversed what three runs
+    #     had suggested: QR loses 165 landmarks (p=0.0008) and adds 0.0024 to RMSE (p=0.032), both
+    #     real, both about 0.12 %. A trade, not a free win - so upstream's JacobiSVD stays the
+    #     DEFAULT and the QR path is opt-in with CHESHIRE_QR_NULLSPACE=1. The flag is read through
+    #     a function-local static: solve() runs 111.7 M times and a getenv per call would cost more
     #     than the change saves.
     alg = AV / "src/aliceVision/numeric/algebra.hpp"
     t = alg.read_text(encoding="utf-8")
@@ -2594,7 +2597,7 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
 
     f7 = AV / "src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp"
     t = f7.read_text(encoding="utf-8")
-    if "cheshireSvdNullspace" not in t:
+    if "cheshireQrNullspace" not in t:
         nl_f7 = "\r\n" if "\r\n" in t else "\n"
         # The same two lines appear in the over-determined branch, where Nullspace2 is doing a
         # LEAST-SQUARES fit that a QR nullspace does not reproduce, and again in the spherical
@@ -2614,17 +2617,17 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                + "        // exactly two-dimensional - a Householder QR of the transpose gives a basis for it" + nl_f7
                + "        // without an iterative SVD. A different basis of the same nullspace spans the same" + nl_f7
                + "        // pencil, so det(F1 + a*F2) = 0 has the same solutions to rounding." + nl_f7
-               + "        static const bool cheshireSvdNullspace = (std::getenv(\"CHESHIRE_SVD_NULLSPACE\") != nullptr);" + nl_f7
-               + "        if (cheshireSvdNullspace)" + nl_f7
-               + "            Nullspace2(A, f1, f2);" + nl_f7
+               + "        static const bool cheshireQrNullspace = (std::getenv(\"CHESHIRE_QR_NULLSPACE\") != nullptr);" + nl_f7
+               + "        if (cheshireQrNullspace)" + nl_f7
+               + "            Nullspace2RankDeficient(A, f1, f2);" + nl_f7
                + "        else" + nl_f7
-               + "            Nullspace2RankDeficient(A, f1, f2);" + nl_f7)
+               + "            Nullspace2(A, f1, f2);" + nl_f7)
         t = t[:head_end] + rest.replace(old, new, 1)
 
         inc = "#include <aliceVision/numeric/polynomial.hpp>" + nl_f7
         if t.count(inc) != 1:
             sys.exit("polynomial.hpp include not found once in Fundamental7PSolver.cpp")
-        t = t.replace(inc, inc + "#include <cstdlib>  // cheshire: CHESHIRE_SVD_NULLSPACE" + nl_f7, 1)
+        t = t.replace(inc, inc + "#include <cstdlib>  // cheshire: CHESHIRE_QR_NULLSPACE" + nl_f7, 1)
         f7.write_text(t, encoding="utf-8", newline="")
 
     # 5. regenerate the reviewable patch.
