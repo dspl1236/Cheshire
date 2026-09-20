@@ -31,6 +31,17 @@ if not exist "%CHESHIRE_CUDA_PATH%\bin\nvcc.exe" ( echo no nvcc at "%CHESHIRE_CU
 rem sm_61 covers both NVIDIA test cards (docs/18)
 if not defined CHESHIRE_CUDA_ARCHS set CHESHIRE_CUDA_ARCHS=61
 
+rem The same C++ toolset AliceVision uses. PopSIFT hands C++ objects across a DLL boundary, so the
+rem two must agree: when this script left C++ to PATH it took 14.44 while AliceVision kept 14.50,
+rem and GPU SIFT died with 0xC0000409 on the first photograph. nvcc constrains only the .cu host
+rem passes (above), not this.
+if not defined CHESHIRE_VS2026 set CHESHIRE_VS2026=C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools
+set CXX_CL=
+for /d %%D in ("%CHESHIRE_VS2026%\VC\Tools\MSVC\*") do if exist "%%D\bin\Hostx64\x64\cl.exe" set CXX_CL=%%D\bin\Hostx64\x64\cl.exe
+if not defined CXX_CL ( echo   no C++ toolset under "%CHESHIRE_VS2026%" & exit /b 1 )
+set CXX_CL=%CXX_CL:\=/%
+echo [c++ ] compiler: %CXX_CL%
+
 set R=%CHESHIRE_ROOT:\=/%
 set SRC=%R%/third_party/popsift
 set V=%R%/tools/vcpkg-deps/x64-windows-release
@@ -51,6 +62,8 @@ goto :build
   -DCMAKE_BUILD_TYPE=Release ^
   "-DCMAKE_MAKE_PROGRAM=%CHESHIRE_TOOLS:\=/%/ninja/ninja.exe" ^
   "-DCMAKE_INSTALL_PREFIX=%INST%" ^
+  "-DCMAKE_C_COMPILER=%CXX_CL%" ^
+  "-DCMAKE_CXX_COMPILER=%CXX_CL%" ^
   "-DCMAKE_CUDA_COMPILER=%CHESHIRE_CUDA_PATH:\=/%/bin/nvcc.exe" ^
   "-DCMAKE_CUDA_HOST_COMPILER=%CHESHIRE_CL%" ^
   "-DCUDAToolkit_ROOT=%CHESHIRE_CUDA_PATH:\=/%" ^

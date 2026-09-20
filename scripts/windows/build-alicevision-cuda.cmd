@@ -42,6 +42,25 @@ set CUDA_HOST_CL=%CHESHIRE_CL%
 if not defined CUDA_HOST_CL ( echo   env.cmd did not resolve CHESHIRE_CL & exit /b 1 )
 echo [cuda] host compiler: %CUDA_HOST_CL%
 
+rem Pin the C++ toolset too. Leaving it to PATH or to an existing cache is how PopSIFT and
+rem AliceVision ended up on different STLs - PopSIFT took 14.44 from PATH while AliceVision kept
+rem 14.50 from a stale cache, and two MSVC STLs either side of a DLL boundary is undefined
+rem behaviour. Both scripts now name the same compiler, so a clean tree and a dirty one agree.
+rem
+rem C++ stays on 14.50 rather than joining nvcc on 14.44: the prebuilt vcpkg archive was compiled
+rem against a newer STL than either, so the older toolset widens the msvcp140 export gap that
+rem stlcompat.lib has to cover. MSVC is binary compatible across 14.x, and nvcc only constrains
+rem the .cu host passes.
+if not defined CHESHIRE_VS2026 set CHESHIRE_VS2026=C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools
+set CXX_CL=
+for /d %%D in ("%CHESHIRE_VS2026%\VC\Tools\MSVC\*") do if exist "%%D\bin\Hostx64\x64\cl.exe" set CXX_CL=%%D\bin\Hostx64\x64\cl.exe
+if not defined CXX_CL (
+  echo   no C++ toolset found under "%CHESHIRE_VS2026%" - set CHESHIRE_VS2026
+  exit /b 1
+)
+set CXX_CL=%CXX_CL:\=/%
+echo [c++ ] compiler: %CXX_CL%
+
 rem Refuse to build with the wrong toolset rather than discover it at the first .cu.
 set CLVER=
 for /f "tokens=7" %%V in ('cl 2^>^&1 ^| findstr /i /c:"Version"') do set CLVER=%%V
@@ -94,6 +113,8 @@ lib /nologo /out:"%CHESHIRE_ROOT%\build\stlcompat-cuda\stlcompat.lib" "%CHESHIRE
 cmake -S "%R%/third_party/aliceVision" -B "%BLD%" -G Ninja -DCMAKE_BUILD_TYPE=Release ^
   "-DCMAKE_EXE_LINKER_FLAGS=%STLC%/stlcompat.lib" ^
   "-DCMAKE_SHARED_LINKER_FLAGS=%STLC%/stlcompat.lib" ^
+  "-DCMAKE_C_COMPILER=%CXX_CL%" ^
+  "-DCMAKE_CXX_COMPILER=%CXX_CL%" ^
   "-DCMAKE_CUDA_COMPILER=%CHESHIRE_CUDA_PATH:\=/%/bin/nvcc.exe" ^
   "-DCMAKE_CUDA_HOST_COMPILER=%CUDA_HOST_CL%" ^
   "-DCUDAToolkit_ROOT=%CHESHIRE_CUDA_PATH:\=/%" ^
