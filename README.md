@@ -273,11 +273,19 @@ meshroom-pair.cmd C:\Meshroom-2023.3.0 --unpair
 The launcher decides per run: an NVIDIA card present (`nvidia-smi` answers) runs the CUDA binary,
 otherwise the HIP build from the package, with the package's DLLs and `share/` in front so nothing
 of Meshroom's older AliceVision leaks in. `CHESHIRE_DEPTHMAP=cuda|hip` forces one; the choice is
-printed as the first line of the node's log. Every other node keeps running from Meshroom.
+printed as the first line of the node's log. The nodes Cheshire does not carry - CameraInit,
+ImageMatching, StructureFromMotion, MeshFiltering, Publish - keep running from Meshroom.
 
 Given a bundle it also picks the payload for the card and prints that too
 (`bundle payload hip6.2/gfx1031`), composing the layered `PATH` per run. A flat single-chip package
 from an older release still works exactly as before - the shape is detected, not configured.
+
+> **v0.2.18 and v0.2.17:** the copy of `meshroom-pair.cmd` inside those zips cannot pair the bundle.
+> It looks for `<package>\bin\aliceVision_depthMapEstimation.exe`, which only a flat package has,
+> and stops with "no HIP aliceVision_depthMapEstimation.exe". The launcher beside it has always
+> understood both shapes; only the pairing script had not. Take
+> [`scripts/windows/meshroom-pair.cmd`](scripts/windows/meshroom-pair.cmd) from this repository and
+> drop it in beside the launcher, or wait for the next release, which carries the fix.
 
 From v0.2.13 the pairing also covers **FeatureExtraction**, so GPU SIFT reaches the graph: leave
 **forceCpuExtraction** unticked ([docs/14](docs/14-gpu-sift.md)). With an older package, or one
@@ -416,18 +424,33 @@ cells from byte-identical input on every run.
   `scripts\build-alicevision.cmd gfx1201 install`.
 * Linux (RDNA1-RDNA4): [docs/06-linux-build.md](docs/06-linux-build.md), then
   `scripts/linux/build-deps.sh` and `scripts/linux/build-alicevision.sh bundle`.
-* Validate: `scripts\run-depthmap.cmd <dataset>` or `scripts/linux/run-depthmap.sh` against a
-  Meshroom cache; `scripts/compare_depthmaps.py` produces the numbers and panels.
+* Validate the numbers: `scripts\run-depthmap.cmd <dataset>` or `scripts/linux/run-depthmap.sh`
+  against a Meshroom cache; `scripts/compare_depthmaps.py` produces the numbers and panels.
+* Validate the package, which is a different question and is checked separately, because a package
+  can be numerically perfect in six stages and broken in the seventh:
+  * `scripts/verify_bundle_stages.py <bundle> <cache>` (HIP) and
+    `scripts\windows\verify-cuda-stages.ps1` (CUDA) run every GPU-bearing stage from the package
+    and require each one to print its own port's line, not merely to produce files.
+  * `scripts/verify_end_to_end.py <meshroom> <package> <photos> <out>` pairs the package into
+    Meshroom and runs whole pipelines under several parameter sets, including one with every
+    `CHESHIRE_GPU_*` switch off, which has to fall back to the CPU and still finish.
 
 ## Status
 
 Works end to end on RDNA1, RDNA2 and RDNA4 (Windows and Linux); RDNA3 has its code object in
 every bundle but no hardware run yet. GCN 4 (RX 400/500) is out: the ROCm 7.2 runtime refuses to
-initialise on an RX 570 even though the kernel driver accepts it (docs/06). A production Meshroom
-2023.3 node (house-pc, RX 5500 XT, Linux) runs its PrepareDenseScene, FeatureExtraction,
-FeatureMatching, DepthMap, DepthMapFilter, Meshing and Texturing on the Cheshire bundle through the pairing script; the same works on Windows through
-`meshroom-pair.cmd`. What
-comes next is the roadmap above.
+initialise on an RX 570 even though the kernel driver accepts it (docs/06).
+
+A whole Meshroom 2023.3 graph runs on the package with all seven Cheshire nodes paired -
+PrepareDenseScene, FeatureExtraction, FeatureMatching, DepthMap, DepthMapFilter, Meshing and
+Texturing. On Windows that is now checked by `scripts/verify_end_to_end.py`, which requires each
+node to print its own port's line rather than merely to produce a mesh, since a pipeline that fell
+back to Meshroom's own binaries would produce a perfectly good one. On 2026-09-20 the v0.2.18
+bundle passed five parameter sets on an RX 9070, 6/6 ports each - including one with every
+`CHESHIRE_GPU_*` switch off, which fell back to the CPU and still produced a textured mesh - and
+the CUDA package passed on a GTX 1050 Ti. On Linux the same pairing was used on a production node
+(house-pc, RX 5500 XT); that machine has since been re-carded, so it stands as a past result
+rather than a standing one. What comes next is the roadmap above.
 
 Primary repository: [git.hausofdub.com/dspl1236/Cheshire](https://git.hausofdub.com/dspl1236/Cheshire);
 mirror: [github.com/dspl1236/Cheshire](https://github.com/dspl1236/Cheshire). Licensed MPL-2.0.
