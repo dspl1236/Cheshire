@@ -85,6 +85,7 @@ tables in [docs/validation](docs/validation/)).
 | RX 9070 vs RX 6750 XT (RDNA4 vs RDNA2), same HIP build | identical | 0 | 97.0-98.5 % | not bit-identical: p95 error 0.07-0.24 % |
 | RX 6750 XT under Windows / HIP 6.2 vs the same card under Linux / HIP 7.2 | identical | 0 | 97.1-98.7 % | not bit-identical: same silicon, different compiler and runtime |
 | **GTX 1080 Ti, CUDA 11.6 on Windows vs GTX 1080 Ti, CUDA 11.3 on Linux** (the reference itself) | 41 / 41 | 0 | 100 % median view, 92.9 % worst | 37 / 41 depth maps bit-identical; the other four differ by up to 7.2 % of pixels. CUDA is not bit-identical to CUDA across builds either |
+| **this tree built as CUDA 12.9 vs the CUDA 11.3 reference**, same GTX 1080 Ti | 41 / 41 | 0 | 100 % (every pixel equal) | **byte-identical, 41 / 41 depth maps and 41 / 41 sim maps** - and 1.80x faster (211 s vs 379 s). AliceVision 3.1 vs 3.4-dev and CUDA 11.3 vs 12.9 both contribute exactly nothing |
 | any HIP card vs the CUDA GTX 1080 Ti | identical | 0 | 97.5-98.9 % | same noise floor as RDNA4 vs RDNA2 |
 
 So the port is deterministic (same inputs, same build, same architecture family, same bits),
@@ -95,6 +96,12 @@ texture-filter and FMA rounding propagating through SGM's argmin, not a port def
 identical silicon, and between two CUDA builds on the same NVIDIA card (the reference disagrees
 with a Windows CUDA 11.6 run of itself on 4 of 41 views, one of them by 7.2 % of pixels), which
 is what rules out the port as the cause.
+
+Since 2026-09-20 that argument no longer rests on circumstantial evidence. This same tree,
+same patches, built as CUDA instead of HIP, is **byte-identical** to the CUDA 11.3 reference on
+all 41 views. Every patch this project carries is therefore provably neutral, and the 1-3 % is
+AMD hardware and compiler float behaviour with nothing else mixed in
+([docs/18](docs/18-cuda-build.md)).
 
 ## Memory bridge
 
@@ -378,9 +385,11 @@ kernels elsewhere):
    x86-64 tiers (v1 / AVX / v3) for the Linux bundle, which is SSE2-only today, and the same
    generic collapse there - 19 hand-listed code objects become four, though Vega must stay explicit
    since it is wave64 where all of RDNA is wave32.
-8. **A CUDA build of the same tree** so NVIDIA users get the GPU matcher too (the source already
-   compiles as CUDA; the packaging does not exist yet), and a Linux bundle built against an older
-   glibc for Ubuntu 22.04 / Debian 12 nodes.
+8. **A CUDA build of the same tree** so NVIDIA users get the GPU matcher too. The Linux build is
+   done and validated byte-identical to the reference ([docs/18](docs/18-cuda-build.md)); what
+   remains is PopSIFT and the memory bridge on CUDA, the Windows build (needs VS 2022 Build Tools
+   for CUDA 12.9's MSVC 193x ceiling), packaging, and a Linux bundle built against an older glibc
+   for Ubuntu 22.04 / Debian 12 nodes.
 9. **Hardware still unrun:** RDNA3 discrete, the RDNA3.5 APUs, Vega, and a card without the 4-byte
    dot instruction (RX 5700, original Vega) for the matcher's fallback path.
 

@@ -49,12 +49,25 @@ consistent with two different AliceVision versions (Meshroom 2023.3 = AliceVisio
 node vs the 2026 development tree here) plus FMA/texture-filter differences; a same-version
 CUDA reference would tighten this, and the 41-image set will show whether it holds at scale.
 
+**The same-version CUDA reference now exists, and it settles this** (2026-09-20, see
+`docs/18-cuda-build.md`): this tree built with CUDA 12.9 is **byte-identical** to the Meshroom
+2023.3 / CUDA 11.3 reference on all 41 views, depth maps and sim maps alike. So the version
+drift contributes **nothing** - AliceVision 3.1 vs 3.4-dev and CUDA 11.3 vs 12.9 are both
+exactly zero here. The whole residual is AMD hardware and compiler float behaviour. The
+sentence above was a reasonable guess; half of it was wrong.
+
 What it took to get from "runs" to "PASS": the first HIP run produced all-invalid maps
 because **HIP on Windows samples half4 (16-bit float) texture arrays as zeros**
 (`hip/tests/half_tex.hip` isolates it; float4 arrays are fine). AliceVision's camera
-mipmaps use half4 by default; the HIP build now selects the float4 path (2x camera-image
-VRAM). Revisit when ROCm fixes half textures on Windows, or when profiling shows texture
-bandwidth matters.
+mipmaps use half4 by default; the HIP build selected the float4 path here (2x camera-image
+VRAM).
+
+**Superseded the same day** (`docs/05-performance.md`): the real HIP-Windows defect is
+`surf2Dwrite` *stores* into 16-bit float arrays, not texture reads. Mip levels are computed
+into device memory and copied with `hipMemcpy2DToArray` instead, and every shipped build -
+HIP and CUDA - uses half4, the same format as the CUDA reference. `CHESHIRE_TEXTURE_FLOAT4`
+survives only as an escape hatch that no build defines; read the paragraph above as history,
+not as what ships.
 
 ### monstree-full (41 views), 2026-09-03 - strict criterion FAIL, agreement otherwise excellent
 
