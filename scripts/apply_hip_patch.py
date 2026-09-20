@@ -81,6 +81,8 @@ TRACKED = [
     "src/aliceVision/multiview/RelativePoseKernel.hpp",
     "src/aliceVision/image/imageAlgo.hpp",
     "src/aliceVision/image/imageAlgo.cpp",
+    "src/aliceVision/numeric/algebra.hpp",
+    "src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp",
 ]
 
 
@@ -2527,6 +2529,103 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                + "        const auto& cameras = trisCams[i];" + NL, 1)
 
         uc.write_text(t, encoding="utf-8", newline=NL)
+
+    # 5a. The 7-point fundamental solver's nullspace. docs/15 left kernel.fit as the largest phase
+    #     of FeatureMatching - 1589.4 thread-seconds, 39 % of the stage, 111.7 M calls - and it is
+    #     Nullspace2 running Eigen's JacobiSVD with ComputeFullV on a 9x9.
+    #
+    #     The 9x9 has two zero rows. encodeEpipolarEquation writes one row per correspondence and
+    #     the minimal case has seven, so this is a full iterative 9x9 SVD for a 7x9 problem whose
+    #     nullspace is exactly two-dimensional. Householder-QR the 9x7 transpose instead: the last
+    #     two columns of Q are orthonormal and orthogonal to every row of A, so they are a basis of
+    #     that nullspace, from one non-iterative factorisation.
+    #
+    #     This is the first change here that is NOT bit-identical to upstream, and it cannot be: a
+    #     different factorisation gives a different BASIS for the same nullspace. What it does not
+    #     change is the answer. The solver then solves det(F1 + a*F2) = 0 over the pencil, and the
+    #     pencil is a property of the subspace, not of the basis chosen for it, so the fundamental
+    #     matrices agree to rounding.
+    #
+    #     Measured against upstream over 50,000 synthetic systems, using upstream's own cubic
+    #     coefficients and root solver (scratch harness, docs/17):
+    #       general position     nullspace 7.6x, whole fit 6.75x; worst model difference 3.96e-09
+    #                            against a control of 3.97e-09 - the control being JacobiSVD on the
+    #                            7x9 block versus the 9x9, the same algorithm on mathematically
+    #                            identical input. QR is as close to upstream as upstream is to a
+    #                            trivial reformulation of itself.
+    #       near-degenerate      whole fit 6.66x. 275 root-count flips, of which 274 are the SAME
+    #                            systems for QR and the control, one unique each; two systems give
+    #                            NaN in upstream too. On the 49,722 stable systems the worst
+    #                            difference is 1.183e-04 for QR against 1.176e-04 for the control.
+    #                            The instability is the ill-conditioned system's, not the method's.
+    #
+    #     CHESHIRE_SVD_NULLSPACE=1 restores upstream's JacobiSVD. The flag is read through a
+    #     function-local static: solve() runs 111.7 M times and a getenv per call would cost more
+    #     than the change saves.
+    alg = AV / "src/aliceVision/numeric/algebra.hpp"
+    t = alg.read_text(encoding="utf-8")
+    if "Nullspace2RankDeficient" not in t:
+        nl_alg = "\r\n" if "\r\n" in t else "\n"
+        old = "#include <Eigen/Core>" + nl_alg + "#include <Eigen/SVD>" + nl_alg
+        if t.count(old) != 1:
+            sys.exit("Eigen includes not found once in algebra.hpp")
+        t = t.replace(old, old + "#include <Eigen/QR>  // cheshire" + nl_alg, 1)
+
+        anchor = "template<typename TMat, typename TVec1, typename TVec2>" + nl_alg + "inline double Nullspace2("
+        if t.count(anchor) != 1:
+            sys.exit("Nullspace2 template not found once in algebra.hpp")
+        helper = (
+            "/// cheshire: basis of the two-dimensional nullspace of a system that is exactly rank" + nl_alg
+            + "/// deficient by two - the minimal 7-point case, seven independent rows in nine columns." + nl_alg
+            + "/// Householder-QR the transpose: the last two columns of Q are orthonormal and" + nl_alg
+            + "/// orthogonal to every row of A. Not for overdetermined systems, where the SVD's answer" + nl_alg
+            + "/// is a least-squares fit that this does not reproduce." + nl_alg
+            + "template<typename TMatA, typename TVec1, typename TVec2>" + nl_alg
+            + "inline void Nullspace2RankDeficient(const TMatA& A, TVec1& x1, TVec2& x2)" + nl_alg
+            + "{" + nl_alg
+            + "    Eigen::Matrix<double, 9, 7> At = A.template topRows<7>().transpose();" + nl_alg
+            + "    Eigen::HouseholderQR<Eigen::Matrix<double, 9, 7>> qr(At);" + nl_alg
+            + "    const Eigen::Matrix<double, 9, 9> Q = qr.householderQ();" + nl_alg
+            + "    x1 = Q.col(8);" + nl_alg
+            + "    x2 = Q.col(7);" + nl_alg
+            + "}" + nl_alg + nl_alg)
+        t = t.replace(anchor, helper + anchor, 1)
+        alg.write_text(t, encoding="utf-8", newline="")
+
+    f7 = AV / "src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp"
+    t = f7.read_text(encoding="utf-8")
+    if "cheshireSvdNullspace" not in t:
+        nl_f7 = "\r\n" if "\r\n" in t else "\n"
+        # The same two lines appear in the over-determined branch, where Nullspace2 is doing a
+        # LEAST-SQUARES fit that a QR nullspace does not reproduce, and again in the spherical
+        # solver. Anchor on the minimal branch's own preamble so only that one is touched.
+        old = ("        Mat9 A = Mat::Zero(9, 9);" + nl_f7
+               + "        encodeEpipolarEquation(x1, x2, &A);" + nl_f7)
+        if t.count(old) != 1:
+            sys.exit("minimal-branch preamble not found once in Fundamental7PSolver.cpp")
+        tail = ("        // find the two F matrices in the nullspace of A." + nl_f7
+                + "        Nullspace2(A, f1, f2);" + nl_f7)
+        head_end = t.index(old) + len(old)
+        rest = t[head_end:]
+        if rest.count(tail) < 1:
+            sys.exit("minimal-branch Nullspace2 call not found after the preamble")
+        old = tail
+        new = ("        // cheshire: A is 9x9 with two zero rows, so this is a 7x9 system whose nullspace is" + nl_f7
+               + "        // exactly two-dimensional - a Householder QR of the transpose gives a basis for it" + nl_f7
+               + "        // without an iterative SVD. A different basis of the same nullspace spans the same" + nl_f7
+               + "        // pencil, so det(F1 + a*F2) = 0 has the same solutions to rounding." + nl_f7
+               + "        static const bool cheshireSvdNullspace = (std::getenv(\"CHESHIRE_SVD_NULLSPACE\") != nullptr);" + nl_f7
+               + "        if (cheshireSvdNullspace)" + nl_f7
+               + "            Nullspace2(A, f1, f2);" + nl_f7
+               + "        else" + nl_f7
+               + "            Nullspace2RankDeficient(A, f1, f2);" + nl_f7)
+        t = t[:head_end] + rest.replace(old, new, 1)
+
+        inc = "#include <aliceVision/numeric/polynomial.hpp>" + nl_f7
+        if t.count(inc) != 1:
+            sys.exit("polynomial.hpp include not found once in Fundamental7PSolver.cpp")
+        t = t.replace(inc, inc + "#include <cstdlib>  // cheshire: CHESHIRE_SVD_NULLSPACE" + nl_f7, 1)
+        f7.write_text(t, encoding="utf-8", newline="")
 
     # 5. regenerate the reviewable patch.
     # CHESHIRE_SKIP_PATCH_EXPORT=1 leaves it alone. The submodule is normally cloned on Windows with
