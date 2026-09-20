@@ -41,6 +41,7 @@ def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker:
 
 TRACKED = [
     "src/cmake/config.hpp.in",
+    "CMakeLists.txt",
     "src/CMakeLists.txt",
     "src/aliceVision/depthMap/CMakeLists.txt",
     "src/aliceVision/mvsData/ROI.hpp",
@@ -427,6 +428,46 @@ endif()
     patch(AV / "src/CMakeLists.txt",
           "# ==============================================================================\n# SYCL/AdaptiveCpp\n",
           hip_block, after=False)
+
+    # 3c. Bundle search paths. Two upstream defects in one line of the `bundle` target:
+    #     it passes -DBUNDLE_LIBS_PATHS=${BUNDLE_LIBS_PATHS} unquoted AND without VERBATIM.
+    #     Unquoted, the CMake list expands into separate command-line arguments, so
+    #     MakeBundle.cmake receives only the FIRST path and silently drops the rest - the CUDA
+    #     toolkit's lib64 has never actually been on that search path. Quoting alone is not
+    #     enough either: ninja runs the command through sh, where the semicolons separate
+    #     commands, and sh then tries to execute the paths ("Permission denied"). The COMMAND
+    #     form with VERBATIM makes CMake escape each argument for the native shell, which is
+    #     also correct for the Windows bundles.
+    #
+    #     Invisible for as long as every dependency was resolvable some other way; PopSIFT,
+    #     installed outside the deps prefix, is the first one that was not.
+    #     Upstream bug, not ours - candidate for a PR alongside #2179 / #2181.
+    top = AV / "CMakeLists.txt"
+    t = top.read_text(encoding="utf-8")
+    if "VERBATIM" not in t:
+        nl_top = "\r\n" if "\r\n" in t else "\n"
+        old_bundle = (
+            "add_custom_target(bundle" + nl_top
+            + "    ${CMAKE_COMMAND}" + nl_top
+            + "    -DBUNDLE_INSTALL_PREFIX=${ALICEVISION_BUNDLE_PREFIX}" + nl_top
+            + "    -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}" + nl_top
+            + "    -DBUNDLE_LIBS_PATHS=${BUNDLE_LIBS_PATHS}" + nl_top
+            + "    -DCMAKE_INSTALL_LIBDIR=${CMAKE_INSTALL_LIBDIR}" + nl_top
+            + "    -P ${CMAKE_CURRENT_SOURCE_DIR}/src/cmake/MakeBundle.cmake" + nl_top
+            + ")" + nl_top)
+        assert t.count(old_bundle) == 1, "bundle target block not found once in CMakeLists.txt"
+        new_bundle = (
+            "add_custom_target(bundle" + nl_top
+            + "    COMMAND ${CMAKE_COMMAND}" + nl_top
+            + "    -DBUNDLE_INSTALL_PREFIX=${ALICEVISION_BUNDLE_PREFIX}" + nl_top
+            + "    -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}" + nl_top
+            + "    \"-DBUNDLE_LIBS_PATHS=${BUNDLE_LIBS_PATHS}\"" + nl_top
+            + "    -DCMAKE_INSTALL_LIBDIR=${CMAKE_INSTALL_LIBDIR}" + nl_top
+            + "    -P ${CMAKE_CURRENT_SOURCE_DIR}/src/cmake/MakeBundle.cmake" + nl_top
+            + "    VERBATIM" + nl_top
+            + ")" + nl_top)
+        t = t.replace(old_bundle, new_bundle, 1)
+        top.write_text(t, encoding="utf-8", newline="")
 
     # 4. depthMap/CMakeLists.txt: HIP source handling + link line
     dm = AV / "src/aliceVision/depthMap/CMakeLists.txt"

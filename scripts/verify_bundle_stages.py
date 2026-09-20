@@ -53,23 +53,30 @@ def main(argv):
     # precisely why the broken build passed every earlier check.
     #
     # Each entry gives its own --output, because Meshing wants a file and the rest want a folder.
+    #
+    # The last field is a regex that MUST appear in the stage's log. Counting output files is not
+    # enough and has already fooled this check once: Texturing writes texturedMesh.obj/.mtl and
+    # exits 0 while generating no textures at all, because --colorMappingFileType defaults to NONE
+    # (found 2026-09-21 on the CUDA bundle). A bundle whose texturing is entirely dead would have
+    # passed. Where a stage carries one of our GPU ports, the regex is that port announcing itself,
+    # so this also catches a silent fall back to the CPU path.
     stages = [
         ("FeatureExtraction (sift/PopSIFT)", "aliceVision_featureExtraction", [
             "--input", ci, "--describerTypes", "sift", "--describerPreset", "normal",
             "--describerQuality", "normal", "--contrastFiltering", "GridSort",
             "--gridFiltering", "True", "--forceCpuExtraction", "False",
-            "--rangeStart", "0", "--rangeSize", "2"], "*.feat", None),
+            "--rangeStart", "0", "--rangeSize", "2"], "*.feat", None, r"(?i)popsift|gpu"),
         ("FeatureMatching (GPU matcher)", "aliceVision_featureMatching", [
             "--input", ci, "--featuresFolders", fe, "--imagePairsList", im,
             "--describerTypes", "dspsift", "--geometricEstimator", "acransac",
             "--geometricFilterType", "fundamental_matrix",
-            "--rangeStart", "0", "--rangeSize", "40"], "*.txt", None),
+            "--rangeStart", "0", "--rangeSize", "40"], "*.txt", None, r"GPU brute-force"),
         ("DepthMap", "aliceVision_depthMapEstimation", [
             "--input", sfm, "--imagesFolder", pds, "--downscale", "2",
-            "--rangeStart", "0", "--rangeSize", "2"], "*.exr", None),
+            "--rangeStart", "0", "--rangeSize", "2"], "*.exr", None, r"Number of GPU devices"),
         ("DepthMapFilter", "aliceVision_depthMapFiltering", [
             "--input", sfm, "--depthMapsFolder", dmf,
-            "--rangeStart", "0", "--rangeSize", "2"], "*.exr", None),
+            "--rangeStart", "0", "--rangeSize", "2"], "*.exr", None, r"filter votes GPU"),
         # Meshing and Texturing have no range option, so these are full runs and the slow part of
         # this script. They are here anyway: leaving out the stages that happened to be validated
         # elsewhere is exactly how GPU SIFT shipped broken.
@@ -77,11 +84,18 @@ def main(argv):
             "--input", sfm, "--depthMapsFolder", dmf,
             "--outputMesh", (ROOT / "build/bundle-stages/aliceVision_meshing/mesh.obj").as_posix(),
             "--maxPoints", "1000000", "--maxInputPoints", "10000000",
-            "--estimateSpaceFromSfM", "True"], "*.abc", "densePointCloud.abc"),
+            "--estimateSpaceFromSfM", "True"], "*.abc", "densePointCloud.abc", r"knn check: identical"),
+        # Texturing needs Meshing's densePointCloud.abc (not the SfM) for visibility, and
+        # --colorMappingFileType or it writes no textures. Both were wrong the first time.
+        ("Texturing (GPU)", "aliceVision_texturing", [
+            "--input", str(ROOT / "build/bundle-stages/aliceVision_meshing/densePointCloud.abc"),
+            "--inputMesh", str(ROOT / "build/bundle-stages/aliceVision_meshing/mesh.obj"),
+            "--imagesFolder", pds, "--colorMappingFileType", "png"], "texture_*.png", None,
+            r"cheshire texturing profile"),
     ]
 
     results = []
-    for label, exe, args, glob, outfile in stages:
+    for label, exe, args, glob, outfile, expect in stages:
         dest = out / exe
         if dest.exists():
             for f in dest.rglob("*"):
@@ -94,10 +108,15 @@ def main(argv):
         with log.open("w", encoding="utf-8", errors="replace") as f:
             rc = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, shell=True).returncode
         made = len(list(dest.glob(glob)))
-        ok = rc == 0 and made > 0
+        text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
+        saw = bool(re.search(expect, text)) if expect else True
+        ok = rc == 0 and made > 0 and saw
         results.append((label, ok, rc, made, round(time.time() - t0)))
         print(f"  {'ok ' if ok else 'FAIL'}  {label:<34} exit={rc:<12} produced {made:<4} {results[-1][4]}s")
         if not ok:
+            if rc == 0 and made > 0 and not saw:
+                print(f"        ran and produced output, but nothing matched /{expect}/ -"
+                      f" the GPU path is silent or the stage did no real work")
             print(f"        {log}")
             for line in log.read_text(encoding='utf-8', errors='replace').splitlines()[-3:]:
                 print(f"        {line[:100]}")

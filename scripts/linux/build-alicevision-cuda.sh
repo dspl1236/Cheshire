@@ -11,10 +11,10 @@
 # $<COMPILE_LANGUAGE:HIP> generator expression, which a CUDA build never receives. And the patch's
 # HIP block is gated on "no CUDA toolkit found", so ALICEVISION_USE_CUDA=ON skips it entirely.
 #
-# The memory bridge is NOT in this build. It is HIP-only by construction (bridge.h includes
-# hip/hip_runtime.h) and, more to the point, it exists because hipMallocManaged does not migrate
-# pages. CUDA's does. Whether it is needed here is a measurement to take after this builds, not an
-# assumption to bake in (docs/18).
+# The memory bridge IS in this build (since 2026-09-21). bridge.h reaches CUDA through
+# cheshire/hip_to_cuda.h, and memory.hpp routes its five device alloc/free sites to it. Disable at
+# run time with CHESHIRE_BRIDGE=0, or pick CUDA unified memory instead with
+# CHESHIRE_CUDA_MANAGED=1; measurements for all three in docs/18.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 AV_DEV="$ROOT/third_party/aliceVision"
@@ -26,6 +26,29 @@ AV_BUILD="${AV_BUILD:-$HOME/av-cuda-build}"
 AV_INSTALL="${AV_INSTALL:-/opt/AliceVision_cuda}"
 AV_BUNDLE="${AV_BUNDLE:-$AV_INSTALL/bundle}"
 JOBS="${JOBS:-$(nproc)}"
+
+# GPU SIFT. PopSIFT is a CUDA project to begin with (third_party/popsift is a clone of
+# alicevision/popsift v0.10.0; scripts/apply_popsift_patch.py is what adapts it *to* HIP), so this
+# needs a build rather than a port - see scripts/linux/build-popsift-cuda.sh. Built OFF until
+# 2026-09-21, which made the bundle die on --describerTypes sift with a bare std::runtime_error.
+POPSIFT="${CHESHIRE_POPSIFT:-ON}"
+POPSIFT_DIR="${CHESHIRE_POPSIFT_DIR:-/opt/popsift-cuda/lib/cmake/PopSift}"
+if [ "$POPSIFT" = "ON" ] && [ ! -f "$POPSIFT_DIR/PopSiftConfig.cmake" ]; then
+  echo "[popsift] no PopSiftConfig.cmake under $POPSIFT_DIR - building without GPU SIFT" >&2
+  echo "[popsift] build it with scripts/linux/build-popsift-cuda.sh, or set CHESHIRE_POPSIFT=OFF" >&2
+  POPSIFT=OFF; POPSIFT_DIR=""
+fi
+[ "$POPSIFT" = "ON" ] && echo "[popsift] GPU SIFT from $POPSIFT_DIR"
+
+# fixup_bundle resolves every DT_NEEDED by name against these paths, so a library that is not
+# listed becomes "cannot resolve item ... READ_ELF given FILE that does not exist" and the
+# bundle target fails outright (seen the moment PopSIFT was switched on, 2026-09-21).
+# PopSIFT installs outside the deps prefix, so it has to be added explicitly.
+BUNDLE_LIB_PATHS="$AV_DEPS/lib;$CUDA/lib64"
+if [ "$POPSIFT" = "ON" ]; then
+  POPSIFT_LIB="$(cd "$POPSIFT_DIR/../.." 2>/dev/null && pwd)"
+  [ -n "$POPSIFT_LIB" ] && BUNDLE_LIB_PATHS="$BUNDLE_LIB_PATHS;$POPSIFT_LIB"
+fi
 
 # Beats upstream's FORCEd "all-major" (patch step 5b), which would compile every .cu five times.
 export CHESHIRE_CUDA_ARCHS="$ARCHS"
@@ -50,11 +73,11 @@ cmake "$AV_DEV" -G Ninja \
   -DCMAKE_PREFIX_PATH="$AV_DEPS;$CUDA" \
   -DCMAKE_INSTALL_PREFIX="$AV_INSTALL" \
   -DALICEVISION_BUNDLE_PREFIX="$AV_BUNDLE" \
-  "-DALICEVISION_BUNDLE_SEARCH_LIBS_PATHS=$AV_DEPS/lib;$CUDA/lib64" \
+  "-DALICEVISION_BUNDLE_SEARCH_LIBS_PATHS=$BUNDLE_LIB_PATHS" \
   -DCMAKE_CUDA_COMPILER="$CUDA/bin/nvcc" \
   -DCUDAToolkit_ROOT="$CUDA" \
   -DALICEVISION_USE_CUDA=ON -DALICEVISION_USE_HIP=OFF -DALICEVISION_USE_SYCL=OFF \
-  -DALICEVISION_USE_POPSIFT=OFF \
+  -DALICEVISION_USE_POPSIFT="$POPSIFT" ${POPSIFT_DIR:+-DPopSift_DIR=$POPSIFT_DIR} \
   -DALICEVISION_USE_CCTAG=OFF -DALICEVISION_USE_APRILTAG=OFF \
   -DALICEVISION_USE_OPENCV=OFF -DALICEVISION_USE_ONNX=OFF -DALICEVISION_USE_ONNX_GPU=OFF \
   -DALICEVISION_USE_USD=OFF -DALICEVISION_USE_ALEMBIC=ON -DALICEVISION_BUILD_LIDAR=OFF \

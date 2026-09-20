@@ -315,3 +315,82 @@ predicted before the port. What the bridge buys on CUDA is not survival, it is c
 output in a quarter of the VRAM for 6 %, leaving the card free for something else. Unified memory
 is a genuine alternative here in a way it never was on AMD - free when nothing binds, and it
 tolerates an over-committed planner where the bridge needs its budget told the truth.
+
+## Every GPU stage, verified on CUDA (2026-09-21)
+
+`DepthMap` is not why an NVIDIA user would want this build - upstream already gives them that.
+The value is the stages upstream CUDA does **not** have: the GPU descriptor matcher, the
+depth-map filter, meshing (votes, min-cut, visibility kNN) and texturing. All of those had only
+ever run as HIP. They compiled as CUDA, which is the cheapest evidence there is, so they were run
+from the bundle with each port's `CHESHIRE_*_CHECK` toggle on - those answer the same queries on
+the host and count disagreements, which is the difference between "the stage executed" and "the
+stage is right".
+
+| stage | result on the GTX 1080 Ti |
+|---|---|
+| FeatureExtraction (`sift` / PopSIFT) | **2 s** vs 22 s for CPU `dspsift` - 11x, 22939 keypoints |
+| FeatureMatching (GPU matcher) | `GPU brute-force L2 2-NN on NVIDIA GeForce GTX 1080 Ti` |
+| DepthMap | byte-identical to the reference (above); bridge planner live |
+| DepthMapFilter (GPU filter) | GPU votes, ~1.17 M pixels per view |
+| Meshing (votes / min-cut / kNN) | 153 s, 392 788 vertices, 781 463 faces |
+| Texturing (GPU) | 7 atlases; the port profiles its own rasterisation |
+
+The meshing self-checks are the strongest statement available, and they are exact:
+
+```
+filterByPixSize check: identical to single-threaded upstream on all 1472035 slots
+visibilities on the GPU: 152201929 queries, 36931967 votes, 0 answered on the host
+GPU knn check: identical to nanoflann on all 152201929 queries
+neighbour table check: 21386816 entries, lists differing from upstream's construction: 0
+facet weight check: 21386816 facets, differing from the sequential computation: 0
+```
+
+### GPU SIFT needed a build, not a port
+
+Every `libpopsift.so` on these machines was a HIP build (they declare `libamdhip64`), so the CUDA
+AliceVision had `ALICEVISION_USE_POPSIFT=OFF`. PopSIFT is a CUDA project to begin with -
+`third_party/popsift` is a clone of alicevision/popsift v0.10.0, and `apply_popsift_patch.py` is
+what adapts it *to* HIP - so the CUDA side just wants the pristine source:
+`scripts/linux/build-popsift-cuda.sh`. `build-alicevision-cuda.sh` now finds it automatically and
+says so loudly when it cannot, instead of silently producing a bundle without GPU SIFT.
+
+### An upstream bug that truncated every bundle's search path
+
+Switching PopSIFT on broke the `bundle` target outright: `cannot resolve item
+'libpopsift.so.0.10.0'`, then `READ_ELF given FILE ... that does not exist`. The cause is one line
+of upstream's top-level `CMakeLists.txt`, with two defects in it:
+
+```cmake
+-DBUNDLE_LIBS_PATHS=${BUNDLE_LIBS_PATHS}     # unquoted, and no VERBATIM
+```
+
+* **Unquoted**, the CMake list expands into separate command-line arguments, so
+  `MakeBundle.cmake` receives only the *first* path and silently drops the rest. The CUDA
+  toolkit's `lib64` has never actually been on that search path.
+* **Quoting alone is not enough**: ninja runs the command through `sh`, where the semicolons
+  separate commands, so `sh` tries to execute the paths -
+  `/bin/sh: 1: /opt/AliceVision_deps/lib64: Permission denied`.
+
+The `COMMAND` form with `VERBATIM` has CMake escape each argument for the native shell, which is
+also correct for the Windows bundles. Applied as patch step 3c; an upstream bug rather than ours,
+and a candidate for a PR alongside #2179 / #2181. It stayed invisible for as long as every
+dependency happened to be resolvable another way; PopSIFT, installed outside the deps prefix, is
+the first one that was not.
+
+### Two corrections to how this was reported
+
+**The FeatureExtraction failure was not PopSIFT.** It was first reported here as "the CUDA bundle
+has no GPU SIFT, so `--describerTypes sift` dies". The real error, once PopSIFT was present and
+the exception could surface, is that the enginebay cache's `cameraInit.sfm` holds Windows `D:`
+paths and those photos are not on the Linux box at all. The original bare `std::runtime_error`
+with no message was that same exception swallowed by `terminate` inside an OpenMP region. The
+PopSIFT work was still necessary and the 11x above is real, but the crash had a different cause,
+and it was attributed on a plausible story rather than on evidence.
+
+**Texturing first "passed" while generating nothing.** It wrote `texturedMesh.obj` and `.mtl`,
+exited 0, and produced no textures at all, because `--colorMappingFileType` defaults to `NONE` and
+the run passed the SfM `sfm.abc` where Meshroom passes Meshing's `densePointCloud.abc` (which is
+what carries visibility). Counting output files is not verifying a stage - the exact blind spot
+`verify_bundle_stages.py` exists to prevent, still present in the checker itself. Each stage there
+now has to emit a specific log line as well, and Texturing was added, wired the way Meshroom
+wires it.
