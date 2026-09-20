@@ -2630,6 +2630,34 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
         t = t.replace(inc, inc + "#include <cstdlib>  // cheshire: CHESHIRE_QR_NULLSPACE" + nl_f7, 1)
         f7.write_text(t, encoding="utf-8", newline="")
 
+    # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
+    #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
+    #     when the cards in front of us are both compute 6.1. FORCE beats -D on the command line, so
+    #     this has to be patched rather than passed. Upstream's default is kept when the variable is
+    #     unset, so the HIP build and anyone building for a spread of cards is unaffected.
+    av = AV / "src/CMakeLists.txt"
+    t = av.read_text(encoding="utf-8")
+    if "CHESHIRE_CUDA_ARCHS" not in t:
+        nl_av = "\r\n" if "\r\n" in t else "\n"
+        old = ('    set(CMAKE_CUDA_ARCHITECTURES' + nl_av
+               + '        "all-major"' + nl_av
+               + '        CACHE STRING "CUDA architectures used to build AliceVision" FORCE' + nl_av
+               + '    )' + nl_av)
+        if t.count(old) != 1:
+            sys.exit("CMAKE_CUDA_ARCHITECTURES block not found once in src/CMakeLists.txt")
+        new = ('    # cheshire: CHESHIRE_CUDA_ARCHS overrides the architecture list (e.g. 61 for' + nl_av
+               + '    # Pascal). Upstream FORCEs all-major, so -D on the command line cannot win.' + nl_av
+               + '    if (DEFINED ENV{CHESHIRE_CUDA_ARCHS})' + nl_av
+               + '        set(CMAKE_CUDA_ARCHITECTURES' + nl_av
+               + '            "$ENV{CHESHIRE_CUDA_ARCHS}"' + nl_av
+               + '            CACHE STRING "CUDA architectures used to build AliceVision" FORCE' + nl_av
+               + '        )' + nl_av
+               + '    else()' + nl_av
+               + old.rstrip(nl_av) + nl_av
+               + '    endif()' + nl_av)
+        t = t.replace(old, new, 1)
+        av.write_text(t, encoding="utf-8", newline="")
+
     # 5. regenerate the reviewable patch.
     # CHESHIRE_SKIP_PATCH_EXPORT=1 leaves it alone. The submodule is normally cloned on Windows with
     # autocrlf, so its working tree has CRLF endings while the index has LF; a git diff taken from

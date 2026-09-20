@@ -1,5 +1,5 @@
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 8e3e862..eed1417 100644
+index 8e3e862..456b000 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -77,6 +77,8 @@ else()
@@ -11,7 +11,27 @@ index 8e3e862..eed1417 100644
  option(ALICEVISION_DEPTHMAP_BACKEND "Compile DepthMap component with support for CUDA or SYCL or both" AUTO)
  trilean_option(ALICEVISION_USE_OPENCV "Enable use of OpenCV algorithms" OFF)
  trilean_option(ALICEVISION_USE_OPENCV_CONTRIB "Enable use of OpenCV algorithms from extra modules" AUTO)
-@@ -781,6 +783,51 @@ if (ALICEVISION_HAVE_CUDA)
+@@ -738,10 +740,19 @@ endif()
+ 
+ if (ALICEVISION_HAVE_CUDA)
+ 
++    # cheshire: CHESHIRE_CUDA_ARCHS overrides the architecture list (e.g. 61 for
++    # Pascal). Upstream FORCEs all-major, so -D on the command line cannot win.
++    if (DEFINED ENV{CHESHIRE_CUDA_ARCHS})
++        set(CMAKE_CUDA_ARCHITECTURES
++            "$ENV{CHESHIRE_CUDA_ARCHS}"
++            CACHE STRING "CUDA architectures used to build AliceVision" FORCE
++        )
++    else()
+     set(CMAKE_CUDA_ARCHITECTURES
+         "all-major"
+         CACHE STRING "CUDA architectures used to build AliceVision" FORCE
+     )
++    endif()
+ 
+     # default stream legacy implies that the 0 stream synchronizes all streams
+     add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:--default-stream=legacy>)
+@@ -781,6 +792,51 @@ if (ALICEVISION_HAVE_CUDA)
      endif()
  endif()
  

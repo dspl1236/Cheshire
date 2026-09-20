@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Cheshire Linux: build AliceVision with the CUDA backend, from the same patched tree the HIP build
+# uses, against the same superbuild dependencies (scripts/linux/build-deps.sh).
+#
+# Usage: scripts/linux/build-alicevision-cuda.sh [configure|build|install] [arch list]
+#   arch list default 61: both test cards (GTX 1080 Ti, GTX 1050 Ti) are compute 6.1, and CUDA 12.9
+#   is the LAST toolkit that supports Pascal - 13 removed Maxwell, Pascal and Volta (docs/18).
+#
+# Nothing is ported for this. The GPU sources added in v0.2.5-v0.2.16 are CUDA dialect; the HIP
+# build reaches them by force-including cheshire/cuda_to_hip.h through a
+# $<COMPILE_LANGUAGE:HIP> generator expression, which a CUDA build never receives. And the patch's
+# HIP block is gated on "no CUDA toolkit found", so ALICEVISION_USE_CUDA=ON skips it entirely.
+#
+# The memory bridge is NOT in this build. It is HIP-only by construction (bridge.h includes
+# hip/hip_runtime.h) and, more to the point, it exists because hipMallocManaged does not migrate
+# pages. CUDA's does. Whether it is needed here is a measurement to take after this builds, not an
+# assumption to bake in (docs/18).
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+AV_DEV="$ROOT/third_party/aliceVision"
+STEP="${1:-install}"
+ARCHS="${2:-61}"
+CUDA="${CUDA_PATH:-/usr/local/cuda-12.9}"
+AV_DEPS="${AV_DEPS:-/opt/AliceVision_deps}"
+AV_BUILD="${AV_BUILD:-$HOME/av-cuda-build}"
+AV_INSTALL="${AV_INSTALL:-/opt/AliceVision_cuda}"
+JOBS="${JOBS:-$(nproc)}"
+
+# Beats upstream's FORCEd "all-major" (patch step 5b), which would compile every .cu five times.
+export CHESHIRE_CUDA_ARCHS="$ARCHS"
+
+if [ ! -x "$CUDA/bin/nvcc" ]; then
+  echo "no nvcc at $CUDA/bin/nvcc - set CUDA_PATH" >&2
+  exit 1
+fi
+echo "[cuda] $("$CUDA/bin/nvcc" --version | sed -n 4p)"
+echo "[cuda] architectures: $ARCHS"
+echo "[cuda] build=$AV_BUILD install=$AV_INSTALL jobs=$JOBS"
+
+# Same patch the HIP build applies; the HIP-specific parts gate themselves off when CUDA is found.
+# Export is skipped for the same reason as the HIP script: CRLF in the submodule working tree would
+# rewrite the reviewable patch as a whole-tree diff.
+CHESHIRE_SKIP_PATCH_EXPORT=1 python3 "$ROOT/scripts/apply_hip_patch.py"
+
+mkdir -p "$AV_BUILD"
+cd "$AV_BUILD"
+cmake "$AV_DEV" -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH="$AV_DEPS;$CUDA" \
+  -DCMAKE_INSTALL_PREFIX="$AV_INSTALL" \
+  -DCMAKE_CUDA_COMPILER="$CUDA/bin/nvcc" \
+  -DCUDAToolkit_ROOT="$CUDA" \
+  -DALICEVISION_USE_CUDA=ON -DALICEVISION_USE_HIP=OFF -DALICEVISION_USE_SYCL=OFF \
+  -DALICEVISION_USE_POPSIFT=OFF \
+  -DALICEVISION_USE_CCTAG=OFF -DALICEVISION_USE_APRILTAG=OFF \
+  -DALICEVISION_USE_OPENCV=OFF -DALICEVISION_USE_ONNX=OFF -DALICEVISION_USE_ONNX_GPU=OFF \
+  -DALICEVISION_USE_USD=OFF -DALICEVISION_USE_ALEMBIC=ON -DALICEVISION_BUILD_LIDAR=OFF \
+  -DALICEVISION_BUILD_TESTS=OFF -DALICEVISION_BUILD_DOC=OFF -DALICEVISION_BUILD_SWIG_BINDING=OFF \
+  -DMINIGLOG=ON -DTARGET_ARCHITECTURE=core \
+  ${CHESHIRE_CMAKE_EXTRA:-}
+
+echo "=== what the configure decided"
+grep -E "ALICEVISION_HAVE_CUDA|ALICEVISION_HAVE_HIP|CMAKE_CUDA_ARCHITECTURES" CMakeCache.txt || true
+
+[ "$STEP" = "configure" ] && exit 0
+cmake --build . -j "$JOBS"
+[ "$STEP" = "build" ] && exit 0
+cmake --install .
+echo "=== installed to $AV_INSTALL"
