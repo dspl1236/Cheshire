@@ -412,7 +412,43 @@ same bits. The files themselves are not byte-identical - that difference is EXR 
 metadata, confirmed by comparing the decoded pixel arrays directly rather than trusting
 `compare_depthmaps.py`'s four-decimal output, where "0.0000" covers anything under 5e-5.
 
-Six of the 41 views so far; the full set has not been run on Windows yet.
+### All 41 views (2026-09-21)
+
+The six-view sample was **not** representative, which is the reason for running the rest rather
+than extrapolating from it: 37 of 41 views are pixel bit-identical, and four are not.
+
+| | Windows vs Linux (ours) | CUDA 11.6 Win vs CUDA 11.3 Linux (upstream's own) |
+|---|---|---|
+| bit-identical views | **37 / 41** | 37 / 41 |
+| mask agreement >= 0.95 | 41 / 41 | 41 / 41 |
+| median view within 1 % | **100 %** | 100 % |
+| worst view | **92.85 %** | 92.9 % |
+
+So our cross-platform divergence is indistinguishable from the divergence upstream's own binaries
+show between the same two platforms - and ours carries an extra variable theirs does not, a
+different GPU (1050 Ti vs 1080 Ti).
+
+Two of the four differ trivially (max relative 6e-4). The two that differ substantially are
+`1227295871` and `1430763847` - precisely the views `docs/04` already names as the least stable
+in every cross-build comparison (mask agreement 0.971, and the worst view at 0.917 respectively).
+They are the ones that flip when anything about the floating-point path changes.
+
+`compare_depthmaps.py` reports FAIL, because its strict criterion is >= 98 % of pixels within 1 %
+on *every* view and the worst is 92.85 %. `README` already records that bar as sitting below the
+algorithm's own noise floor.
+
+### The 4 GB card is where the planner finally binds
+
+41 views on the GTX 1050 Ti: 640.5 s against 211 s on the 11 GB 1080 Ti. More usefully, the
+planner reported
+
+    Cheshire bridge planner 1: VRAM budget 2417.33 MB, 0 full R cameras + 4 tiles
+
+**Zero full R cameras.** On the 1080 Ti it allocated two or three full camera sets plus tiles, and
+every artificial cap was absorbed by cutting tile parallelism without spilling a byte. Here it
+could not fit even one, and fell back to tiles alone. That is the regime the bridge exists for,
+reached honestly rather than by inflating a budget - the oversubscription test that could not be
+constructed on 11 GB (see above) simply happens on 4 GB.
 
 ### Toolchain
 
@@ -465,3 +501,19 @@ And a `Test-Path "...\$d"` sent through ssh quoting never expanded `$d`, so it t
 directory, returned `True` six times, and was reported as "the runtime DLLs are in the package".
 They were not. Remote PowerShell goes in a script file, not inside nested quotes.
 
+## The AMD side of these changes, verified on hardware
+
+`bridge.h` and `memory.hpp` are shipping AMD code: the allocation macros now call
+`cheshire::bridge::*` directly instead of going through `cuda_to_hip.h`'s `cudaMalloc` shim, and
+`bridge.h` gained the VRAM-cap clamp. The argument was that this is the same function and
+therefore neutral, and the compiler agreed it builds - but neither of those is a measurement, and
+until 2026-09-21 no AMD card had executed a build from these commits.
+
+Rebuilt for `gfx1201` and run on the RX 9070: 476/476 targets, 0 errors, and the six-view
+`monstree-mini6` output is **byte-identical** to a run of the same views on the same card from
+before any of these changes. Against the CUDA reference it lands where `docs/04` says the
+validated HIP build lands - median error 0, 98-99 % within 1 %, simMAD 0.12-0.25.
+
+Still open: that verification ran from `build/av-gfx1201-install`, not from a bundle produced by
+the patched `bundle` target. The `VERBATIM` fix changes packaging for every platform including the
+AMD packages already published, and a rebuilt binary is not a rebuilt bundle.
