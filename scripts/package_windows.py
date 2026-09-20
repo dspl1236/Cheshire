@@ -44,12 +44,15 @@ for c in cand:
 # System32) and absent on a clean one, where the exe dies with 0xC0000135 and no message. Both
 # are Microsoft-redistributable; take them from the VS Redist tree, falling back to System32.
 import glob
-redist = sorted(glob.glob(r'C:\Program Files*\Microsoft Visual Studio\*\*\VC\Redist\MSVC.*d\Microsoft.VC*.CRT'))        + sorted(glob.glob(r'C:\Program Files*\Microsoft Visual Studio\*\*\VC\Redist\MSVC.*d\Microsoft.VC*.OpenMP.LLVM'))
+# NB: the previous pattern here contained literal form-feed bytes (\f interpreted rather than
+# kept), so it matched nothing and every runtime DLL silently came from the System32
+# fallback instead - fine on a machine with Visual Studio, nothing at all on one without.
+redist = sorted(glob.glob(r'C:\Program Files*\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT'))
 runtime = {}
 for d in redist + [r'C:\Windows\System32']:
     for f in Path(d).glob('*.dll'):
         n = f.name.lower()
-        if n not in runtime and (n.startswith(('msvcp140', 'vcruntime140', 'concrt140')) or n.startswith('libomp140')) and not n.endswith('d.dll') and 'debug' not in n:
+        if n not in runtime and n.startswith(('msvcp140', 'vcruntime140', 'concrt140')) and not n.endswith('d.dll') and 'debug' not in n:
             runtime[n] = f
 missing_rt = set()
 for pe in list((stage / 'bin').glob('*.dll')) + list((stage / 'bin').glob('*.exe')):
@@ -59,6 +62,23 @@ for pe in list((stage / 'bin').glob('*.dll')) + list((stage / 'bin').glob('*.exe
 for n in sorted(missing_rt):
     shutil.copy2(runtime[n], stage / 'bin' / runtime[n].name); have.add(n); copied.append(n)
 print(f"runtime DLLs bundled: {' '.join(sorted(missing_rt))}")
+
+# OpenMP runtime: LLVM's build, not Microsoft's. Microsoft ships the same runtime (the file says
+# Company: LLVM) but only under debug_nonredist / System32, neither of which grants redistribution.
+# LLVM's is Apache-2.0 WITH LLVM-exception, which does - provided the licence travels with it.
+# Copied under the name -openmp:llvm makes the binaries import. Checked by comparing imports rather
+# than exports: Microsoft's build exports 25 OpenMP 6.0 memspace symbols LLVM 20.1.8 lacks, and
+# nothing in the package imports any of them. See third_party/llvm-openmp/README.md.
+omp_src = Path(__file__).parent.parent / 'third_party' / 'llvm-openmp'
+if (omp_src / 'libomp.dll').exists():
+    shutil.copy2(omp_src / 'libomp.dll', stage / 'bin' / 'libomp140.x86_64.dll')
+    if (omp_src / 'LICENSE.TXT').exists():
+        shutil.copy2(omp_src / 'LICENSE.TXT', stage / 'LICENSE.llvm-openmp.txt')
+    copied.append('libomp140.x86_64.dll')
+    print('OpenMP runtime: LLVM build from third_party/llvm-openmp, with its licence')
+else:
+    print('WARNING: no third_party/llvm-openmp/libomp.dll - the package will have no OpenMP runtime'
+          ' and every binary will die with 0xC0000135 on a machine without Visual Studio')
 print(f"copied {len(copied)} DLLs: {' '.join(sorted(copied))[:600]}")
 # the no-repo runner, so the zip is usable on its own: run-depthmap-standalone.cmd <package> <cache> <out>
 shutil.copy2(Path(__file__).with_name('run-depthmap-standalone.cmd'), stage / 'run-depthmap-standalone.cmd')

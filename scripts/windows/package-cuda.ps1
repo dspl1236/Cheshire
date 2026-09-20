@@ -46,12 +46,26 @@ if (Test-Path $popsift) {
 # redist does not have it. The shipped HIP Windows packages already bundle the same set.
 $vs = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Redist\MSVC"
 $crt = Get-ChildItem "$vs\*\x64\Microsoft.VC*.CRT" -Directory | Sort-Object Name | Select-Object -Last 1
-$omp = Get-ChildItem "$vs\*\debug_nonredist\x64\Microsoft.VC*.OpenMP.LLVM\libomp140.x86_64.dll" | Sort-Object FullName | Select-Object -Last 1
-if (-not $crt -or -not $omp) { throw "could not locate the MSVC runtime redistributables under $vs" }
+if (-not $crt) { throw "could not locate the MSVC CRT redistributable under $vs" }
 Write-Output "=== adding the MSVC runtime"
 Copy-Item "$($crt.FullName)\*.dll" $stage -Force
-Copy-Item $omp.FullName $stage -Force
-Write-Output "  from $($crt.Name) + libomp140.x86_64.dll"
+Write-Output "  from $($crt.Name)"
+
+# OpenMP runtime: LLVM's own build, NOT Microsoft's. Microsoft's copy of the same runtime lives
+# under a debug_nonredist path, which is their marker for files outside the Distributable Code
+# terms - not ours to ship, and attribution would not change that. LLVM's is Apache-2.0 WITH
+# LLVM-exception, redistributable on condition of shipping the licence, which is why LICENSE.TXT
+# goes in beside it. See third_party/llvm-openmp/README.md.
+#
+# Copied under the name the binaries import (-openmp:llvm emits libomp140.x86_64.dll). Verified by
+# comparing imports, not exports: 80 binaries import 32 symbols and LLVM's runtime provides all 32.
+$ompSrc = "D:\MMI\cheshire\third_party\llvm-openmp"
+if (-not (Test-Path "$ompSrc\libomp.dll")) {
+    throw "no LLVM OpenMP runtime at $ompSrc - see its README for how to fetch one"
+}
+Copy-Item "$ompSrc\libomp.dll" (Join-Path $stage "libomp140.x86_64.dll") -Force
+Copy-Item "$ompSrc\LICENSE.TXT" (Join-Path $stage "LICENSE.llvm-openmp.txt") -Force
+Write-Output ("  LLVM OpenMP runtime {0:N2} MB + its licence" -f ((Get-Item "$ompSrc\libomp.dll").Length/1MB))
 
 # share/aliceVision carries the OCIO config and sensor database the binaries look for
 $share = "D:\MMI\cheshire\build\av-cuda-install\share"
