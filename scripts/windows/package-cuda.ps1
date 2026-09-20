@@ -21,6 +21,23 @@ Write-Output "=== adding the CUDA runtime"
 Copy-Item "$cuda\cudart64_12.dll" $stage
 "  cudart64_12.dll"
 
+# PopSIFT, taken from its own install tree rather than from the build output.
+#
+# There is a prebuilt popsift.dll in the vcpkg dependency tree
+# (tools/vcpkg-deps/.../bin/popsift.dll, 15.7 MB, no GPU runtime in its import table), and vcpkg's
+# applocal deployment copies it into Windows-AMD64 on every AliceVision build - so the CUDA build
+# linked against the CUDA PopSIFT we built and then *shipped* that one instead. On the GTX 1050 Ti
+# that crashed with 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN) on the first photograph, after
+# printing "Choosing device 0". A CUDA build of PopSIFT is 3.6 MB and imports cudart64_12.dll;
+# if what lands here is 15.7 MB, the wrong one has won again.
+$popsift = "D:\MMI\cheshire\build\popsift-cuda-install\bin\popsift.dll"
+if (Test-Path $popsift) {
+    Copy-Item $popsift $stage -Force
+    Write-Output ("=== PopSIFT from its install tree ({0:N2} MB)" -f ((Get-Item $popsift).Length/1MB))
+} else {
+    Write-Output "=== no CUDA PopSIFT install - GPU SIFT will fall back to the CPU extractor"
+}
+
 # MSVC runtime. The build machine has these in system32 from its VS install, which is why the
 # package ran here and died on bench-pc with 0xC0000135 before a single log line. libomp140 is the
 # one that actually bites: it is the LLVM OpenMP runtime CMake's FindOpenMP selects via
