@@ -60,12 +60,17 @@ def main(argv):
     # (found 2026-09-21 on the CUDA bundle). A bundle whose texturing is entirely dead would have
     # passed. Where a stage carries one of our GPU ports, the regex is that port announcing itself,
     # so this also catches a silent fall back to the CPU path.
+    # Markers must be lines the port emits UNCONDITIONALLY. Three of these were wrong when
+    # first written and none had been run: 'filter votes GPU' and 'knn check: identical'
+    # only appear under CHESHIRE_GPU_FILTER_DEBUG / CHESHIRE_GPU_VIS_CHECK, so both would
+    # have reported a healthy GPU run as a failure, and '(?i)popsift|gpu' matched any path
+    # containing 'gpu' - a directory named gpusift was enough to pass a broken stage.
     stages = [
         ("FeatureExtraction (sift/PopSIFT)", "aliceVision_featureExtraction", [
             "--input", ci, "--describerTypes", "sift", "--describerPreset", "normal",
             "--describerQuality", "normal", "--contrastFiltering", "GridSort",
             "--gridFiltering", "True", "--forceCpuExtraction", "False",
-            "--rangeStart", "0", "--rangeSize", "2"], "*.feat", None, r"(?i)popsift|gpu"),
+            "--rangeStart", "0", "--rangeSize", "2"], "*.feat", None, r"Choosing device \d+:"),
         ("FeatureMatching (GPU matcher)", "aliceVision_featureMatching", [
             "--input", ci, "--featuresFolders", fe, "--imagePairsList", im,
             "--describerTypes", "dspsift", "--geometricEstimator", "acransac",
@@ -76,7 +81,7 @@ def main(argv):
             "--rangeStart", "0", "--rangeSize", "2"], "*.exr", None, r"Number of GPU devices"),
         ("DepthMapFilter", "aliceVision_depthMapFiltering", [
             "--input", sfm, "--depthMapsFolder", dmf,
-            "--rangeStart", "0", "--rangeSize", "2"], "*.exr", None, r"filter votes GPU"),
+            "--rangeStart", "0", "--rangeSize", "2"], "*.exr", None, r"depth map filter: group votes on"),
         # Meshing and Texturing have no range option, so these are full runs and the slow part of
         # this script. They are here anyway: leaving out the stages that happened to be validated
         # elsewhere is exactly how GPU SIFT shipped broken.
@@ -84,7 +89,7 @@ def main(argv):
             "--input", sfm, "--depthMapsFolder", dmf,
             "--outputMesh", (ROOT / "build/bundle-stages/aliceVision_meshing/mesh.obj").as_posix(),
             "--maxPoints", "1000000", "--maxInputPoints", "10000000",
-            "--estimateSpaceFromSfM", "True"], "*.abc", "densePointCloud.abc", r"knn check: identical"),
+            "--estimateSpaceFromSfM", "True"], "*.abc", "densePointCloud.abc", r"meshing votes: ray marching on"),
         # Texturing needs Meshing's densePointCloud.abc (not the SfM) for visibility, and
         # --colorMappingFileType or it writes no textures. Both were wrong the first time.
         ("Texturing (GPU)", "aliceVision_texturing", [
