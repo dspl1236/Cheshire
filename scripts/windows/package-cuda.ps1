@@ -7,8 +7,10 @@
 $ErrorActionPreference = "Stop"
 $src  = "D:\MMI\cheshire\build\av-cuda\Windows-AMD64"
 $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin"
-$stage = "D:\MMI\cheshire\build\pkg-cuda-windows"
-$tarball = "D:\MMI\cheshire\build\cheshire-alicevision-cuda-windows-x64-cuda12.9.tar.gz"
+# The stage directory name is what a user sees after extracting, so it is the release name and not
+# a build-tree one: the zip used to unpack to a folder called pkg-cuda-windows.
+$stage = "D:\MMI\cheshire\build\cheshire-alicevision-cuda-windows-x64"
+$zip = "D:\MMI\cheshire\build\cheshire-alicevision-cuda-windows-x64-cuda12.9.zip"
 
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Path $stage | Out-Null
@@ -86,7 +88,12 @@ $n = (Get-ChildItem $stage -Recurse -File).Count
 $mb = [math]::Round((Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum/1MB,1)
 Write-Output "=== staged: $n files, $mb MB"
 
+# A zip, like the Windows HIP package: Explorer opens one without a tool, and a .tar.gz asset on a
+# Windows release is a papercut even though tar.exe has shipped in Windows since 1809. bsdtar's -a
+# picks the format from the extension, which is far faster than Compress-Archive at this size.
 Write-Output "=== compressing"
-if (Test-Path $tarball) { Remove-Item $tarball -Force }
-tar -czf $tarball -C (Split-Path $stage) (Split-Path $stage -Leaf)
-"  $tarball  ($([math]::Round((Get-Item $tarball).Length/1MB,1)) MB)"
+if (Test-Path $zip) { Remove-Item $zip -Force }
+tar -a -c -f $zip -C (Split-Path $stage) (Split-Path $stage -Leaf)
+if (-not (Test-Path $zip)) { throw "tar produced no archive at $zip" }
+"  $zip  ($([math]::Round((Get-Item $zip).Length/1MB,1)) MB)"
+"  sha256: $((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower())"

@@ -45,6 +45,19 @@ them, choosing per run by the card present. On a
 as measured at v0.2.13, before the geometric verification, point-cloud fusion and UV unwrap work in
 v0.2.15 and v0.2.16 took another 230 s off the stages it covers.
 
+### Why there is an NVIDIA build (v0.3.0)
+
+Read the `upstream` column again: DepthMap is the *only* stage Meshroom puts on a CUDA GPU. Feature
+matching, depth map filtering, meshing and texturing are on the CPU for everyone, NVIDIA included.
+Every one of the ports above was written as CUDA source and compiled through a compat header for
+HIP, so building them *as* CUDA costs nothing but a configure - and an NVIDIA user gets the five
+stages plus GPU SIFT and the memory bridge, none of which are upstream.
+
+DepthMap is the exception and deliberately so: on CUDA it is upstream's own kernels, and a packaged
+run is byte-identical to a Meshroom CUDA 11.3 reference, checked from a clean extraction of the
+release tarball rather than from a build tree. Nobody should switch DepthMap backends for its own
+sake; the reason to take the CUDA package is everything around it.
+
 ## Results
 
 Same photos, same SfM, same DepthMap parameters as the CUDA reference (Meshroom 2023.3 on a
@@ -214,18 +227,29 @@ upstream refuses. Details in `docs/02-memory-bridge.md`.
 the GPU, what the error codes mean, and the dozen settings worth knowing. The rest of this file is
 what was built and why.
 
-Binaries are on the [v0.2.18 release](https://github.com/dspl1236/Cheshire/releases/tag/v0.2.18);
+Binaries are on the [v0.3.0 release](https://github.com/dspl1236/Cheshire/releases/tag/v0.3.0);
 the data sets and references are on
 [v0.1.0](https://github.com/dspl1236/Cheshire/releases/tag/v0.1.0) and unchanged, the depth
 maps being bit-identical between the two:
 
 | asset | size | contents |
 |---|---|---|
-| `cheshire-alicevision-windows-x64.zip` (v0.2.18) | 184 MB | **one Windows package for every AMD card.** Eleven GPU payloads across both HIP runtimes - gfx1010/1012 (RX 5500-5700), gfx1030/1031/1032/1034 (RX 6000), gfx1033/1035/1036 (RDNA2 APUs), and `gfx11-generic` + `gfx12-generic` for RDNA3/RDNA4 and future chips in those families. `cheshire-detect.exe` asks the card which it needs, so there is nothing to choose; `cheshire-run.cmd` runs a node straight from it, `meshroom-pair.cmd` + launcher pair it into Meshroom |
-| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.2.18) | 123 MB | relocatable Linux bundle with the GPU matcher, depth map filter, meshing votes, texturing and the packed-slot mipmap sampler, depth-map code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested) - 19 in all; GPU SIFT covers 15 of those, not the RDNA2 APUs or Vega, which fall back to CPU SIFT; needs only `amdgpu` + `/dev/kfd`; validated on the RX 6750 XT and RX 5500 XT |
+| `cheshire-alicevision-windows-x64.zip` (v0.3.0) | 184 MB | **one Windows package for every AMD card.** Eleven GPU payloads across both HIP runtimes - gfx1010/1012 (RX 5500-5700), gfx1030/1031/1032/1034 (RX 6000), gfx1033/1035/1036 (RDNA2 APUs), and `gfx11-generic` + `gfx12-generic` for RDNA3/RDNA4 and future chips in those families. `cheshire-detect.exe` asks the card which it needs, so there is nothing to choose; `cheshire-run.cmd` runs a node straight from it, `meshroom-pair.cmd` + launcher pair it into Meshroom |
+| `cheshire-alicevision-cuda-windows-x64-cuda12.9.zip` (v0.3.0) | 104 MB | **the same stages for NVIDIA, Windows.** GPU SIFT, matcher, depth map filter, meshing votes and texturing, plus the memory bridge; `cudart` is bundled, so no CUDA toolkit is needed - only the driver. Pair it with `CHESHIRE_BACKEND=cheshire`, or the launcher sees an NVIDIA card and hands every node back to Meshroom |
+| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.3.0) | 123 MB | relocatable Linux bundle with the GPU matcher, depth map filter, meshing votes, texturing and the packed-slot mipmap sampler, depth-map code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested) - 19 in all; GPU SIFT covers 15 of those, not the RDNA2 APUs or Vega, which fall back to CPU SIFT; needs only `amdgpu` + `/dev/kfd`; validated on the RX 6750 XT and RX 5500 XT |
+| `cheshire-alicevision-cuda-linux-x64-cuda12.9.tar.gz` (v0.3.0) | 49 MB | **the same stages for NVIDIA, Linux.** `libcudart` bundled and no `libcuda` (the driver's, not ours); one depth map from a clean extraction of this tarball is byte-identical to the Meshroom CUDA 11.3 reference on a GTX 1080 Ti |
 | `monstree-mini6-meshroom-cache.tar.gz` (v0.1.0) | 383 MB | 6-view Meshroom 2023.3 cache: CameraInit, SfM, PrepareDenseScene and the CUDA DepthMap reference |
 | `monstree-full-cuda-reference.tar.gz` (v0.1.0) | 680 MB | 41-view SfM + CUDA DepthMap reference (GTX 1080 Ti) |
 | `cheshire-hip-depthmap-outputs.tar.gz` (v0.1.0) | 966 MB | the HIP depth maps behind the table above (RX 9070 6 + 41 views, RX 5500 XT, RX 6750 XT) |
+
+The AMD binaries in v0.3.0 are the ones from v0.2.18, unchanged - `aliceVision_depthMapEstimation.exe`
+is byte-identical between the two. What changed in the Windows bundle is the OpenMP runtime (LLVM's
+build, which is redistributable, in place of Microsoft's, which is not) and `meshroom-pair.cmd`,
+which could not pair a bundle at all and so could not pair the only Windows download there was. One
+HIP-side fix is *not* in these binaries: a clamp for a VRAM cap set above the card's total memory,
+which landed after they were built. Rebuilding for it would mean rebuilding all eleven GPU payloads
+and re-validating each on hardware, so it waits for the next HIP refresh; a cap below total memory,
+which is every deliberate use of the setting, is unaffected.
 
 **There is nothing to pick any more.** Until v0.2.17 there were six Windows downloads and choosing
 the wrong one did not fail: a package built for one chip enumerates another, runs every kernel and
@@ -286,12 +310,12 @@ Given a bundle it also picks the payload for the card and prints that too
 (`bundle payload hip6.2/gfx1031`), composing the layered `PATH` per run. A flat single-chip package
 from an older release still works exactly as before - the shape is detected, not configured.
 
-> **v0.2.18 and v0.2.17:** the copy of `meshroom-pair.cmd` inside those zips cannot pair the bundle.
+> **v0.2.17 and v0.2.18:** the copy of `meshroom-pair.cmd` inside those zips cannot pair the bundle.
 > It looks for `<package>\bin\aliceVision_depthMapEstimation.exe`, which only a flat package has,
 > and stops with "no HIP aliceVision_depthMapEstimation.exe". The launcher beside it has always
-> understood both shapes; only the pairing script had not. Take
-> [`scripts/windows/meshroom-pair.cmd`](scripts/windows/meshroom-pair.cmd) from this repository and
-> drop it in beside the launcher, or wait for the next release, which carries the fix.
+> understood both shapes; only the pairing script had not. v0.3.0 carries the fix; on an older zip,
+> drop [`scripts/windows/meshroom-pair.cmd`](scripts/windows/meshroom-pair.cmd) from this repository
+> in beside the launcher.
 
 From v0.2.13 the pairing also covers **FeatureExtraction**, so GPU SIFT reaches the graph: leave
 **forceCpuExtraction** unticked ([docs/14](docs/14-gpu-sift.md)). With an older package, or one
@@ -445,18 +469,25 @@ cells from byte-identical input on every run.
 
 Works end to end on RDNA1, RDNA2 and RDNA4 (Windows and Linux); RDNA3 has its code object in
 every bundle but no hardware run yet. GCN 4 (RX 400/500) is out: the ROCm 7.2 runtime refuses to
-initialise on an RX 570 even though the kernel driver accepts it (docs/06).
+initialise on an RX 570 even though the kernel driver accepts it (docs/06). From v0.3.0 the same
+stages are built for CUDA as well, on both systems.
 
 A whole Meshroom 2023.3 graph runs on the package with all seven Cheshire nodes paired -
 PrepareDenseScene, FeatureExtraction, FeatureMatching, DepthMap, DepthMapFilter, Meshing and
-Texturing. On Windows that is now checked by `scripts/verify_end_to_end.py`, which requires each
-node to print its own port's line rather than merely to produce a mesh, since a pipeline that fell
-back to Meshroom's own binaries would produce a perfectly good one. On 2026-09-20 the v0.2.18
-bundle passed five parameter sets on an RX 9070, 6/6 ports each - including one with every
-`CHESHIRE_GPU_*` switch off, which fell back to the CPU and still produced a textured mesh - and
-the CUDA package passed on a GTX 1050 Ti. On Linux the same pairing was used on a production node
-(house-pc, RX 5500 XT); that machine has since been re-carded, so it stands as a past result
-rather than a standing one. What comes next is the roadmap above.
+Texturing. On Windows that is checked by `scripts/verify_end_to_end.py`, which requires each node
+to print its own port's line rather than merely to produce a mesh, since a pipeline that fell back
+to Meshroom's own binaries would produce a perfectly good one. On 2026-09-20 (docs/04):
+
+* the v0.3.0 Windows AMD bundle passed the stage gate 6/6 and five whole pipelines 5/5 on an
+  RX 9070, 6/6 ports each - including one with every `CHESHIRE_GPU_*` switch off, which fell back
+  to the CPU and still produced a textured mesh;
+* the Windows CUDA package passed the same two gates on a GTX 1050 Ti, 6/6 and 5/5;
+* the Linux CUDA package, extracted from the release tarball rather than run from a build tree,
+  produced a depth map byte-identical to the Meshroom CUDA 11.3 reference on a GTX 1080 Ti.
+
+On Linux the AMD pairing was used on a production node (house-pc, RX 5500 XT); that machine has
+since been re-carded, so it stands as a past result rather than a standing one, and there is no
+Linux equivalent of the end-to-end gate yet. What comes next is the roadmap above.
 
 Primary repository: [git.hausofdub.com/dspl1236/Cheshire](https://git.hausofdub.com/dspl1236/Cheshire);
 mirror: [github.com/dspl1236/Cheshire](https://github.com/dspl1236/Cheshire). Licensed MPL-2.0.

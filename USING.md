@@ -3,6 +3,14 @@
 Meshroom photogrammetry on an AMD Radeon card. This is the practical guide; the reasoning behind
 any of it is in [`docs/`](docs/).
 
+**On an NVIDIA card** there is a CUDA package from v0.3.0 -
+`cheshire-alicevision-cuda-windows-x64-cuda12.9.zip` or
+`cheshire-alicevision-cuda-linux-x64-cuda12.9.tar.gz`. It is worth having because Meshroom puts
+only DepthMap on the GPU; the matcher, depth map filter, meshing votes, texturing and SIFT are on
+the CPU upstream for everyone. Follow this guide with two changes: there is only one package, with
+no payload to select, and the pairing needs `CHESHIRE_BACKEND=cheshire` - otherwise the launcher
+sees an NVIDIA card and hands every node back to Meshroom.
+
 ## 1. Will it work on my card?
 
 | card | supported |
@@ -99,8 +107,10 @@ cheshire: 18907488 rays, 11676791 cells to the GPU (votes + weakly supported sur
 No `[cheshire]` lines at all means the pairing did not take, and Meshroom is running its own
 binaries. Re-run `meshroom-pair.cmd`.
 
-A line saying `Meshroom's own binary` means an NVIDIA card was detected and the CUDA path was
-chosen deliberately. `CHESHIRE_DEPTHMAP=hip` forces Cheshire instead.
+A line saying `Meshroom's own binary` means an NVIDIA card was detected and Meshroom's own CUDA
+build was chosen deliberately. `CHESHIRE_BACKEND=cheshire` forces the Cheshire package instead -
+which is what you want if the package you paired is itself a **Cheshire CUDA** one, since there the
+automatic choice hands every node back to Meshroom and the package never runs.
 
 ## 4. When it goes wrong
 
@@ -129,7 +139,7 @@ Every one of these is off by default. Set to `0` to disable a GPU path, `1` to e
 | `CHESHIRE_GPU_MAXFLOW=0` | graph cut on the CPU |
 | `CHESHIRE_GPU_BLUR=0` | the similarity-map blur through OpenImageIO |
 | `CHESHIRE_GPU_TEX=0` | texturing on the CPU |
-| `CHESHIRE_DEPTHMAP=cuda\|hip` | force the launcher's choice |
+| `CHESHIRE_BACKEND=auto\|cheshire\|meshroom` | force the launcher's choice (`CHESHIRE_DEPTHMAP=cuda\|hip` is the older spelling and still works) |
 
 **Verify rather than trust** - this runs the CPU reference alongside the GPU and reports the
 difference:
