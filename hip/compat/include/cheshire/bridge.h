@@ -1,8 +1,12 @@
 // Cheshire memory bridge v2: VRAM first, mapped system RAM when VRAM is short, and the
 // choice of *what* spills made by buffer class instead of by arrival order.
 //
-// Header-only, HIP-only. Wired in through cuda_to_hip.h so AliceVision's memory.hpp
-// (cudaMalloc / cudaMallocPitch / cudaMalloc3D / cudaFree) uses it without a source change.
+// Header-only, and used by both backends. On HIP it is wired in through cuda_to_hip.h, which
+// shadows AliceVision's cudaMalloc / cudaMallocPitch / cudaMalloc3D / cudaFree so memory.hpp
+// needs no source change. That trick relies on the CUDA names being absent from the HIP
+// headers, so it cannot work in reverse: the CUDA build routes memory.hpp's five device
+// alloc/free sites to this bridge explicitly (apply_hip_patch.py step 6), and picks up the HIP
+// entry points below through cheshire/hip_to_cuda.h.
 //
 // Classes (docs/02-memory-bridge.md):
 //   Volume  3D pitched allocations: SGM / Refine similarity volumes. Streamed by every
@@ -41,7 +45,14 @@
 //                                        downscale 1 under a 2 GB cap spilled 3240 maps of 0 MB)
 //   CHESHIRE_BRIDGE_LOG=1                log placement decisions and a per-class summary at exit
 #pragma once
-#include <hip/hip_runtime.h>
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#  include <hip/hip_runtime.h>
+#else
+// relative, not <cheshire/...>: the CUDA build must never get the shim directory on its
+// include path, because it also holds cuda_runtime.h / cuda_fp16.h shims that would shadow the
+// real CUDA headers. bridge.h and hip_to_cuda.h always sit side by side.
+#  include "hip_to_cuda.h"
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -156,11 +167,32 @@ struct State {
     void initCap() {
         if (capInit) return;
         capInit = true;
+        size_t freeB = 0, totalB = 0;
+        const bool haveInfo = (hipMemGetInfo(&freeB, &totalB) == hipSuccess && freeB > 0);
         if (vramCapEnv == 0) { vramCap = ~size_t(0); }
-        else if (vramCapEnv > 0) { vramCap = size_t(vramCapEnv) << 20; }
+        else if (vramCapEnv > 0) {
+            vramCap = size_t(vramCapEnv) << 20;
+            // An explicit cap above what the device actually has is not reachable, and it is
+            // actively harmful: the cap is also the tile planner's budget, so the planner commits
+            // more concurrent tiles than the card can hold and the bridge fills VRAM to the brim
+            // trying to honour it. Allocations the bridge owns then spill correctly, but anything
+            // it does NOT own has nowhere to go - on CUDA the camera mipmaps are real
+            // cudaMipmappedArrays that never pass through cudaMalloc, so they hit a hard OOM with
+            // a couple of hundred MB left (measured 2026-09-20, docs/18). Clamp to the same
+            // fraction of free VRAM the default uses, which leaves that headroom.
+            // Only a cap above the device's TOTAL memory is clamped - that one is unreachable by
+            // definition. A cap below total is a deliberate budget and is left exactly as asked,
+            // including the ones the bridge-v2 matrices in docs/validation pin down to 500 MB.
+            if (haveInfo && vramCap > totalB) {
+                const size_t ceiling = size_t(double(freeB) * vramFraction);
+                if (log)
+                    std::fprintf(stderr, "[cheshire] bridge: requested vram cap %zu MB exceeds this device (%zu MB total); clamping to %zu MB\n",
+                                 vramCap >> 20, totalB >> 20, ceiling >> 20);
+                vramCap = ceiling;
+            }
+        }
         else {
-            size_t freeB = 0, totalB = 0;
-            if (hipMemGetInfo(&freeB, &totalB) == hipSuccess && freeB > 0) vramCap = size_t(double(freeB) * vramFraction);
+            if (haveInfo) vramCap = size_t(double(freeB) * vramFraction);
             else vramCap = ~size_t(0);
         }
         if (log) {

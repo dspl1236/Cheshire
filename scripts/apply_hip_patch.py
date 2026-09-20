@@ -96,7 +96,7 @@ def main() -> None:
     for f in ["cuda_runtime.h", "cuda_fp16.h", "math_constants.h"]:
         shutil.copy2(ROOT / "hip" / "compat" / "include" / f, dst / f)
     (dst / "cheshire").mkdir(exist_ok=True)
-    for f in ["cuda_to_hip.h", "bridge.h", "mipmap_emu.h"]:
+    for f in ["cuda_to_hip.h", "bridge.h", "hip_to_cuda.h", "managed_cuda.h", "mipmap_emu.h"]:
         shutil.copy2(ROOT / "hip" / "compat" / "include" / "cheshire" / f, dst / "cheshire" / f)
     shutil.copy2(ROOT / "hip" / "port" / "unity" / "depthmap_device_unity.hip", dst / "depthmap_device_unity.hip")
     # header overlay (2-line change) applied in place
@@ -233,8 +233,107 @@ def main() -> None:
         assert i0 > 0 and i1 > i0, "planner block not found in DepthMapEstimator.cpp"
         i1 += len(p1)
         original = t[i0:i1]
-        t = t[:i0] + "#ifdef CHESHIRE_HIP\n" + (ROOT / "hip/port/bridge_v2/planner.cpp.txt").read_text(encoding="utf-8") + "#else\n" + original + "#endif\n" + t[i1:]
+        t = t[:i0] + "#if defined(CHESHIRE_HIP) || defined(CHESHIRE_BRIDGE_CUDA)\n" \
+            + (ROOT / "hip/port/bridge_v2/planner.cpp.txt").read_text(encoding="utf-8") \
+            + "#else\n" + original + "#endif\n" + t[i1:]
+        # The planner needs cheshire::bridge and the macro that says which backend wired it up.
+        # On HIP both arrive through cuda_to_hip.h via the shimmed <cuda_runtime.h>; on CUDA
+        # memory.hpp does it (step 1j). Including memory.hpp here makes that true in both cases
+        # rather than relying on a transitive include through DeviceCache.hpp.
+        inc = '#include "DepthMapEstimator.hpp"\n'
+        assert t.count(inc) == 1, "DepthMapEstimator.cpp self-include not found once"
+        t = t.replace(inc, inc + "#include <aliceVision/depthMap/cuda/host/memory.hpp>  // cheshire: memory bridge\n", 1)
         dme.write_text(t, encoding="utf-8", newline="\n")
+
+    # 1j. CUDA backend: route memory.hpp's device allocations through the memory bridge.
+    #     cuda_to_hip.h cannot do this job here. It works on HIP only because the CUDA names are
+    #     absent from the HIP headers, so its inline cudaMalloc/cudaMallocPitch/... shadow
+    #     nothing; in a CUDA build <cuda_runtime.h> declares the real ones and they would clash.
+    #     A function-like macro is not an option either: AliceVision calls
+    #     cudaMallocPitch<Type>(&buf, ...), and a macro does not expand when the next token is
+    #     '<' rather than '(', so that call - the main one - would silently bypass the bridge.
+    #     Declaring the overloads inside namespace aliceVision::depthMap works because
+    #     unqualified lookup searches the enclosing namespaces before the global one, so every
+    #     call site in this file binds to them with no source change.
+    #
+    #     Note what the bridge does and does not cover on CUDA: camera mipmaps are real
+    #     cudaMipmappedArrays here (HIP-Windows emulates them with buffers, mipmap_emu.h), and
+    #     array allocations do not pass through cudaMalloc. So the Image class stays empty and
+    #     the bridge manages volumes and maps - which docs/02 measured as the cheap classes to
+    #     spill (5.6x and 1.9x) rather than the expensive one (images, 13x).
+    mh = AV / "src/aliceVision/depthMap/cuda/host/memory.hpp"
+    t = mh.read_text(encoding="utf-8")
+    if "CHESHIRE_BRIDGE_CUDA" not in t:
+        # (a) pull the bridge in at file scope. This must happen OUTSIDE the namespace: bridge.h
+        #     includes <map>, <mutex>, <string> and friends, and including it inside
+        #     aliceVision::depthMap would nest all of those in that namespace.
+        inc_anchor = "#include <cuda_runtime.h>\n"
+        assert t.count(inc_anchor) == 1, "memory.hpp <cuda_runtime.h> include not found once"
+        t = t.replace(inc_anchor, inc_anchor +
+                      "\n"
+                      "// --- cheshire memory bridge, CUDA backend --------------------------------------\n"
+                      "// CHESHIRE_HIP is defined by cuda_to_hip.h, which a HIP build reaches through the\n"
+                      "// shimmed <cuda_runtime.h> just included; there the bridge is already wired in and\n"
+                      "// this must stay out of the way. Anything else is a real CUDA toolkit.\n"
+                      "#ifndef CHESHIRE_HIP\n"
+                      "#define CHESHIRE_BRIDGE_CUDA 1\n"
+                      "#include \"../hip/cheshire/bridge.h\"\n"
+                      "#include \"../hip/cheshire/managed_cuda.h\"\n"
+                      "namespace cheshire { namespace devmem {\n"
+                      "// Two placement strategies, picked once per process. The bridge places whole buffers\n"
+                      "// by class; CUDA unified memory migrates pages on fault. CHESHIRE_CUDA_MANAGED=1\n"
+                      "// selects the latter (docs/18). The mode is constant for the process, so an\n"
+                      "// allocation and its free always agree on who owns the pointer.\n"
+                      "inline cudaError_t malloc(void** p, size_t n)\n"
+                      "{ return managed::enabled() ? managed::malloc(p, n) : bridge::malloc(p, n); }\n"
+                      "inline cudaError_t mallocPitch(void** p, size_t* pitch, size_t w, size_t h)\n"
+                      "{ return managed::enabled() ? managed::mallocPitch(p, pitch, w, h) : bridge::mallocPitch(p, pitch, w, h); }\n"
+                      "inline cudaError_t malloc3D(cudaPitchedPtr* pp, cudaExtent e)\n"
+                      "{ return managed::enabled() ? managed::malloc3D(pp, e) : bridge::malloc3D(pp, e); }\n"
+                      "inline cudaError_t free(void* p)\n"
+                      "{ return managed::enabled() ? managed::free(p) : bridge::free(p); }\n"
+                      "}}  // namespace cheshire::devmem\n"
+                      "#endif\n"
+                      "\n"
+                      "#if defined(CHESHIRE_BRIDGE_CUDA)\n"
+                      "// CHESHIRE_BRIDGE=0 falls back to plain cudaMalloc; CHESHIRE_CUDA_MANAGED=1 to unified memory.\n"
+                      "#define CHESHIRE_DEV_MALLOC(p, n)               cheshire::devmem::malloc(reinterpret_cast<void**>(p), (n))\n"
+                      "#define CHESHIRE_DEV_MALLOC_PITCH(p, pi, w, h)  cheshire::devmem::mallocPitch(reinterpret_cast<void**>(p), (pi), (w), (h))\n"
+                      "#define CHESHIRE_DEV_MALLOC_3D(pp, e)           cheshire::devmem::malloc3D((pp), (e))\n"
+                      "#define CHESHIRE_DEV_FREE(p)                    cheshire::devmem::free(p)\n"
+                      "#elif defined(CHESHIRE_HIP)\n"
+                      "// Device allocations go through the bridge; CHESHIRE_BRIDGE=0 disables it at runtime.\n"
+                      "#define CHESHIRE_DEV_MALLOC(p, n)               cheshire::bridge::malloc(reinterpret_cast<void**>(p), (n))\n"
+                      "#define CHESHIRE_DEV_MALLOC_PITCH(p, pi, w, h)  cheshire::bridge::mallocPitch(reinterpret_cast<void**>(p), (pi), (w), (h))\n"
+                      "#define CHESHIRE_DEV_MALLOC_3D(pp, e)           cheshire::bridge::malloc3D((pp), (e))\n"
+                      "#define CHESHIRE_DEV_FREE(p)                    cheshire::bridge::free(p)\n"
+                      "#else\n"
+                      "#define CHESHIRE_DEV_MALLOC(p, n)               cudaMalloc(reinterpret_cast<void**>(p), (n))\n"
+                      "#define CHESHIRE_DEV_MALLOC_PITCH(p, pi, w, h)  cudaMallocPitch(reinterpret_cast<void**>(p), (pi), (w), (h))\n"
+                      "#define CHESHIRE_DEV_MALLOC_3D(pp, e)           cudaMalloc3D((pp), (e))\n"
+                      "#define CHESHIRE_DEV_FREE(p)                    cudaFree(p)\n"
+                      "#endif\n"
+                      "// -------------------------------------------------------------------------------\n", 1)
+        # (b) name the bridge at the call sites. Declaring overloads inside
+        #     aliceVision::depthMap does NOT work: the arguments (float2, __half, cudaPitchedPtr,
+        #     cudaExtent) all live in the global namespace, so ADL adds :: back into the
+        #     candidate set and every call becomes ambiguous with the real CUDA declaration.
+        #     Unqualified lookup stopping at the enclosing namespace does not suppress ADL, it
+        #     merges with it. Macros at the five call sites are unambiguous and keep one code
+        #     path for both backends (on HIP the bridge is the same function cuda_to_hip.h
+        #     would have routed to).
+        sites = [
+            ("cudaMallocPitch<Type>(&buffer, &this->getPitchRef(), this->getUnpaddedBytesInRow(), this->getUnitsInDim(1))",
+             "CHESHIRE_DEV_MALLOC_PITCH(&buffer, &this->getPitchRef(), this->getUnpaddedBytesInRow(), this->getUnitsInDim(1))"),
+            ("cudaMalloc3D(&pitchDevPtr, extent)", "CHESHIRE_DEV_MALLOC_3D(&pitchDevPtr, extent)"),
+            ("cudaError_t err = cudaFree(buffer);", "cudaError_t err = CHESHIRE_DEV_FREE(buffer);"),
+            ("cudaMalloc(&buffer, this->getBytesUnpadded())", "CHESHIRE_DEV_MALLOC(&buffer, this->getBytesUnpadded())"),
+            ("CHECK_CUDA_RETURN_ERROR(cudaFree(buffer));", "CHECK_CUDA_RETURN_ERROR(CHESHIRE_DEV_FREE(buffer));"),
+        ]
+        for old, new in sites:
+            assert t.count(old) == 1, f"memory.hpp: expected exactly one '{old}'"
+            t = t.replace(old, new, 1)
+        mh.write_text(t, encoding="utf-8", newline="\n")
 
     # 1e. block-height override for the occupancy-derived launch shape (CHESHIRE_BLOCK_Y)
     t = sv.read_text(encoding="utf-8")
