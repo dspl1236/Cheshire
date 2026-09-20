@@ -3,14 +3,23 @@ rem Full AliceVision build with the CUDA depth-map backend (Windows, MSVC, prebu
 rem Usage: scripts\windows\build-alicevision-cuda.cmd [configure|build|install]   (default: build)
 rem
 rem Why MSVC and not clang-cl: nvcc on Windows drives cl.exe as its host compiler, and the HIP
-rem build only uses clang-cl because ROCm requires it. With CUDA there is no reason for two
-rem compilers, so this builds everything with cl.
+rem build only uses clang-cl because ROCm requires it.
 rem
-rem Why 14.44 and not the machine's own 14.50: CUDA 12.9's crt/host_config.h reads
+rem CUDA 12.9's crt/host_config.h reads
 rem   #if _MSC_VER < 1910 || _MSC_VER >= 1950
-rem so it accepts MSVC 14.1x-14.4x. 14.50 (VS 2026) is exactly 1950 and is rejected with
-rem "Only the versions between 2017 and 2022 (inclusive) are supported". Measured both ways,
-rem docs/18. That is why VS 2022 Build Tools has to be installed alongside.
+rem so it accepts MSVC 14.1x-14.4x. 14.50 (VS 2026, this machine's own) is exactly 1950 and is
+rem rejected with "Only the versions between 2017 and 2022 (inclusive) are supported" - measured
+rem both ways, docs/18. Hence VS 2022 Build Tools alongside, and the vcvars ordering below.
+rem
+rem After that ordering the whole build uses the 2022 toolset: vcvars puts 14.44 on PATH, env.cmd
+rem then leaves it alone and resolves CHESHIRE_CL to the same compiler. CMAKE_CUDA_HOST_COMPILER
+rem is still set explicitly, because leaving nvcc's host compiler to PATH order is how this broke
+rem the first time, with an error that reads exactly like VS 2022 not being installed.
+rem
+rem (An existing build/av-cuda configured before that ordering was fixed will have C++ cached at
+rem 14.50 while .cu uses 14.44. That mixes toolsets, which MSVC's binary compatibility across 14.x
+rem makes sound, but it is not what a fresh configure produces - delete the build dir if you want
+rem the single-toolset build this script describes.)
 setlocal
 set STEP=%~1
 if "%STEP%"=="" set STEP=build
@@ -26,6 +35,12 @@ rem env.cmd then sees VCToolsInstallDir already set and leaves it alone.
 call "%CHESHIRE_VS2022%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=%CHESHIRE_MSVC_VER% >nul
 if errorlevel 1 ( echo vcvars64 for %CHESHIRE_MSVC_VER% failed & exit /b 1 )
 call "%~dp0..\env.cmd"
+
+rem env.cmd already resolved the active toolset's cl from VCToolsInstallDir, and because vcvars ran
+rem first that is the 2022 one. Reuse it rather than globbing for a version-numbered directory.
+set CUDA_HOST_CL=%CHESHIRE_CL%
+if not defined CUDA_HOST_CL ( echo   env.cmd did not resolve CHESHIRE_CL & exit /b 1 )
+echo [cuda] host compiler: %CUDA_HOST_CL%
 
 rem Refuse to build with the wrong toolset rather than discover it at the first .cu.
 set CLVER=
@@ -69,13 +84,18 @@ rem __std_min/max_element_*i from msvcp140; 14.44 does not (nor does 14.50 - see
 rem scripts\build-alicevision.cmd, which hits the same gap through clang-cl). Built with cl here.
 set STLC=%R%/build/stlcompat-cuda
 if not exist "%STLC%" mkdir "%CHESHIRE_ROOT%\build\stlcompat-cuda"
+rem std_vector_algorithms.cpp is the CUDA build's extra share of that gap: 14.44 is OLDER than the
+rem 14.50 the clang-cl build uses, so its msvcp140 exports even less (__std_adjacent_find_4 and
+rem __std_unique_4 turned up as LNK2019 in CoinUtils linking aliceVision_lInftyComputerVision).
 cl /nologo /O2 /MD /EHsc /std:c++17 /c "%CHESHIRE_ROOT%\hip\compat\stlcompat\std_minmax_element.cpp" /Fo"%CHESHIRE_ROOT%\build\stlcompat-cuda\std_minmax_element.obj" || exit /b 1
-lib /nologo /out:"%CHESHIRE_ROOT%\build\stlcompat-cuda\stlcompat.lib" "%CHESHIRE_ROOT%\build\stlcompat-cuda\std_minmax_element.obj" || exit /b 1
+cl /nologo /O2 /MD /EHsc /std:c++17 /c "%CHESHIRE_ROOT%\hip\compat\stlcompat\std_vector_algorithms.cpp" /Fo"%CHESHIRE_ROOT%\build\stlcompat-cuda\std_vector_algorithms.obj" || exit /b 1
+lib /nologo /out:"%CHESHIRE_ROOT%\build\stlcompat-cuda\stlcompat.lib" "%CHESHIRE_ROOT%\build\stlcompat-cuda\std_minmax_element.obj" "%CHESHIRE_ROOT%\build\stlcompat-cuda\std_vector_algorithms.obj" || exit /b 1
 
 cmake -S "%R%/third_party/aliceVision" -B "%BLD%" -G Ninja -DCMAKE_BUILD_TYPE=Release ^
   "-DCMAKE_EXE_LINKER_FLAGS=%STLC%/stlcompat.lib" ^
   "-DCMAKE_SHARED_LINKER_FLAGS=%STLC%/stlcompat.lib" ^
   "-DCMAKE_CUDA_COMPILER=%CHESHIRE_CUDA_PATH:\=/%/bin/nvcc.exe" ^
+  "-DCMAKE_CUDA_HOST_COMPILER=%CUDA_HOST_CL%" ^
   "-DCUDAToolkit_ROOT=%CHESHIRE_CUDA_PATH:\=/%" ^
   "-DCMAKE_TOOLCHAIN_FILE=%V%/scripts/buildsystems/vcpkg.cmake" ^
   -DVCPKG_TARGET_TRIPLET=x64-windows-release -DVCPKG_MANIFEST_MODE=OFF ^

@@ -1120,6 +1120,22 @@ endif()
     patch(mc, "alicevision_add_library(aliceVision_mesh" + NL, MARK + """ (GPU texturing)
 set(mesh_gpu_links "")
 if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
+    # vcpkg's OpenMeshConfig.cmake exports INTERFACE_COMPILE_OPTIONS "/bigobj" with no language
+    # guard (pybind11 does the same thing correctly, as $<$<COMPILE_LANGUAGE:CXX>:/bigobj>), so it
+    # reaches this target's CUDA sources too. nvcc on Windows reads a leading '/' as a file path
+    # and dies with "A single input file is required for a non-link phase when an outputfile is
+    # specified". mesh is the only CUDA-bearing target that links OpenMesh, which is why nothing
+    # hit this before the GPU texturing port. Re-state the option, guarded.
+    foreach(_om_target OpenMeshCore OpenMeshTools)
+        if (TARGET ${_om_target})
+            get_target_property(_om_opts ${_om_target} INTERFACE_COMPILE_OPTIONS)
+            if (_om_opts AND "/bigobj" IN_LIST _om_opts)
+                list(REMOVE_ITEM _om_opts "/bigobj")
+                list(APPEND _om_opts "$<$<COMPILE_LANGUAGE:C,CXX>:/bigobj>")
+                set_target_properties(${_om_target} PROPERTIES INTERFACE_COMPILE_OPTIONS "${_om_opts}")
+            endif()
+        endif()
+    endforeach()
     list(APPEND mesh_files_headers gpu/texturingGPU.hpp)
     list(APPEND mesh_files_sources gpu/texturingGPU.cu)
     if (ALICEVISION_HAVE_HIP)
