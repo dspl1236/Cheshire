@@ -25,7 +25,26 @@ your card needs.
 ## 2. Install
 
 Download `cheshire-alicevision-windows-x64.zip` from the
-[latest release](https://github.com/dspl1236/Cheshire/releases/latest) and unzip it anywhere.
+[latest release](https://github.com/dspl1236/Cheshire/releases/latest) and unzip it anywhere -
+`C:\cheshire-alicevision-windows-x64` is used below. Inside you will find:
+
+```
+cheshire-alicevision-windows-x64\
+    cheshire-run.cmd              run a node, or ask which payload your card gets
+    cheshire-detect.exe           the card probe, on its own
+    meshroom-pair.cmd             pair it with Meshroom
+    meshroom-pair-launcher.exe    installed by the pairing; not run directly
+    common\  fam\  gpu\           the payloads - nothing to do in here
+```
+
+**Open a terminal in that folder.** In Explorer, shift-right-click an empty part of the window and
+choose *Open in Terminal* (or *Open PowerShell window here*); or open Command Prompt and `cd` to it:
+
+```
+cd C:\cheshire-alicevision-windows-x64
+```
+
+Do not double-click the `.cmd` files - they print their answer and close before you can read it.
 
 Check it sees your card:
 
@@ -35,7 +54,12 @@ cheshire-run.cmd --which
 
 You should get something like `hip6.2 gfx1031` or `rocm7.2 gfx12-generic`. If not, see §4.
 
-Then pair it with an existing Meshroom 2023.3 install:
+> In **PowerShell**, a script in the current folder needs the `.\` prefix:
+> `.\cheshire-run.cmd --which`. Command Prompt does not care. Either way, calling it by its full
+> path works from anywhere: `C:\cheshire-alicevision-windows-x64\cheshire-run.cmd --which`.
+
+Then pair it with an existing Meshroom 2023.3 install - still from that folder, with your Meshroom
+path and the package path:
 
 ```
 meshroom-pair.cmd C:\Meshroom-2023.3.0 C:\cheshire-alicevision-windows-x64
