@@ -38,12 +38,25 @@ older runtime, and both boxes report a maximum of CUDA 13.0, so a 12.9 build run
 | | Pascal `sm_61` | our host compiler |
 |---|---|---|
 | CUDA 13.x | removed | MSVC 14.50 / GCC 13 fine |
-| CUDA 12.9.1 | supported | **Windows: MSVC 193x only** |
+| CUDA 12.9.1 | supported | **Windows: `_MSC_VER` < 1950, i.e. MSVC 14.1x-14.4x** |
 
 WSL Ubuntu 24.04 ships GCC 13.3 and 12.9 accepts GCC 6.x-14.x, so **the Linux side has no friction
-at all**. Windows does: 12.9 tops out at MSVC 193x (Visual Studio 2022) and this machine builds with
-MSVC 14.50 (Visual Studio 2026), so it needs VS 2022 Build Tools installed alongside and `nvcc
--ccbin` pointed at it. That is why Linux goes first.
+at all**. Windows needs VS 2022 Build Tools installed alongside VS 2026. That is why Linux went
+first.
+
+The exact bound, measured on 2026-09-21 rather than taken from the release notes -
+`crt/host_config.h` reads `#if _MSC_VER < 1910 || _MSC_VER >= 1950`, so 12.9 accepts **1910 to
+1949**, which is MSVC 14.1x through 14.4x. This document said "MSVC 193x only", which was too
+strict by a whole toolset generation:
+
+| toolset | `cl` | `_MSC_VER` | nvcc 12.9 |
+|---|---|---|---|
+| VS 2022 Build Tools 14.44 | 19.44.35229 | 1944 | compiles `sm_61` |
+| VS 2026 Build Tools 14.50 | 19.50.35729 | 1950 | rejected: *"Only the versions between 2017 and 2022 (inclusive) are supported"* |
+
+So the machine's own toolset misses by exactly one version, and VS 2022 Build Tools with the
+14.44 toolset is both necessary and sufficient. `-allow-unsupported-compiler` would override the
+check, but that is a way to get a build rather than a working one.
 
 A risk to smoke-test early on the Windows side rather than discover at final link: the prebuilt
 vcpkg dependencies were built with MSVC 14.50, and linking them against `.cu` objects compiled
