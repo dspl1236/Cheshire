@@ -203,6 +203,10 @@ upstream refuses. Details in `docs/02-memory-bridge.md`.
 
 ## Downloads
 
+**If you just want to use it, [USING.md](USING.md) is the guide** - install, check it is really on
+the GPU, what the error codes mean, and the dozen settings worth knowing. The rest of this file is
+what was built and why.
+
 Binaries are on the [v0.2.17 release](https://github.com/dspl1236/Cheshire/releases/tag/v0.2.17);
 the data sets and references are on
 [v0.1.0](https://github.com/dspl1236/Cheshire/releases/tag/v0.1.0) and unchanged, the depth
