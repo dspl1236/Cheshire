@@ -24,6 +24,7 @@ CUDA="${CUDA_PATH:-/usr/local/cuda-12.9}"
 AV_DEPS="${AV_DEPS:-/opt/AliceVision_deps}"
 AV_BUILD="${AV_BUILD:-$HOME/av-cuda-build}"
 AV_INSTALL="${AV_INSTALL:-/opt/AliceVision_cuda}"
+AV_BUNDLE="${AV_BUNDLE:-$AV_INSTALL/bundle}"
 JOBS="${JOBS:-$(nproc)}"
 
 # Beats upstream's FORCEd "all-major" (patch step 5b), which would compile every .cu five times.
@@ -48,6 +49,8 @@ cmake "$AV_DEV" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$AV_DEPS;$CUDA" \
   -DCMAKE_INSTALL_PREFIX="$AV_INSTALL" \
+  -DALICEVISION_BUNDLE_PREFIX="$AV_BUNDLE" \
+  "-DALICEVISION_BUNDLE_SEARCH_LIBS_PATHS=$AV_DEPS/lib;$CUDA/lib64" \
   -DCMAKE_CUDA_COMPILER="$CUDA/bin/nvcc" \
   -DCUDAToolkit_ROOT="$CUDA" \
   -DALICEVISION_USE_CUDA=ON -DALICEVISION_USE_HIP=OFF -DALICEVISION_USE_SYCL=OFF \
@@ -67,3 +70,19 @@ cmake --build . -j "$JOBS"
 [ "$STEP" = "build" ] && exit 0
 cmake --install .
 echo "=== installed to $AV_INSTALL"
+[ "$STEP" = "install" ] && exit 0
+
+cmake --build . --target bundle
+echo "=== bundled to $AV_BUNDLE"
+
+# libcuda is the DRIVER library and must come from the machine that has the GPU. The toolkit ships
+# a link-only stub in lib64/stubs, and a WSL box carries its own flavour; bundling either gives a
+# package that loads and then fails on the first API call. Same class of mistake as the WSL HSA
+# runtime the HIP bundle has to swap out, so it gets the same treatment - drop it, let the host
+# driver provide it.
+if ls "$AV_BUNDLE"/lib/libcuda.so* >/dev/null 2>&1; then
+  echo "removing libcuda from the bundle - it belongs to the host driver"
+  rm -f "$AV_BUNDLE"/lib/libcuda.so*
+fi
+echo "=== CUDA runtime in the bundle"
+ls "$AV_BUNDLE"/lib/libcudart.so* 2>/dev/null || echo "  WARNING: no libcudart in the bundle"
