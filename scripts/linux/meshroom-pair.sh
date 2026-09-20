@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # Cheshire: pair a Meshroom 2023.3 Linux bundle with the Cheshire HIP AliceVision bundle.
 #
-# Meshroom runs its nodes as aliceVision_* executables from <Meshroom>/aliceVision/bin. Two of them
-# get the GPU treatment: DepthMap (the HIP port) and FeatureMatching (the GPU descriptor matcher,
-# bundles from v0.2.5 on). Each becomes a wrapper that execs the Cheshire build with the bundle's
-# libraries in front, or Meshroom's own binary (kept as <name>.cuda) when nvidia-smi finds an NVIDIA
-# card: the choice is made per run, so a node that swaps cards needs no re-pairing. Everything else
-# (SfM, meshing, texturing) keeps running from the Meshroom bundle unchanged. `--unpair` restores.
+# Meshroom runs its nodes as aliceVision_* executables from <Meshroom>/aliceVision/bin. Seven of
+# them get the Cheshire treatment when the bundle carries them: PrepareDenseScene,
+# FeatureExtraction, FeatureMatching, DepthMap, DepthMapFilter, Meshing and Texturing. Each becomes
+# a wrapper that execs the Cheshire build with the bundle's libraries in front, or Meshroom's own
+# binary (kept as <name>.cuda) when nvidia-smi finds an NVIDIA card: the choice is made per run, so
+# a node that swaps cards needs no re-pairing, and CHESHIRE_BACKEND forces it. The nodes Cheshire
+# does not carry - CameraInit, ImageMatching, StructureFromMotion, MeshFiltering, Publish - keep
+# running from the Meshroom bundle unchanged. `--unpair` restores.
+#
+# (Until v0.3.0 this header said two nodes and named meshing and texturing as staying on Meshroom's
+# side; the body has paired seven since v0.2.9.)
 #
 #   meshroom-pair.sh <Meshroom dir> [<cheshire bundle dir>]      # default bundle: ~/apps/cheshire/bundle
 #   meshroom-pair.sh <Meshroom dir> --unpair

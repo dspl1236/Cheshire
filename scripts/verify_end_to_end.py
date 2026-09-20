@@ -3,6 +3,9 @@
 
     verify_end_to_end.py <meshroom dir> <package dir> <photos> <out root> [config ...]
 
+Runs on Windows and on Linux: both platforms pair the same way and take the same two arguments, so
+only the pairing script's name, the directory it lives in here, and whether it needs a shell differ.
+
 Until 2026-09-20 nothing had ever run a whole Meshroom graph on a Cheshire package. The stage gates
 (verify_bundle_stages.py, verify-cuda-stages.ps1) drive one node at a time from a reference cache,
 and the reference caches under build/meshroom were themselves made with DepthMap paired and nothing
@@ -116,7 +119,8 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     env["CHESHIRE_BACKEND"] = "cheshire"
     env.update(cfg["env"])
 
-    cmd = [str(meshroom / "meshroom_batch.exe"),
+    batch = meshroom / ("meshroom_batch.exe" if os.name == "nt" else "meshroom_batch")
+    cmd = [str(batch),
            "--input", str(photos), "--output", str(out / "out"), "--cache", str(cache),
            "--pipeline", "photogrammetry"]
     if cfg["overrides"]:
@@ -157,16 +161,22 @@ def main(argv):
     if bad:
         sys.exit(f"unknown config(s): {', '.join(bad)} - have {', '.join(CONFIGS)}")
 
-    pair = package / "meshroom-pair.cmd"
+    # Both platforms pair the same way and take the same two arguments; only the script's name,
+    # its directory here, and whether it needs a shell differ.
+    win = os.name == "nt"
+    pair_name = "meshroom-pair.cmd" if win else "meshroom-pair.sh"
+    pair = package / pair_name
     if not pair.exists():
-        pair = Path(__file__).resolve().parent / "windows" / "meshroom-pair.cmd"
+        pair = Path(__file__).resolve().parent / ("windows" if win else "linux") / pair_name
     if not pair.exists():
-        sys.exit("meshroom-pair.cmd not found in the package or in scripts/windows")
+        sys.exit(f"{pair_name} not found in the package or in scripts/{'windows' if win else 'linux'}")
+    pair_cmd = [str(pair)] if win else ["bash", str(pair)]
 
     print(f"=== meshroom {meshroom}")
     print(f"=== package  {package}")
     print(f"=== photos   {photos} ({len(list(photos.glob('*.[jJ][pP][gG]')))} jpg)")
-    p = subprocess.run([str(pair), str(meshroom), str(package)], capture_output=True, text=True, shell=True)
+    p = subprocess.run(pair_cmd + [str(meshroom), str(package)],
+                       capture_output=True, text=True, shell=win)
     print(p.stdout.strip() or p.stderr.strip())
     if p.returncode != 0:
         return 2
@@ -178,7 +188,8 @@ def main(argv):
     finally:
         # Always put Meshroom back: pairing renames its binaries in place, and a half-paired install
         # is a trap for whoever opens Meshroom next.
-        u = subprocess.run([str(pair), str(meshroom), "--unpair"], capture_output=True, text=True, shell=True)
+        u = subprocess.run(pair_cmd + [str(meshroom), "--unpair"],
+                           capture_output=True, text=True, shell=win)
         print("\n" + (u.stdout.strip() or u.stderr.strip()))
 
     passed = sum(1 for v in results.values() if v)
