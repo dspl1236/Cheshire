@@ -21,6 +21,20 @@ GPU_DLLS = ['aliceVision_matching.dll', 'popsift.dll', 'aliceVision_fuseCut.dll'
             'aliceVision_mesh.dll', 'aliceVision_depthMap_cuda.dll']
 OFFLOAD = re.compile(rb'amdhsa--([0-9a-z:+\-]+)')
 
+# PopSIFT must NOT be built for a generic target. A generic code object makes it exit 0xC0000094
+# (integer divide by zero) on the first photograph, while the identical source built for the chip
+# works - verified gfx1201 against gfx12-generic on an RX 9070. Every other GPU DLL is fine under a
+# generic target: DepthMap, Meshing and Texturing were all checked. So the generic payloads carry a
+# PopSIFT built for the chips that generic covers, which ROCm 7.2 handles as one fat binary (the
+# v0.2.16 rdna3-rdna4 package shipped ten targets in one popsift.dll).
+#
+# Consequence to remember: a future chip in these families runs the generic AliceVision objects but
+# finds no PopSIFT code object, so GPU SIFT will not cover it until this list is extended.
+POPSIFT_FOR_GENERIC = {
+    'gfx11-generic': 'gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153',
+    'gfx12-generic': 'gfx1200;gfx1201',
+}
+
 FAMILIES = {
     # family:   (tree name, aliceVision build suffix, extra env for the toolchain)
     'rocm7.2': ('gfx1201', '-popsift', {}),
@@ -62,8 +76,13 @@ def main(argv):
         env['CHESHIRE_BUILD_SUFFIX'] = suffix
         logdir = ROOT / 'build' / 'payload' / family / target
 
+        psenv = dict(env)
+        psarch = POPSIFT_FOR_GENERIC.get(target)
+        if psarch:
+            psenv['CHESHIRE_HIP_ARCHS'] = psarch
+            print(f"    popsift for {psarch} (generic code objects break it)")
         rc = run(['cmd', '/c', str(ROOT / 'scripts' / 'build-popsift.cmd'), tree, 'install'],
-                 env, logdir / 'popsift.log')
+                 psenv, logdir / 'popsift.log')
         if rc != 0:
             print(f"    popsift build failed, see {logdir / 'popsift.log'}")
             failures.append((target, 'popsift build')); continue
@@ -84,8 +103,10 @@ def main(argv):
             if not src.exists():
                 bad.append(f"{dll}: missing"); continue
             got = targets_of(src)
-            if target not in got:
-                bad.append(f"{dll}: carries {', '.join(sorted(got)) or 'no code object'}"); continue
+            want = set(psarch.split(';')) if (psarch and dll == 'popsift.dll') else {target}
+            if not want <= got:
+                bad.append(f"{dll}: carries {', '.join(sorted(got)) or 'no code object'}, "
+                           f"wanted {', '.join(sorted(want))}"); continue
             shutil.copy2(src, logdir / dll)
         if bad:
             print(f"    WRONG ARCHITECTURE, not harvested:")

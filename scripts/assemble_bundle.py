@@ -29,9 +29,26 @@ def main(argv):
         print(__doc__); return 2
     outzip, pkg_rocm, pkg_hip = Path(argv[1]), Path(argv[2]), Path(argv[3])
 
+    # Detect the base package's own GPU target instead of assuming one. The build trees are reused
+    # across targets, so whichever was built last is what the install holds - declaring the wrong
+    # one makes the bundler reject the package for carrying the wrong architecture, which is at
+    # least loud, but there is no reason to guess when the answer is in the binary.
+    import re as _re
+    def base_target_of(pkg: Path) -> str:
+        root = pkg if (pkg / 'bin').is_dir() else next(
+            (c for c in pkg.iterdir() if c.is_dir() and (c / 'bin').is_dir()), pkg)
+        for dll in ('aliceVision_depthMap_cuda.dll', 'aliceVision_fuseCut.dll'):
+            f = root / 'bin' / dll
+            if not f.exists():
+                continue
+            found = {m.decode() for m in _re.findall(rb'amdhsa--([0-9a-z:+\-]+)', f.read_bytes())}
+            if len(found) == 1:
+                return found.pop()
+        sys.exit(f"cannot determine the GPU target of {pkg}")
+
     specs, untested = [], {}
-    for family, base, base_target in (('rocm7.2', pkg_rocm, 'gfx12-generic'),
-                                      ('hip6.2', pkg_hip, 'gfx1012')):
+    for family, base, base_target in (('rocm7.2', pkg_rocm, base_target_of(pkg_rocm)),
+                                      ('hip6.2', pkg_hip, base_target_of(pkg_hip))):
         famdir = PAYLOADS / family
         if not famdir.is_dir():
             print(f"error: no payloads under {famdir}"); return 1
@@ -42,6 +59,7 @@ def main(argv):
                   f"it; the base package's own GPU DLLs must match the target it is filed under")
             return 1
         # The base package first: it carries the family's CPU and runtime files.
+        print(f"  {family}: base package carries {base_target}")
         specs.append(f"{family}:{base_target}:{base}")
         specs += [f"{family}:{t}:{famdir / t}" for t in targets if t != base_target]
         untested[family] = [t for t in targets if t not in VALIDATED.get(family, [])]

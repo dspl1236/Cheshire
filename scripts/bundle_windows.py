@@ -51,6 +51,23 @@ def offload_targets(path: Path) -> set:
         return set()
     return {m.decode() for m in OFFLOAD.findall(blob)}
 
+def carries_target(name: str, target: str, tgts: set) -> bool:
+    """Does this binary carry the code object the payload claims?
+
+    Normally that means the target itself. popsift.dll is the exception: a generic code object
+    makes PopSIFT exit 0xC0000094 on the first photograph, so generic payloads deliberately carry a
+    PopSIFT built for the CHIPS that generic covers (docs/16). Accept that, but only when every
+    target it carries really is a chip of the same family - so a gfx11 PopSIFT in a gfx12 payload is
+    still caught.
+    """
+    if target in tgts:
+        return True
+    if name.lower() != 'popsift.dll' or not target.endswith('-generic') or not tgts:
+        return False
+    fam = target[:-len('-generic')].replace('-', '')      # gfx10-3-generic -> gfx103
+    return all(t.startswith(fam) and t[len(fam):].isdigit() for t in tgts)
+
+
 def is_runtime(name: str) -> bool:
     n = name.lower()
     return n.startswith('amdhip64') or n.startswith('amd_comgr')
@@ -128,7 +145,7 @@ def main(argv):
                 # Every GPU-bearing binary in this payload must carry the target it is filed under.
                 # Anything else is a stale artifact from another architecture, and shipping it would
                 # put the wrong code object in a package that looks correct.
-                if target not in tgts:
+                if not carries_target(f.name, target, tgts):
                     mismatched.append((family, target, rel, sorted(tgts)))
                     continue
                 dst = stage / 'gpu' / family / target / name

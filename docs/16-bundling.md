@@ -163,6 +163,46 @@ is not safety, it is nothing. Every target outside the first row is listed in
 Two of these were already shipping unflagged: v0.2.16 released gfx1030 and gfx1032 packages that
 have never run on an RX 6800 or an RX 6600. Marking them is more honest than the status quo.
 
+## PopSIFT will not run from a generic code object
+
+Found after v0.2.17 shipped, which is the point of writing it down.
+
+`aliceVision_featureExtraction --describerTypes sift` exits **0xC0000094**, integer divide by zero,
+on the first photograph when `popsift.dll` is built for `gfx12-generic`. The identical source built
+for `gfx1201` runs fine. Same binary set, same images, same settings, one variable:
+
+| popsift.dll built for | result |
+|---|---|
+| `gfx1201` | exit 0, features extracted |
+| `gfx12-generic` | exit 0xC0000094, nothing produced |
+
+Nothing else is affected. DepthMap, Meshing and Texturing were each run from a generic payload and
+work - Meshing and Texturing byte-identically across four configurations. So the generic payloads
+now carry a PopSIFT built for the **chips that generic covers**, which ROCm 7.2 links as one fat
+binary (the v0.2.16 `rdna3-rdna4` package already shipped ten targets in one `popsift.dll`):
+
+    gfx11-generic  ->  gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153
+    gfx12-generic  ->  gfx1200;gfx1201
+
+The cost is the thing generics were for: a future chip in these families runs the generic
+AliceVision objects but finds no PopSIFT code object, so GPU SIFT will not cover it until that list
+is extended. AliceVision's own kernels still gain the future-proofing; only extraction does not.
+
+### How it got shipped
+
+The v0.2.17 validation ran Meshing and Texturing through the bundle on four machines and reported
+"validated on four configurations". **FeatureExtraction and DepthMap were never run through the
+bundle at all** - not on any of the four. The fleet table has five rows and not one of them
+exercises GPU SIFT, the stage with the largest speedup in the project (2021 s to 26 s).
+
+The failure was not the generic target; that is a vendor quirk and finding it is ordinary work. The
+failure was calling a package validated when the check covered the two stages that had changed and
+skipped the stages that had not. A payload swap changes *every* stage's code objects, so the test
+has to cover every stage that has one, whether or not that stage was touched.
+
+It surfaced by accident, while chasing an unrelated timing discrepancy that happened to need `sift`
+features - the first time anything had asked the bundle for them.
+
 ## Fleet results (v0.2.17)
 
 Every row compares against a value the same host produced before, so nothing is shipped between
