@@ -171,3 +171,75 @@ The like-for-like comparison with the CUDA reference (which ran the same way):
 
 Feature extraction ran on the CPU for the HIP jobs (PopSift is CUDA-only), so the SfM inputs
 differ slightly from the CUDA job's; the vertex counts are within 2 % of each other.
+
+## Package validation (a different question from the numbers above)
+
+Everything above asks whether the depth maps are right. It does not ask whether the *package* runs,
+and those are not the same question: v0.2.17 shipped with GPU SIFT crashing on the first photograph
+while its depth maps were bit-identical across two platforms. Three checks answer the second
+question, and all three found something the first time they were run.
+
+### Stage gates, 2026-09-20
+
+`scripts/verify_bundle_stages.py` (HIP) and `scripts\windows\verify-cuda-stages.ps1` (CUDA) run
+every GPU-bearing stage from the package and require each one to print its own port's line. Neither
+had ever been executed.
+
+| | RX 9070, v0.2.18 bundle (`rocm7.2 gfx12-generic`) | GTX 1050 Ti, Windows CUDA package |
+|---|---|---|
+| FeatureExtraction (GPU SIFT) | ok, 9 s | ok, 3.8 s |
+| FeatureMatching (GPU matcher) | ok, 2 s | ok, 11.4 s |
+| DepthMap | ok, 12 s | ok, 89.5 s |
+| DepthMapFilter (GPU filter) | ok, 1 s | ok, 3.4 s |
+| Meshing (GPU votes) | ok, 18 s | ok, 50.4 s |
+| Texturing (GPU) | ok, 18 s | ok, 47.6 s |
+
+Five markers were wrong when first run, in two families, and both families produce a *silent* wrong
+answer:
+
+* three matched lines the port only emits under a debug variable (`filter votes GPU`,
+  `knn check: identical`, `cheshire texturing profile`), so a healthy GPU run reported as a failure;
+* two matched the port's own DISABLED message as well as its success one (`GPU brute-force` also
+  matches "GPU brute-force disabled by CHESHIRE_GPU_MATCHER=0"; `(?i)popsift|gpu` matches any path
+  containing `gpu`, and bench-pc has a `C:\cheshire\gpusift`), so a CPU run reported as a GPU one.
+
+The rule that catches both: take the marker from the success branch of the port's `available()`,
+and include enough of it that the disabled branch cannot match.
+
+Both gates also fed DepthMapFilter the *filtered* maps as its input, so the stage ran, produced
+output and reported ok while never seeing the input it gets in a pipeline.
+
+### End to end, 2026-09-20
+
+`scripts/verify_end_to_end.py` pairs the package into Meshroom and runs whole graphs, requiring both
+a textured mesh and a port line from every paired node - a pipeline that fell back to Meshroom's own
+binaries produces a perfectly good mesh, and counting files cannot tell the difference.
+
+Before this, no complete Meshroom graph had ever run on a Cheshire package on Windows, and none
+could have: `meshroom-pair.cmd` required `<pkg>\bin\` and rejected the bundle, which has been the
+only Windows download since v0.2.17. The reference caches under `build/meshroom` look like
+end-to-end runs and are not - only their DepthMap node carries a `[cheshire]` line; every other node
+in them ran stock Meshroom.
+
+Six photographs (monstree mini6), all seven nodes paired, 6/6 ports in every row:
+
+| config | what it varies | RX 9070 | GTX 1050 Ti |
+|---|---|---|---|
+| `base` | defaults | 59 s | 186 s |
+| `tiles` | 512 px tile buffers - 24 tiles against 6 | 59 s | 180 s |
+| `coarse` | downscale 4, one depth list, `maxPoints=300000` | 41 s | 106 s |
+| `texbig` | 8192 atlas at full resolution | 59 s | 179 s |
+| `cpufallback` | every `CHESHIRE_GPU_*` switch at 0 | 69 s | 233 s |
+
+The settings demonstrably bit rather than re-running the same work five times: `coarse` produced a
+10 MB mesh against 38 MB, `texbig` an 84 MB texture against 27 MB, `tiles` 24 tiles against 6.
+
+`cpufallback` is the one that inverts the test - each port must log its DISABLED line instead - and
+it matters more than it looks: a package whose CPU fallback is broken passes every other check here
+and fails on the first machine without a supported card. All four ports fell back and the pipeline
+still produced a 38 MB mesh and a 26 MB texture, 10 s slower than the GPU run on the RX 9070 at this
+scene size.
+
+The Windows CUDA package had to be re-laid-out with `bin\` before it could be paired at all. Per
+node it made no difference: FeatureExtraction 4.7 vs 4.8 s, FeatureMatching 2.5 vs 2.5, DepthMap
+89.0 vs 87.9, DepthMapFilter 3.5 vs 3.5, Meshing 27.5 vs 27.4, Texturing 31.0 vs 30.7.
