@@ -8,11 +8,16 @@ was written in CUDA dialect and compiled as HIP, so it should build as CUDA with
 This is the work to find out, and to answer one open question properly: **does the memory bridge
 earn its place on a vendor whose driver already migrates pages?**
 
-## Pinned: CUDA 12.9.2
+## Pinned: CUDA 12.9.1
 
 Not a preference - a ceiling. CUDA 13's release notes: *"Removed support for Maxwell, Pascal, and
 Volta GPUs, corresponding to compute capabilities earlier than 7.5."* Both test cards are compute
-6.1, and 12.9.2 is the last 12.x in NVIDIA's archive (the next entry is 13.0.0).
+6.1, so the build has to stay on 12.x.
+
+This section said 12.9.2 until 2026-09-21, which was wrong: the toolkit every measurement in this
+document was taken with reports `V12.9.86`, and that is **12.9.1**'s compiler (12.9.0 ships
+12.9.41). Nothing under `12.9.2/` on NVIDIA's download host resolves, while 12.9.1's installers do.
+The number in the prose was never the number on disk.
 
 Verified rather than assumed - `nvcc -arch=sm_61` compiles on the installed toolkit:
 
@@ -33,7 +38,7 @@ older runtime, and both boxes report a maximum of CUDA 13.0, so a 12.9 build run
 | | Pascal `sm_61` | our host compiler |
 |---|---|---|
 | CUDA 13.x | removed | MSVC 14.50 / GCC 13 fine |
-| CUDA 12.9.2 | supported | **Windows: MSVC 193x only** |
+| CUDA 12.9.1 | supported | **Windows: MSVC 193x only** |
 
 WSL Ubuntu 24.04 ships GCC 13.3 and 12.9 accepts GCC 6.x-14.x, so **the Linux side has no friction
 at all**. Windows does: 12.9 tops out at MSVC 193x (Visual Studio 2022) and this machine builds with
