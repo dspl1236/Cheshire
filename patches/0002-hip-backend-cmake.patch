@@ -1,3 +1,23 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4926de8..d7fc43a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -154,12 +154,13 @@ if(CMAKE_PREFIX_PATH)
+ endif()
+ 
+ add_custom_target(bundle
+-    ${CMAKE_COMMAND}
++    COMMAND ${CMAKE_COMMAND}
+     -DBUNDLE_INSTALL_PREFIX=${ALICEVISION_BUNDLE_PREFIX}
+     -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}
+-    -DBUNDLE_LIBS_PATHS=${BUNDLE_LIBS_PATHS}
++    "-DBUNDLE_LIBS_PATHS=${BUNDLE_LIBS_PATHS}"
+     -DCMAKE_INSTALL_LIBDIR=${CMAKE_INSTALL_LIBDIR}
+     -P ${CMAKE_CURRENT_SOURCE_DIR}/src/cmake/MakeBundle.cmake
++    VERBATIM
+ )
+ 
+ set_target_properties(bundle PROPERTIES FOLDER Packaging)
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
 index 8e3e862..456b000 100644
 --- a/src/CMakeLists.txt
@@ -144,23 +164,24 @@ index 25b80d4..84dba54 100644
          aliceVision_gpu
          aliceVision_sfmData
 diff --git a/src/aliceVision/depthMap/DepthMapEstimator.cpp b/src/aliceVision/depthMap/DepthMapEstimator.cpp
-index 187e8f5..83c8c87 100644
+index 187e8f5..086d883 100644
 --- a/src/aliceVision/depthMap/DepthMapEstimator.cpp
 +++ b/src/aliceVision/depthMap/DepthMapEstimator.cpp
-@@ -5,6 +5,8 @@
+@@ -5,6 +5,9 @@
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
  #include "DepthMapEstimator.hpp"
++#include <aliceVision/depthMap/cuda/host/memory.hpp>  // cheshire: memory bridge
 +#include <aliceVision/alicevision_omp.hpp>
 +#include <algorithm>
  
  #include <aliceVision/system/Logger.hpp>
  #include <aliceVision/system/Timer.hpp>
-@@ -109,6 +111,68 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
+@@ -109,6 +112,68 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
      const double rcMinCostMB = rcCamsCostMB + tileCostMB;
      const double rcMaxCostMB = rcCamsCostMB + nbTilesPerCamera * tileCostMB;
  
-+#ifdef CHESHIRE_HIP
++#if defined(CHESHIRE_HIP) || defined(CHESHIRE_BRIDGE_CUDA)
 +    // cheshire memory bridge v2 (hip/compat/include/cheshire/bridge.h). Measured on the RX 9070
 +    // (docs/02-memory-bridge.md): camera images behind PCIe cost 13x, maps 1.9x, volumes 5.6x;
 +    // tile parallelism costs nothing to give up. So: images stay in VRAM (reserve), tile
@@ -225,7 +246,7 @@ index 187e8f5..83c8c87 100644
      // available device memory
      double deviceMemoryMB;
      {
-@@ -126,6 +190,7 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
+@@ -126,6 +191,7 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
          const double remainingMemoryMB = deviceMemoryMB - (nbSimultaneousFullRc * rcMaxCostMB);
          nbRemainingTiles = static_cast<int>(std::max(0.0, remainingMemoryMB - rcCamsCostMB) / tileCostMB);
      }
@@ -233,7 +254,7 @@ index 187e8f5..83c8c87 100644
  
      // check that we do not need more constant camera parameters than the ones in device constant memory
      if (ALICEVISION_DEVICE_MAX_CONSTANT_CAMERA_PARAM_SETS < ((nbSimultaneousFullRc + ((nbRemainingTiles > 0) ? 1 : 0)) * rcCamParams))
-@@ -331,6 +396,27 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -331,6 +397,27 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          const int firstTileIndex = b * nbTilesPerBatch;
          const int lastTileIndex = std::min((b + 1) * nbTilesPerBatch, static_cast<int>(tiles.size()));
  
@@ -371,15 +392,19 @@ index 0564791..d2e3efc 100644
  
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h b/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h
 new file mode 100644
-index 0000000..b488193
+index 0000000..eb1e8f5
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h
-@@ -0,0 +1,370 @@
+@@ -0,0 +1,402 @@
 +// Cheshire memory bridge v2: VRAM first, mapped system RAM when VRAM is short, and the
 +// choice of *what* spills made by buffer class instead of by arrival order.
 +//
-+// Header-only, HIP-only. Wired in through cuda_to_hip.h so AliceVision's memory.hpp
-+// (cudaMalloc / cudaMallocPitch / cudaMalloc3D / cudaFree) uses it without a source change.
++// Header-only, and used by both backends. On HIP it is wired in through cuda_to_hip.h, which
++// shadows AliceVision's cudaMalloc / cudaMallocPitch / cudaMalloc3D / cudaFree so memory.hpp
++// needs no source change. That trick relies on the CUDA names being absent from the HIP
++// headers, so it cannot work in reverse: the CUDA build routes memory.hpp's five device
++// alloc/free sites to this bridge explicitly (apply_hip_patch.py step 6), and picks up the HIP
++// entry points below through cheshire/hip_to_cuda.h.
 +//
 +// Classes (docs/02-memory-bridge.md):
 +//   Volume  3D pitched allocations: SGM / Refine similarity volumes. Streamed by every
@@ -418,7 +443,14 @@ index 0000000..b488193
 +//                                        downscale 1 under a 2 GB cap spilled 3240 maps of 0 MB)
 +//   CHESHIRE_BRIDGE_LOG=1                log placement decisions and a per-class summary at exit
 +#pragma once
-+#include <hip/hip_runtime.h>
++#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
++#  include <hip/hip_runtime.h>
++#else
++// relative, not <cheshire/...>: the CUDA build must never get the shim directory on its
++// include path, because it also holds cuda_runtime.h / cuda_fp16.h shims that would shadow the
++// real CUDA headers. bridge.h and hip_to_cuda.h always sit side by side.
++#  include "hip_to_cuda.h"
++#endif
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
@@ -533,11 +565,32 @@ index 0000000..b488193
 +    void initCap() {
 +        if (capInit) return;
 +        capInit = true;
++        size_t freeB = 0, totalB = 0;
++        const bool haveInfo = (hipMemGetInfo(&freeB, &totalB) == hipSuccess && freeB > 0);
 +        if (vramCapEnv == 0) { vramCap = ~size_t(0); }
-+        else if (vramCapEnv > 0) { vramCap = size_t(vramCapEnv) << 20; }
++        else if (vramCapEnv > 0) {
++            vramCap = size_t(vramCapEnv) << 20;
++            // An explicit cap above what the device actually has is not reachable, and it is
++            // actively harmful: the cap is also the tile planner's budget, so the planner commits
++            // more concurrent tiles than the card can hold and the bridge fills VRAM to the brim
++            // trying to honour it. Allocations the bridge owns then spill correctly, but anything
++            // it does NOT own has nowhere to go - on CUDA the camera mipmaps are real
++            // cudaMipmappedArrays that never pass through cudaMalloc, so they hit a hard OOM with
++            // a couple of hundred MB left (measured 2026-09-20, docs/18). Clamp to the same
++            // fraction of free VRAM the default uses, which leaves that headroom.
++            // Only a cap above the device's TOTAL memory is clamped - that one is unreachable by
++            // definition. A cap below total is a deliberate budget and is left exactly as asked,
++            // including the ones the bridge-v2 matrices in docs/validation pin down to 500 MB.
++            if (haveInfo && vramCap > totalB) {
++                const size_t ceiling = size_t(double(freeB) * vramFraction);
++                if (log)
++                    std::fprintf(stderr, "[cheshire] bridge: requested vram cap %zu MB exceeds this device (%zu MB total); clamping to %zu MB\n",
++                                 vramCap >> 20, totalB >> 20, ceiling >> 20);
++                vramCap = ceiling;
++            }
++        }
 +        else {
-+            size_t freeB = 0, totalB = 0;
-+            if (hipMemGetInfo(&freeB, &totalB) == hipSuccess && freeB > 0) vramCap = size_t(double(freeB) * vramFraction);
++            if (haveInfo) vramCap = size_t(double(freeB) * vramFraction);
 +            else vramCap = ~size_t(0);
 +        }
 +        if (log) {
@@ -1024,6 +1077,179 @@ index 0000000..7bd0800
 +// __global__ __device__ __host__ __constant__ __shared__ __forceinline__
 +// dim3, blockIdx/blockDim/threadIdx/gridDim, __syncthreads, make_float4 ...
 +// tex2D<T>, tex2DLod<T>, surf2Dwrite, atomicAdd ...
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/hip_to_cuda.h b/src/aliceVision/depthMap/cuda/hip/cheshire/hip_to_cuda.h
+new file mode 100644
+index 0000000..ac2f25c
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshire/hip_to_cuda.h
+@@ -0,0 +1,77 @@
++// Cheshire: the mirror of cuda_to_hip.h.
++//
++// bridge.h was written against the HIP runtime because that is where it was needed first. The
++// CUDA build wants the same allocator, and the bridge's logic has nothing backend-specific in
++// it - only the ten entry points below. Rather than rewrite bridge.h in CUDA dialect and risk
++// changing behaviour that is validated on five AMD cards, this header maps the HIP names it
++// uses onto their CUDA equivalents, so the bridge body compiles unmodified on both.
++//
++// Safe for the same reason cuda_to_hip.h is safe in the other direction: the CUDA headers never
++// declare a hip* name, so nothing here can collide with the real runtime.
++//
++// Included by bridge.h when the translation unit is not HIP. Never include it in a HIP build.
++#pragma once
++
++#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
++#  error "hip_to_cuda.h is for the CUDA backend; HIP builds include <hip/hip_runtime.h> directly"
++#endif
++
++#include <cuda_runtime.h>
++
++// ---- types ----------------------------------------------------------------
++using hipError_t = cudaError_t;
++using hipPitchedPtr = cudaPitchedPtr;
++using hipExtent = cudaExtent;
++using hipDeviceProp_t = cudaDeviceProp;
++
++// ---- status codes ---------------------------------------------------------
++constexpr cudaError_t hipSuccess = cudaSuccess;
++constexpr cudaError_t hipErrorOutOfMemory = cudaErrorMemoryAllocation;
++
++// ---- host-allocation flags ------------------------------------------------
++constexpr unsigned int hipHostMallocMapped = cudaHostAllocMapped;
++// AMD cache-coherency hint with no CUDA equivalent. On NVIDIA the mapped allocation is already
++// what the bridge wants (device-visible, host-written once, read over PCIe), so this is a no-op
++// rather than a behaviour change: dropping it cannot make the CUDA path differ from plain
++// cudaHostAlloc(..., cudaHostAllocMapped).
++constexpr unsigned int hipHostMallocNonCoherent = 0u;
++
++// ---- entry points ---------------------------------------------------------
++inline cudaError_t hipMalloc(void** devPtr, size_t bytes) { return cudaMalloc(devPtr, bytes); }
++inline cudaError_t hipFree(void* devPtr) { return cudaFree(devPtr); }
++
++inline cudaError_t hipMallocPitch(void** devPtr, size_t* pitch, size_t widthBytes, size_t height)
++{
++    return cudaMallocPitch(devPtr, pitch, widthBytes, height);
++}
++
++inline cudaError_t hipMalloc3D(cudaPitchedPtr* pitchedDevPtr, cudaExtent extent)
++{
++    return cudaMalloc3D(pitchedDevPtr, extent);
++}
++
++inline cudaError_t hipHostMalloc(void** ptr, size_t bytes, unsigned int flags)
++{
++    return cudaHostAlloc(ptr, bytes, flags);
++}
++
++inline cudaError_t hipHostFree(void* ptr) { return cudaFreeHost(ptr); }
++
++inline cudaError_t hipHostGetDevicePointer(void** devPtr, void* hostPtr, unsigned int flags)
++{
++    return cudaHostGetDevicePointer(devPtr, hostPtr, flags);
++}
++
++inline cudaError_t hipMemGetInfo(size_t* freeBytes, size_t* totalBytes)
++{
++    return cudaMemGetInfo(freeBytes, totalBytes);
++}
++
++inline cudaError_t hipGetDevice(int* device) { return cudaGetDevice(device); }
++
++inline cudaError_t hipGetDeviceProperties(cudaDeviceProp* prop, int device)
++{
++    return cudaGetDeviceProperties(prop, device);
++}
++
++inline cudaError_t hipGetLastError() { return cudaGetLastError(); }
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/managed_cuda.h b/src/aliceVision/depthMap/cuda/hip/cheshire/managed_cuda.h
+new file mode 100644
+index 0000000..8308d0e
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshire/managed_cuda.h
+@@ -0,0 +1,84 @@
++// Cheshire: the CUDA unified-memory arm of the device allocator, for comparison against the
++// memory bridge.
++//
++// The bridge exists because of docs/02 finding #2: on AMD, hipMallocManaged succeeds but behaves
++// like mapped host memory - 26 GB/s and no page migration into VRAM - so managed memory was
++// never a candidate there. CUDA's unified memory genuinely does migrate pages, with hardware
++// fault handling, at page granularity. That is finer than the bridge's whole-buffer placement by
++// class, and it is the one thing the bridge cannot do.
++//
++// It can also lose badly: SGM sweeps the similarity volume repeatedly, and page migration can
++// thrash a working set that whole-buffer placement simply pins. Which effect wins is a
++// measurement, not a prediction, so this header exists to make the measurement possible.
++//
++//   CHESHIRE_CUDA_MANAGED=1   route device allocations to cudaMallocManaged instead of the bridge
++//
++// CUDA only: it is never compiled into a HIP build (see memory.hpp, which selects between this
++// and the bridge).
++#pragma once
++#include <cuda_runtime.h>
++#include <cstdlib>
++
++namespace cheshire {
++namespace managed {
++
++inline bool enabled()
++{
++    static const bool on = [] {
++        const char* e = std::getenv("CHESHIRE_CUDA_MANAGED");
++        return e && e[0] == '1';
++    }();
++    return on;
++}
++
++// Pitch for the emulated pitched allocations below. cudaMallocManaged has no pitched form, so we
++// pick the alignment the device reports for pitched texture binding and lay the rows out by hand;
++// 512 covers every NVIDIA part in practice and is what the driver returns for texturePitchAlignment
++// on the cards this is measured on.
++inline size_t pitchAlign()
++{
++    static const size_t a = [] {
++        cudaDeviceProp p{};
++        int d = 0;
++        if (cudaGetDevice(&d) == cudaSuccess && cudaGetDeviceProperties(&p, d) == cudaSuccess && p.texturePitchAlignment > 0)
++            return size_t(p.texturePitchAlignment);
++        return size_t(512);
++    }();
++    return a;
++}
++
++inline size_t alignUp(size_t v, size_t a) { return (v + a - 1) / a * a; }
++
++inline cudaError_t malloc(void** devPtr, size_t bytes)
++{
++    return cudaMallocManaged(devPtr, bytes);
++}
++
++inline cudaError_t mallocPitch(void** devPtr, size_t* pitch, size_t widthBytes, size_t height)
++{
++    const size_t p = alignUp(widthBytes, pitchAlign());
++    const cudaError_t e = cudaMallocManaged(devPtr, p * height);
++    if (e == cudaSuccess)
++        *pitch = p;
++    return e;
++}
++
++inline cudaError_t malloc3D(cudaPitchedPtr* pitchedDevPtr, cudaExtent extent)
++{
++    const size_t p = alignUp(extent.width, pitchAlign());
++    void* ptr = nullptr;
++    const cudaError_t e = cudaMallocManaged(&ptr, p * extent.height * extent.depth);
++    if (e != cudaSuccess)
++        return e;
++    pitchedDevPtr->ptr = ptr;
++    pitchedDevPtr->pitch = p;
++    pitchedDevPtr->xsize = extent.width;
++    pitchedDevPtr->ysize = extent.height;
++    return cudaSuccess;
++}
++
++// cudaFree releases managed allocations too, so no registry is needed on this path.
++inline cudaError_t free(void* devPtr) { return cudaFree(devPtr); }
++
++}  // namespace managed
++}  // namespace cheshire
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/mipmap_emu.h b/src/aliceVision/depthMap/cuda/hip/cheshire/mipmap_emu.h
 new file mode 100644
 index 0000000..ff51784
@@ -1351,7 +1577,7 @@ index 0000000..e7182a6
 +#pragma once
 +#include <cheshire/cuda_to_hip.h>
 diff --git a/src/aliceVision/depthMap/cuda/host/memory.hpp b/src/aliceVision/depthMap/cuda/host/memory.hpp
-index 294259f..86728fb 100644
+index 294259f..4ef2d9d 100644
 --- a/src/aliceVision/depthMap/cuda/host/memory.hpp
 +++ b/src/aliceVision/depthMap/cuda/host/memory.hpp
 @@ -6,8 +6,13 @@
@@ -1369,6 +1595,102 @@ index 294259f..86728fb 100644
  #define ALICEVISION_DEPTHMAP_TEXTURE_USE_INTERPOLATION
  
  #ifdef ALICEVISION_DEPTHMAP_TEXTURE_USE_HALF
+@@ -20,6 +25,50 @@
+ 
+ #include <cuda_runtime.h>
+ 
++// --- cheshire memory bridge, CUDA backend --------------------------------------
++// CHESHIRE_HIP is defined by cuda_to_hip.h, which a HIP build reaches through the
++// shimmed <cuda_runtime.h> just included; there the bridge is already wired in and
++// this must stay out of the way. Anything else is a real CUDA toolkit.
++#ifndef CHESHIRE_HIP
++#define CHESHIRE_BRIDGE_CUDA 1
++#include "../hip/cheshire/bridge.h"
++#include "../hip/cheshire/managed_cuda.h"
++namespace cheshire { namespace devmem {
++// Two placement strategies, picked once per process. The bridge places whole buffers
++// by class; CUDA unified memory migrates pages on fault. CHESHIRE_CUDA_MANAGED=1
++// selects the latter (docs/18). The mode is constant for the process, so an
++// allocation and its free always agree on who owns the pointer.
++inline cudaError_t malloc(void** p, size_t n)
++{ return managed::enabled() ? managed::malloc(p, n) : bridge::malloc(p, n); }
++inline cudaError_t mallocPitch(void** p, size_t* pitch, size_t w, size_t h)
++{ return managed::enabled() ? managed::mallocPitch(p, pitch, w, h) : bridge::mallocPitch(p, pitch, w, h); }
++inline cudaError_t malloc3D(cudaPitchedPtr* pp, cudaExtent e)
++{ return managed::enabled() ? managed::malloc3D(pp, e) : bridge::malloc3D(pp, e); }
++inline cudaError_t free(void* p)
++{ return managed::enabled() ? managed::free(p) : bridge::free(p); }
++}}  // namespace cheshire::devmem
++#endif
++
++#if defined(CHESHIRE_BRIDGE_CUDA)
++// CHESHIRE_BRIDGE=0 falls back to plain cudaMalloc; CHESHIRE_CUDA_MANAGED=1 to unified memory.
++#define CHESHIRE_DEV_MALLOC(p, n)               cheshire::devmem::malloc(reinterpret_cast<void**>(p), (n))
++#define CHESHIRE_DEV_MALLOC_PITCH(p, pi, w, h)  cheshire::devmem::mallocPitch(reinterpret_cast<void**>(p), (pi), (w), (h))
++#define CHESHIRE_DEV_MALLOC_3D(pp, e)           cheshire::devmem::malloc3D((pp), (e))
++#define CHESHIRE_DEV_FREE(p)                    cheshire::devmem::free(p)
++#elif defined(CHESHIRE_HIP)
++// Device allocations go through the bridge; CHESHIRE_BRIDGE=0 disables it at runtime.
++#define CHESHIRE_DEV_MALLOC(p, n)               cheshire::bridge::malloc(reinterpret_cast<void**>(p), (n))
++#define CHESHIRE_DEV_MALLOC_PITCH(p, pi, w, h)  cheshire::bridge::mallocPitch(reinterpret_cast<void**>(p), (pi), (w), (h))
++#define CHESHIRE_DEV_MALLOC_3D(pp, e)           cheshire::bridge::malloc3D((pp), (e))
++#define CHESHIRE_DEV_FREE(p)                    cheshire::bridge::free(p)
++#else
++#define CHESHIRE_DEV_MALLOC(p, n)               cudaMalloc(reinterpret_cast<void**>(p), (n))
++#define CHESHIRE_DEV_MALLOC_PITCH(p, pi, w, h)  cudaMallocPitch(reinterpret_cast<void**>(p), (pi), (w), (h))
++#define CHESHIRE_DEV_MALLOC_3D(pp, e)           cudaMalloc3D((pp), (e))
++#define CHESHIRE_DEV_FREE(p)                    cudaFree(p)
++#endif
++// -------------------------------------------------------------------------------
++
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <stdexcept>
+@@ -479,7 +528,7 @@ class CudaDeviceMemoryPitched : public CudaMemorySizeBase<Type, Dim>
+ 
+         if (Dim == 2)
+         {
+-            cudaError_t err = cudaMallocPitch<Type>(&buffer, &this->getPitchRef(), this->getUnpaddedBytesInRow(), this->getUnitsInDim(1));
++            cudaError_t err = CHESHIRE_DEV_MALLOC_PITCH(&buffer, &this->getPitchRef(), this->getUnpaddedBytesInRow(), this->getUnitsInDim(1));
+             if (err != cudaSuccess)
+             {
+                 int devid;
+@@ -498,7 +547,7 @@ class CudaDeviceMemoryPitched : public CudaMemorySizeBase<Type, Dim>
+             extent.height = this->getUnitsInDim(1);
+             extent.depth = this->getUnitsInDim(2);
+             cudaPitchedPtr pitchDevPtr;
+-            cudaError_t err = cudaMalloc3D(&pitchDevPtr, extent);
++            cudaError_t err = CHESHIRE_DEV_MALLOC_3D(&pitchDevPtr, extent);
+             if (err != cudaSuccess)
+             {
+                 int devid;
+@@ -535,7 +584,7 @@ class CudaDeviceMemoryPitched : public CudaMemorySizeBase<Type, Dim>
+         if (buffer == nullptr)
+             return;
+ 
+-        cudaError_t err = cudaFree(buffer);
++        cudaError_t err = CHESHIRE_DEV_FREE(buffer);
+         if (err != cudaSuccess)
+         {
+             std::stringstream ss;
+@@ -610,7 +659,7 @@ class CudaDeviceMemory : public CudaMemorySizeBase<Type, 1>
+     {
+         this->setSize(size, true);
+ 
+-        cudaError_t err = cudaMalloc(&buffer, this->getBytesUnpadded());
++        cudaError_t err = CHESHIRE_DEV_MALLOC(&buffer, this->getBytesUnpadded());
+ 
+         THROW_ON_CUDA_ERROR(err, "Could not allocate pinned host memory in " << __FILE__ << ":" << __LINE__ << ", " << cudaGetErrorString(err));
+     }
+@@ -621,7 +670,7 @@ class CudaDeviceMemory : public CudaMemorySizeBase<Type, 1>
+         if (buffer == nullptr)
+             return;
+ 
+-        CHECK_CUDA_RETURN_ERROR(cudaFree(buffer));
++        CHECK_CUDA_RETURN_ERROR(CHESHIRE_DEV_FREE(buffer));
+ 
+         buffer = nullptr;
+     }
 diff --git a/src/aliceVision/depthMap/cuda/imageProcessing/deviceMipmappedArray.cu b/src/aliceVision/depthMap/cuda/imageProcessing/deviceMipmappedArray.cu
 index e059d0d..1e02f37 100644
 --- a/src/aliceVision/depthMap/cuda/imageProcessing/deviceMipmappedArray.cu
