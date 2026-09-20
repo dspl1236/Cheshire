@@ -270,11 +270,17 @@ meshroom-pair.cmd C:\Meshroom-2023.3.0 C:\cheshire-alicevision-windows-x64
 meshroom-pair.cmd C:\Meshroom-2023.3.0 --unpair
 ```
 
-The launcher decides per run: an NVIDIA card present (`nvidia-smi` answers) runs the CUDA binary,
-otherwise the HIP build from the package, with the package's DLLs and `share/` in front so nothing
-of Meshroom's older AliceVision leaks in. `CHESHIRE_DEPTHMAP=cuda|hip` forces one; the choice is
-printed as the first line of the node's log. The nodes Cheshire does not carry - CameraInit,
-ImageMatching, StructureFromMotion, MeshFiltering, Publish - keep running from Meshroom.
+The launcher decides per run: an NVIDIA card present (`nvidia-smi` answers) runs Meshroom's own
+binary, otherwise the build from the Cheshire package, with the package's DLLs and `share/` in front
+so nothing of Meshroom's older AliceVision leaks in. `CHESHIRE_BACKEND=auto|cheshire|meshroom`
+forces one, and `CHESHIRE_DEPTHMAP=cuda|hip` is the older spelling of the same switch, still
+honoured. The choice is printed as the first line of the node's log. The nodes Cheshire does not
+carry - CameraInit, ImageMatching, StructureFromMotion, MeshFiltering, Publish - keep running from
+Meshroom.
+
+Pairing a Cheshire **CUDA** package is the one case where the automatic choice is wrong: the card is
+NVIDIA, so `auto` hands every node back to Meshroom and the package never runs. Set
+`CHESHIRE_BACKEND=cheshire` for that.
 
 Given a bundle it also picks the payload for the card and prints that too
 (`bundle payload hip6.2/gfx1031`), composing the layered `PATH` per run. A flat single-chip package

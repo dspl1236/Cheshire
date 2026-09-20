@@ -131,15 +131,23 @@ batch quoting of `%*` is fragile. The launcher:
 
 * keeps the original as `aliceVision_depthMapEstimation.cuda.exe` and reads the package path from
   `aliceVision_depthMapEstimation.cheshire.txt` beside itself;
-* runs `nvidia-smi -L` (System32, installed with the NVIDIA driver); exit 0 means CUDA, else HIP;
-  `CHESHIRE_DEPTHMAP=cuda|hip` overrides;
-* on the HIP path sets `ALICEVISION_ROOT` to the package and puts `<package>\bin` first on PATH
+* runs `nvidia-smi -L` (System32, installed with the NVIDIA driver); exit 0 means Meshroom's own
+  binary, else the Cheshire package. `CHESHIRE_BACKEND=auto|cheshire|meshroom` overrides, and
+  `CHESHIRE_DEPTHMAP=cuda|hip` is the older spelling of the same switch, still honoured. The
+  automatic choice is only right while Cheshire is the AMD alternative to Meshroom's CUDA: with a
+  Cheshire **CUDA** package the card is NVIDIA, `auto` hands the node straight back to Meshroom, and
+  the package under test never runs. Ask for `cheshire` explicitly there - which is what
+  `scripts/verify_end_to_end.py` does;
+* on the Cheshire path sets `ALICEVISION_ROOT` to the package and puts `<package>\bin` first on PATH
   (the package is self-contained: vcpkg, ROCm, MSVC and OpenMP DLLs), and drops
   `--sgmFilteringAxes` like the Linux wrapper (removed upstream);
 * `CreateProcessW` with the arguments re-quoted by the MSVC rules, waits, returns the child's exit code.
 
-Verified on bench-pc (GTX 1080 Ti): auto-selects CUDA, one view in 15.4 s through the launcher, and
-`CHESHIRE_DEPTHMAP=hip` switches to the HIP package (which then correctly reports no AMD device).
+Verified on bench-pc (GTX 1080 Ti): auto-selects Meshroom's CUDA binary, one view in 15.4 s through
+the launcher, and `CHESHIRE_DEPTHMAP=hip` switches to the HIP package (which then correctly reports
+no AMD device). All six spellings re-checked on 2026-09-20 against the v0.2.18 bundle on an RX 9070:
+unset, `CHESHIRE_BACKEND=cheshire`, `=meshroom`, an unrecognised value (warns, then uses the
+package), and both legacy `CHESHIRE_DEPTHMAP=cuda|hip`.
 Verified on this PC (RX 9070): a complete `meshroom_batch` photogrammetry run with
 `FeatureExtraction:forceCpuExtraction=True` whose DepthMap node logs
 `[cheshire] DepthMap backend: HIP`, see the README.

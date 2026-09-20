@@ -113,7 +113,7 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     # Force the paired launcher to the Cheshire package. Its default is 'auto', which hands the node
     # back to Meshroom's own CUDA binary whenever an NVIDIA card is present - correct when Cheshire
     # was AMD-only, and precisely wrong when the package under test is itself the CUDA one.
-    env["CHESHIRE_DEPTHMAP"] = "hip"
+    env["CHESHIRE_BACKEND"] = "cheshire"
     env.update(cfg["env"])
 
     cmd = [str(meshroom / "meshroom_batch.exe"),

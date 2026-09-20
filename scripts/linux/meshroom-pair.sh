@@ -49,11 +49,24 @@ pair() {  # name  drop-option
 # Cheshire pairing (scripts/linux/meshroom-pair.sh): $name on whichever GPU is in the box.
 # NVIDIA present (nvidia-smi answers): Meshroom's own binary, kept beside this file as .cuda.
 # Otherwise the Cheshire build from the bundle. Decided per run, so swapping cards needs no
-# re-pairing. CHESHIRE_DEPTHMAP=cuda|hip forces one (for every paired node).
-if [ "\${CHESHIRE_DEPTHMAP:-auto}" = cuda ] || { [ "\${CHESHIRE_DEPTHMAP:-auto}" = auto ] && nvidia-smi >/dev/null 2>&1; }; then
+# re-pairing. CHESHIRE_BACKEND=auto|cheshire|meshroom forces one, for every paired node.
+#
+# auto hands the node back to Meshroom whenever an NVIDIA card is present. That was the right
+# default while Cheshire was AMD-only and is exactly wrong when the paired bundle is itself a CUDA
+# build, so a CUDA bundle has to be asked for. CHESHIRE_DEPTHMAP=cuda|hip is the older spelling,
+# from when "hip" and "the Cheshire bundle" were the same thing, and is still honoured.
+CHESHIRE_MODE="\${CHESHIRE_BACKEND:-}"
+if [ -z "\$CHESHIRE_MODE" ]; then
+  case "\${CHESHIRE_DEPTHMAP:-auto}" in
+    cuda) CHESHIRE_MODE=meshroom ;;
+    hip)  CHESHIRE_MODE=cheshire ;;
+    *)    CHESHIRE_MODE="\${CHESHIRE_DEPTHMAP:-auto}" ;;
+  esac
+fi
+if [ "\$CHESHIRE_MODE" = meshroom ] || { [ "\$CHESHIRE_MODE" = auto ] && nvidia-smi >/dev/null 2>&1; }; then
   exec "$target.cuda" "\$@"
 fi
-# Meshroom's environment stays; the Cheshire bundle's libraries go first so the HIP build
+# Meshroom's environment stays; the Cheshire bundle's libraries go first so the Cheshire build
 # resolves its own OpenImageIO/Boost/ROCm sonames, not the Meshroom bundle's older ones.
 export ALICEVISION_ROOT="$BUNDLE"
 export LD_LIBRARY_PATH="$BUNDLE/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
