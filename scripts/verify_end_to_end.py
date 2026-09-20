@@ -59,6 +59,16 @@ CPU_MARKERS = {
 # were at fault.
 SIFT = ["FeatureExtraction:describerTypes=sift", "FeatureExtraction:forceCpuExtraction=False"]
 
+# The binary each Meshroom node runs, for the provenance check below.
+BINARY = {
+    "FeatureExtraction": "aliceVision_featureExtraction",
+    "FeatureMatching":   "aliceVision_featureMatching",
+    "DepthMap":          "aliceVision_depthMapEstimation",
+    "DepthMapFilter":    "aliceVision_depthMapFiltering",
+    "Meshing":           "aliceVision_meshing",
+    "Texturing":         "aliceVision_texturing",
+}
+
 # Override paths are Meshroom ATTRIBUTE paths, not AliceVision command-line flags, and the two are
 # not the same: some of a node's parameters sit in a group, so --sgmDepthListPerTile on the command
 # line is sgm.sgmDepthListPerTile here and --tileBufferWidth is tiling.tileBufferWidth, while others
@@ -137,14 +147,27 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     # for .png reported a perfectly good textured mesh as having no textures.
     tex = list((out / "out").glob("texture_*.*"))
     markers = CPU_MARKERS if cfg.get("markers") == "cpu" else GPU_MARKERS
-    missing = [n for n, pat in markers.items() if not re.search(pat, node_logs(cache, n))]
 
-    ok = rc == 0 and mesh and tex and not missing
+    # Provenance first, then the port. A port marker alone is not proof the Cheshire binary ran:
+    # Meshroom's own featureExtraction is a CUDA PopSIFT and prints the very same
+    # "Choosing device 0" line, so on an NVIDIA box an UNPAIRED node scored a pass here
+    # (found 2026-09-20 on Linux, where the CUDA bundle's versioned libpopsift.so.0.10.0 made the
+    # pairing script decline GPU SIFT silently). Both launchers announce the binary they run.
+    paired = {n: bool(re.search(rf"\[cheshire\] {BINARY[n]}: Cheshire build", node_logs(cache, n)))
+              for n in markers}
+    missing = [n for n, pat in markers.items()
+               if paired[n] and not re.search(pat, node_logs(cache, n))]
+    unpaired = [n for n in markers if not paired[n]]
+
+    ok = rc == 0 and mesh and tex and not missing and not unpaired
     print(f"  {'ok  ' if ok else 'FAIL'}  {name:<14} exit={rc:<4} mesh={len(mesh)} tex={len(tex)} "
-          f"ports={len(markers) - len(missing)}/{len(markers)}  {secs}s")
+          f"ports={len(markers) - len(missing) - len(unpaired)}/{len(markers)}  {secs}s")
+    if unpaired:
+        print(f"        NOT PAIRED: {', '.join(unpaired)}"
+              f" - the node ran Meshroom's own binary, so nothing here tested the package")
     if missing:
-        print(f"        no Cheshire line from: {', '.join(missing)}"
-              f" - that node ran something else, or its port fell silent")
+        print(f"        paired but silent: {', '.join(missing)}"
+              f" - the Cheshire binary ran and its GPU port did not announce itself")
     if rc != 0:
         for line in log.read_text(encoding="utf-8", errors="replace").splitlines()[-4:]:
             print(f"        {line[:110]}")

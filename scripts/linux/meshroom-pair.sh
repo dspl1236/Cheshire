@@ -69,6 +69,7 @@ if [ -z "\$CHESHIRE_MODE" ]; then
   esac
 fi
 if [ "\$CHESHIRE_MODE" = meshroom ] || { [ "\$CHESHIRE_MODE" = auto ] && nvidia-smi >/dev/null 2>&1; }; then
+  echo "[cheshire] $name: Meshroom's own binary ($target.cuda)" >&2
   exec "$target.cuda" "\$@"
 fi
 # Meshroom's environment stays; the Cheshire bundle's libraries go first so the Cheshire build
@@ -84,6 +85,11 @@ while [ \$# -gt 0 ]; do
     *) ARGS+=("\$1"); shift ;;
   esac
 done
+# Say which binary is about to run, the way the Windows launcher does. Without it a node's
+# provenance can only be inferred from what its port prints, and that is not always decisive:
+# Meshroom's own featureExtraction is a CUDA PopSIFT and prints the same "Choosing device 0" line
+# as ours, so an unpaired node looked paired to the end-to-end gate.
+echo "[cheshire] $name: Cheshire build ($BUNDLE/bin/$name)" >&2
 exec "$BUNDLE/bin/$name" "\${ARGS[@]}"
 EOF
   chmod +x "$target"
@@ -108,7 +114,14 @@ fi
 # executable picks it up transitively - so test that library. Not with ldd: the bundle sets
 # RUNPATH $ORIGIN/../lib, and ldd without LD_LIBRARY_PATH reports its siblings as not found,
 # which greps to nothing and would silently refuse to pair a perfectly good bundle.
-if [ -x "$BUNDLE/bin/aliceVision_featureExtraction" ] && [ -f "$BUNDLE/lib/libpopsift.so" ] \
+# Match libpopsift.so*, not libpopsift.so. A bundle may carry only the versioned soname - the
+# v0.3.0 Linux CUDA bundle ships libpopsift.so.0.10.0 with no unversioned symlink, while the HIP
+# one has the plain name - and testing the plain name silently refused to pair GPU SIFT on a
+# package that has it. It failed quietly twice over: the node then runs Meshroom's own binary,
+# which on an NVIDIA box is also a CUDA PopSIFT and prints the same "Choosing device 0" line, so
+# the end-to-end gate scored it a pass.
+if [ -x "$BUNDLE/bin/aliceVision_featureExtraction" ] \
+   && compgen -G "$BUNDLE/lib/libpopsift.so*" > /dev/null \
    && grep -aq libpopsift.so "$BUNDLE/lib/libaliceVision_feature.so" 2>/dev/null; then
   pair aliceVision_featureExtraction
 else
