@@ -394,3 +394,74 @@ what carries visibility). Counting output files is not verifying a stage - the e
 `verify_bundle_stages.py` exists to prevent, still present in the checker itself. Each stage there
 now has to emit a specific log line as well, and Texturing was added, wired the way Meshroom
 wires it.
+
+## Windows (2026-09-21)
+
+Builds, links, installs, packages and runs. 396 / 396 targets, 0 unresolved symbols, and the
+result on bench-pc's GTX 1050 Ti is **bit-identical pixel data** to the Linux CUDA build - which
+is itself byte-identical to the Meshroom CUDA 11.3 reference:
+
+| | |
+|---|---|
+| our Windows CUDA (MSVC, GTX 1050 Ti, 4 GB) | bit-identical pixels to |
+| our Linux CUDA (GCC 13.3, GTX 1080 Ti, 11 GB) | byte-identical to |
+| Meshroom 2023.3 (AliceVision 3.1, CUDA 11.3, GTX 1080 Ti) | |
+
+Different operating system, different host compiler, different GPU, and the depth values are the
+same bits. The files themselves are not byte-identical - that difference is EXR container
+metadata, confirmed by comparing the decoded pixel arrays directly rather than trusting
+`compare_depthmaps.py`'s four-decimal output, where "0.0000" covers anything under 5e-5.
+
+Six of the 41 views so far; the full set has not been run on Windows yet.
+
+### Toolchain
+
+nvcc drives `cl.exe`, so this build is MSVC rather than the clang-cl the HIP build needs for
+ROCm. `scripts/windows/build-alicevision-cuda.cmd`.
+
+The ordering trap, which cost an hour: `scripts/env.cmd` calls `vcvarsall` for VS 2026 whenever
+`VCToolsInstallDir` is unset, and **vcvars refuses to re-initialise a shell it has already
+configured** - it returns 0 and changes nothing. Calling `env.cmd` before `vcvars64
+-vcvars_ver=14.44` therefore leaves 14.50 on `PATH`, nvcc picks it up, and the configure fails
+with "Only the versions between 2017 and 2022 (inclusive) are supported" - which reads exactly
+like VS 2022 not being installed. 2022 is now initialised first, `CMAKE_CUDA_HOST_COMPILER` is
+pinned rather than left to `PATH` order, and the script aborts if `cl` is not a 19.4x.
+
+### Three obstacles, none in the ported GPU code
+
+1. **The vcpkg STL gap** `docs/18` predicted as the ABI risk: `__std_adjacent_find_4` and
+   `__std_unique_4`, unresolved in CoinUtils when linking `aliceVision_lInftyComputerVision`. Two
+   symbols across 1204 targets. `hip/compat/stlcompat/std_vector_algorithms.cpp`.
+
+2. **OpenMesh's unguarded `/bigobj`.** vcpkg's `OpenMeshConfig.cmake` sets
+   `INTERFACE_COMPILE_OPTIONS "/bigobj"` with no language genex - pybind11 in the same tree
+   writes `$<$<COMPILE_LANGUAGE:CXX>:/bigobj>`, which is what it should be. It reaches every
+   source of any target linking OpenMesh, and nvcc on Windows reads a leading `/` as a file path:
+
+       nvcc fatal : A single input file is required for a non-link phase
+
+   `mesh` is the only CUDA-bearing target that links OpenMesh, and the GPU texturing port is the
+   first CUDA source ever to live there, so this could not have bitten anyone before.
+
+3. **`libomp140.x86_64.dll` missing from the package.** Every binary died with `0xC0000135`
+   (STATUS_DLL_NOT_FOUND) before writing a log line, while the same package ran on the machine
+   that built it. CMake's `FindOpenMP` selects `-openmp:llvm` (OpenMP 3.0+, which AliceVision
+   needs; the redistributable `vcomp140` is 2.0 only), and that runtime ships with Visual Studio
+   rather than the VC++ redistributable. The build machine had it in `system32`; bench-pc did
+   not. The shipped HIP Windows packages already bundle it, so the CUDA package matches them.
+
+   Worth flagging rather than deciding quietly: `libomp140.x86_64.dll` lives under a
+   `debug_nonredist` path in the VS tree. That applies equally to the HIP packages already
+   published, so it is a pre-existing question about both, not one this build introduces.
+
+### Two test-design errors, recorded so they are not repeated
+
+The first comparison used `out-cuda-mini6` as the yardstick without checking what it was: a run
+of the *monstree-mini6* dataset, while this run took `monstree-full --rangeSize 6`, i.e. the
+first 6 of 41 views. Not one view id overlapped. The same failure as the `sgmDepthListPerTile`
+episode - **check what the reference actually is before comparing against it.**
+
+And a `Test-Path "...\$d"` sent through ssh quoting never expanded `$d`, so it tested the
+directory, returned `True` six times, and was reported as "the runtime DLLs are in the package".
+They were not. Remote PowerShell goes in a script file, not inside nested quotes.
+
