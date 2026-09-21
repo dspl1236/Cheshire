@@ -24,6 +24,17 @@ AV_BUNDLE="${AV_BUNDLE:-$AV_INSTALL/bundle}"
 # Its lib directory also joins the bundle search path so libpopsift.so gets packaged.
 CHESHIRE_POPSIFT="${CHESHIRE_POPSIFT:-OFF}"
 POPSIFT_INSTALL="${CHESHIRE_POPSIFT_INSTALL:-$ROOT/build/popsift-linux-install}"
+# A missing PopSift is a hard error, not a fallback. With CHESHIRE_POPSIFT=ON and this directory
+# absent, -DPopSift_DIR points nowhere and find_package keeps searching - and found the CUDA
+# PopSift cached from a previous configure of the same tree, so a HIP bundle linked
+# aliceVision_feature against libpopsift.so.0.10.0 from /opt/popsift-cuda and said nothing
+# (2026-09-20). On the WSL box the HIP PopSift is the Windows-side build, reached through /mnt/d;
+# build/wsl_av_build.sh sets CHESHIRE_POPSIFT_INSTALL for exactly that reason.
+if [ "$CHESHIRE_POPSIFT" = ON ] && [ ! -f "$POPSIFT_INSTALL/lib/cmake/PopSift/PopSiftConfig.cmake" ]; then
+  echo "CHESHIRE_POPSIFT=ON but there is no PopSift at $POPSIFT_INSTALL" >&2
+  echo "set CHESHIRE_POPSIFT_INSTALL to a HIP PopSift install (scripts/linux/build-popsift.sh)" >&2
+  exit 1
+fi
 JOBS="${JOBS:-$(nproc)}"
 
 # The submodule working tree has Windows line endings, so a diff taken here would rewrite the
