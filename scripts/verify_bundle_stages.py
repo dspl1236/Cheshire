@@ -79,7 +79,9 @@ def main(argv):
             "--rangeStart", "0", "--rangeSize", "2"], "*.feat", None, r"Choosing device \d+:"),
         ("FeatureMatching (GPU matcher)", "aliceVision_featureMatching", [
             "--input", ci, "--featuresFolders", fe, "--imagePairsList", im,
-            "--describerTypes", "dspsift", "--geometricEstimator", "acransac",
+            # sift, like the extraction stage above and every mini6 cache this gate is given
+            # (dspsift here failed with "Can't find view ... region files" on a sift cache).
+            "--describerTypes", "sift", "--geometricEstimator", "acransac",
             "--geometricFilterType", "fundamental_matrix",
             "--rangeStart", "0", "--rangeSize", "40"], "*.txt", None, r"GPU brute-force L2 2-NN on"),
         ("DepthMap", "aliceVision_depthMapEstimation", [
