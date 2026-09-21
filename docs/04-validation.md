@@ -823,3 +823,14 @@ longer come out of the packager.
 The zip was rebuilt from the v0.3.2 tag (e5a7cea) with PopSIFT on, through the new guard
 (`feature.dll imports popsift: True`), sha256 `2832289c…`, 104 MB, and staged at
 `build/release/0.3.2-fix/`. Its matrix on the 1080 Ti is recorded below.
+
+**The rebuilt zip on the same card: 12 of 12**, every config 6/6 ports, no bugcheck across the
+40 minutes - `base` 126 s (151 on the defective zip), `tiles` 131, `coarse` 80, `texbig` 121,
+`cpufallback` 196, `verify` 186 (all six self-checks), `bridgecap` 156, `bridgespill` 271,
+`bridgeoff` 126, `texcheck` 136, `ds1` 301, `blast` 346. FeatureExtraction now reads
+`Choosing device 0: NVIDIA GeForce GTX 1080 Ti` followed by the stable-order line; the bridge
+summaries match the defective run to the allocation (DepthMap volume peak 5244 MB, image 372 MB
+with the mipmaps counted, Texturing 3850 MB), which is what one expects when only the extractor
+changed. With this every one of the four v0.3.2 packages has run its full matrix on its own
+hardware - RX 9070, RX 5500 XT, RX 6750 XT, GTX 1050 Ti and now the GTX 1080 Ti under Windows -
+and the published Windows CUDA asset is the only one that is not the build validated here.
