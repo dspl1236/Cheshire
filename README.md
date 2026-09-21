@@ -485,9 +485,14 @@ to Meshroom's own binaries would produce a perfectly good one. On 2026-09-20 (do
 * the Linux CUDA package, extracted from the release tarball rather than run from a build tree,
   produced a depth map byte-identical to the Meshroom CUDA 11.3 reference on a GTX 1080 Ti.
 
-On Linux the AMD pairing was used on a production node (house-pc, RX 5500 XT); that machine has
-since been re-carded, so it stands as a past result rather than a standing one, and there is no
-Linux equivalent of the end-to-end gate yet. What comes next is the roadmap above.
+The same gate runs on Linux, and on 2026-09-20 the shipped v0.3.0 Linux HIP bundle passed all five
+parameter sets on an RX 6750 XT (house-pc), 6/6 ports each - the first time the Linux AMD artifact
+has been checked as a whole pipeline rather than stage by stage. Building that gate immediately
+found that the Linux **CUDA** bundle never pairs GPU SIFT: it ships `libpopsift.so.0.10.0` where the
+pairing script looked for `libpopsift.so`, and the gate's own first pass missed it because
+Meshroom's own featureExtraction is also a CUDA PopSIFT and prints the identical line. The gate now
+requires each node to prove which binary ran before it looks at any port. What comes next is the
+roadmap above.
 
 Primary repository: [git.hausofdub.com/dspl1236/Cheshire](https://git.hausofdub.com/dspl1236/Cheshire);
 mirror: [github.com/dspl1236/Cheshire](https://github.com/dspl1236/Cheshire). Licensed MPL-2.0.
