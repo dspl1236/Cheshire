@@ -463,3 +463,28 @@ test is the next step. Every earlier "the run died" in this document was this.
 The run was resumed rather than restarted: the harness gained `CHESHIRE_E2E_RESUME=1`, which
 keeps the cache so Meshroom skips the SUCCESS chunks (three of nine) and redoes the one it was
 killed in.
+
+## Engine bay at full resolution on 4 GB: GTX 1050 Ti, Windows CUDA package (2026-09-21)
+
+The resumed run passed - `ds1` 6/6 ports, mesh + 6 texture atlases, every node announcing the
+Cheshire build, no further bugcheck (uptime held from 00:31). Chunk times, sum over chunks:
+DepthMap 4837 s (9 chunks, ~9 min per 12 views), DepthMapFilter 196 s, Meshing 602 s, Texturing
+593 s; SfM 280 s. Wall clock 4695 s from the resume, with three DepthMap chunks carried over.
+
+What 4 GB did to each stage:
+
+* **DepthMap: 0 spills in all 9 chunks.** The bridge capped at 3021 MB and budgeted 2417 MB - 0
+  full R cameras + 2 tiles resident, 15 tiles per view - and that fits without ever spilling. So
+  the "spill for sure" premise of this run was wrong for the CUDA path at this resolution: the
+  planner's tile-only regime is enough, and the bridge's host-spill path stayed untested here.
+  Spilling needs a cap below one tile (the stage gate's 500 MB) or a larger image.
+* **Meshing** ran the CPU-side fusion (kd-trees of 34.5 M, 18 M, 10 M, 7.8 M points) and the GPU
+  ports within 4 GB; no fallback line, no error.
+* **Texturing** ran `pyramid + rasterisation on NVIDIA GeForce GTX 1050 Ti` with an atlas pyramid
+  of 3072 MB and `memoryPerAtlas: 3488` - one atlas at a time inside the card's 4096 MB, where the
+  RX 6750 XT's run peaked at 9.8 GB by holding more at once. The CUDA build prints no allocator
+  summary (`vram: N allocs, peak M MB` is HIP-side), so the CUDA peaks are not measured here.
+
+This is the strongest package result so far: the smallest card the project has, at the largest
+per-view working set, through Meshroom end to end on the download as shipped (plus the pairing
+files 0.3.1 adds).
