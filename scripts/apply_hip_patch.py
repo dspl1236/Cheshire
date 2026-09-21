@@ -876,7 +876,7 @@ endif()
         shutil.copy2(ROOT / "hip" / "port" / "gpu_texturing" / f, gt_dst / f)
     tx = AV / "src/aliceVision/mesh/Texturing.cpp"
     patch(tx, '#include "Texturing.hpp"' + NL,
-          '#include <cstdlib>  // cheshire' + NL + '#include <cstdint>' + NL + '#ifdef ALICEVISION_HAVE_GPU_TEX' + NL + '#include "aliceVision/mesh/gpu/texturingGPU.hpp"  // cheshire' + NL + '#include <chrono>' + NL + 'static int cheshirePrefetchDepth = 1;  // cameras read ahead of the one on the GPU (image cache slots - 1)' + NL + 'static bool cheshireAtlasPadded = false;  // the GPU already ran writeTexture edge padding on this atlas' + NL + '#endif' + NL)
+          '#include <cstdlib>  // cheshire' + NL + '#include <cstdint>' + NL + '#ifdef ALICEVISION_HAVE_GPU_TEX' + NL + '#include "aliceVision/mesh/gpu/texturingGPU.hpp"  // cheshire' + NL + '#include <chrono>' + NL + 'static int cheshirePrefetchDepth = 1;  // cameras read ahead of the one on the GPU (image cache slots - 1)' + NL + 'static bool cheshireAtlasPadded = false;  // the GPU already ran writeTexture edge padding on this atlas' + NL + 'static aliceVision::image::Image<aliceVision::image::RGBfColor>* cheshireResizedAtlas = nullptr;  // the GPU already downscaled this atlas (step 5j)' + NL + '#endif' + NL)
     # chunk size: what the card holds (the host keeps one atlas at a time on the GPU path)
     patch(tx, '    ALICEVISION_LOG_INFO("Total amount of available RAM: " << availableRam << " MB.");' + NL, """#ifdef ALICEVISION_HAVE_GPU_TEX
     // cheshire: the accumulators live in VRAM, so the chunk is what the card holds
@@ -1010,12 +1010,23 @@ endif()
             atlasTexture.resize(texParams.textureSide, texParams.textureSide);
             // cheshire: the edge padding runs on the device before the download (step 5d)
             const int gpuPad = (!texParams.fillHoles && texParams.padding > 0) ? int(texParams.padding) * 3 : 0;
-            ok = tex.finish((int)s, reinterpret_cast<float*>(atlasTexture.img.data()), atlasTexture.imgCount.data(), gpuPad);
+            // cheshire: the downscale too (step 5j): OIIO's lanczos3 resize transcribed on the device
+            image::Image<image::RGBfColor> cheshireSmall;
+            float* cheshireSmallPtr = nullptr;
+            if (texParams.downscale > 1 && std::getenv(\"CHESHIRE_GPU_RESIZE\") == nullptr)
+            {
+                const int smallSide = int(texParams.textureSide) / int(texParams.downscale);   // not 'small': windows.h defines it
+                cheshireSmall.resize(smallSide, smallSide);
+                cheshireSmallPtr = reinterpret_cast<float*>(cheshireSmall.data());
+            }
+            ok = tex.finish((int)s, reinterpret_cast<float*>(atlasTexture.img.data()), atlasTexture.imgCount.data(), gpuPad, int(texParams.downscale), cheshireSmallPtr);
             if (!ok)
                 break;
             cheshireAtlasPadded = gpuPad > 0;
+            cheshireResizedAtlas = cheshireSmallPtr ? &cheshireSmall : nullptr;
             writeTexture(atlasTexture, atlasID, outPath, textureFileType, -1, imageType);
             cheshireAtlasPadded = false;
+            cheshireResizedAtlas = nullptr;
         }
         if (log)
             ALICEVISION_LOG_INFO("cheshire texturing profile: image loads " << loadSec << " s, uploads " << tex.uploadSec << " s, pyramids " << tex.pyramidSec
@@ -3255,6 +3266,49 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
             inc0 = t.index("#include")
             t = t[:inc0] + "#include <cstdlib>  // cheshire: CHESHIRE_BA_PROFILE" + NL + t[inc0:]
         bac.write_text(t, encoding="utf-8", newline="")
+
+    # 5j. The texture downscale on the device. After padding, writeTexture ran imageAlgo::resizeImage
+    #     (OIIO resize, lanczos3 for downsizing) on the host: 4.1 s per 8192^2 atlas on the RX 9070 box,
+    #     the largest piece of the node once padding moved. finish() now produces the downscaled atlas
+    #     (texturingGPU.cu: OIIO's tap weights computed on the host exactly as OIIO computes them, the
+    #     accumulation on the device in OIIO's order) and writeTexture uses it; CHESHIRE_GPU_RESIZE=0
+    #     keeps the host path, CHESHIRE_GPU_RESIZE_CHECK=1 runs both and counts differing texels.
+    tx = AV / "src/aliceVision/mesh/Texturing.cpp"
+    t = tx.read_text(encoding="utf-8")
+    if "GPU resize check" not in t:
+        old = ('        ALICEVISION_LOG_INFO("  - Downscaling texture (" << texParams.downscale << "x).");' + NL
+               + "        imageAlgo::resizeImage(texParams.downscale, atlasTexture.img, resizedColorBuffer);" + NL)
+        if t.count(old) != 1:
+            sys.exit("writeTexture downscale call not found once")
+        new = r"""        if (cheshireResizedAtlas != nullptr)
+        {
+            // cheshire: the device produced it (scripts/apply_hip_patch.py, step 5j)
+            ALICEVISION_LOG_INFO("  - Downscaling texture (" << texParams.downscale << "x) done on the GPU.");
+            if (std::getenv("CHESHIRE_GPU_RESIZE_CHECK") != nullptr)
+            {
+                image::Image<image::RGBfColor> hostResized;
+                imageAlgo::resizeImage(texParams.downscale, atlasTexture.img, hostResized);
+                std::size_t bad = 0;
+                const std::size_t n = std::size_t(hostResized.width()) * hostResized.height();
+                const float* a = reinterpret_cast<const float*>(hostResized.data());
+                const float* b = reinterpret_cast<const float*>(cheshireResizedAtlas->data());
+                if (hostResized.width() != cheshireResizedAtlas->width() || hostResized.height() != cheshireResizedAtlas->height())
+                    bad = n;
+                else
+                    for (std::size_t i = 0; i < n * 3; ++i)
+                        if (a[i] != b[i]) { ++bad; }
+                ALICEVISION_LOG_INFO("cheshire: GPU resize check: texel channels differing from OpenImageIO: " << bad << " of " << n * 3);
+            }
+            resizedColorBuffer = *cheshireResizedAtlas;
+        }
+        else
+        {
+            ALICEVISION_LOG_INFO("  - Downscaling texture (" << texParams.downscale << "x).");
+            imageAlgo::resizeImage(texParams.downscale, atlasTexture.img, resizedColorBuffer);
+        }
+"""
+        t = t.replace(old, new.replace("\n", NL), 1)
+        tx.write_text(t, encoding="utf-8", newline="")
 
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu

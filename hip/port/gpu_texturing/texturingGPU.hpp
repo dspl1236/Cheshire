@@ -52,7 +52,13 @@ public:
     // count carries upstream's values (1 valid, -k for a texel padded k deep, 0 empty).
     // CHESHIRE_GPU_PAD_CHECK=1 runs the sequential sweeps on the host as well and reports the
     // number of texels that differ (the port is a wavefront ordering of the same sweeps: 0).
-    bool finish(int slot, float* rgb, float* count, int padding = 0);
+    // downscale > 1 with rgbSmall set also produces the downscaled atlas on the device - OpenImageIO's
+    // resize with its default filter for downsizing (lanczos3, width 6), transcribed: the per-column
+    // and per-row tap weights are computed on the host exactly as OIIO 3.0.9 computes them (same
+    // float expressions, the C runtime's sinf) and the device accumulates in OIIO's order - into
+    // rgbSmall ((side / downscale)^2 x 3 floats). Texturing.cpp compares against OIIO itself under
+    // CHESHIRE_GPU_RESIZE_CHECK=1.
+    bool finish(int slot, float* rgb, float* count, int padding = 0, int downscale = 1, float* rgbSmall = nullptr);
 
     // seconds spent, for CHESHIRE_GPU_TEX_LOG
     double uploadSec = 0, pyramidSec = 0, rasterSec = 0, finishSec = 0;

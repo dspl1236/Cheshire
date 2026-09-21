@@ -763,3 +763,22 @@ autodiff's; SfM is already non-reproducible run to run, so that is a change with
 band, not a new one. Worth doing, but it is an 18 % win on a 5 % node: below the texturing
 Lanczos downscale (25 s of a 175 s node on the 6750 XT, portable exactly, docs/04 item 3 of 0.3.2)
 in the queue. Recorded, not started.
+
+## 0.3.3: the texture downscale on the GPU, exact against OpenImageIO (2026-09-21)
+
+After padding moved to the device (0.3.2), the largest piece left in Texturing was
+`imageAlgo::resizeImage` on the finished atlas: 4.1 s per 8192^2 atlas on the RX 9070 box. That
+is `ImageBufAlgo::resize` with an empty filter name, and OIIO 3.0.9 - the version in the
+dependency tree - picks **lanczos3, width 6** for downsizing and runs its separable path (both
+confirmed in that release's source). The tap weights depend on the destination column or row
+alone, so they are computed on the host with OIIO's own expressions - `FilterLanczos3_1D::lanczos3`
+verbatim, the C runtime's `sinf`, contraction off - and uploaded; the device does the inner loop in
+OIIO's order (rows outer, taps inner, `w = wy * xfilt[i]`, zero weights skipped, clamped reads,
+float sums). `finish()` now returns the downscaled atlas beside the full one, and `writeTexture`
+uses it. `CHESHIRE_GPU_RESIZE_CHECK=1` runs OIIO on the host as well: **0 of 50,331,648 texel
+channels differ** (4096^2 x 3). `CHESHIRE_GPU_RESIZE=0` keeps the host path.
+
+mini6, RX 9070: Texturing 9.1 s -> 7.1 s; `texcheck` (padding, resize, OBJ) and `base` 2/2, 6/6.
+On the 6750 XT's six engine-bay atlases this is the ~25 s the 0.3.2 notes pointed at, to be
+measured on the next Linux build. What remains in the node: image loads (I/O), UV generation,
+the EXR write, and Assimp's load on the way in.

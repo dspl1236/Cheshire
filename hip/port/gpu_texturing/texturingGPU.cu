@@ -451,6 +451,96 @@ static void padHostReference(std::vector<float>& rgb, std::vector<int>& pc, int 
         }
 }
 
+// ---- texture downscale: OpenImageIO's resize, lanczos3, exactly ----------------------------------
+//
+// writeTexture downscales the finished atlas with imageAlgo::resizeImage, which is
+// ImageBufAlgo::resize with an empty filter name: for downsizing OIIO 3.0.9 picks "lanczos3",
+// width 6 (get_resize_filter), and runs the separable resize_ path. Its weights are functions of
+// the destination column (or row) alone, computed in float with the C runtime's sinf inside
+// FilterLanczos3_1D::lanczos3; the host computes them here with the same expressions, in the same
+// order, contraction off (the pragma at the top of this file), and uploads them. The device then
+// does what resize_'s inner loop does - j outer, i inner, w = wy * xfiltval[i], skip zero weights,
+// WrapClamp reads, float accumulation into pel - so the sum rounds where OIIO's does.
+
+// FilterLanczos3_1D::lanczos3, OIIO 3.0.9 src/libutil/filter.cpp, verbatim
+static float oiioLanczos3(float x)
+{
+    const float a    = 3.0f;
+    const float ainv = 1.0f / a;
+    const float m_pi = 3.14159265358979323846f;   // float(M_PI)
+    x                = fabsf(x);
+    if (x > a)
+        return 0.0f;
+    if (x < 0.0001f)
+        return 1.0f;
+    float s1 = sinf(x * ainv * m_pi);
+    float s3 = (-4.0f * s1 * s1 + 3.0f) * s1;
+    return a / (x * x * (m_pi * m_pi)) * s1 * s3;
+}
+
+// resize_'s per-position tap weights along one axis: for every destination index, ntaps weights
+// (normalised as OIIO normalises them) and the integer source position; usable[] is OIIO's
+// "totalweight != 0" per row (per column it only gates the accumulation, and that is done on the
+// device from the weights themselves).
+static void oiioResizeTaps(int srcN, int dstN, std::vector<float>& taps, std::vector<int>& pos, std::vector<unsigned char>& usable, int& rad, int& ntaps)
+{
+    const float srcf = float(srcN);
+    const float ratio = float(dstN) / srcf;                 // < 1 when downsizing
+    const float dstpixel = 1.0f / float(dstN);
+    const float filterrad = (6.0f * (ratio > 1.0f ? ratio : 1.0f)) / 2.0f;   // fd.width * max(1, ratio), halved
+    rad = (int)ceilf(filterrad / ratio);
+    ntaps = 2 * rad + 1;
+    taps.assign(size_t(dstN) * ntaps, 0.0f); pos.assign(dstN, 0); usable.assign(dstN, 0);
+    for (int d = 0; d < dstN; ++d) {
+        const float s = (float(d) - 0.0f + 0.5f) * dstpixel;
+        const float src_f = 0.0f + s * srcf;
+        const float fl = floorf(src_f);
+        const int src_i = int(fl);
+        const float frac = src_f - fl;                      // floorfrac
+        float total = 0.0f;
+        float* t = taps.data() + size_t(d) * ntaps;
+        for (int i = 0; i < ntaps; ++i) {
+            const float w = oiioLanczos3((ratio * (float(i - rad) - (frac - 0.5f))) * 1.0f);   // xfilt: lanczos3(x * m_wscale), m_wscale = 6 / 6
+            t[i] = w; total += w;
+        }
+        if (total != 0.0f) for (int i = 0; i < ntaps; ++i) t[i] /= total;
+        pos[d] = src_i; usable[d] = total != 0.0f ? 1 : 0;
+    }
+}
+
+__global__ void resizeTapsKernel(const float* __restrict__ src, int srcW, int srcH,
+                                 const float* __restrict__ xt, int xtaps, int radi, const int* __restrict__ srcX,
+                                 const float* __restrict__ yt, int ytaps, int radj, const int* __restrict__ srcY, const unsigned char* __restrict__ yok,
+                                 float* __restrict__ dst, int dstW, int dstH)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y;
+    if (x >= dstW || y >= dstH) return;
+    const float* xf = xt + size_t(x) * xtaps;
+    const float* yf = yt + size_t(y) * ytaps;
+    float pel[3] = {0.0f, 0.0f, 0.0f};
+    float tw = 0.0f;
+    for (int i = 0; i < xtaps; ++i) tw += xf[i];
+    if (tw != 0.0f) {
+        const int sx0 = srcX[x], sy0 = srcY[y];
+        for (int j = -radj; j <= radj; ++j) {
+            const float wy = yf[j + radj];
+            if (wy == 0.0f) continue;
+            int sy = sy0 + j; sy = sy < 0 ? 0 : (sy >= srcH ? srcH - 1 : sy);
+            for (int i = 0; i < xtaps; ++i) {
+                const float w = wy * xf[i];
+                if (w != 0.0f) {
+                    int sx = sx0 - radi + i; sx = sx < 0 ? 0 : (sx >= srcW ? srcW - 1 : sx);
+                    const float* p = src + (size_t(sy) * srcW + sx) * 3;
+                    pel[0] += w * p[0]; pel[1] += w * p[1]; pel[2] += w * p[2];
+                }
+            }
+        }
+    }
+    float* o = dst + (size_t(y) * dstW + x) * 3;
+    if (!yok[y]) { o[0] = 0.0f; o[1] = 0.0f; o[2] = 0.0f; }
+    else { o[0] = pel[0]; o[1] = pel[1]; o[2] = pel[2]; }
+}
+
 bool g_checked = false, g_available = false;
 std::mutex g_mutex;
 
@@ -500,12 +590,15 @@ struct Texturer::Impl {
     std::vector<float*> down;            // downscaled scratch per level (nbBand - 1)
     uint32_t* dTri = nullptr; float* dScore = nullptr; uint32_t listCap = 0;
     int* padCnt = nullptr;               // edge padding state, one int per texel of one level
+    float* dSmall = nullptr; size_t dSmallCap = 0;   // downscaled atlas (device)
+    float* dTaps = nullptr; size_t dTapsCap = 0;     // x taps | y taps (device)
+    int* dPos = nullptr; size_t dPosCap = 0;         // src_x per column | src_y per row | y-row-usable flags
     Cam cam{};
     bool camSet = false;
     std::vector<float> hostTmp;
 
     ~Impl() {
-        for (void* p : {(void*)accRgb, (void*)accCnt, (void*)triPts, (void*)triPix, (void*)img, (void*)dTri, (void*)dScore, (void*)padCnt}) if (p) cheshire::devFree(p);
+        for (void* p : {(void*)accRgb, (void*)accCnt, (void*)triPts, (void*)triPix, (void*)img, (void*)dTri, (void*)dScore, (void*)padCnt, (void*)dSmall, (void*)dTaps, (void*)dPos}) if (p) cheshire::devFree(p);
         for (float* p : levels) if (p) cheshire::devFree(p);
         for (float* p : down) if (p) cheshire::devFree(p);
     }
@@ -596,7 +689,7 @@ bool Texturer::raster(int slot, int band, const std::uint32_t* triIds, const flo
     return ok;
 }
 
-bool Texturer::finish(int slot, float* rgb, float* count, int padding)
+bool Texturer::finish(int slot, float* rgb, float* count, int padding, int downscale, float* rgbSmall)
 {
     if (slot < 0 || slot >= p->nbSlots) return false;
     const auto t0 = std::chrono::steady_clock::now();
@@ -645,6 +738,41 @@ bool Texturer::finish(int slot, float* rgb, float* count, int padding)
                 if (gotCnt[i] != float(refPc[i]) || gotRgb[i * 3] != refRgb[i * 3] || gotRgb[i * 3 + 1] != refRgb[i * 3 + 1] || gotRgb[i * 3 + 2] != refRgb[i * 3 + 2]) ++bad;
             std::fprintf(stderr, "[cheshire] GPU padding check: texels differing from the sequential sweeps: %zu of %zu\n", bad, n);
         }
+    }
+    if (ok && downscale > 1 && rgbSmall) {
+        // the downscaled atlas, OIIO's resize transcribed (see resizeTapsKernel)
+        const int S = int(p->texSide);
+        const int dS = S / downscale;                       // imageAlgo::resizeImage: outWidth = inWidth / downscale
+        std::vector<float> xt, yt; std::vector<int> sx, sy; std::vector<unsigned char> xok, yok;
+        int radi = 0, radj = 0, xtaps = 0, ytaps = 0;
+        oiioResizeTaps(S, dS, xt, sx, xok, radi, xtaps);
+        oiioResizeTaps(S, dS, yt, sy, yok, radj, ytaps);
+        auto ensure = [](void** buf, size_t* cap, size_t bytes) {
+            if (bytes <= *cap) return true;
+            if (*buf) cheshire::devFree(*buf);
+            *buf = nullptr; *cap = 0;
+            if (cheshire::devMalloc(buf, bytes) != cudaSuccess) return false;
+            *cap = bytes; return true;
+        };
+        const size_t tapBytes = (xt.size() + yt.size()) * sizeof(float);
+        const size_t posBytes = (sx.size() + sy.size()) * sizeof(int) + yok.size();
+        ok = ensure((void**)&p->dSmall, &p->dSmallCap, size_t(dS) * dS * 3 * sizeof(float))
+          && ensure((void**)&p->dTaps, &p->dTapsCap, tapBytes)
+          && ensure((void**)&p->dPos, &p->dPosCap, posBytes + 16);
+        float* dXt = p->dTaps; float* dYt = p->dTaps + xt.size();
+        int* dSx = p->dPos; int* dSy = p->dPos + sx.size();
+        unsigned char* dYok = reinterpret_cast<unsigned char*>(dSy + sy.size());
+        if (ok) ok = cudaMemcpy(dXt, xt.data(), xt.size() * sizeof(float), cudaMemcpyHostToDevice) == cudaSuccess
+                  && cudaMemcpy(dYt, yt.data(), yt.size() * sizeof(float), cudaMemcpyHostToDevice) == cudaSuccess
+                  && cudaMemcpy(dSx, sx.data(), sx.size() * sizeof(int), cudaMemcpyHostToDevice) == cudaSuccess
+                  && cudaMemcpy(dSy, sy.data(), sy.size() * sizeof(int), cudaMemcpyHostToDevice) == cudaSuccess
+                  && cudaMemcpy(dYok, yok.data(), yok.size(), cudaMemcpyHostToDevice) == cudaSuccess;
+        if (ok) {
+            const dim3 block(256), grid(unsigned((dS + 255) / 256), unsigned(dS));
+            resizeTapsKernel<<<grid, block>>>(r, S, S, dXt, xtaps, radi, dSx, dYt, ytaps, radj, dSy, dYok, p->dSmall, dS, dS);
+            ok = cudaGetLastError() == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess;
+        }
+        if (ok) ok = cudaMemcpy(rgbSmall, p->dSmall, size_t(dS) * dS * 3 * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess;
     }
     if (ok) ok = cudaMemcpy(rgb, r, n * 3 * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess
               && cudaMemcpy(count, c, n * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess;

@@ -3727,10 +3727,10 @@ index b0b5910..8569072 100644
  
      return nupd;
 diff --git a/src/aliceVision/mesh/Texturing.cpp b/src/aliceVision/mesh/Texturing.cpp
-index 76bf7e5..df260ef 100644
+index 76bf7e5..7bd49cb 100644
 --- a/src/aliceVision/mesh/Texturing.cpp
 +++ b/src/aliceVision/mesh/Texturing.cpp
-@@ -5,6 +5,16 @@
+@@ -5,6 +5,17 @@
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
  #include "Texturing.hpp"
@@ -3743,11 +3743,12 @@ index 76bf7e5..df260ef 100644
 +#include <chrono>
 +static int cheshirePrefetchDepth = 1;  // cameras read ahead of the one on the GPU (image cache slots - 1)
 +static bool cheshireAtlasPadded = false;  // the GPU already ran writeTexture edge padding on this atlas
++static aliceVision::image::Image<aliceVision::image::RGBfColor>* cheshireResizedAtlas = nullptr;  // the GPU already downscaled this atlas (step 5j)
 +#endif
  #include "geoMesh.hpp"
  #include "UVAtlas.hpp"
  
-@@ -463,6 +473,33 @@ void Texturing::generateTextures(const mvsUtils::MultiViewParams& mp,
+@@ -463,6 +474,33 @@ void Texturing::generateTextures(const mvsUtils::MultiViewParams& mp,
          nbAtlasMax -= 1;
      nbAtlasMax = std::max(1, nbAtlasMax);  // if not enough memory, do it one by one
  
@@ -3781,7 +3782,7 @@ index 76bf7e5..df260ef 100644
      ALICEVISION_LOG_INFO("Total amount of available RAM: " << availableRam << " MB.");
      ALICEVISION_LOG_INFO("Total amount of memory remaining for the computation: " << availableMem << " MB.");
      ALICEVISION_LOG_INFO("Total amount of an image in memory: " << imageMaxMemSize << " MB.");
-@@ -513,9 +550,17 @@ void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
+@@ -513,9 +551,17 @@ void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
          ALICEVISION_LOG_INFO("Generating texture for atlas " << atlasID + 1 << "/" << _atlases.size() << " (" << _atlases[atlasID].size()
                                                               << " triangles).");
  
@@ -3801,7 +3802,7 @@ index 76bf7e5..df260ef 100644
              int triangleID = _atlases[atlasID][i];
  
              // Fuse visibilities of the 3 vertices
-@@ -632,9 +677,154 @@ void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
+@@ -632,9 +678,165 @@ void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
                  }
              }
          }
@@ -3938,12 +3939,23 @@ index 76bf7e5..df260ef 100644
 +            atlasTexture.resize(texParams.textureSide, texParams.textureSide);
 +            // cheshire: the edge padding runs on the device before the download (step 5d)
 +            const int gpuPad = (!texParams.fillHoles && texParams.padding > 0) ? int(texParams.padding) * 3 : 0;
-+            ok = tex.finish((int)s, reinterpret_cast<float*>(atlasTexture.img.data()), atlasTexture.imgCount.data(), gpuPad);
++            // cheshire: the downscale too (step 5j): OIIO's lanczos3 resize transcribed on the device
++            image::Image<image::RGBfColor> cheshireSmall;
++            float* cheshireSmallPtr = nullptr;
++            if (texParams.downscale > 1 && std::getenv("CHESHIRE_GPU_RESIZE") == nullptr)
++            {
++                const int smallSide = int(texParams.textureSide) / int(texParams.downscale);   // not 'small': windows.h defines it
++                cheshireSmall.resize(smallSide, smallSide);
++                cheshireSmallPtr = reinterpret_cast<float*>(cheshireSmall.data());
++            }
++            ok = tex.finish((int)s, reinterpret_cast<float*>(atlasTexture.img.data()), atlasTexture.imgCount.data(), gpuPad, int(texParams.downscale), cheshireSmallPtr);
 +            if (!ok)
 +                break;
 +            cheshireAtlasPadded = gpuPad > 0;
++            cheshireResizedAtlas = cheshireSmallPtr ? &cheshireSmall : nullptr;
 +            writeTexture(atlasTexture, atlasID, outPath, textureFileType, -1, imageType);
 +            cheshireAtlasPadded = false;
++            cheshireResizedAtlas = nullptr;
 +        }
 +        if (log)
 +            ALICEVISION_LOG_INFO("cheshire texturing profile: image loads " << loadSec << " s, uploads " << tex.uploadSec << " s, pyramids " << tex.pyramidSec
@@ -3956,7 +3968,7 @@ index 76bf7e5..df260ef 100644
  
      // pyramid of atlases frequency bands
      std::map<AtlasIndex, AccuPyramid> accuPyramids;
-@@ -1004,7 +1194,9 @@ void Texturing::writeTexture(AccuImage& atlasTexture,
+@@ -1004,7 +1206,9 @@ void Texturing::writeTexture(AccuImage& atlasTexture,
      unsigned int outTextureSide = texParams.textureSide;
      // WARNING: we modify the "imgCount" to apply the padding (to avoid the creation of a new buffer)
      // edge padding (dilate gutter)
@@ -3967,7 +3979,42 @@ index 76bf7e5..df260ef 100644
      {
          const unsigned int padding = texParams.padding * 3;
          ALICEVISION_LOG_INFO("  - Edge padding (" << padding << " pixels).");
-@@ -1304,6 +1496,70 @@ void Texturing::saveAs(const fs::path& dir, const std::string& basename, EFileTy
+@@ -1120,8 +1324,32 @@ void Texturing::writeTexture(AccuImage& atlasTexture,
+     {
+         image::Image<image::RGBfColor> resizedColorBuffer;
+ 
+-        ALICEVISION_LOG_INFO("  - Downscaling texture (" << texParams.downscale << "x).");
+-        imageAlgo::resizeImage(texParams.downscale, atlasTexture.img, resizedColorBuffer);
++        if (cheshireResizedAtlas != nullptr)
++        {
++            // cheshire: the device produced it (scripts/apply_hip_patch.py, step 5j)
++            ALICEVISION_LOG_INFO("  - Downscaling texture (" << texParams.downscale << "x) done on the GPU.");
++            if (std::getenv("CHESHIRE_GPU_RESIZE_CHECK") != nullptr)
++            {
++                image::Image<image::RGBfColor> hostResized;
++                imageAlgo::resizeImage(texParams.downscale, atlasTexture.img, hostResized);
++                std::size_t bad = 0;
++                const std::size_t n = std::size_t(hostResized.width()) * hostResized.height();
++                const float* a = reinterpret_cast<const float*>(hostResized.data());
++                const float* b = reinterpret_cast<const float*>(cheshireResizedAtlas->data());
++                if (hostResized.width() != cheshireResizedAtlas->width() || hostResized.height() != cheshireResizedAtlas->height())
++                    bad = n;
++                else
++                    for (std::size_t i = 0; i < n * 3; ++i)
++                        if (a[i] != b[i]) { ++bad; }
++                ALICEVISION_LOG_INFO("cheshire: GPU resize check: texel channels differing from OpenImageIO: " << bad << " of " << n * 3);
++            }
++            resizedColorBuffer = *cheshireResizedAtlas;
++        }
++        else
++        {
++            ALICEVISION_LOG_INFO("  - Downscaling texture (" << texParams.downscale << "x).");
++            imageAlgo::resizeImage(texParams.downscale, atlasTexture.img, resizedColorBuffer);
++        }
+ 
+         // Normalize normal map after dowscaling
+         /*if(imageType == mvsUtils::EFileType::normalMap)
+@@ -1304,6 +1532,70 @@ void Texturing::saveAs(const fs::path& dir, const std::string& basename, EFileTy
      const std::string meshFileTypeStr = EFileType_enumToString(meshFileType);
      const std::string filepath = (dir / (basename + "." + meshFileTypeStr)).string();
  
@@ -4038,7 +4085,7 @@ index 76bf7e5..df260ef 100644
      ALICEVISION_LOG_INFO("Saving " << meshFileTypeStr << " mesh file using Assimp.");
  
      if (_atlases.empty())
-@@ -1489,7 +1745,7 @@ void Texturing::saveAs(const fs::path& dir, const std::string& basename, EFileTy
+@@ -1489,7 +1781,7 @@ void Texturing::saveAs(const fs::path& dir, const std::string& basename, EFileTy
  
      // export mesh
      Assimp::Exporter exporter;
