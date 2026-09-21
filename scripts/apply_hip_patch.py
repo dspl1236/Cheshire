@@ -3093,6 +3093,143 @@ inline long long cheshireUsSince(std::chrono::steady_clock::time_point t)
                       + "        cheshirePdsProfile.writeUs += cheshireUsSince(cheshireT); ++cheshirePdsProfile.views;" + NL + "    }" + NL, 1)
         pds.write_text(t, encoding="utf-8", newline="")
 
+    # 5h. Undistortion coordinate map, once per intrinsic. UndistortImage evaluates the camera model
+    #     (ima2cam, the distortion polynomial, cam2ima) for every output pixel of every view; on the
+    #     engine bay that is 153 of PrepareDenseScene's 367 thread-seconds, for 107 views that share
+    #     ONE intrinsic. The distorted coordinate depends only on the intrinsic, the output size and
+    #     the principal-point correction, so it is computed once per such key and kept; the per-view
+    #     work is the bilinear sample alone. Same doubles, same contains() test, same sampler call:
+    #     the same bytes out. CHESHIRE_UNDISTORT_MAP=0 disables; CHESHIRE_UNDISTORT_MAP_MB caps the
+    #     cache (default 2048 MB; a 12 MP map is 195 MB); beyond the cap the original loop runs.
+    cu = AV / "src/aliceVision/camera/cameraUndistortImage.hpp"
+    t = cu.read_text(encoding="utf-8")
+    if "cheshire_undistort" not in t:   # the namespace the helper defines; the guard must name something the patch emits
+        inc = "#include <aliceVision/image/io.hpp>" + NL
+        if t.count(inc) != 1:
+            sys.exit("io.hpp include not found once in cameraUndistortImage.hpp")
+        helper = r"""#include <cstdlib>   // cheshire: undistortion map cache (scripts/apply_hip_patch.py, step 5h)
+#include <memory>
+#include <mutex>
+#include <vector>
+
+namespace aliceVision {
+namespace camera {
+namespace cheshire_undistort {
+
+struct MapKey
+{
+    std::vector<double> params;
+    int type = 0, w = 0, h = 0, roiW = 0, roiH = 0, xOff = 0, yOff = 0;
+    double ppx = 0, ppy = 0;
+    bool operator==(const MapKey& o) const
+    {
+        return params == o.params && type == o.type && w == o.w && h == o.h && roiW == o.roiW && roiH == o.roiH
+            && xOff == o.xOff && yOff == o.yOff && ppx == o.ppx && ppy == o.ppy;
+    }
+};
+struct MapEntry
+{
+    MapKey key;
+    std::shared_ptr<const std::vector<Vec2>> map;   // roiW x roiH distorted source coordinates
+};
+struct Cache
+{
+    std::mutex m;
+    std::vector<MapEntry> entries;
+    std::size_t bytes = 0;
+    std::size_t capBytes = std::size_t(2048) << 20;
+    bool enabled = true;
+    bool announced = false;
+    Cache()
+    {
+        if (const char* e = std::getenv("CHESHIRE_UNDISTORT_MAP")) enabled = !(e[0] == '0');
+        if (const char* e = std::getenv("CHESHIRE_UNDISTORT_MAP_MB")) capBytes = std::size_t(std::atoll(e)) << 20;
+    }
+};
+inline Cache& cache() { static Cache c; return c; }
+
+// The map for this key, computed on first use with exactly the expression UndistortImage used
+// per pixel; nullptr when the cache is off or full (the caller then runs the original loop).
+inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intrinsicPtr, int roiW, int roiH,
+                                                       int xOff, int yOff, const Vec2& ppCorrection)
+{
+    Cache& c = cache();
+    if (!c.enabled) return nullptr;
+    MapKey key;
+    key.params = intrinsicPtr->getParameters();
+    key.type = int(intrinsicPtr->getType());
+    key.w = int(intrinsicPtr->w()); key.h = int(intrinsicPtr->h());
+    key.roiW = roiW; key.roiH = roiH; key.xOff = xOff; key.yOff = yOff;
+    key.ppx = ppCorrection(0); key.ppy = ppCorrection(1);
+    {
+        std::lock_guard<std::mutex> g(c.m);
+        for (const MapEntry& e : c.entries)
+            if (e.key == key) return e.map;
+    }
+    const std::size_t need = std::size_t(roiW) * roiH * sizeof(Vec2);
+    {
+        std::lock_guard<std::mutex> g(c.m);
+        if (c.bytes + need > c.capBytes)
+        {
+            if (!c.announced)
+            {
+                c.announced = true;
+                ALICEVISION_LOG_INFO("cheshire: undistort map: " << roiW << "x" << roiH << " would exceed CHESHIRE_UNDISTORT_MAP_MB, computing per view");
+            }
+            return nullptr;
+        }
+    }
+    auto m = std::make_shared<std::vector<Vec2>>(std::size_t(roiW) * roiH);
+    Vec2* out = m->data();
+#pragma omp parallel for
+    for (int y = 0; y < roiH; ++y)
+    {
+        for (int x = 0; x < roiW; ++x)
+        {
+            const Vec2 undisto_pix(x + xOff, y + yOff);
+            out[std::size_t(y) * roiW + x] = intrinsicPtr->getDistortedPixel(undisto_pix + ppCorrection);
+        }
+    }
+    std::lock_guard<std::mutex> g(c.m);
+    for (const MapEntry& e : c.entries)   // another thread may have filled the same key meanwhile
+        if (e.key == key) return e.map;
+    c.entries.push_back(MapEntry{key, m});
+    c.bytes += need;
+    ALICEVISION_LOG_INFO("cheshire: undistort map: " << roiW << "x" << roiH << " for one intrinsic, computed once ("
+                         << (need >> 20) << " MB; " << c.entries.size() << " cached, CHESHIRE_UNDISTORT_MAP=0 to disable)");
+    return m;
+}
+
+}  // namespace cheshire_undistort
+}  // namespace camera
+}  // namespace aliceVision
+"""
+        t = t.replace(inc, inc + helper.replace("\n", NL), 1)
+        old_loop = ("#pragma omp parallel for" + NL
+                    + "    for (int y = 0; y < heightRoi; ++y)" + NL
+                    + "    {" + NL
+                    + "        for (int x = 0; x < widthRoi; ++x)" + NL
+                    + "        {" + NL
+                    + "            const Vec2 undisto_pix(x + xOffset, y + yOffset);" + NL
+                    + "            // compute coordinates with distortion" + NL
+                    + "            const Vec2 disto_pix = intrinsicPtr->getDistortedPixel(undisto_pix + ppCorrection);" + NL)
+        if t.count(old_loop) != 1:
+            sys.exit("UndistortImage (intrinsicPtr overload) pixel loop not found once")
+        new_loop = ("    // cheshire: the distorted coordinates come from the per-intrinsic map when there is one" + NL
+                    + "    const auto cheshireMap = cheshire_undistort::mapFor(intrinsicPtr, widthRoi, heightRoi, xOffset, yOffset, ppCorrection);" + NL
+                    + "    const Vec2* cheshireLut = cheshireMap ? cheshireMap->data() : nullptr;" + NL
+                    + "#pragma omp parallel for" + NL
+                    + "    for (int y = 0; y < heightRoi; ++y)" + NL
+                    + "    {" + NL
+                    + "        for (int x = 0; x < widthRoi; ++x)" + NL
+                    + "        {" + NL
+                    + "            const Vec2 undisto_pix(x + xOffset, y + yOffset);" + NL
+                    + "            // compute coordinates with distortion" + NL
+                    + "            const Vec2 disto_pix = cheshireLut ? cheshireLut[std::size_t(y) * widthRoi + x]" + NL
+                    + "                                              : intrinsicPtr->getDistortedPixel(undisto_pix + ppCorrection);" + NL)
+        t = t.replace(old_loop, new_loop, 1)
+        cu.write_text(t, encoding="utf-8", newline="")
+
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
     #     when the cards in front of us are both compute 6.1. FORCE beats -D on the command line, so

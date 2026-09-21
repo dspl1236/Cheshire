@@ -103,6 +103,133 @@ index 8e3e862..456b000 100644
  # ==============================================================================
  # SYCL/AdaptiveCpp
  # ==============================================================================
+diff --git a/src/aliceVision/camera/cameraUndistortImage.hpp b/src/aliceVision/camera/cameraUndistortImage.hpp
+index ef0d52f..6bd2db5 100644
+--- a/src/aliceVision/camera/cameraUndistortImage.hpp
++++ b/src/aliceVision/camera/cameraUndistortImage.hpp
+@@ -17,6 +17,102 @@
+ #include <aliceVision/camera/Pinhole.hpp>
+ #include <aliceVision/camera/Undistortion.hpp>
+ #include <aliceVision/image/io.hpp>
++#include <cstdlib>   // cheshire: undistortion map cache (scripts/apply_hip_patch.py, step 5h)
++#include <memory>
++#include <mutex>
++#include <vector>
++
++namespace aliceVision {
++namespace camera {
++namespace cheshire_undistort {
++
++struct MapKey
++{
++    std::vector<double> params;
++    int type = 0, w = 0, h = 0, roiW = 0, roiH = 0, xOff = 0, yOff = 0;
++    double ppx = 0, ppy = 0;
++    bool operator==(const MapKey& o) const
++    {
++        return params == o.params && type == o.type && w == o.w && h == o.h && roiW == o.roiW && roiH == o.roiH
++            && xOff == o.xOff && yOff == o.yOff && ppx == o.ppx && ppy == o.ppy;
++    }
++};
++struct MapEntry
++{
++    MapKey key;
++    std::shared_ptr<const std::vector<Vec2>> map;   // roiW x roiH distorted source coordinates
++};
++struct Cache
++{
++    std::mutex m;
++    std::vector<MapEntry> entries;
++    std::size_t bytes = 0;
++    std::size_t capBytes = std::size_t(2048) << 20;
++    bool enabled = true;
++    bool announced = false;
++    Cache()
++    {
++        if (const char* e = std::getenv("CHESHIRE_UNDISTORT_MAP")) enabled = !(e[0] == '0');
++        if (const char* e = std::getenv("CHESHIRE_UNDISTORT_MAP_MB")) capBytes = std::size_t(std::atoll(e)) << 20;
++    }
++};
++inline Cache& cache() { static Cache c; return c; }
++
++// The map for this key, computed on first use with exactly the expression UndistortImage used
++// per pixel; nullptr when the cache is off or full (the caller then runs the original loop).
++inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intrinsicPtr, int roiW, int roiH,
++                                                       int xOff, int yOff, const Vec2& ppCorrection)
++{
++    Cache& c = cache();
++    if (!c.enabled) return nullptr;
++    MapKey key;
++    key.params = intrinsicPtr->getParameters();
++    key.type = int(intrinsicPtr->getType());
++    key.w = int(intrinsicPtr->w()); key.h = int(intrinsicPtr->h());
++    key.roiW = roiW; key.roiH = roiH; key.xOff = xOff; key.yOff = yOff;
++    key.ppx = ppCorrection(0); key.ppy = ppCorrection(1);
++    {
++        std::lock_guard<std::mutex> g(c.m);
++        for (const MapEntry& e : c.entries)
++            if (e.key == key) return e.map;
++    }
++    const std::size_t need = std::size_t(roiW) * roiH * sizeof(Vec2);
++    {
++        std::lock_guard<std::mutex> g(c.m);
++        if (c.bytes + need > c.capBytes)
++        {
++            if (!c.announced)
++            {
++                c.announced = true;
++                ALICEVISION_LOG_INFO("cheshire: undistort map: " << roiW << "x" << roiH << " would exceed CHESHIRE_UNDISTORT_MAP_MB, computing per view");
++            }
++            return nullptr;
++        }
++    }
++    auto m = std::make_shared<std::vector<Vec2>>(std::size_t(roiW) * roiH);
++    Vec2* out = m->data();
++#pragma omp parallel for
++    for (int y = 0; y < roiH; ++y)
++    {
++        for (int x = 0; x < roiW; ++x)
++        {
++            const Vec2 undisto_pix(x + xOff, y + yOff);
++            out[std::size_t(y) * roiW + x] = intrinsicPtr->getDistortedPixel(undisto_pix + ppCorrection);
++        }
++    }
++    std::lock_guard<std::mutex> g(c.m);
++    for (const MapEntry& e : c.entries)   // another thread may have filled the same key meanwhile
++        if (e.key == key) return e.map;
++    c.entries.push_back(MapEntry{key, m});
++    c.bytes += need;
++    ALICEVISION_LOG_INFO("cheshire: undistort map: " << roiW << "x" << roiH << " for one intrinsic, computed once ("
++                         << (need >> 20) << " MB; " << c.entries.size() << " cached, CHESHIRE_UNDISTORT_MAP=0 to disable)");
++    return m;
++}
++
++}  // namespace cheshire_undistort
++}  // namespace camera
++}  // namespace aliceVision
+ 
+ #include <memory>
+ 
+@@ -120,6 +216,9 @@ void UndistortImage(const image::Image<T>& imageIn,
+     image_ud.resize(widthRoi, heightRoi, true, fillcolor);
+     const image::Sampler2d<image::SamplerLinear> sampler;
+ 
++    // cheshire: the distorted coordinates come from the per-intrinsic map when there is one
++    const auto cheshireMap = cheshire_undistort::mapFor(intrinsicPtr, widthRoi, heightRoi, xOffset, yOffset, ppCorrection);
++    const Vec2* cheshireLut = cheshireMap ? cheshireMap->data() : nullptr;
+ #pragma omp parallel for
+     for (int y = 0; y < heightRoi; ++y)
+     {
+@@ -127,7 +226,8 @@ void UndistortImage(const image::Image<T>& imageIn,
+         {
+             const Vec2 undisto_pix(x + xOffset, y + yOffset);
+             // compute coordinates with distortion
+-            const Vec2 disto_pix = intrinsicPtr->getDistortedPixel(undisto_pix + ppCorrection);
++            const Vec2 disto_pix = cheshireLut ? cheshireLut[std::size_t(y) * widthRoi + x]
++                                              : intrinsicPtr->getDistortedPixel(undisto_pix + ppCorrection);
+ 
+             // pick pixel if it is in the image domain
+             if (imageIn.contains(disto_pix(1), disto_pix(0)))
 diff --git a/src/aliceVision/depthMap/BufPtr.hpp b/src/aliceVision/depthMap/BufPtr.hpp
 index 6ead556..eabd2d9 100644
 --- a/src/aliceVision/depthMap/BufPtr.hpp
@@ -4598,7 +4725,7 @@ index 4fe193b..a271a2f 100644
                      fuseCut::Mesher mesher(mp, pc, tetrahedralization, gfiller.getCellsStatus());
                      mesher.graphCutPostProcessing(&hexah[0]);
 diff --git a/src/software/pipeline/main_prepareDenseScene.cpp b/src/software/pipeline/main_prepareDenseScene.cpp
-index a37cb29..1ec8df4 100644
+index a37cb29..0ba0d51 100644
 --- a/src/software/pipeline/main_prepareDenseScene.cpp
 +++ b/src/software/pipeline/main_prepareDenseScene.cpp
 @@ -4,6 +4,8 @@
@@ -4610,7 +4737,69 @@ index a37cb29..1ec8df4 100644
  #include <aliceVision/sfmData/SfMData.hpp>
  #include <aliceVision/alicevision_omp.hpp>
  #include <aliceVision/sfmDataIO/sfmDataIO.hpp>
-@@ -132,7 +134,10 @@ bool prepareDenseScene(const SfMData& sfmData,
+@@ -17,6 +19,28 @@
+ #include <aliceVision/config.hpp>
+ #include <aliceVision/sfmDataIO/viewIO.hpp>
+ #include <aliceVision/camera/cameraUndistortImage.hpp>
++#include <atomic>   // cheshire: CHESHIRE_PDS_PROFILE
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++namespace {
++// cheshire: per-phase seconds summed over threads (scripts/apply_hip_patch.py, step 5g)
++struct CheshirePdsProfile
++{
++    bool on = std::getenv("CHESHIRE_PDS_PROFILE") != nullptr;
++    std::atomic<long long> readUs{0}, prepUs{0}, undistortUs{0}, writeUs{0}, views{0};
++    ~CheshirePdsProfile()
++    {
++        if (on)
++            std::fprintf(stderr, "[cheshire] prepareDenseScene profile: %lld views; thread-seconds: read %.1f, exposure+mask %.1f, undistort %.1f, write %.1f\n",
++                         views.load(), readUs.load() / 1e6, prepUs.load() / 1e6, undistortUs.load() / 1e6, writeUs.load() / 1e6);
++    }
++} cheshirePdsProfile;
++inline long long cheshireUsSince(std::chrono::steady_clock::time_point t)
++{
++    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t).count();
++}
++}  // namespace
+ 
+ #include <boost/program_options.hpp>
+ 
+@@ -55,7 +79,9 @@ void process(const std::string& dstColorImage,
+              MaskFuncT&& maskFunc)
+ {
+     ImageT image, image_ud;
++    auto cheshireT = std::chrono::steady_clock::now();  // cheshire, step 5g
+     readImage(srcImage, image, image::EImageColorSpace::LINEAR);
++    cheshirePdsProfile.readUs += cheshireUsSince(cheshireT); cheshireT = std::chrono::steady_clock::now();
+ 
+     // exposure correction
+     if (evCorrection)
+@@ -70,6 +96,7 @@ void process(const std::string& dstColorImage,
+ 
+     // mask
+     maskFunc(image);
++    cheshirePdsProfile.prepUs += cheshireUsSince(cheshireT); cheshireT = std::chrono::steady_clock::now();
+ 
+     // undistort
+     if (cam->isValid() && cam->hasDistortion())
+@@ -78,11 +105,14 @@ void process(const std::string& dstColorImage,
+         using Pix = typename ImageT::Tpixel;
+         Pix pixZero(Pix::Zero());
+         UndistortImage(image, cam, image_ud, pixZero);
++        cheshirePdsProfile.undistortUs += cheshireUsSince(cheshireT); cheshireT = std::chrono::steady_clock::now();
+         writeImage(dstColorImage, image_ud, image::ImageWriteOptions(), metadata);
++        cheshirePdsProfile.writeUs += cheshireUsSince(cheshireT); ++cheshirePdsProfile.views;
+     }
+     else
+     {
+         writeImage(dstColorImage, image, image::ImageWriteOptions(), metadata);
++        cheshirePdsProfile.writeUs += cheshireUsSince(cheshireT); ++cheshirePdsProfile.views;
+     }
+ }
+ 
+@@ -132,7 +162,10 @@ bool prepareDenseScene(const SfMData& sfmData,
      const double medianCameraExposure = sfmData.getMedianCameraExposureSetting().getExposure();
      ALICEVISION_LOG_INFO("Median Camera Exposure: " << medianCameraExposure << ", Median EV: " << std::log2(1.0 / medianCameraExposure));
  
@@ -4622,7 +4811,7 @@ index a37cb29..1ec8df4 100644
      for (int i = 0; i < viewIds.size(); ++i)
      {
          auto itView = viewIds.begin();
-@@ -335,7 +340,7 @@ int aliceVision_main(int argc, char* argv[])
+@@ -335,7 +368,7 @@ int aliceVision_main(int argc, char* argv[])
           "Correct exposure value.");
      // clang-format on
  
