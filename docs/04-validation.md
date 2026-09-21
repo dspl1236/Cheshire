@@ -799,3 +799,27 @@ This closes the one inference both the v0.3.1 and v0.3.2 notes had to state: the
 hip6.2 payloads for RDNA1 now have a hardware run behind them. What remains unrun on hardware is
 the Windows CUDA zip (no Windows NVIDIA machine; the 1050 Ti went into house-pc for the Linux CUDA
 matrix and out again).
+
+## The shipped 0.3.2 Windows CUDA zip on the GTX 1080 Ti: no GPU SIFT (2026-09-21)
+
+The one artifact the v0.3.2 notes could not vouch for has now run on Windows NVIDIA hardware: the
+1080 Ti went into bench-pc (driver 581.57, matched DIMMs) and the zip published as v0.3.2 ran the
+full matrix. **0 of 12.** Every config finished (`exit=0`, mesh and texture present, 0 bugchecks
+over the 45 minutes) and five of the six ports announced themselves - DepthMap capped at 9180 MB and
+planned 12 tiles per view with images resident, DepthMapFilter, Meshing and Texturing all on the
+device, `image vram: 6 allocs, peak 372 MB` in the blast summary - but FeatureExtraction was
+"paired but silent" twelve times: the Cheshire binary ran and every view came out `[cpu]`.
+
+The cause is in the build script, not the code. `build-alicevision-cuda.cmd` defaulted
+`CHESHIRE_POPSIFT` to OFF, the 09-21 rebuild ran in a shell that had not set it, and CMake
+configured `ALICEVISION_USE_POPSIFT=OFF`; `package-cuda.ps1` still staged `popsift.dll` from its
+own install tree, so the package looked complete while `aliceVision_feature.dll` imported nothing
+from it. The Linux CUDA script defaults PopSIFT on, which is why the 1050 Ti bundle was fine. Two
+fixes (4ad97eb): the Windows script defaults to ON whenever the PopSift install exists and echoes
+the choice, and the packager reads the staged feature library and throws if a `popsift.dll` is
+shipped that it does not import. A package that says GPU SIFT and runs the CPU extractor can no
+longer come out of the packager.
+
+The zip was rebuilt from the v0.3.2 tag (e5a7cea) with PopSIFT on, through the new guard
+(`feature.dll imports popsift: True`), sha256 `2832289c…`, 104 MB, and staged at
+`build/release/0.3.2-fix/`. Its matrix on the 1080 Ti is recorded below.
