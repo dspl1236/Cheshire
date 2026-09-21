@@ -47,7 +47,12 @@ public:
     bool raster(int slot, int band, const std::uint32_t* triIds, const float* scores, std::uint32_t n);
     // Final (average) colour and band fusion for a slot, downloaded into rgb (3 per texel) and
     // count (1 where a texel has colour, else 0), then the slot is cleared for the next chunk.
-    bool finish(int slot, float* rgb, float* count);
+    // padding > 0 also runs upstream's edge padding (Texturing::writeTexture's two sweeps, the
+    // "dilate gutter") on the device before the download, so the host receives a padded atlas and
+    // count carries upstream's values (1 valid, -k for a texel padded k deep, 0 empty).
+    // CHESHIRE_GPU_PAD_CHECK=1 runs the sequential sweeps on the host as well and reports the
+    // number of texels that differ (the port is a wavefront ordering of the same sweeps: 0).
+    bool finish(int slot, float* rgb, float* count, int padding = 0);
 
     // seconds spent, for CHESHIRE_GPU_TEX_LOG
     double uploadSec = 0, pyramidSec = 0, rasterSec = 0, finishSec = 0;

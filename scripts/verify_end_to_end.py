@@ -160,6 +160,13 @@ CONFIGS = {
                         checks={"DepthMap": [r"bridge: vram cap 500 MB", r"bridge summary: [1-9]\d* spills"]}),
     # And the bridge switched off entirely: plain device allocation.
     "bridgeoff": dict(overrides=SIFT, env={"CHESHIRE_BRIDGE": "0"}),
+    # Texturing's two 0.3.2 ports under their self-checks: the device edge padding against
+    # upstream's sequential sweeps (must differ on 0 texels) and the direct OBJ writer with
+    # Assimp's file written beside it (scripts/check_textured_obj.py compares them by content).
+    "texcheck": dict(overrides=SIFT, obj_check=True, env={"CHESHIRE_GPU_PAD_CHECK": "1", "CHESHIRE_OBJ_CHECK": "1"}, checks={
+        "Texturing": [r"GPU padding check: texels differing from the sequential sweeps: 0 of [1-9]",
+                      r"Edge padding \(\d+ pixels\) done on the GPU",
+                      r"Saving obj mesh file \(cheshire direct writer\)"]}),
     # Full-resolution depth maps, uncapped: the card's own VRAM is the constraint. Per-view working
     # set is 4x the default, so on a large high-resolution set this is what makes the bridge spill
     # naturally rather than under an artificial cap - and on CUDA, where camera mipmaps never pass
@@ -296,6 +303,19 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     # Config-specific assertions on top of the port lines: self-check verdicts, bridge announcements.
     unmet = [f"{n}: /{p}/" for n, pats in cfg.get("checks", {}).items()
              for p in pats if not re.search(p, node_logs(cache, n))]
+    if cfg.get("obj_check"):
+        # The direct textured-OBJ writer against Assimp's file of the same mesh, by content
+        # (CHESHIRE_OBJ_CHECK=1 makes Texturing write both; numbering differs by design).
+        tdir = next(iter(sorted((cache / "Texturing").glob("*/"))), None)
+        ours = tdir / "texturedMesh.obj" if tdir else None
+        theirs = tdir / "texturedMesh.assimp.obj" if tdir else None
+        if not (ours and ours.exists() and theirs.exists()):
+            unmet.append("Texturing: texturedMesh.obj and texturedMesh.assimp.obj both present")
+        else:
+            r = subprocess.run([sys.executable, str(Path(__file__).with_name("check_textured_obj.py")), str(ours), str(theirs)],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                unmet.append("Texturing: direct OBJ content == Assimp's (" + r.stdout.strip().splitlines()[-2][:100] + ")")
     # Depth and sim maps as bytes, for the cross-config identity check in main().
     dm_dir = next(iter(sorted((cache / "DepthMap").glob("*/"))), None)
     dm_digest = None

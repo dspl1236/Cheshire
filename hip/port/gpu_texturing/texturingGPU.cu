@@ -359,6 +359,97 @@ __global__ void finishKernel(float* __restrict__ accRgb, float* __restrict__ acc
     }
 }
 
+// ---- edge padding: upstream's two sweeps as wavefronts ----------------------------------------
+//
+// Texturing::writeTexture dilates each chart's gutter with two sequential raster sweeps over the
+// atlas: up-left to bottom-right, where a texel reads the left and up neighbours AS ALREADY
+// UPDATED in this sweep, then bottom-right to up-left reading right and down likewise (and left and
+// up as they stood before this sweep). The dependency of texel (x, y) on (x-1, y) and (x, y-1)
+// makes every anti-diagonal x + y = d independent once diagonal d-1 is done, so the sweep is
+// 2*side launches of one diagonal each, and the same for the reverse sweep in reversed
+// coordinates. Same reads, same writes, same order along every dependency chain: the result is the
+// sequential algorithm's, texel for texel, which CHESHIRE_GPU_PAD_CHECK=1 verifies on the host.
+// count values are upstream's: 1 valid, -k padded k texels deep, 0 untouched.
+
+__global__ void padInitKernel(const float* __restrict__ cnt, int* __restrict__ pc, size_t n)
+{
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) pc[i] = cnt[i] > 0.0f ? 1 : 0;
+}
+
+__global__ void padForwardKernel(float* __restrict__ rgb, int* __restrict__ pc, int S, int d, int xlo, int nx, int padding)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= nx) return;
+    const int x = xlo + t, y = d - x;
+    const size_t o = size_t(y) * S + x;
+    if (pc[o] > 0) return;
+    const int upCount = pc[o - S];
+    const int leftCount = pc[o - 1];
+    size_t src; int val;
+    if (leftCount > 0) { src = o - 1; val = -1; }
+    else if (upCount > 0) { src = o - S; val = -1; }
+    else if (leftCount < 0 && -leftCount < padding && (upCount == 0 || leftCount > upCount)) { src = o - 1; val = leftCount - 1; }
+    else if (upCount < 0 && -upCount < padding) { src = o - S; val = upCount - 1; }
+    else return;
+    rgb[o * 3] = rgb[src * 3]; rgb[o * 3 + 1] = rgb[src * 3 + 1]; rgb[o * 3 + 2] = rgb[src * 3 + 2];
+    pc[o] = val;
+}
+
+__global__ void padBackwardKernel(float* __restrict__ rgb, int* __restrict__ pc, int S, int d, int ulo, int nu, int padding)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= nu) return;
+    const int u = ulo + t, v = d - u;          // reversed coordinates: u = S-1-x, v = S-1-y
+    const int x = S - 1 - u, y = S - 1 - v;
+    const size_t o = size_t(y) * S + x;
+    if (pc[o] > 0) return;
+    const int upCount = pc[o - S];
+    const int downCount = pc[o + S];
+    const int rightCount = pc[o + 1];
+    const int leftCount = pc[o - 1];
+    size_t src; int val;
+    if (rightCount > 0) { src = o + 1; val = -1; }
+    else if (downCount > 0) { src = o + S; val = -1; }
+    else if ((rightCount < 0 && -rightCount < padding) && (leftCount == 0 || rightCount > leftCount) && (downCount == 0 || rightCount >= downCount)) { src = o + 1; val = rightCount - 1; }
+    else if ((downCount < 0 && -downCount < padding) && (upCount == 0 || downCount > upCount)) { src = o + S; val = downCount - 1; }
+    else return;
+    rgb[o * 3] = rgb[src * 3]; rgb[o * 3 + 1] = rgb[src * 3 + 1]; rgb[o * 3 + 2] = rgb[src * 3 + 2];
+    pc[o] = val;
+}
+
+__global__ void padCountOutKernel(const int* __restrict__ pc, float* __restrict__ cnt, size_t n)
+{
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) cnt[i] = float(pc[i]);
+}
+
+// Upstream's sweeps verbatim, on the host, for CHESHIRE_GPU_PAD_CHECK.
+static void padHostReference(std::vector<float>& rgb, std::vector<int>& pc, int S, int padding)
+{
+    auto copy = [&](size_t dst, size_t src) { rgb[dst * 3] = rgb[src * 3]; rgb[dst * 3 + 1] = rgb[src * 3 + 1]; rgb[dst * 3 + 2] = rgb[src * 3 + 2]; };
+    for (int y = 1; y < S - 1; ++y)
+        for (int x = 1; x < S - 1; ++x) {
+            const size_t o = size_t(y) * S + x;
+            if (pc[o] > 0) continue;
+            const int upCount = pc[o - S], leftCount = pc[o - 1];
+            if (leftCount > 0) { copy(o, o - 1); pc[o] = -1; }
+            else if (upCount > 0) { copy(o, o - S); pc[o] = -1; }
+            else if (leftCount < 0 && -leftCount < padding && (upCount == 0 || leftCount > upCount)) { copy(o, o - 1); pc[o] = leftCount - 1; }
+            else if (upCount < 0 && -upCount < padding) { copy(o, o - S); pc[o] = upCount - 1; }
+        }
+    for (int y = 1; y < S - 1; ++y)
+        for (int x = 1; x < S - 1; ++x) {
+            const size_t o = size_t(S - 1 - y) * S + (S - 1 - x);
+            if (pc[o] > 0) continue;
+            const int upCount = pc[o - S], downCount = pc[o + S], rightCount = pc[o + 1], leftCount = pc[o - 1];
+            if (rightCount > 0) { copy(o, o + 1); pc[o] = -1; }
+            else if (downCount > 0) { copy(o, o + S); pc[o] = -1; }
+            else if ((rightCount < 0 && -rightCount < padding) && (leftCount == 0 || rightCount > leftCount) && (downCount == 0 || rightCount >= downCount)) { copy(o, o + 1); pc[o] = rightCount - 1; }
+            else if ((downCount < 0 && -downCount < padding) && (upCount == 0 || downCount > upCount)) { copy(o, o + S); pc[o] = downCount - 1; }
+        }
+}
+
 bool g_checked = false, g_available = false;
 std::mutex g_mutex;
 
@@ -407,12 +498,13 @@ struct Texturer::Impl {
     std::vector<float*> levels;          // Laplacian levels (nbBand), level i has dims of image / downscale^i
     std::vector<float*> down;            // downscaled scratch per level (nbBand - 1)
     uint32_t* dTri = nullptr; float* dScore = nullptr; uint32_t listCap = 0;
+    int* padCnt = nullptr;               // edge padding state, one int per texel of one level
     Cam cam{};
     bool camSet = false;
     std::vector<float> hostTmp;
 
     ~Impl() {
-        for (void* p : {(void*)accRgb, (void*)accCnt, (void*)triPts, (void*)triPix, (void*)img, (void*)dTri, (void*)dScore}) if (p) cudaFree(p);
+        for (void* p : {(void*)accRgb, (void*)accCnt, (void*)triPts, (void*)triPix, (void*)img, (void*)dTri, (void*)dScore, (void*)padCnt}) if (p) cudaFree(p);
         for (float* p : levels) if (p) cudaFree(p);
         for (float* p : down) if (p) cudaFree(p);
     }
@@ -503,7 +595,7 @@ bool Texturer::raster(int slot, int band, const std::uint32_t* triIds, const flo
     return ok;
 }
 
-bool Texturer::finish(int slot, float* rgb, float* count)
+bool Texturer::finish(int slot, float* rgb, float* count, int padding)
 {
     if (slot < 0 || slot >= p->nbSlots) return false;
     const auto t0 = std::chrono::steady_clock::now();
@@ -511,6 +603,48 @@ bool Texturer::finish(int slot, float* rgb, float* count)
     const size_t n = p->levelStride;
     finishKernel<<<unsigned((n + 255) / 256), 256>>>(r, c, n, p->nbBand, p->levelStride);
     bool ok = cudaGetLastError() == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess;
+    if (ok && padding > 0) {
+        const int S = int(p->texSide);
+        static const bool check = std::getenv("CHESHIRE_GPU_PAD_CHECK") != nullptr;
+        std::vector<float> refRgb; std::vector<int> refPc;
+        if (check) {   // the un-padded atlas, for the host reference below
+            refRgb.resize(n * 3); refPc.resize(n);
+            std::vector<float> cnt(n);
+            ok = cudaMemcpy(refRgb.data(), r, n * 3 * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess
+              && cudaMemcpy(cnt.data(), c, n * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess;
+            for (size_t i = 0; i < n; ++i) refPc[i] = cnt[i] > 0.0f ? 1 : 0;
+        }
+        if (ok && !p->padCnt) ok = cudaMalloc((void**)&p->padCnt, n * sizeof(int)) == cudaSuccess;
+        if (ok) {
+            padInitKernel<<<unsigned((n + 255) / 256), 256>>>(c, p->padCnt, n);
+            // forward: diagonals d = x + y over 1 <= x, y <= S-2
+            for (int d = 2; d <= 2 * (S - 2); ++d) {
+                const int xlo = d - (S - 2) > 1 ? d - (S - 2) : 1;
+                const int xhi = d - 1 < S - 2 ? d - 1 : S - 2;
+                const int nx = xhi - xlo + 1;
+                if (nx > 0) padForwardKernel<<<unsigned((nx + 255) / 256), 256>>>(r, p->padCnt, S, d, xlo, nx, padding);
+            }
+            // backward: the same diagonals in reversed coordinates
+            for (int d = 2; d <= 2 * (S - 2); ++d) {
+                const int ulo = d - (S - 2) > 1 ? d - (S - 2) : 1;
+                const int uhi = d - 1 < S - 2 ? d - 1 : S - 2;
+                const int nu = uhi - ulo + 1;
+                if (nu > 0) padBackwardKernel<<<unsigned((nu + 255) / 256), 256>>>(r, p->padCnt, S, d, ulo, nu, padding);
+            }
+            padCountOutKernel<<<unsigned((n + 255) / 256), 256>>>(p->padCnt, c, n);
+            ok = cudaGetLastError() == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess;
+        }
+        if (ok && check) {
+            padHostReference(refRgb, refPc, S, padding);
+            std::vector<float> gotRgb(n * 3), gotCnt(n);
+            ok = cudaMemcpy(gotRgb.data(), r, n * 3 * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess
+              && cudaMemcpy(gotCnt.data(), c, n * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess;
+            size_t bad = 0;
+            for (size_t i = 0; ok && i < n; ++i)
+                if (gotCnt[i] != float(refPc[i]) || gotRgb[i * 3] != refRgb[i * 3] || gotRgb[i * 3 + 1] != refRgb[i * 3 + 1] || gotRgb[i * 3 + 2] != refRgb[i * 3 + 2]) ++bad;
+            std::fprintf(stderr, "[cheshire] GPU padding check: texels differing from the sequential sweeps: %zu of %zu\n", bad, n);
+        }
+    }
     if (ok) ok = cudaMemcpy(rgb, r, n * 3 * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess
               && cudaMemcpy(count, c, n * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess;
     if (ok) ok = cudaMemset(r, 0, size_t(p->nbBand) * n * 3 * sizeof(float)) == cudaSuccess && cudaMemset(c, 0, size_t(p->nbBand) * n * sizeof(float)) == cudaSuccess;

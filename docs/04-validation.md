@@ -597,3 +597,34 @@ expands to `stream << a` without parentheses, so `stream << on ? "A" : "B"` pars
 `(stream << on) ? "A" : "B"`: it logged the bool and both strings were dead. Any ternary handed to
 that macro does this; the fix is an if/else, and the check that caught it - search the binary for
 the literal - is now the habit for every new line.
+
+## 0.3.2 progress: item 3 landed - texturing padding on the GPU, direct textured-OBJ writer (2026-09-21)
+
+**Padding.** `writeTexture`'s "dilate gutter" is two sequential sweeps over the atlas in which a
+texel reads neighbours already updated in the same sweep. That dependency is only on the left and
+up neighbour (forward) or right and down (backward), so every anti-diagonal is independent once
+the previous one is done: the port runs the same sweeps as one kernel launch per diagonal, in
+place, on the device, before the atlas is downloaded - 16,000 launches of up to 8,190 threads for
+an 8192^2 atlas, 0.36 s including the download. `CHESHIRE_GPU_PAD_CHECK=1` runs upstream's loops
+on the host copy and compares: **0 of 67,108,864 texels differ**, colours and count values both.
+The CPU fallback path still pads on the host; `writeTexture` logs which one ran.
+
+**The writer.** `Texturing::saveAs` built an Assimp scene (every (vertex, uv) pair through a
+`std::map`, positions copied into `aiMesh` arrays) and exported through Assimp's OBJ writer. The
+direct writer emits every mesh vertex, every uv, then per atlas `usemtl` and `f v/vt v/vt v/vt`,
+and the MTL; OBJ only, and only without normal/bump/displacement maps. Content is asserted, not
+assumed: `CHESHIRE_OBJ_CHECK=1` writes Assimp's file beside it and `scripts/check_textured_obj.py`
+resolves every face of both to its (position, uv) corners and compares the multisets per material.
+First run: 20,409 of 499,080 faces differed by one float ulp in a uv - the mesh holds doubles,
+Assimp stores floats, and printing a double to 9 digits then reading it back as float
+double-rounds differently from casting first. The writer casts to float before printing, as
+Assimp's numbers are; second run **0 faces differ either way** (249,933 v / 269,826 vt / 499,517
+faces, Assimp 269,934 v by its own deduplication). Save 0.4 s direct against 2.8 s Assimp on that
+mesh; the engine bay's 14 s should scale the same way.
+
+Texturing on mini6: 11.7 s to 10.8 s. What the timeline shows is left per atlas: the Lanczos
+downscale (`imageAlgo::resizeImage`, 4.1 s at 8192 to 4096), the EXR write 0.5 s. The downscale
+is the next texturing target and is not part of this item.
+
+Gate: `base` and `texcheck` both 6/6; `texcheck` asserts the padding verdict, the "done on the
+GPU" line, the writer's line and the OBJ content comparison.

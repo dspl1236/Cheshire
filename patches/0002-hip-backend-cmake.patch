@@ -3482,24 +3482,27 @@ index b0b5910..8569072 100644
  
      return nupd;
 diff --git a/src/aliceVision/mesh/Texturing.cpp b/src/aliceVision/mesh/Texturing.cpp
-index 76bf7e5..eb5d127 100644
+index 76bf7e5..df260ef 100644
 --- a/src/aliceVision/mesh/Texturing.cpp
 +++ b/src/aliceVision/mesh/Texturing.cpp
-@@ -5,6 +5,13 @@
+@@ -5,6 +5,16 @@
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
  #include "Texturing.hpp"
 +#include <cstdlib>  // cheshire
++#include <cstdio>   // cheshire: direct OBJ writer
++#include <stdexcept>
 +#include <cstdint>
 +#ifdef ALICEVISION_HAVE_GPU_TEX
 +#include "aliceVision/mesh/gpu/texturingGPU.hpp"  // cheshire
 +#include <chrono>
 +static int cheshirePrefetchDepth = 1;  // cameras read ahead of the one on the GPU (image cache slots - 1)
++static bool cheshireAtlasPadded = false;  // the GPU already ran writeTexture edge padding on this atlas
 +#endif
  #include "geoMesh.hpp"
  #include "UVAtlas.hpp"
  
-@@ -463,6 +470,33 @@ void Texturing::generateTextures(const mvsUtils::MultiViewParams& mp,
+@@ -463,6 +473,33 @@ void Texturing::generateTextures(const mvsUtils::MultiViewParams& mp,
          nbAtlasMax -= 1;
      nbAtlasMax = std::max(1, nbAtlasMax);  // if not enough memory, do it one by one
  
@@ -3533,7 +3536,7 @@ index 76bf7e5..eb5d127 100644
      ALICEVISION_LOG_INFO("Total amount of available RAM: " << availableRam << " MB.");
      ALICEVISION_LOG_INFO("Total amount of memory remaining for the computation: " << availableMem << " MB.");
      ALICEVISION_LOG_INFO("Total amount of an image in memory: " << imageMaxMemSize << " MB.");
-@@ -513,9 +547,17 @@ void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
+@@ -513,9 +550,17 @@ void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
          ALICEVISION_LOG_INFO("Generating texture for atlas " << atlasID + 1 << "/" << _atlases.size() << " (" << _atlases[atlasID].size()
                                                               << " triangles).");
  
@@ -3553,7 +3556,7 @@ index 76bf7e5..eb5d127 100644
              int triangleID = _atlases[atlasID][i];
  
              // Fuse visibilities of the 3 vertices
-@@ -632,9 +674,150 @@ void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
+@@ -632,9 +677,154 @@ void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
                  }
              }
          }
@@ -3688,10 +3691,14 @@ index 76bf7e5..eb5d127 100644
 +            ALICEVISION_LOG_INFO("Create texture " << atlasID + 1);
 +            AccuImage atlasTexture;
 +            atlasTexture.resize(texParams.textureSide, texParams.textureSide);
-+            ok = tex.finish((int)s, reinterpret_cast<float*>(atlasTexture.img.data()), atlasTexture.imgCount.data());
++            // cheshire: the edge padding runs on the device before the download (step 5d)
++            const int gpuPad = (!texParams.fillHoles && texParams.padding > 0) ? int(texParams.padding) * 3 : 0;
++            ok = tex.finish((int)s, reinterpret_cast<float*>(atlasTexture.img.data()), atlasTexture.imgCount.data(), gpuPad);
 +            if (!ok)
 +                break;
++            cheshireAtlasPadded = gpuPad > 0;
 +            writeTexture(atlasTexture, atlasID, outPath, textureFileType, -1, imageType);
++            cheshireAtlasPadded = false;
 +        }
 +        if (log)
 +            ALICEVISION_LOG_INFO("cheshire texturing profile: image loads " << loadSec << " s, uploads " << tex.uploadSec << " s, pyramids " << tex.pyramidSec
@@ -3704,6 +3711,97 @@ index 76bf7e5..eb5d127 100644
  
      // pyramid of atlases frequency bands
      std::map<AtlasIndex, AccuPyramid> accuPyramids;
+@@ -1004,7 +1194,9 @@ void Texturing::writeTexture(AccuImage& atlasTexture,
+     unsigned int outTextureSide = texParams.textureSide;
+     // WARNING: we modify the "imgCount" to apply the padding (to avoid the creation of a new buffer)
+     // edge padding (dilate gutter)
+-    if (!texParams.fillHoles && texParams.padding > 0 && level < 0)
++    if (cheshireAtlasPadded && !texParams.fillHoles && texParams.padding > 0 && level < 0)
++        ALICEVISION_LOG_INFO("  - Edge padding (" << texParams.padding * 3 << " pixels) done on the GPU.");
++    if (!cheshireAtlasPadded && !texParams.fillHoles && texParams.padding > 0 && level < 0)
+     {
+         const unsigned int padding = texParams.padding * 3;
+         ALICEVISION_LOG_INFO("  - Edge padding (" << padding << " pixels).");
+@@ -1304,6 +1496,70 @@ void Texturing::saveAs(const fs::path& dir, const std::string& basename, EFileTy
+     const std::string meshFileTypeStr = EFileType_enumToString(meshFileType);
+     const std::string filepath = (dir / (basename + "." + meshFileTypeStr)).string();
+ 
++    // cheshire: OBJ and MTL straight to the files (scripts/apply_hip_patch.py, step 5e)
++    std::string cheshireAssimpPath = filepath;
++    if (meshFileType == EFileType::OBJ && std::getenv("CHESHIRE_OBJ_ASSIMP") == nullptr && !_atlases.empty()
++        && material.getTextures(Material::TextureType::NORMAL).empty()
++        && material.getTextures(Material::TextureType::BUMP).empty()
++        && material.getTextures(Material::TextureType::DISPLACEMENT).empty())
++    {
++        const std::string mtlName = basename + ".mtl";
++        const StaticVector<std::string>& diffuse = material.getTextures(Material::TextureType::DIFFUSE);
++        ALICEVISION_LOG_INFO("Saving obj mesh file (cheshire direct writer): " << mesh->pts.size() << " vertices, " << mesh->uvCoords.size()
++                                                                              << " uvs, " << mesh->tris.size() << " faces, " << _atlases.size() << " materials.");
++        FILE* f = std::fopen(filepath.c_str(), "wb");
++        if (f == nullptr)
++            throw std::runtime_error("Cannot open mesh file for writing: " + filepath);
++        std::vector<char> buf(1 << 22);
++        std::size_t used = 0;
++        auto flush = [&]() { if (used) { std::fwrite(buf.data(), 1, used, f); used = 0; } };
++        auto put = [&](const char* fmt, auto... args) {
++            if (used + 256 > buf.size()) flush();
++            used += std::snprintf(buf.data() + used, buf.size() - used, fmt, args...);
++        };
++        put("# textured mesh, written by Cheshire (AliceVision)\n\nmtllib %s\n\n", mtlName.c_str());
++        for (int i = 0; i < mesh->pts.size(); ++i)
++            put("v %.9g %.9g %.9g\n", double(float(mesh->pts[i].x)), double(float(-mesh->pts[i].y)), double(float(-mesh->pts[i].z)));
++        put("\n");
++        for (int i = 0; i < mesh->uvCoords.size(); ++i)
++            put("vt %.9g %.9g 0\n", double(float(mesh->uvCoords[i].x)), double(float(mesh->uvCoords[i].y)));
++        for (int atlasId = 0; atlasId < _atlases.size(); ++atlasId)
++        {
++            put("\nusemtl material_%s\n", Material::textureId(atlasId).c_str());
++            for (const int triangleId : _atlases[atlasId])
++            {
++                const auto& tri = mesh->tris[triangleId];
++                const auto& uv = mesh->trisUvIds[triangleId];
++                put("f %d/%d %d/%d %d/%d\n", tri.v[0] + 1, uv.m[0] + 1, tri.v[1] + 1, uv.m[1] + 1, tri.v[2] + 1, uv.m[2] + 1);
++            }
++        }
++        flush();
++        std::fclose(f);
++        const std::string mtlPath = (dir / mtlName).string();
++        FILE* m = std::fopen(mtlPath.c_str(), "wb");
++        if (m == nullptr)
++            throw std::runtime_error("Cannot open material file for writing: " + mtlPath);
++        std::fprintf(m, "# textured mesh materials, written by Cheshire (AliceVision)\n\n");
++        for (int atlasId = 0; atlasId < _atlases.size(); ++atlasId)
++        {
++            std::fprintf(m, "newmtl material_%s\n", Material::textureId(atlasId).c_str());
++            std::fprintf(m, "Kd %.9g %.9g %.9g\n", double(material.diffuse.r), double(material.diffuse.g), double(material.diffuse.b));
++            std::fprintf(m, "Ka %.9g %.9g %.9g\n", double(material.ambient.r), double(material.ambient.g), double(material.ambient.b));
++            std::fprintf(m, "Ks %.9g %.9g %.9g\n", double(material.specular.r), double(material.specular.g), double(material.specular.b));
++            std::fprintf(m, "illum 1\n");
++            if (diffuse.size() == _atlases.size())
++                std::fprintf(m, "map_Kd %s\n", diffuse[atlasId].c_str());
++            std::fprintf(m, "\n");
++        }
++        std::fclose(m);
++        if (std::getenv("CHESHIRE_OBJ_CHECK") == nullptr)
++        {
++            ALICEVISION_LOG_INFO("Mesh saved.");
++            return;
++        }
++        cheshireAssimpPath = (dir / (basename + ".assimp." + meshFileTypeStr)).string();
++        ALICEVISION_LOG_INFO("CHESHIRE_OBJ_CHECK: also writing Assimp's file to " << cheshireAssimpPath);
++    }
+     ALICEVISION_LOG_INFO("Saving " << meshFileTypeStr << " mesh file using Assimp.");
+ 
+     if (_atlases.empty())
+@@ -1489,7 +1745,7 @@ void Texturing::saveAs(const fs::path& dir, const std::string& basename, EFileTy
+ 
+     // export mesh
+     Assimp::Exporter exporter;
+-    const aiReturn ret = exporter.Export(&scene, pFormatId, filepath, pPreprocessing);
++    const aiReturn ret = exporter.Export(&scene, pFormatId, cheshireAssimpPath, pPreprocessing);
+ 
+     // check for errors
+     if (ret != AI_SUCCESS)
 diff --git a/src/aliceVision/mesh/UVAtlas.cpp b/src/aliceVision/mesh/UVAtlas.cpp
 index 626e638..248beab 100644
 --- a/src/aliceVision/mesh/UVAtlas.cpp

@@ -876,7 +876,7 @@ endif()
         shutil.copy2(ROOT / "hip" / "port" / "gpu_texturing" / f, gt_dst / f)
     tx = AV / "src/aliceVision/mesh/Texturing.cpp"
     patch(tx, '#include "Texturing.hpp"' + NL,
-          '#include <cstdlib>  // cheshire' + NL + '#include <cstdint>' + NL + '#ifdef ALICEVISION_HAVE_GPU_TEX' + NL + '#include "aliceVision/mesh/gpu/texturingGPU.hpp"  // cheshire' + NL + '#include <chrono>' + NL + 'static int cheshirePrefetchDepth = 1;  // cameras read ahead of the one on the GPU (image cache slots - 1)' + NL + '#endif' + NL)
+          '#include <cstdlib>  // cheshire' + NL + '#include <cstdint>' + NL + '#ifdef ALICEVISION_HAVE_GPU_TEX' + NL + '#include "aliceVision/mesh/gpu/texturingGPU.hpp"  // cheshire' + NL + '#include <chrono>' + NL + 'static int cheshirePrefetchDepth = 1;  // cameras read ahead of the one on the GPU (image cache slots - 1)' + NL + 'static bool cheshireAtlasPadded = false;  // the GPU already ran writeTexture edge padding on this atlas' + NL + '#endif' + NL)
     # chunk size: what the card holds (the host keeps one atlas at a time on the GPU path)
     patch(tx, '    ALICEVISION_LOG_INFO("Total amount of available RAM: " << availableRam << " MB.");' + NL, """#ifdef ALICEVISION_HAVE_GPU_TEX
     // cheshire: the accumulators live in VRAM, so the chunk is what the card holds
@@ -1008,10 +1008,14 @@ endif()
             ALICEVISION_LOG_INFO("Create texture " << atlasID + 1);
             AccuImage atlasTexture;
             atlasTexture.resize(texParams.textureSide, texParams.textureSide);
-            ok = tex.finish((int)s, reinterpret_cast<float*>(atlasTexture.img.data()), atlasTexture.imgCount.data());
+            // cheshire: the edge padding runs on the device before the download (step 5d)
+            const int gpuPad = (!texParams.fillHoles && texParams.padding > 0) ? int(texParams.padding) * 3 : 0;
+            ok = tex.finish((int)s, reinterpret_cast<float*>(atlasTexture.img.data()), atlasTexture.imgCount.data(), gpuPad);
             if (!ok)
                 break;
+            cheshireAtlasPadded = gpuPad > 0;
             writeTexture(atlasTexture, atlasID, outPath, textureFileType, -1, imageType);
+            cheshireAtlasPadded = false;
         }
         if (log)
             ALICEVISION_LOG_INFO("cheshire texturing profile: image loads " << loadSec << " s, uploads " << tex.uploadSec << " s, pyramids " << tex.pyramidSec
@@ -2863,6 +2867,116 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
 """
         t = t.replace(tail, sort_block.replace("\n", NL) + tail, 1)
         ps.write_text(t, encoding="utf-8", newline="")
+
+    # 5d. Edge padding on the GPU. writeTexture's "dilate gutter" is two sequential sweeps over the
+    #     whole atlas (67 M texels at 8192^2), run on the host after the port had already handed the
+    #     atlas back; texturingGPU.cu now runs the same sweeps as wavefronts on the device before the
+    #     download (the block above passes the padding to finish()), so writeTexture skips its own.
+    #     The CPU fallback loop never sets the flag and pads as before.
+    tx = AV / "src/aliceVision/mesh/Texturing.cpp"
+    t = tx.read_text(encoding="utf-8")
+    old_guard = "    if (!texParams.fillHoles && texParams.padding > 0 && level < 0)" + NL + "    {" + NL + "        const unsigned int padding = texParams.padding * 3;" + NL
+    if "cheshireAtlasPadded)" not in t:
+        if t.count(old_guard) != 1:
+            sys.exit("writeTexture padding guard not found once")
+        t = t.replace(old_guard,
+                      "    if (cheshireAtlasPadded && !texParams.fillHoles && texParams.padding > 0 && level < 0)" + NL
+                      + "        ALICEVISION_LOG_INFO(\"  - Edge padding (\" << texParams.padding * 3 << \" pixels) done on the GPU.\");" + NL
+                      + "    if (!cheshireAtlasPadded && !texParams.fillHoles && texParams.padding > 0 && level < 0)" + NL
+                      + "    {" + NL + "        const unsigned int padding = texParams.padding * 3;" + NL, 1)
+        tx.write_text(t, encoding="utf-8", newline="")
+
+    # 5e. The textured mesh straight to OBJ + MTL. saveAs builds an Assimp scene - every (vertex, uv)
+    #     pair deduplicated through a std::map, positions and uvs copied into aiMesh arrays - and
+    #     exports through Assimp's OBJ writer, 14 s for the engine bay's 1.2 M triangles. The same
+    #     content written directly: every mesh vertex as `v` (y and z negated as upstream does), every
+    #     uv as `vt u v 0`, then per atlas `usemtl material_<udim>` and `f v/vt v/vt v/vt`, 1-based,
+    #     9 significant digits of the FLOAT value (the mesh holds doubles; Assimp's aiVector3D is float,
+    #     so upstream's files carry float precision and the direct writer prints the same numbers); the
+    #     MTL carries the same Kd/Ka/Ks/illum/map_Kd lines. OBJ only, and
+    #     only when the material has no normal, bump or displacement maps (those keep Assimp).
+    #     CHESHIRE_OBJ_ASSIMP=1 keeps upstream; CHESHIRE_OBJ_CHECK=1 also writes Assimp's file next to
+    #     it as <basename>.assimp.obj for scripts/check_textured_obj.py.
+    t = tx.read_text(encoding="utf-8")
+    if "cheshireAssimpPath" not in t:
+        head = '    ALICEVISION_LOG_INFO("Saving " << meshFileTypeStr << " mesh file using Assimp.");' + NL
+        if t.count(head) != 1:
+            sys.exit("saveAs Assimp log line not found once")
+        block = r"""    // cheshire: OBJ and MTL straight to the files (scripts/apply_hip_patch.py, step 5e)
+    std::string cheshireAssimpPath = filepath;
+    if (meshFileType == EFileType::OBJ && std::getenv("CHESHIRE_OBJ_ASSIMP") == nullptr && !_atlases.empty()
+        && material.getTextures(Material::TextureType::NORMAL).empty()
+        && material.getTextures(Material::TextureType::BUMP).empty()
+        && material.getTextures(Material::TextureType::DISPLACEMENT).empty())
+    {
+        const std::string mtlName = basename + ".mtl";
+        const StaticVector<std::string>& diffuse = material.getTextures(Material::TextureType::DIFFUSE);
+        ALICEVISION_LOG_INFO("Saving obj mesh file (cheshire direct writer): " << mesh->pts.size() << " vertices, " << mesh->uvCoords.size()
+                                                                              << " uvs, " << mesh->tris.size() << " faces, " << _atlases.size() << " materials.");
+        FILE* f = std::fopen(filepath.c_str(), "wb");
+        if (f == nullptr)
+            throw std::runtime_error("Cannot open mesh file for writing: " + filepath);
+        std::vector<char> buf(1 << 22);
+        std::size_t used = 0;
+        auto flush = [&]() { if (used) { std::fwrite(buf.data(), 1, used, f); used = 0; } };
+        auto put = [&](const char* fmt, auto... args) {
+            if (used + 256 > buf.size()) flush();
+            used += std::snprintf(buf.data() + used, buf.size() - used, fmt, args...);
+        };
+        put("# textured mesh, written by Cheshire (AliceVision)\n\nmtllib %s\n\n", mtlName.c_str());
+        for (int i = 0; i < mesh->pts.size(); ++i)
+            put("v %.9g %.9g %.9g\n", double(float(mesh->pts[i].x)), double(float(-mesh->pts[i].y)), double(float(-mesh->pts[i].z)));
+        put("\n");
+        for (int i = 0; i < mesh->uvCoords.size(); ++i)
+            put("vt %.9g %.9g 0\n", double(float(mesh->uvCoords[i].x)), double(float(mesh->uvCoords[i].y)));
+        for (int atlasId = 0; atlasId < _atlases.size(); ++atlasId)
+        {
+            put("\nusemtl material_%s\n", Material::textureId(atlasId).c_str());
+            for (const int triangleId : _atlases[atlasId])
+            {
+                const auto& tri = mesh->tris[triangleId];
+                const auto& uv = mesh->trisUvIds[triangleId];
+                put("f %d/%d %d/%d %d/%d\n", tri.v[0] + 1, uv.m[0] + 1, tri.v[1] + 1, uv.m[1] + 1, tri.v[2] + 1, uv.m[2] + 1);
+            }
+        }
+        flush();
+        std::fclose(f);
+        const std::string mtlPath = (dir / mtlName).string();
+        FILE* m = std::fopen(mtlPath.c_str(), "wb");
+        if (m == nullptr)
+            throw std::runtime_error("Cannot open material file for writing: " + mtlPath);
+        std::fprintf(m, "# textured mesh materials, written by Cheshire (AliceVision)\n\n");
+        for (int atlasId = 0; atlasId < _atlases.size(); ++atlasId)
+        {
+            std::fprintf(m, "newmtl material_%s\n", Material::textureId(atlasId).c_str());
+            std::fprintf(m, "Kd %.9g %.9g %.9g\n", double(material.diffuse.r), double(material.diffuse.g), double(material.diffuse.b));
+            std::fprintf(m, "Ka %.9g %.9g %.9g\n", double(material.ambient.r), double(material.ambient.g), double(material.ambient.b));
+            std::fprintf(m, "Ks %.9g %.9g %.9g\n", double(material.specular.r), double(material.specular.g), double(material.specular.b));
+            std::fprintf(m, "illum 1\n");
+            if (diffuse.size() == _atlases.size())
+                std::fprintf(m, "map_Kd %s\n", diffuse[atlasId].c_str());
+            std::fprintf(m, "\n");
+        }
+        std::fclose(m);
+        if (std::getenv("CHESHIRE_OBJ_CHECK") == nullptr)
+        {
+            ALICEVISION_LOG_INFO("Mesh saved.");
+            return;
+        }
+        cheshireAssimpPath = (dir / (basename + ".assimp." + meshFileTypeStr)).string();
+        ALICEVISION_LOG_INFO("CHESHIRE_OBJ_CHECK: also writing Assimp's file to " << cheshireAssimpPath);
+    }
+"""
+        t = t.replace(head, block.replace("\n", NL) + head, 1)
+        old_export = "exporter.Export(&scene, pFormatId, filepath, pPreprocessing)"
+        if t.count(old_export) != 1:
+            sys.exit("Assimp Export call not found once")
+        t = t.replace(old_export, "exporter.Export(&scene, pFormatId, cheshireAssimpPath, pPreprocessing)", 1)
+        inc = "#include <cstdlib>  // cheshire" + NL
+        if t.count(inc) != 1:
+            sys.exit("cheshire cstdlib include not found once in Texturing.cpp")
+        t = t.replace(inc, inc + "#include <cstdio>   // cheshire: direct OBJ writer" + NL + "#include <stdexcept>" + NL, 1)
+        tx.write_text(t, encoding="utf-8", newline="")
 
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu

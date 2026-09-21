@@ -175,6 +175,8 @@ together as its `verify` configuration ([docs/04](docs/04-validation.md)):
 | `CHESHIRE_GPU_TEDGE_CHECK=1` | `tedge check: cells with on != 0: cpu N, gpu N` - the counts must match; the sums differ by an ulp of summation order |
 | `CHESHIRE_GPU_VOTE_LOG=1` | includes `facet weight check: N facets, differing from the sequential computation: 0` |
 | `CHESHIRE_GPU_BLUR_CHECK=1` | how many pixels differ from OpenImageIO, and the worst |
+| `CHESHIRE_GPU_PAD_CHECK=1` | `GPU padding check: texels differing from the sequential sweeps: 0 of N` - texturing's edge padding on the device against upstream's two host sweeps (v0.3.2) |
+| `CHESHIRE_OBJ_CHECK=1` | Meshing and Texturing also write Assimp's file beside the direct writer's (`mesh.assimp.obj`, `texturedMesh.assimp.obj`); `scripts/check_textured_obj.py` compares the textured pair by content |
 
 **Memory.** Defaults fit the card you have; the bridge settings exist to give it *less* than it
 has, never more. The bridge reads the card at every run - cap = total minus about 1.1 GB of
