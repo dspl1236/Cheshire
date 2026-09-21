@@ -425,3 +425,25 @@ Two lessons for the gates. The end-to-end harness *would* have caught this at th
 which is the wrong end of a two-hour job: it should check the first paired node's provenance line
 as soon as that node's log exists and abort. And a file's name and date are not its version - the
 launcher was checked by the pairing script's "exists" test and nothing else.
+
+## Engine bay at full resolution, RX 6750 XT 12 GB, Linux 0.3.1 bundle (2026-09-21)
+
+107 photographs, `DepthMap:downscale=1`, the whole graph through Meshroom, both configs passing
+6/6 ports with every node announcing the Cheshire build:
+
+| config | total | SfM | Meshing | Texturing | depth maps | spills |
+|---|---|---|---|---|---|---|
+| `ds1` | 2863 s | 140 s | 310 s | 176 s | 107, 9 chunks | 0 in every chunk |
+| `blast` (every opt-in path + profile logs) | 2919 s | 152 s | 434 s | 175 s | 107, 9 chunks | 0 |
+
+The bridge on a 12 GB card at full resolution: cap 11014 MB, budget 8811 MB, 1 full R camera +
+7 tiles, then 15 tiles per view - it never spills; 12 GB is simply enough. Peak VRAM by stage,
+from the allocator summaries: depth map filter 593 MB, meshing 3.4 GB, **texturing 9.8 GB** -
+the hungriest stage at full resolution is texturing, not DepthMap, which is what an 8 GB card
+will meet first. `blast` is not faster than `ds1`: its extra 124 s in Meshing is the facet-weight
+comparison `CHESHIRE_GPU_VOTE_LOG` runs alongside the port, and the two opt-ins it turns on
+(`CHESHIRE_QR_NULLSPACE`, `CHESHIRE_FILTER_CACHE_MB`) announce nothing in any log - two more for
+the 0.3.2 silent-ports list. Profile lines that did appear: meshing votes 19.8 M rays / 25.6 M
+cells, vote kernels 6.2 s + tedge 5.2 s; knn index 21.3 M points in 7.5 s; texturing image loads
+25.9 s of a stage dominated by I/O. Depth-map digests differ between the two runs, as they must
+(GPU SIFT order → different SfM).
