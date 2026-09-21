@@ -196,8 +196,16 @@ def wrong_binary(cache: Path):
 def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     out = outroot / name
     cache = out / "cache"
-    shutil.rmtree(out, ignore_errors=True)
-    (out / "out").mkdir(parents=True)
+    # CHESHIRE_E2E_RESUME=1 keeps an existing cache so Meshroom skips the chunks it already finished.
+    # For the bench-pc BSOD of 2026-09-21 (bugcheck 0x1A, three hours and 48 full-resolution depth
+    # maps into a run on a 4 GB card) a fresh start would have cost the same three hours again. The
+    # classification at the end reads the same logs either way; a resumed node's log carries the
+    # provenance line of the run that wrote it, so the pairing rule still holds per chunk.
+    if os.environ.get("CHESHIRE_E2E_RESUME") == "1" and cache.is_dir():
+        print(f"        resuming {name} from its existing cache (CHESHIRE_E2E_RESUME=1)")
+    else:
+        shutil.rmtree(out, ignore_errors=True)
+    (out / "out").mkdir(parents=True, exist_ok=True)
 
     env = dict(os.environ)
     # Force the paired launcher to the Cheshire package. Its default is 'auto', which hands the node

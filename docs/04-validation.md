@@ -417,9 +417,9 @@ README could not have paired it either.
 Fixes: `package-cuda.ps1` stages both files and checks the launcher by substance (the wide-string
 `CHESHIRE_BACKEND` must be present; the old launcher is refused, verified); the 0.3.1 CUDA zip is
 repacked, 484 entries byte-identical plus the two files. The run was restarted with the current
-launcher, all seven nodes announcing the Cheshire build, and started through WMI
-(`Win32_Process.Create`) rather than `Start-Process` - a process started from an ssh session's
-PowerShell dies with that session, which is what killed the first relaunch.
+launcher, all seven nodes announcing the Cheshire build. (The first relaunch was found dead a
+few minutes later and blamed on the ssh session ending; the event log later showed bench-pc had
+bugchecked at 23:38 - see the next section - so that diagnosis was wrong and is withdrawn.)
 
 Two lessons for the gates. The end-to-end harness *would* have caught this at the end of the run,
 which is the wrong end of a two-hour job: it should check the first paired node's provenance line
@@ -447,3 +447,19 @@ the 0.3.2 silent-ports list. Profile lines that did appear: meshing votes 19.8 M
 cells, vote kernels 6.2 s + tedge 5.2 s; knn index 21.3 M points in 7.5 s; texturing image loads
 25.9 s of a stage dominated by I/O. Depth-map digests differ between the two runs, as they must
 (GPU SIFT order → different SfM).
+
+## bench-pc bugchecks under the full-resolution run (2026-09-21)
+
+The paired 1050 Ti run stopped at 00:30:32, mid-chunk, 48 of 107 depth maps done, 0 spills in the
+three finished chunks, with no error in any log and no process left: bench-pc had rebooted from
+**bugcheck 0x1A (MEMORY_MANAGEMENT, subcode 0x403)** at 00:31. The System log has the same
+bugcheck at 17:59 (the run that "died at 17:58" earlier that day, then attributed to an ssh
+session) and at 23:38 (the first relaunch, attributed to `Start-Process`), plus 0x1A/0x411 on
+09-16 - four kernel memory-management crashes in five days, all under heavy runs, on a box with
+mixed DIMMs (2 x 4 GB 800 MHz + 2 x 4 GB 667 MHz). The minidumps name no third-party driver.
+User-mode code cannot bugcheck a machine; this is RAM or a driver (NVIDIA 581.57), and a memory
+test is the next step. Every earlier "the run died" in this document was this.
+
+The run was resumed rather than restarted: the harness gained `CHESHIRE_E2E_RESUME=1`, which
+keeps the cache so Meshroom skips the SUCCESS chunks (three of nine) and redoes the one it was
+killed in.
