@@ -3031,6 +3031,68 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
         t = t.replace(inc, inc + "#include <aliceVision/depthMap/cuda/host/memory.hpp>  // cheshire: the bridge" + NL, 1)
         di.write_text(t, encoding="utf-8", newline="")
 
+    # 5g. PrepareDenseScene phase profile. The node is read (JPEG decode), exposure + mask,
+    #     undistort (per-pixel bilinear through the camera model) and an EXR write per view; which of
+    #     the four costs what is not visible in any log. CHESHIRE_PDS_PROFILE=1 sums each phase over
+    #     the threads and prints the four totals when the node finishes. Same bytes out.
+    pds = AV / "src/software/pipeline/main_prepareDenseScene.cpp"
+    t = pds.read_text(encoding="utf-8")
+    if "cheshirePdsProfile" not in t:
+        inc = "#include <aliceVision/camera/cameraUndistortImage.hpp>" + NL
+        if t.count(inc) != 1:
+            sys.exit("cameraUndistortImage include not found once in main_prepareDenseScene.cpp")
+        t = t.replace(inc, inc + r"""#include <atomic>   // cheshire: CHESHIRE_PDS_PROFILE
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+namespace {
+// cheshire: per-phase seconds summed over threads (scripts/apply_hip_patch.py, step 5g)
+struct CheshirePdsProfile
+{
+    bool on = std::getenv("CHESHIRE_PDS_PROFILE") != nullptr;
+    std::atomic<long long> readUs{0}, prepUs{0}, undistortUs{0}, writeUs{0}, views{0};
+    ~CheshirePdsProfile()
+    {
+        if (on)
+            std::fprintf(stderr, "[cheshire] prepareDenseScene profile: %lld views; thread-seconds: read %.1f, exposure+mask %.1f, undistort %.1f, write %.1f\n",
+                         views.load(), readUs.load() / 1e6, prepUs.load() / 1e6, undistortUs.load() / 1e6, writeUs.load() / 1e6);
+    }
+} cheshirePdsProfile;
+inline long long cheshireUsSince(std::chrono::steady_clock::time_point t)
+{
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t).count();
+}
+}  // namespace
+""".replace("\n", NL), 1)
+        old_read = "    ImageT image, image_ud;" + NL + "    readImage(srcImage, image, image::EImageColorSpace::LINEAR);" + NL
+        if t.count(old_read) != 1:
+            sys.exit("process() readImage not found once")
+        t = t.replace(old_read,
+                      "    ImageT image, image_ud;" + NL
+                      + "    auto cheshireT = std::chrono::steady_clock::now();  // cheshire, step 5g" + NL
+                      + "    readImage(srcImage, image, image::EImageColorSpace::LINEAR);" + NL
+                      + "    cheshirePdsProfile.readUs += cheshireUsSince(cheshireT); cheshireT = std::chrono::steady_clock::now();" + NL, 1)
+        old_mask = "    // mask" + NL + "    maskFunc(image);" + NL
+        if t.count(old_mask) != 1:
+            sys.exit("process() maskFunc not found once")
+        t = t.replace(old_mask, old_mask + "    cheshirePdsProfile.prepUs += cheshireUsSince(cheshireT); cheshireT = std::chrono::steady_clock::now();" + NL, 1)
+        old_ud = "        UndistortImage(image, cam, image_ud, pixZero);" + NL + "        writeImage(dstColorImage, image_ud, image::ImageWriteOptions(), metadata);" + NL
+        if t.count(old_ud) != 1:
+            sys.exit("process() undistort+write not found once")
+        t = t.replace(old_ud,
+                      "        UndistortImage(image, cam, image_ud, pixZero);" + NL
+                      + "        cheshirePdsProfile.undistortUs += cheshireUsSince(cheshireT); cheshireT = std::chrono::steady_clock::now();" + NL
+                      + "        writeImage(dstColorImage, image_ud, image::ImageWriteOptions(), metadata);" + NL
+                      + "        cheshirePdsProfile.writeUs += cheshireUsSince(cheshireT); ++cheshirePdsProfile.views;" + NL, 1)
+        old_w2 = "    else" + NL + "    {" + NL + "        writeImage(dstColorImage, image, image::ImageWriteOptions(), metadata);" + NL + "    }" + NL
+        if t.count(old_w2) != 1:
+            sys.exit("process() plain write not found once")
+        t = t.replace(old_w2,
+                      "    else" + NL + "    {" + NL
+                      + "        writeImage(dstColorImage, image, image::ImageWriteOptions(), metadata);" + NL
+                      + "        cheshirePdsProfile.writeUs += cheshireUsSince(cheshireT); ++cheshirePdsProfile.views;" + NL + "    }" + NL, 1)
+        pds.write_text(t, encoding="utf-8", newline="")
+
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
     #     when the cards in front of us are both compute 6.1. FORCE beats -D on the command line, so
