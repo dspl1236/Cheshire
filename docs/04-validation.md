@@ -678,3 +678,34 @@ Linux matrix of 0.3.1 did not include `verify`. The RX 9070 reports "identical".
 verdict that matters (visibilities are per vertex; the distance is an intermediate the GPU rounds
 differently from nanoflann on this card), so the gate accepts either wording, and the difference
 itself is recorded here as a card-dependent rounding, not a defect.
+
+## 0.3.2 release gates (2026-09-21)
+
+Every artifact gated as the file a user downloads, all five items in, source 8f48532 + gate fixes.
+
+| artifact | hardware | stage gate | end to end |
+|---|---|---|---|
+| `cheshire-alicevision-windows-x64.zip` (AMD, 11 payloads) | RX 9070, Windows | 10/10, depth maps byte-identical across uncapped / 1500 MB / 500 MB / bridge-off (`42abe20a879c546f`) | 12/12 |
+| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` | RX 6750 XT, Linux | - | 12/12 (knn verdict by vertex) |
+| `cheshire-alicevision-cuda-linux-x64-cuda12.9.tar.gz` | GTX 1050 Ti 4 GB, Linux | - | **12/12** |
+| `cheshire-alicevision-cuda-windows-x64-cuda12.9.zip` | (no Windows NVIDIA box: bench-pc's RAM) | literals checked in the DLLs | not run on hardware |
+
+**The CUDA matrix is the proof of items 4 and 5 on NVIDIA.** Under `blast` on the 1050 Ti the
+bridge summary reads DepthMap `map` 163 / `volume` 874 / **`image` 372 MB (6 allocs)** - the
+camera mipmaps counted for the first time on CUDA - and `other` for the filter (790 MB), meshing
+(846), texturing (3506) and matcher (6), where 0.3.1's CUDA logs had no such lines at all. The
+planner on 4 GB budgets 2860 MB (cap 3574) as two resident tiles, `bridgespill` spilled at 500 MB,
+`verify` satisfied all six self-checks, `texcheck` padded 0 of 67,108,864 texels differently and
+wrote the direct OBJ. `ds1` 430 s and `blast` 455 s on mini6 are the card, not the code.
+
+**Gate corrections found by the run, all committed:** the stage gate's FeatureMatching asked for
+`dspsift` regions since it was written while every mini6 cache and its own extraction stage are
+`sift` (it had passed 10/10 for 0.3.1 on a cache since replaced); the reference cache's image
+paths are JSON-escaped Linux paths, so a local copy with them rewritten (`build/stage-cache-mini6`)
+is what the gate consumes on Windows; the knn self-check verdict is the vertex, not the distance.
+
+**Not done:** the Windows CUDA zip has not run on NVIDIA hardware under Windows. Its binaries come
+from the same source as the Linux CUDA bundle that passed 12/12, its package layout and pairing
+files are the ones 0.3.1 validated, and the new literals are present in its DLLs; that is
+inference, stated here. bench-pc (the only Windows NVIDIA box) bugchecks under load until its RAM
+is sorted.
