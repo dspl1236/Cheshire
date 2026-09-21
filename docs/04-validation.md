@@ -782,3 +782,20 @@ mini6, RX 9070: Texturing 9.1 s -> 7.1 s; `texcheck` (padding, resize, OBJ) and 
 On the 6750 XT's six engine-bay atlases this is the ~25 s the 0.3.2 notes pointed at, to be
 measured on the next Linux build. What remains in the node: image loads (I/O), UV generation,
 the EXR write, and Assimp's load on the way in.
+
+## The shipped 0.3.2 Windows bundle on the RX 5500 XT (hip6.2/gfx1012), matched DIMMs (2026-09-21)
+
+bench-pc came back with a matched 2 x 8 GB pair in place of the mixed 667/800 MHz set that had
+bugchecked five times in six days. The zip published as v0.3.2 ran the full matrix on the RX 5500
+XT: **12 of 12**, 6/6 ports each - `base` 166 s, `tiles` 151, `coarse` 106, `texbig` 146,
+`cpufallback` 211, `verify` 211 (all six self-checks), `bridgecap` 196, `bridgespill` 422, `bridgeoff`
+156, `texcheck` 176 (padding 0 of 67 M, OBJ identical), `ds1` 382, `blast` 422 - with **no bugcheck
+across the 55 minutes**, including the memory-heaviest configs the old RAM never survived. The
+payload picked was `hip6.2/gfx1012`; the bridge capped at 7232 MB and budgeted 5786 MB as 14
+tiles per view; and under `blast` the summary carries `image vram: 6 allocs, peak 372 MB` - the
+camera mipmaps counted on Windows HIP as well, the RDNA1 half of 0.3.2's item 5.
+
+This closes the one inference both the v0.3.1 and v0.3.2 notes had to state: the rebuilt Windows
+hip6.2 payloads for RDNA1 now have a hardware run behind them. What remains unrun on hardware is
+the Windows CUDA zip (no Windows NVIDIA machine; the 1050 Ti went into house-pc for the Linux CUDA
+matrix and out again).
