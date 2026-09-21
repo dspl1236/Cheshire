@@ -243,3 +243,58 @@ scene size.
 The Windows CUDA package had to be re-laid-out with `bin\` before it could be paired at all. Per
 node it made no difference: FeatureExtraction 4.7 vs 4.8 s, FeatureMatching 2.5 vs 2.5, DepthMap
 89.0 vs 87.9, DepthMapFilter 3.5 vs 3.5, Meshing 27.5 vs 27.4, Texturing 31.0 vs 30.7.
+
+### The gate on Linux, 2026-09-20
+
+`verify_end_to_end.py` now runs on both systems - there was no need for a second script, since both
+platforms pair the same way and take the same two arguments. Building it found two things.
+
+**The first Linux pass was false.** It reported 6/6 with FeatureExtraction not paired at all.
+`meshroom-pair.sh` gates GPU SIFT on `-f "$BUNDLE/lib/libpopsift.so"`, and the Linux CUDA bundle
+ships only the versioned soname `libpopsift.so.0.10.0` - the HIP bundle has the plain name - so the
+script declined to pair the node. Meshroom's own binary ran instead, and because Meshroom 2023.3's
+featureExtraction is itself a CUDA PopSIFT, on an NVIDIA box it printed the very "Choosing device 0"
+line the gate was looking for. So v0.3.0's Linux CUDA package never pairs GPU SIFT, and the check
+built to catch that class of failure was fooled by it.
+
+The gate now requires PROVENANCE before it looks at any port: both launchers announce the binary
+they run, and a node that is not paired is reported apart from a paired node whose port fell silent,
+because those mean different things. A port marker was never proof - it says a GPU path ran, not
+whose.
+
+**Linux + AMD, first complete runs.** house-pc (i3-4330 + RX 6750 XT, RDNA2), the shipped v0.3.0
+Linux HIP bundle, six photographs, all seven nodes paired, 6/6 ports every row:
+
+| config | RX 6750 XT (Linux) |
+|---|---|
+| `base` | 86 s |
+| `tiles` | 85 s |
+| `coarse` | 57 s |
+| `texbig` | 80 s |
+| `cpufallback` | 135 s |
+
+`cpufallback` logged all four disabled lines and still produced a textured mesh; the GPU rows name
+the card ("ray marching on AMD Radeon RX 6750 XT"). Before this, the Linux AMD artifact had only
+ever been checked stage by stage.
+
+### The HIP rebuild for the VRAM clamp, 2026-09-20
+
+v0.3.0 shipped without the clamp for a VRAM cap set above the card's total memory, because it
+landed after the binaries were built. Rebuilding is cheaper than it looks: only five DLLs differ per
+GPU target, so `build_targets.py` reuses each family's tree - both rocm7.2 targets took 11.5 minutes
+together, and nine hip6.2 targets 31 minutes.
+
+Verified on the RX 9070 by overlaying the rebuilt payload onto the shipped bundle:
+
+* **no regression** - 4/4 depth and sim maps byte-identical to the shipped bundle's own output from
+  the same inputs on the same card;
+* **the clamp works** - with `CHESHIRE_BRIDGE_VRAM_MB=32000` on a 16304 MB card, v0.3.0 reports
+  `vram cap 32000 MB` and plans a 25600 MB budget it cannot have, while the rebuild reports
+  `requested vram cap 32000 MB exceeds this device (16304 MB total); clamping to 14537 MB` and
+  re-plans from 12 full cameras to 5 plus 2 tiles. First hardware demonstration of that fix on AMD;
+  the commit that made it had only measured it on a GTX 1080 Ti.
+
+Three of the nine hip6.2 targets failed the first time with "Access is denied" while linking a
+*different* auxiliary executable each - exportAlembic, exportMeshroomMaya, imageSegmentation. That
+is a real-time antivirus scan holding a freshly linked exe while ninja replaces it; which one gets
+hit is random, and none are GPU payload DLLs. Re-running is the fix.
