@@ -2069,6 +2069,71 @@ index 514487d..8f5fb98 100644
  endif()
  
  # Link OpenCV library
+diff --git a/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp b/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp
+index 97f4ed5..3809a4e 100644
+--- a/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp
++++ b/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp
+@@ -15,6 +15,10 @@
+ #include <popsift/common/device_prop.h>
+ 
+ #include <atomic>
++#include <algorithm>  // cheshire: stable keypoint order
++#include <cstdlib>
++#include <cstring>
++#include <numeric>
+ 
+ namespace aliceVision {
+ namespace feature {
+@@ -66,6 +70,49 @@ bool ImageDescriber_SIFT_popSIFT::describe(const image::Image<float>& image,
+         }
+     }
+ 
++    // cheshire: the keypoints arrive in GPU completion order, which differs run to run; put them
++    // in an order that depends only on the image (see scripts/apply_hip_patch.py, step 5c)
++    {
++        static const bool cheshireSiftSort = []() {
++            const char* e = std::getenv("CHESHIRE_SIFT_SORT");
++            const bool on = !(e != nullptr && e[0] == '0');
++            // if/else, not a ternary: ALICEVISION_LOG_INFO(a) expands to `stream << a` without
++            // parentheses, so `stream << on ? A : B` logs the bool and discards both strings.
++            if (on)
++                ALICEVISION_LOG_INFO("cheshire: GPU SIFT keypoints in stable order (CHESHIRE_SIFT_SORT=0 for arrival order)");
++            else
++                ALICEVISION_LOG_INFO("cheshire: GPU SIFT keypoints in arrival order (CHESHIRE_SIFT_SORT=0)");
++            return on;
++        }();
++        if (cheshireSiftSort)
++        {
++            auto& feats = regionsCasted->Features();
++            auto& descs = regionsCasted->Descriptors();
++            std::vector<std::size_t> order(feats.size());
++            std::iota(order.begin(), order.end(), std::size_t(0));
++            std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
++                const auto& fa = feats[a];
++                const auto& fb = feats[b];
++                if (fa.x() != fb.x()) return fa.x() < fb.x();
++                if (fa.y() != fb.y()) return fa.y() < fb.y();
++                if (fa.scale() != fb.scale()) return fa.scale() < fb.scale();
++                if (fa.orientation() != fb.orientation()) return fa.orientation() < fb.orientation();
++                return std::memcmp(descs[a].getData(), descs[b].getData(), 128) < 0;
++            });
++            std::vector<PointFeature> sortedFeats;
++            std::vector<Descriptor<unsigned char, 128>> sortedDescs;
++            sortedFeats.reserve(feats.size());
++            sortedDescs.reserve(descs.size());
++            for (std::size_t i : order)
++            {
++                sortedFeats.push_back(feats[i]);
++                sortedDescs.push_back(descs[i]);
++            }
++            feats.swap(sortedFeats);
++            descs.swap(sortedDescs);
++        }
++    }
++
+     ALICEVISION_LOG_TRACE("aliceVision PopSIFT feature count : " << regionsCasted->RegionCount() << std::endl);
+ 
+     return true;
 diff --git a/src/aliceVision/fuseCut/CMakeLists.txt b/src/aliceVision/fuseCut/CMakeLists.txt
 index 1b7f39c..4cd0f1e 100644
 --- a/src/aliceVision/fuseCut/CMakeLists.txt
@@ -2107,7 +2172,7 @@ index 1b7f39c..4cd0f1e 100644
  # Unit tests
  alicevision_add_test(DelaunayGraphCut_test.cpp
 diff --git a/src/aliceVision/fuseCut/Fuser.cpp b/src/aliceVision/fuseCut/Fuser.cpp
-index 7b385ee..4524283 100644
+index 7b385ee..c4e3fc4 100644
 --- a/src/aliceVision/fuseCut/Fuser.cpp
 +++ b/src/aliceVision/fuseCut/Fuser.cpp
 @@ -16,6 +16,9 @@
@@ -2120,7 +2185,7 @@ index 7b385ee..4524283 100644
  #include <aliceVision/image/io.hpp>
  #include <aliceVision/image/imageAlgo.hpp>
  
-@@ -26,6 +29,50 @@
+@@ -26,6 +29,57 @@
  
  #include <iostream>
  
@@ -2136,7 +2201,14 @@ index 7b385ee..4524283 100644
 +    std::unordered_map<int, Entry> entries;
 +    std::size_t bytes = 0;
 +    std::size_t capBytes = 4096ull << 20;
-+    CheshireDepthMapCache() { if (const char* e = std::getenv("CHESHIRE_FILTER_CACHE_MB")) capBytes = std::size_t(std::atoll(e)) << 20; }
++    CheshireDepthMapCache()
++    {
++        if (const char* e = std::getenv("CHESHIRE_FILTER_CACHE_MB")) capBytes = std::size_t(std::atoll(e)) << 20;
++        if (capBytes == 0)
++            ALICEVISION_LOG_INFO("cheshire: depth map filter cache: disabled by CHESHIRE_FILTER_CACHE_MB=0");
++        else
++            ALICEVISION_LOG_INFO("cheshire: depth map filter cache: cap " << (capBytes >> 20) << " MB (CHESHIRE_FILTER_CACHE_MB)");
++    }
 +    std::shared_ptr<aliceVision::image::Image<float>> get(int tc, const aliceVision::mvsUtils::MultiViewParams& mp)
 +    {
 +        if (capBytes == 0)
@@ -2171,7 +2243,7 @@ index 7b385ee..4524283 100644
  namespace aliceVision {
  namespace fuseCut {
  
-@@ -171,6 +218,78 @@ bool Fuser::filterGroupsRC(int rc, float pixToleranceFactor, int pixSizeBall, in
+@@ -171,6 +225,78 @@ bool Fuser::filterGroupsRC(int rc, float pixToleranceFactor, int pixSizeBall, in
  
      StaticVector<int> tcams = _mp.findNearestCamsFromLandmarks(rc, nNearestCams);
  
@@ -2250,7 +2322,7 @@ index 7b385ee..4524283 100644
      for (int c = 0; c < tcams.size(); c++)
      {
          numOfPtsMap->resize_with(w * h, 0);
-@@ -201,6 +320,12 @@ bool Fuser::filterGroupsRC(int rc, float pixToleranceFactor, int pixSizeBall, in
+@@ -201,6 +327,12 @@ bool Fuser::filterGroupsRC(int rc, float pixToleranceFactor, int pixSizeBall, in
              {
                  numOfModalsMap(i) += static_cast<int>((*numOfPtsMap)[i] > 0);
              }
@@ -3842,18 +3914,19 @@ index c0a3ab3..643f300 100644
      double errorVectorDimension() const override { return (_pointToLine) ? 1.0 : 2.0; }
      Mat3 normalizer1() const override { return _N1; }
 diff --git a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
-index 298c9d2..f477778 100644
+index 298c9d2..8880d5d 100644
 --- a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
 +++ b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
-@@ -8,6 +8,7 @@
+@@ -8,6 +8,8 @@
  
  #include "Fundamental7PSolver.hpp"
  #include <aliceVision/numeric/polynomial.hpp>
 +#include <cstdlib>  // cheshire: CHESHIRE_QR_NULLSPACE
++#include <cstdio>   // cheshire: the announce line
  #include <aliceVision/multiview/epipolarEquation.hpp>
  #include <aliceVision/numeric/algebra.hpp>
  namespace aliceVision {
-@@ -37,8 +38,15 @@ void Fundamental7PSolver::solve(const Mat& x1, const Mat& x2, std::vector<robust
+@@ -37,8 +39,20 @@ void Fundamental7PSolver::solve(const Mat& x1, const Mat& x2, std::vector<robust
          // Eigen::JacobiSVD<Mat9> svdA(A);
          // ALICEVISION_LOG_DEBUG("Its singular values are:\n" << svdA.singularValues());
  
@@ -3864,6 +3937,11 @@ index 298c9d2..f477778 100644
 +        // without an iterative SVD. A different basis of the same nullspace spans the same
 +        // pencil, so det(F1 + a*F2) = 0 has the same solutions to rounding.
 +        static const bool cheshireQrNullspace = (std::getenv("CHESHIRE_QR_NULLSPACE") != nullptr);
++        static const bool cheshireQrAnnounced = []() {  // once per process, both paths (docs/04 marker rule)
++            std::fprintf(stderr, cheshireQrNullspace ? "[cheshire] 7-point nullspace: Householder QR (CHESHIRE_QR_NULLSPACE=1)\n"
++                                                     : "[cheshire] 7-point nullspace: SVD (default; CHESHIRE_QR_NULLSPACE=1 for QR)\n");
++            return true; }();
++        (void)cheshireQrAnnounced;
 +        if (cheshireQrNullspace)
 +            Nullspace2RankDeficient(A, f1, f2);
 +        else
