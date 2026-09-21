@@ -489,6 +489,13 @@ This is the strongest package result so far: the smallest card the project has, 
 per-view working set, through Meshroom end to end on the download as shipped (plus the pairing
 files 0.3.1 adds).
 
+**Postscript, 08:22 the same morning:** the `blast` config on the same card died the same way -
+bugcheck 0x1A (0x403) with 44 of 107 depth maps done, 0 spills in the three finished chunks, no
+error in any log - the fifth in six days. bench-pc is retired from hours-long runs until its
+memory is tested; the `ds1` result above stands (it completed, and its every stage is in its
+logs), and `blast` on 4 GB is recorded as not run.
+
+
 ## 0.3.2 - the queue (2026-09-21)
 
 Everything below is a source change, so it rides one rebuild of all eleven Windows payloads, the
