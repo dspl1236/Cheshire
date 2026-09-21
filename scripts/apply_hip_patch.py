@@ -3230,6 +3230,32 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
         t = t.replace(old_loop, new_loop, 1)
         cu.write_text(t, encoding="utf-8", newline="")
 
+    # 5i. Bundle adjustment profile. SfM on the engine bay is 63 % bundle adjustment (docs/04), and
+    #     nothing says whether a run is Jacobian evaluation (autodiff over every observation) or the
+    #     Schur solve. Ceres measures both; CHESHIRE_BA_PROFILE=1 prints its numbers after each solve.
+    bac = AV / "src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp"
+    t = bac.read_text(encoding="utf-8")
+    if "CHESHIRE_BA_PROFILE" not in t:
+        old = "    ceres::Solve(options, &problem, &summary);" + NL
+        if t.count(old) != 1:
+            sys.exit("ceres::Solve call not found once in BundleAdjustmentCeres.cpp")
+        t = t.replace(old, old + r"""    // cheshire: Ceres' own time split, one line per solve (scripts/apply_hip_patch.py, step 5i)
+    {
+        static const bool cheshireBaProfile = std::getenv("CHESHIRE_BA_PROFILE") != nullptr;
+        if (cheshireBaProfile)
+            ALICEVISION_LOG_INFO("cheshire: BA profile: total " << summary.total_time_in_seconds << " s = residuals "
+                                 << summary.residual_evaluation_time_in_seconds << " + jacobians " << summary.jacobian_evaluation_time_in_seconds
+                                 << " + linear solver " << summary.linear_solver_time_in_seconds << " + other; "
+                                 << summary.iterations.size() << " iterations, " << summary.num_threads_used << " threads, "
+                                 << ceres::LinearSolverTypeToString(summary.linear_solver_type_used) << ", "
+                                 << summary.num_residual_blocks << " residual blocks, " << summary.num_parameter_blocks << " parameter blocks");
+    }
+""".replace("\n", NL), 1)
+        if "#include <cstdlib>" not in t:
+            inc0 = t.index("#include")
+            t = t[:inc0] + "#include <cstdlib>  // cheshire: CHESHIRE_BA_PROFILE" + NL + t[inc0:]
+        bac.write_text(t, encoding="utf-8", newline="")
+
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
     #     when the cards in front of us are both compute 6.1. FORCE beats -D on the command line, so

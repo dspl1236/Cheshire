@@ -4596,6 +4596,36 @@ index bb91d4e..1043533 100644
                      better = true;
                      minNFA = best.first;
                      vec_inliers.resize(best.second);
+diff --git a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
+index bd0bf27..c73e84a 100644
+--- a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
++++ b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
+@@ -5,6 +5,7 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <cstdlib>  // cheshire: CHESHIRE_BA_PROFILE
+ #include <aliceVision/config.hpp>
+ #include <aliceVision/alicevision_omp.hpp>
+ #include <aliceVision/system/Logger.hpp>
+@@ -1338,6 +1339,17 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+     // solve BA
+     ceres::Solver::Summary summary;
+     ceres::Solve(options, &problem, &summary);
++    // cheshire: Ceres' own time split, one line per solve (scripts/apply_hip_patch.py, step 5i)
++    {
++        static const bool cheshireBaProfile = std::getenv("CHESHIRE_BA_PROFILE") != nullptr;
++        if (cheshireBaProfile)
++            ALICEVISION_LOG_INFO("cheshire: BA profile: total " << summary.total_time_in_seconds << " s = residuals "
++                                 << summary.residual_evaluation_time_in_seconds << " + jacobians " << summary.jacobian_evaluation_time_in_seconds
++                                 << " + linear solver " << summary.linear_solver_time_in_seconds << " + other; "
++                                 << summary.iterations.size() << " iterations, " << summary.num_threads_used << " threads, "
++                                 << ceres::LinearSolverTypeToString(summary.linear_solver_type_used) << ", "
++                                 << summary.num_residual_blocks << " residual blocks, " << summary.num_parameter_blocks << " parameter blocks");
++    }
+ 
+     ALICEVISION_LOG_INFO("landmarksBlockIds : " << landmarksBlockIds.size());
+     evaluateOptions.residual_blocks = landmarksBlockIds;
 diff --git a/src/aliceVision/sfm/pipeline/expanding/DistanceWeighting.cpp b/src/aliceVision/sfm/pipeline/expanding/DistanceWeighting.cpp
 index 1f23958..5491985 100644
 --- a/src/aliceVision/sfm/pipeline/expanding/DistanceWeighting.cpp
