@@ -202,7 +202,23 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     # classification at the end reads the same logs either way; a resumed node's log carries the
     # provenance line of the run that wrote it, so the pairing rule still holds per chunk.
     if os.environ.get("CHESHIRE_E2E_RESUME") == "1" and cache.is_dir():
-        print(f"        resuming {name} from its existing cache (CHESHIRE_E2E_RESUME=1)")
+        # Meshroom refuses a graph with any chunk still SUBMITTED or RUNNING ("Some nodes are
+        # already submitted") - the statuses a dead run leaves behind. Drop those status files
+        # (and the chunk's log) so those chunks are computed again; SUCCESS chunks are kept.
+        cleared = 0
+        for st in list(cache.glob("*/*/status")) + list(cache.glob("*/*/*.status")):
+            try:
+                state = json.loads(st.read_text(encoding="utf-8", errors="replace")).get("status")
+            except ValueError:
+                state = None
+            if state in ("SUBMITTED", "RUNNING", "ERROR", "KILLED", "STOPPED"):
+                st.unlink()
+                lg = st.with_name(st.name.replace("status", "log"))
+                if lg.exists():
+                    lg.unlink()
+                cleared += 1
+        print(f"        resuming {name} from its existing cache (CHESHIRE_E2E_RESUME=1):"
+              f" {cleared} unfinished chunk statuses cleared")
     else:
         shutil.rmtree(out, ignore_errors=True)
     (out / "out").mkdir(parents=True, exist_ok=True)
