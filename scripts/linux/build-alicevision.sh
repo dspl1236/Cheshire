@@ -98,11 +98,22 @@ if grep -a -q "/dev/dxg" "$AV_BUNDLE/lib/libhsa-runtime64.so.1" && [ "$(stat -c 
   fi
   rm -rf "$T"
 fi
-# HIP dlopens the code-object manager at runtime; the bundler never sees it as a dependency.
-if ! ls "$AV_BUNDLE"/lib/libamd_comgr.so.* >/dev/null 2>&1; then
-  C=$(ls "$ROCM"/lib/libamd_comgr.so.*.*.* 2>/dev/null | head -1)
-  [ -n "$C" ] && cp "$C" "$AV_BUNDLE/lib/" && ln -sfn "$(basename "$C")" "$AV_BUNDLE/lib/libamd_comgr.so.${C##*.so.}" 2>/dev/null
-  ln -sfn "$(basename "$C")" "$AV_BUNDLE/lib/libamd_comgr.so.$(basename "$C" | sed 's/.*\.so\.\([0-9]*\).*/\1/')"
-  echo "added $(basename "$C") to the bundle"
+# HIP dlopens the code-object manager at runtime; the bundler never sees it as a dependency, so
+# it is placed here. Always from the resolved real file, always with cp -L, never trusting a name.
+# The 2026-09-20 0.3.1 bundle shipped libamd_comgr.so.3.0.0 as a symlink to ITSELF: the alias line
+# in the previous version of this block expanded to the full version and clobbered the copy it had
+# just made, and the guard was `ls libamd_comgr.so.*`, which a dangling symlink satisfies. The
+# bundle saw no GPU and its tarball was 56 MB short.
+C=$(readlink -f "$ROCM/lib/libamd_comgr.so.3" 2>/dev/null || true)
+if [ -n "$C" ] && [ -f "$C" ]; then
+  rm -f "$AV_BUNDLE"/lib/libamd_comgr.so*
+  cp -L "$C" "$AV_BUNDLE/lib/$(basename "$C")"
+  ln -sfn "$(basename "$C")" "$AV_BUNDLE/lib/libamd_comgr.so.3"
+  sz=$(stat -c %s "$AV_BUNDLE/lib/$(basename "$C")")
+  [ "$sz" -gt 50000000 ] || { echo "libamd_comgr in the bundle is only $sz bytes" >&2; exit 1; }
+  echo "added $(basename "$C") to the bundle ($((sz / 1048576)) MB, real file)"
+else
+  echo "no libamd_comgr under $ROCM/lib - HIP would find no GPU; not bundling" >&2
+  exit 1
 fi
 echo "BUNDLE -> $AV_BUNDLE"
