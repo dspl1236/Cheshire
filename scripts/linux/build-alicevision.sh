@@ -59,6 +59,23 @@ cmake "$AV_DEV" -G Ninja \
   -DALICEVISION_BUILD_TESTS=OFF -DALICEVISION_BUILD_DOC=OFF -DALICEVISION_BUILD_SWIG_BINDING=OFF \
   -DMINIGLOG=ON -DTARGET_ARCHITECTURE=core \
   ${CHESHIRE_CMAKE_EXTRA:-}
+# Assert the cache took the PopSift we named, not one it found. A cache configured earlier for
+# the CUDA backend keeps PopSift_DIR=/opt/popsift-cuda, and find_package keeps it when the named
+# directory is empty - the configure step never clears a cache. Checked after every configure so
+# the failure surfaces here, not as "cannot resolve item 'libpopsift.so.0.10.0'" at bundle time
+# seven minutes later (2026-09-20).
+#
+# The cache type varies and must not be matched: a value CMake took from -D is recorded as
+# PopSift_DIR:UNINITIALIZED=, one find_package had to search for as PopSift_DIR:PATH=. Matching
+# only :PATH= would fail every correct configure and pass the stale one.
+if [ "$CHESHIRE_POPSIFT" = ON ]; then
+  got=$(sed -n 's/^PopSift_DIR:[A-Z]*=//p' CMakeCache.txt)
+  case "$got" in
+    "$POPSIFT_INSTALL"/*) ;;
+    *) echo "PopSift_DIR is '$got', not under $POPSIFT_INSTALL: a stale cache. Delete $AV_BUILD and reconfigure." >&2
+       exit 1 ;;
+  esac
+fi
 [ "$STEP" = configure ] && exit 0
 cmake --build . --parallel "$JOBS"
 [ "$STEP" = build ] && exit 0
