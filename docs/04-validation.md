@@ -372,3 +372,33 @@ Run on the v0.3.1 Windows bundle, RX 9070, 2026-09-20, after the corrections abo
   switches off, the two unprovable ones labelled), `verify` 80 (all six self-checks satisfied:
   max-flow labelling 0 of 1,676,527 cells different, knn identical on 8,770,375 queries),
   `bridgecap` 91 (planner absorbed 1.5 GB), `bridgespill` 122 (spilled at 500 MB), `bridgeoff` 57.
+
+## Skull turntable: a failure that was not ours (2026-09-20)
+
+Seventy-five 4272x2848 photographs of a skull on a turntable, a set no Cheshire build had seen.
+Two configs on the v0.3.1 Windows bundle, RX 9070: `verify` passed 6/6 (623 s, 73 poses, 66,294
+landmarks, every self-check satisfied); `base` failed at StructureFromMotion, exit 1, with a Ceres
+`CHECK` - `Manifold::PlusJacobian computation failed for x: 0 0 0 0 ...` - a pose whose rotation is
+all zeros reaching bundle adjustment after the 68th resection.
+
+What settled the attribution, in order:
+
+* **The node is not a paired one.** The launcher pairs seven binaries; incrementalSfM is not among
+  them, and the node's log has no `[cheshire]` provenance line. The binary that crashed is
+  Meshroom 2023.3.0's own `aliceVision_incrementalSfM.exe` (145,920 bytes, dated 2023-12-07).
+* **Replaying its exact command line on the same features and matches reproduces the CHECK** with
+  that stock binary (this time after the 55th resection - RANSAC inside SfM is not seeded either),
+  so the failure is a property of those inputs, not of a flaky run.
+* **What differs between the passing and failing inputs is keypoint order only.** Same 1,083,238
+  features, same 74 candidate pairs, match files four lines apart; GPU SIFT orders its keypoints
+  differently each run (docs/04, capability review), which changed the automatic initial pair:
+  `822551637, 1010062824` crashes, `861327282, 1489813614` reconstructs. A second `base` run drew
+  the second pair and went through.
+
+So the finding is an upstream fragility of incremental SfM on turntable data (a static background
+rotating against the object gives inconsistent geometry; the usual answer is masking or a
+turntable-aware pipeline), exposed roughly one run in two by keypoint order. Meshroom's own
+PopSIFT has the same order nondeterminism, so stock users see the same rate. Two consequences for
+this project: the end-to-end report now names the failed node and whether it was a paired binary,
+so this is read off the summary rather than dug out of a log; and the stable keypoint sort already
+listed for 0.3.2 would make which initial pair a dataset draws a fixed fact rather than a coin toss.

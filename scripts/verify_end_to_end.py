@@ -26,6 +26,7 @@ Markers follow the rule the stage gates arrived at the hard way: take the line f
 branch of the port's available(), and include enough of it that the disabled branch cannot match.
 Bare 'GPU brute-force' matches "GPU brute-force disabled by CHESHIRE_GPU_MATCHER=0".
 """
+import json
 import os, re, shutil, subprocess, sys, time
 from pathlib import Path
 
@@ -236,10 +237,12 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     dm_digest = None
     if dm_dir is not None:
         import hashlib
-        h = hashlib.sha256()
-        for f in sorted(dm_dir.glob("*_depthMap.exr")) + sorted(dm_dir.glob("*_simMap.exr")):
-            h.update(f.name.encode()); h.update(f.read_bytes())
-        dm_digest = h.hexdigest()[:16]
+        exrs = sorted(dm_dir.glob("*_depthMap.exr")) + sorted(dm_dir.glob("*_simMap.exr"))
+        if exrs:   # otherwise the digest of nothing (e3b0c442...) masquerades as a result
+            h = hashlib.sha256()
+            for f in exrs:
+                h.update(f.name.encode()); h.update(f.read_bytes())
+            dm_digest = h.hexdigest()[:16]
 
     ok = rc == 0 and mesh and tex and not missing and not unpaired and not never_ran and not unmet
     print(f"  {'ok  ' if ok else 'FAIL'}  {name:<14} exit={rc:<4} mesh={len(mesh)} tex={len(tex)} "
@@ -259,6 +262,22 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
         print(f"        paired but silent: {', '.join(missing)}"
               f" - the Cheshire binary ran and its GPU port did not announce itself")
     if rc != 0:
+        # Name the node that failed and whose binary it was. The skull-turntable run of 2026-09-20
+        # died in StructureFromMotion, a node the launcher never pairs: Meshroom's own
+        # aliceVision_incrementalSfM hit a Ceres CHECK (zero-rotation pose after resection), and the
+        # report should say so rather than leave the reader to work out from the log that no
+        # Cheshire code ran there.
+        for st in sorted(cache.glob("*/*/status")):
+            try:
+                j = json.loads(st.read_text(encoding="utf-8", errors="replace"))
+            except ValueError:
+                continue
+            if j.get("status") == "ERROR":
+                node = st.parent.parent.name
+                ours = bool(re.search(r"\[cheshire\] \S+: Cheshire build", node_logs(cache, node)))
+                print(f"        failed node: {node} - "
+                      + ("a Cheshire-paired binary" if ours else
+                         "Meshroom's own binary (not a paired node, no Cheshire code ran there)"))
         for line in log.read_text(encoding="utf-8", errors="replace").splitlines()[-4:]:
             print(f"        {line[:110]}")
     return bool(ok), dm_digest
