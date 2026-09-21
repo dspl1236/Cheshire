@@ -488,3 +488,37 @@ What 4 GB did to each stage:
 This is the strongest package result so far: the smallest card the project has, at the largest
 per-view working set, through Meshroom end to end on the download as shipped (plus the pairing
 files 0.3.1 adds).
+
+## 0.3.2 - the queue (2026-09-21)
+
+Everything below is a source change, so it rides one rebuild of all eleven Windows payloads, the
+Linux bundle and both CUDA packages, followed by the full set of gates. Collected here because
+the items were scattered through the sections above.
+
+1. **Unconditional announce lines for the silent ports** - max-flow, sim blur, visibility knn,
+   QR nullspace, filter cache. Each must print one line on the GPU path and one on the fallback,
+   long enough that the gate's marker rule can tell them apart. Without it the gate cannot prove
+   five of the ports ran (capability review above).
+2. **Stable keypoint sort after GPU SIFT.** Same keypoint set every run, different order; a sort
+   makes SfM, and so whole pipelines, byte-reproducible, and turns the skull's initial-pair coin
+   toss into a fixed draw.
+3. **Texturing: padding on the GPU and a direct textured-OBJ writer.** On the engine bay (RX 6750
+   XT, 2026-09-21) the ported stage is about 6 s of a 175 s node: uploads 2.1 + pyramids 0.6 +
+   rasterisation 2.6 + finish 0.6. The rest is upstream CPU: per-atlas edge padding + downscale +
+   EXR write ~10 s x 6 atlases, UV generation ~53 s, mesh load and textured-mesh save through
+   Assimp ~20-25 s, image loads 26 s (I/O). Padding is a dilate on an atlas that is already in VRAM
+   at rasterisation time - do it before the download, not after. The save is patch step 4n again
+   (`Mesh::save`'s direct writer, docs/11) with `vt` / `f v/vt` lines and the MTL; the Assimp load
+   stays, since the node accepts non-OBJ input. `Texturing::loadWithAtlas` and `saveAs` have no
+   Cheshire code today.
+4. **CUDA allocator peak summary.** `vram: N allocs, peak M MB` is HIP-side only; the 1050 Ti run
+   reported no peaks. The CUDA build should print the same line so both backends' memory is
+   measured the same way.
+5. **Camera mipmaps through the bridge on CUDA.** They bypass it today, so on a small NVIDIA card
+   there is memory the planner cannot see; the 1050 Ti absorbed the engine bay, a larger set may
+   not.
+6. **Announce lines in the end-to-end gate for items 1 and 4**, and the 8 GB HIP texturing run
+   (RX 5500 XT) recorded before the release, whatever it shows.
+
+Not source, and not waiting for 0.3.2: memtest on bench-pc; the RX 5500 XT gate on the Windows
+hip6.2 gfx1012/gfx1031 payloads (closes the one inference in 0.3.1's notes).
