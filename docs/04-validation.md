@@ -744,3 +744,22 @@ On this machine PrepareDenseScene is a memory-bound 34 s and the map moves work,
 CPU-bound box - house-pc's four slow threads at 133 s - the saved CPU should be wall time, and the
 next Linux build carries the change to measure it. What remains here is the read phase (JPEG
 decode and the OCIO colour conversion, now 47 % of thread time), which is upstream OIIO/OCIO work.
+
+## 0.3.3 item 3: SfM profiled (2026-09-21)
+
+`CHESHIRE_BA_PROFILE=1` prints Ceres' own timers per solve. Engine bay, 107 views, dspsift, 12
+threads, RX 9070 box, SfM wall 92 s: **140 bundle-adjustment solves, 1095 iterations, 50.9 s** =
+Jacobians 25.1 s (49 %) + linear solver 13.1 s (26 %) + other 11.0 s (22 %: per-solve problem
+construction and trust-region bookkeeping) + residuals 1.7 s. Solvers used: SPARSE_SCHUR
+(SuiteSparse), DENSE_SCHUR for the small local problems, DENSE_QR for the tiny ones; 12 threads
+throughout. The largest solves are the global ones: 9.0 s for 15 iterations over 325 k residual
+blocks, 7.2 s for 8 over 415 k. Final scene 141,077 landmarks.
+
+So the lever inside SfM is the Jacobian evaluation - Ceres autodiff over every observation's
+reprojection functor - not the Schur solve. Analytic Jacobians for the pinhole + radial models
+(AliceVision's intrinsics already expose `getDerivative*WrtParams`) would cut that phase by
+perhaps 2-3x, about 17 s of the 92, at the cost of iterates that differ in rounding from
+autodiff's; SfM is already non-reproducible run to run, so that is a change within the existing
+band, not a new one. Worth doing, but it is an 18 % win on a 5 % node: below the texturing
+Lanczos downscale (25 s of a 175 s node on the 6750 XT, portable exactly, docs/04 item 3 of 0.3.2)
+in the queue. Recorded, not started.
