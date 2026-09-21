@@ -307,6 +307,25 @@ inline Tier tierOf(const void* devPtr) {
 }
 // VRAM the planner wants kept free for camera images (they are allocated after the tile buffers).
 inline void setReserve(size_t bytes) { auto& s = detail::st(); std::lock_guard<std::mutex> g(s.m); s.reserve = bytes; }
+
+// VRAM the bridge does not own but must count. On CUDA the camera mipmaps are real
+// cudaMipmappedArrays, allocated by the driver and never through cudaMalloc, so until 0.3.2 they
+// were invisible here: no "image" line in the summary and a budget the card could not honour on a
+// small card. The depth-map code notes each array's estimated bytes after creating it and forgets
+// them before freeing it; the bytes count towards vramUsed and the class peaks like any other
+// VRAM placement, and free() never sees these keys (forget removes them first).
+inline void noteExternal(const void* key, size_t bytes, Class cls) {
+    auto& s = detail::st();
+    if (!s.enabled) return;
+    detail::noteVram(const_cast<void*>(key), bytes, cls);
+}
+inline void forgetExternal(const void* key) {
+    auto& s = detail::st(); std::lock_guard<std::mutex> g(s.m);
+    auto v = s.vram.find(const_cast<void*>(key));
+    if (v == s.vram.end()) return;
+    s.stats.vramBytes -= v->second.bytes; s.stats.cls[int(v->second.cls)].vramBytes -= v->second.bytes;
+    s.vram.erase(v);
+}
 inline Budget budget() {
     auto& s = detail::st(); std::lock_guard<std::mutex> g(s.m);
     s.initCap();

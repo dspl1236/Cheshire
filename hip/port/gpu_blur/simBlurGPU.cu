@@ -2,6 +2,7 @@
 #include "aliceVision/fuseCut/gpu/simBlurGPU.hpp"
 
 #include <cuda_runtime.h>
+#include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
 
 // FMA contraction is off for this file so a*b+c rounds twice, as OIIO's does on the CPU. Without it
 // the device fuses and 74.3 M of 244.6 M pixels land a few ULP away - the same 30 % the harness
@@ -114,9 +115,9 @@ bool blurGaussian(const float* src, float* dst, int w, int h,
 
     do
     {
-        if (cudaMalloc(&dSrc, nPix * sizeof(float)) != cudaSuccess) break;
-        if (cudaMalloc(&dDst, nPix * sizeof(float)) != cudaSuccess) break;
-        if (cudaMalloc(&dKer, nKer * sizeof(float)) != cudaSuccess) break;
+        if (cheshire::devMalloc(&dSrc, nPix * sizeof(float)) != cudaSuccess) break;
+        if (cheshire::devMalloc(&dDst, nPix * sizeof(float)) != cudaSuccess) break;
+        if (cheshire::devMalloc(&dKer, nKer * sizeof(float)) != cudaSuccess) break;
         if (cudaMemcpyAsync(dSrc, src, nPix * sizeof(float), cudaMemcpyHostToDevice, stream) != cudaSuccess) break;
         if (cudaMemcpyAsync(dKer, kern, nKer * sizeof(float), cudaMemcpyHostToDevice, stream) != cudaSuccess) break;
 
@@ -129,9 +130,9 @@ bool blurGaussian(const float* src, float* dst, int w, int h,
         ok = true;
     } while (false);
 
-    cudaFree(dSrc);
-    cudaFree(dDst);
-    cudaFree(dKer);
+    cheshire::devFree(dSrc);
+    cheshire::devFree(dDst);
+    cheshire::devFree(dKer);
     cudaStreamDestroy(stream);
     return ok;
 }

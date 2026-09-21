@@ -20,6 +20,7 @@
 // synchronisation costs as much as a whole sweep on a small graph.
 #include "maxflowGPU.hpp"
 #include <cuda_runtime.h>
+#include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
 #include <chrono>
 #include <climits>
 #include <cstdio>
@@ -37,7 +38,7 @@ constexpr unsigned kGrid = 4096;             // fixed grid for the list kernels,
 constexpr float kPinCapacity = 1073741824.0f; // 2^30: a source edge at or above this is a pin
 
 template<class T> bool up(T** d, const T* h, size_t n) {
-    if (cudaMalloc((void**)d, n * sizeof(T)) != cudaSuccess) return false;
+    if (cheshire::devMalloc((void**)d, n * sizeof(T)) != cudaSuccess) return false;
     return cudaMemcpy(*d, h, n * sizeof(T), cudaMemcpyHostToDevice) == cudaSuccess;
 }
 
@@ -223,7 +224,7 @@ struct Device {
     float *residual = nullptr, *excess = nullptr;
     std::uint8_t* pinned = nullptr;
     unsigned* work = nullptr;
-    ~Device() { for (void* p : {(void*)rowstart, (void*)target, (void*)partner, (void*)height, (void*)listA, (void*)listB, (void*)countA, (void*)countB, (void*)residual, (void*)excess, (void*)pinned, (void*)work}) if (p) cudaFree(p); }
+    ~Device() { for (void* p : {(void*)rowstart, (void*)target, (void*)partner, (void*)height, (void*)listA, (void*)listB, (void*)countA, (void*)countB, (void*)residual, (void*)excess, (void*)pinned, (void*)work}) if (p) cheshire::devFree(p); }
 };
 
 // heights = BFS distance to the sink over residual edges, nbNodes where the sink is unreachable;
@@ -292,11 +293,11 @@ bool minCut(const Graph& g, std::vector<std::uint8_t>& sinkSide, Stats& stats, i
     const std::uint32_t V = g.nbNodes, E = g.nbEdges;
     Device d;
     if (!up(&d.rowstart, g.rowstart, size_t(V) + 1) || !up(&d.target, g.target, E) || !up(&d.partner, g.partner, E) || !up(&d.residual, g.capacity, E)) return false;
-    if (cudaMalloc((void**)&d.excess, size_t(V) * 4) != cudaSuccess || cudaMemset(d.excess, 0, size_t(V) * 4) != cudaSuccess) return false;
-    if (cudaMalloc((void**)&d.height, size_t(V) * 4) != cudaSuccess) return false;
-    if (cudaMalloc((void**)&d.pinned, size_t(V)) != cudaSuccess || cudaMemset(d.pinned, 0, size_t(V)) != cudaSuccess) return false;
-    if (cudaMalloc((void**)&d.listA, size_t(V) * 4) != cudaSuccess || cudaMalloc((void**)&d.listB, size_t(V) * 4) != cudaSuccess) return false;
-    if (cudaMalloc((void**)&d.countA, 4) != cudaSuccess || cudaMalloc((void**)&d.countB, 4) != cudaSuccess || cudaMalloc((void**)&d.work, 4) != cudaSuccess) return false;
+    if (cheshire::devMalloc((void**)&d.excess, size_t(V) * 4) != cudaSuccess || cudaMemset(d.excess, 0, size_t(V) * 4) != cudaSuccess) return false;
+    if (cheshire::devMalloc((void**)&d.height, size_t(V) * 4) != cudaSuccess) return false;
+    if (cheshire::devMalloc((void**)&d.pinned, size_t(V)) != cudaSuccess || cudaMemset(d.pinned, 0, size_t(V)) != cudaSuccess) return false;
+    if (cheshire::devMalloc((void**)&d.listA, size_t(V) * 4) != cudaSuccess || cheshire::devMalloc((void**)&d.listB, size_t(V) * 4) != cudaSuccess) return false;
+    if (cheshire::devMalloc((void**)&d.countA, 4) != cudaSuccess || cheshire::devMalloc((void**)&d.countB, 4) != cudaSuccess || cheshire::devMalloc((void**)&d.work, 4) != cudaSuccess) return false;
 
     const std::uint32_t nbSourceEdges = g.rowstart[g.source + 1] - g.rowstart[g.source];
     if (nbSourceEdges) initSourceKernel<<<(nbSourceEdges + kBlock - 1) / kBlock, kBlock>>>(g.source, d.rowstart, d.target, d.partner, d.residual, d.excess, d.pinned);

@@ -97,7 +97,7 @@ def main() -> None:
     for f in ["cuda_runtime.h", "cuda_fp16.h", "math_constants.h"]:
         shutil.copy2(ROOT / "hip" / "compat" / "include" / f, dst / f)
     (dst / "cheshire").mkdir(exist_ok=True)
-    for f in ["cuda_to_hip.h", "bridge.h", "hip_to_cuda.h", "managed_cuda.h", "mipmap_emu.h"]:
+    for f in ["cuda_to_hip.h", "bridge.h", "hip_to_cuda.h", "managed_cuda.h", "mipmap_emu.h", "devalloc.h"]:
         shutil.copy2(ROOT / "hip" / "compat" / "include" / "cheshire" / f, dst / "cheshire" / f)
     shutil.copy2(ROOT / "hip" / "port" / "unity" / "depthmap_device_unity.hip", dst / "depthmap_device_unity.hip")
     # header overlay (2-line change) applied in place
@@ -2977,6 +2977,59 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
             sys.exit("cheshire cstdlib include not found once in Texturing.cpp")
         t = t.replace(inc, inc + "#include <cstdio>   // cheshire: direct OBJ writer" + NL + "#include <stdexcept>" + NL, 1)
         tx.write_text(t, encoding="utf-8", newline="")
+
+    # 5f. CUDA camera mipmaps counted by the bridge. cudaMallocMipmappedArray is driver memory that
+    #     never passes through cudaMalloc, so on CUDA the bridge saw no "image" bytes at all: no image
+    #     line in the summary, and on a small card a budget the planner could commit but the card
+    #     could not hold (bridge.h, the clamp comment). The array is noted with its estimated bytes
+    #     (every level, the texel type the build uses) right after creation and forgotten before it
+    #     is freed. Same on HIP when the platform's native mipmapped arrays are used
+    #     (CHESHIRE_NATIVE_MIPMAP); the emulation counts its own levels in mipmap_emu.h, and forget
+    #     of an unknown key is a no-op.
+    dm = AV / "src/aliceVision/depthMap/cuda/imageProcessing/deviceMipmappedArray.cu"
+    t = dm.read_text(encoding="utf-8")
+    if "noteExternal" not in t:
+        old = "    CHECK_CUDA_RETURN_ERROR(cudaMallocMipmappedArray(out_mipmappedArrayPtr, &desc, imgSize, levels));" + NL
+        if t.count(old) != 1:
+            sys.exit("cudaMallocMipmappedArray call not found once in deviceMipmappedArray.cu")
+        t = t.replace(old, old + """#if !defined(CHESHIRE_EMULATE_MIPMAP)
+    {
+        // cheshire: count the array's VRAM in the bridge (scripts/apply_hip_patch.py, step 5f).
+        // CUDA, and HIP with the platform's own mipmapped arrays: driver memory the bridge cannot
+        // own. The HIP emulation (CHESHIRE_EMULATE_MIPMAP, cuda_to_hip.h) counts its own levels.
+        size_t bytes = 0, w = in_imgSize.x(), h = in_imgSize.y();
+        for (unsigned l = 0; l < levels; ++l)
+        {
+            bytes += w * h * sizeof(CudaRGBA)
+#ifdef ALICEVISION_DEPTHMAP_TEXTURE_USE_HALF
+                     / 2
+#endif
+                ;
+            w = w > 1 ? w / 2 : 1;
+            h = h > 1 ? h / 2 : 1;
+        }
+        cheshire::bridge::noteExternal(*out_mipmappedArrayPtr, bytes, cheshire::bridge::Class::Image);
+    }
+#endif
+""".replace("\n", NL), 1)
+        dm.write_text(t, encoding="utf-8", newline="")
+    di = AV / "src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.cpp"
+    t = di.read_text(encoding="utf-8")
+    if "forgetExternal" not in t:
+        for old in ("        CHECK_CUDA_RETURN_ERROR_NOEXCEPT(cudaFreeMipmappedArray(_mipmappedArray));" + NL,
+                    "        CHECK_CUDA_RETURN_ERROR(cudaFreeMipmappedArray(_mipmappedArray));" + NL):
+            if t.count(old) != 1:
+                sys.exit("cudaFreeMipmappedArray call not found once in DeviceMipmapImage.cpp")
+            # braced: upstream's `if (_mipmappedArray != nullptr)` has no braces, so an inserted
+            # statement would become the if-body and the free would run unconditionally (it did:
+            # "invalid argument" from freeing a null handle, first build of this step).
+            t = t.replace(old, "        {" + NL + "            cheshire::bridge::forgetExternal(_mipmappedArray);  // cheshire, step 5f" + NL
+                          + "    " + old + "        }" + NL, 1)
+        inc = "#include <aliceVision/depthMap/cuda/imageProcessing/deviceMipmappedArray.hpp>" + NL
+        if t.count(inc) != 1:
+            sys.exit("deviceMipmappedArray.hpp include not found once in DeviceMipmapImage.cpp")
+        t = t.replace(inc, inc + "#include <aliceVision/depthMap/cuda/host/memory.hpp>  // cheshire: the bridge" + NL, 1)
+        di.write_text(t, encoding="utf-8", newline="")
 
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu

@@ -11,6 +11,7 @@
 #endif
 #include "depthMapFilterGPU.hpp"
 #include <cuda_runtime.h>
+#include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -224,12 +225,12 @@ struct GroupFilter::Impl {
     CamGeom rc{};
     static bool grow(void** p, size_t* cap, size_t need) {
         if (need <= *cap) return true;
-        if (*p) cudaFree(*p);
+        if (*p) cheshire::devFree(*p);
         *p = nullptr; *cap = 0;
-        if (cudaMalloc(p, need) != cudaSuccess) return false;
+        if (cheshire::devMalloc(p, need) != cudaSuccess) return false;
         *cap = need; return true;
     }
-    ~Impl() { if (rcDepth) cudaFree(rcDepth); if (rcSim) cudaFree(rcSim); if (pts) cudaFree(pts); if (modals) cudaFree(modals); if (tcDepth) cudaFree(tcDepth); }
+    ~Impl() { if (rcDepth) cheshire::devFree(rcDepth); if (rcSim) cheshire::devFree(rcSim); if (pts) cheshire::devFree(pts); if (modals) cheshire::devFree(modals); if (tcDepth) cheshire::devFree(tcDepth); }
 };
 
 GroupFilter::GroupFilter() : impl_(new Impl) {}
@@ -241,10 +242,10 @@ bool GroupFilter::setRc(const float* depth, const float* sim, const CamGeom& rc)
     m.rc = rc;
     const size_t n = size_t(rc.w) * rc.h;
     if (n > m.rcCap) {
-        for (void** p : {(void**)&m.rcDepth, (void**)&m.rcSim, (void**)&m.pts, (void**)&m.modals}) { if (*p) cudaFree(*p); *p = nullptr; }
+        for (void** p : {(void**)&m.rcDepth, (void**)&m.rcSim, (void**)&m.pts, (void**)&m.modals}) { if (*p) cheshire::devFree(*p); *p = nullptr; }
         m.rcCap = 0;
-        if (cudaMalloc((void**)&m.rcDepth, n * 4) != cudaSuccess || cudaMalloc((void**)&m.rcSim, n * 4) != cudaSuccess
-            || cudaMalloc((void**)&m.pts, n * 4) != cudaSuccess || cudaMalloc((void**)&m.modals, n) != cudaSuccess) return false;
+        if (cheshire::devMalloc((void**)&m.rcDepth, n * 4) != cudaSuccess || cheshire::devMalloc((void**)&m.rcSim, n * 4) != cudaSuccess
+            || cheshire::devMalloc((void**)&m.pts, n * 4) != cudaSuccess || cheshire::devMalloc((void**)&m.modals, n) != cudaSuccess) return false;
         m.rcCap = n;
     }
     if (cudaMemcpy(m.rcDepth, depth, n * 4, cudaMemcpyHostToDevice) != cudaSuccess) return false;
@@ -280,10 +281,10 @@ bool GroupFilter::probe(const float* tcDepth, const CamGeom& tc, int x, int y, f
     if (!Impl::grow((void**)&m.tcDepth, &m.tcCap, tn * 4)) return false;
     if (cudaMemcpy(m.tcDepth, tcDepth, tn * 4, cudaMemcpyHostToDevice) != cudaSuccess) return false;
     double* d = nullptr;
-    if (cudaMalloc((void**)&d, 10 * sizeof(double)) != cudaSuccess) return false;
+    if (cheshire::devMalloc((void**)&d, 10 * sizeof(double)) != cudaSuccess) return false;
     probeKernel<<<1, 1>>>(m.tcDepth, tc, m.rc, m.rcDepth, m.rcSim, pixToleranceFactor, pixSizeBall, pixSizeBallWSP, x, y, d);
     const bool ok = cudaMemcpy(out, d, 10 * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess;
-    cudaFree(d);
+    cheshire::devFree(d);
     return ok;
 }
 

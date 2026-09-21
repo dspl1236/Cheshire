@@ -392,10 +392,10 @@ index 0564791..d2e3efc 100644
  
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h b/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h
 new file mode 100644
-index 0000000..eb1e8f5
+index 0000000..dbd7efe
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h
-@@ -0,0 +1,402 @@
+@@ -0,0 +1,421 @@
 +// Cheshire memory bridge v2: VRAM first, mapped system RAM when VRAM is short, and the
 +// choice of *what* spills made by buffer class instead of by arrival order.
 +//
@@ -705,6 +705,25 @@ index 0000000..eb1e8f5
 +}
 +// VRAM the planner wants kept free for camera images (they are allocated after the tile buffers).
 +inline void setReserve(size_t bytes) { auto& s = detail::st(); std::lock_guard<std::mutex> g(s.m); s.reserve = bytes; }
++
++// VRAM the bridge does not own but must count. On CUDA the camera mipmaps are real
++// cudaMipmappedArrays, allocated by the driver and never through cudaMalloc, so until 0.3.2 they
++// were invisible here: no "image" line in the summary and a budget the card could not honour on a
++// small card. The depth-map code notes each array's estimated bytes after creating it and forgets
++// them before freeing it; the bytes count towards vramUsed and the class peaks like any other
++// VRAM placement, and free() never sees these keys (forget removes them first).
++inline void noteExternal(const void* key, size_t bytes, Class cls) {
++    auto& s = detail::st();
++    if (!s.enabled) return;
++    detail::noteVram(const_cast<void*>(key), bytes, cls);
++}
++inline void forgetExternal(const void* key) {
++    auto& s = detail::st(); std::lock_guard<std::mutex> g(s.m);
++    auto v = s.vram.find(const_cast<void*>(key));
++    if (v == s.vram.end()) return;
++    s.stats.vramBytes -= v->second.bytes; s.stats.cls[int(v->second.cls)].vramBytes -= v->second.bytes;
++    s.vram.erase(v);
++}
 +inline Budget budget() {
 +    auto& s = detail::st(); std::lock_guard<std::mutex> g(s.m);
 +    s.initCap();
@@ -1077,6 +1096,40 @@ index 0000000..7bd0800
 +// __global__ __device__ __host__ __constant__ __shared__ __forceinline__
 +// dim3, blockIdx/blockDim/threadIdx/gridDim, __syncthreads, make_float4 ...
 +// tex2D<T>, tex2DLod<T>, surf2Dwrite, atomicAdd ...
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/devalloc.h b/src/aliceVision/depthMap/cuda/hip/cheshire/devalloc.h
+new file mode 100644
+index 0000000..557c093
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshire/devalloc.h
+@@ -0,0 +1,28 @@
++// Cheshire: device allocation for the GPU ports (matcher, depth-map filter, votes, max-flow,
++// knn, blur, texturing), routed through the memory bridge on BOTH backends.
++//
++// On HIP every port already reached the bridge: cuda_to_hip.h is force-included into each HIP
++// translation unit and defines cudaMalloc/cudaFree as bridge calls. The CUDA build has no such
++// force-include (bridge.h reaches it through depthMap's memory.hpp only), so the ports' plain
++// cudaMalloc calls bypassed the bridge there: nothing counted them, the per-class summary showed
++// no "other" line, and a CUDA card's VRAM had a population the planner could not see. Item 4 of
++// 0.3.2 (docs/04). The ports call these instead, and the two names below are the same bridge
++// functions on either backend; bridge.h supplies hipError_t as cudaError_t on CUDA through
++// hip_to_cuda.h and cuda_to_hip.h maps the other way on HIP.
++//
++// Reached as <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>: the generator copies this
++// directory into the tree, and the CUDA build must never see hip/compat/include on its include
++// path (it holds cuda_runtime.h shims that would shadow the real headers).
++#pragma once
++
++#include "bridge.h"
++
++namespace cheshire {
++
++inline hipError_t devMalloc(void** devPtr, size_t bytes) { return bridge::malloc(devPtr, bytes); }
++// the typed form the ports use (cudaMalloc has the same templated overload in cuda_runtime.h)
++template <class T>
++inline hipError_t devMalloc(T** devPtr, size_t bytes) { return bridge::malloc(reinterpret_cast<void**>(devPtr), bytes); }
++inline hipError_t devFree(void* devPtr) { return bridge::free(devPtr); }
++
++}  // namespace cheshire
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/hip_to_cuda.h b/src/aliceVision/depthMap/cuda/hip/cheshire/hip_to_cuda.h
 new file mode 100644
 index 0000000..ac2f25c
@@ -1252,10 +1305,10 @@ index 0000000..8308d0e
 +}  // namespace cheshire
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/mipmap_emu.h b/src/aliceVision/depthMap/cuda/hip/cheshire/mipmap_emu.h
 new file mode 100644
-index 0000000..ff51784
+index 0000000..d5bcb15
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshire/mipmap_emu.h
-@@ -0,0 +1,270 @@
+@@ -0,0 +1,273 @@
 +// Cheshire: mipmapped-array emulation for HIP stacks without hipMallocMipmappedArray
 +// (Linux ROCm 7.2 reports "Mipmap not supported on one of the devices", e.g. RX 5500 XT).
 +//
@@ -1381,7 +1434,7 @@ index 0000000..ff51784
 +    size_t w = extent.width, h = extent.height;
 +    auto fail = [&](hipError_t e) {
 +        for (Level* l : rec.levels) {
-+            if (l->arr) (void)hipFreeArray(l->arr);
++            if (l->arr) { cheshire::bridge::forgetExternal(l->arr); (void)hipFreeArray(l->arr); }
 +            if (l->dev) (void)cheshire::bridge::free(l->dev);
 +            delete l;
 +        }
@@ -1395,6 +1448,8 @@ index 0000000..ff51784
 +            e = cheshire::bridge::mallocPitch(&lv->dev, &lv->pitch, lv->w * rec.elemBytes, lv->h);
 +        } else {
 +            e = hipMallocArray(&lv->arr, desc, lv->w, lv->h, hipArrayDefault);
++            // array storage is driver memory the bridge cannot own; count it (0.3.2 item 5)
++            if (e == hipSuccess) cheshire::bridge::noteExternal(lv->arr, lv->w * lv->h * rec.elemBytes, cheshire::bridge::Class::Image);
 +        }
 +        if (e != hipSuccess) { delete lv; return fail(e); }
 +        rec.levels.push_back(lv);
@@ -1427,6 +1482,7 @@ index 0000000..ff51784
 +      for (Level* l : rec.levels) reg().linear.erase(l); }
 +    hipError_t err = hipSuccess;
 +    for (Level* l : rec.levels) {
++        if (l->arr) cheshire::bridge::forgetExternal(l->arr);
 +        hipError_t e = l->arr ? hipFreeArray(l->arr) : cheshire::bridge::free(l->dev);
 +        if (e != hipSuccess) err = e;
 +        delete l;
@@ -1576,6 +1632,42 @@ index 0000000..e7182a6
 +// Shim: CUDART_* constants are mapped onto hip_math_constants.h in cuda_to_hip.h.
 +#pragma once
 +#include <cheshire/cuda_to_hip.h>
+diff --git a/src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.cpp b/src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.cpp
+index 51697cd..2294862 100644
+--- a/src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.cpp
++++ b/src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.cpp
+@@ -10,6 +10,7 @@
+ #include <aliceVision/depthMap/cuda/imageProcessing/deviceColorConversion.hpp>
+ #include <aliceVision/depthMap/cuda/imageProcessing/deviceGaussianFilter.hpp>
+ #include <aliceVision/depthMap/cuda/imageProcessing/deviceMipmappedArray.hpp>
++#include <aliceVision/depthMap/cuda/host/memory.hpp>  // cheshire: the bridge
+ 
+ namespace aliceVision {
+ namespace depthMap {
+@@ -22,7 +23,10 @@ DeviceMipmapImage::~DeviceMipmapImage()
+ 
+     // free mipmapped array
+     if (_mipmappedArray != nullptr)
+-        CHECK_CUDA_RETURN_ERROR_NOEXCEPT(cudaFreeMipmappedArray(_mipmappedArray));
++        {
++            cheshire::bridge::forgetExternal(_mipmappedArray);  // cheshire, step 5f
++            CHECK_CUDA_RETURN_ERROR_NOEXCEPT(cudaFreeMipmappedArray(_mipmappedArray));
++        }
+ }
+ 
+ void DeviceMipmapImage::fill(const CudaHostMemoryHeap<CudaRGBA, 2>& in_img_hmh, int minDownscale, int maxDownscale)
+@@ -40,7 +44,10 @@ void DeviceMipmapImage::fill(const CudaHostMemoryHeap<CudaRGBA, 2>& in_img_hmh,
+ 
+     // destroy previous mipmapped array
+     if (_mipmappedArray != nullptr)
+-        CHECK_CUDA_RETURN_ERROR(cudaFreeMipmappedArray(_mipmappedArray));
++        {
++            cheshire::bridge::forgetExternal(_mipmappedArray);  // cheshire, step 5f
++            CHECK_CUDA_RETURN_ERROR(cudaFreeMipmappedArray(_mipmappedArray));
++        }
+ 
+     // allocate the device-sided full-size input image buffer
+     auto img_dmpPtr = std::make_shared<CudaDeviceMemoryPitched<CudaRGBA, 2>>(in_img_hmh.getSize());
 diff --git a/src/aliceVision/depthMap/cuda/host/memory.hpp b/src/aliceVision/depthMap/cuda/host/memory.hpp
 index 294259f..4ef2d9d 100644
 --- a/src/aliceVision/depthMap/cuda/host/memory.hpp
@@ -1692,7 +1784,7 @@ index 294259f..4ef2d9d 100644
          buffer = nullptr;
      }
 diff --git a/src/aliceVision/depthMap/cuda/imageProcessing/deviceMipmappedArray.cu b/src/aliceVision/depthMap/cuda/imageProcessing/deviceMipmappedArray.cu
-index e059d0d..1e02f37 100644
+index e059d0d..5966250 100644
 --- a/src/aliceVision/depthMap/cuda/imageProcessing/deviceMipmappedArray.cu
 +++ b/src/aliceVision/depthMap/cuda/imageProcessing/deviceMipmappedArray.cu
 @@ -219,6 +219,67 @@ __global__ void createMipmappedArrayDebugFlatImage_kernel(CudaRGBA* out_flatImag
@@ -1763,7 +1855,33 @@ index e059d0d..1e02f37 100644
  __host__ void cuda_createMipmappedArrayFromImage(cudaMipmappedArray_t* out_mipmappedArrayPtr,
                                                   const CudaDeviceMemoryPitched<CudaRGBA, 2>& in_img_dmp,
                                                   const unsigned int levels)
-@@ -303,6 +364,20 @@ __host__ void cuda_createMipmappedArrayFromImage(cudaMipmappedArray_t* out_mipma
+@@ -234,6 +295,25 @@ __host__ void cuda_createMipmappedArrayFromImage(cudaMipmappedArray_t* out_mipma
+ 
+     // allocate CUDA mipmapped array
+     CHECK_CUDA_RETURN_ERROR(cudaMallocMipmappedArray(out_mipmappedArrayPtr, &desc, imgSize, levels));
++#if !defined(CHESHIRE_EMULATE_MIPMAP)
++    {
++        // cheshire: count the array's VRAM in the bridge (scripts/apply_hip_patch.py, step 5f).
++        // CUDA, and HIP with the platform's own mipmapped arrays: driver memory the bridge cannot
++        // own. The HIP emulation (CHESHIRE_EMULATE_MIPMAP, cuda_to_hip.h) counts its own levels.
++        size_t bytes = 0, w = in_imgSize.x(), h = in_imgSize.y();
++        for (unsigned l = 0; l < levels; ++l)
++        {
++            bytes += w * h * sizeof(CudaRGBA)
++#ifdef ALICEVISION_DEPTHMAP_TEXTURE_USE_HALF
++                     / 2
++#endif
++                ;
++            w = w > 1 ? w / 2 : 1;
++            h = h > 1 ? h / 2 : 1;
++        }
++        cheshire::bridge::noteExternal(*out_mipmappedArrayPtr, bytes, cheshire::bridge::Class::Image);
++    }
++#endif
+ 
+     // get mipmapped array at level 0
+     cudaArray_t level0;
+@@ -303,6 +383,20 @@ __host__ void cuda_createMipmappedArrayFromImage(cudaMipmappedArray_t* out_mipma
          }
  
          // generate surface object for current level writing
@@ -1784,7 +1902,7 @@ index e059d0d..1e02f37 100644
          cudaSurfaceObject_t currentLevel_surf;
          {
              cudaResourceDesc surfRes;
-@@ -329,6 +404,7 @@ __host__ void cuda_createMipmappedArrayFromImage(cudaMipmappedArray_t* out_mipma
+@@ -329,6 +423,7 @@ __host__ void cuda_createMipmappedArrayFromImage(cudaMipmappedArray_t* out_mipma
          // destroy temporary CUDA objects
          CHECK_CUDA_RETURN_ERROR(cudaDestroySurfaceObject(currentLevel_surf));
          CHECK_CUDA_RETURN_ERROR(cudaDestroyTextureObject(previousLevel_tex));

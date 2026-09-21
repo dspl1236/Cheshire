@@ -628,3 +628,34 @@ is the next texturing target and is not part of this item.
 
 Gate: `base` and `texcheck` both 6/6; `texcheck` asserts the padding verdict, the "done on the
 GPU" line, the writer's line and the OBJ content comparison.
+
+## 0.3.2 progress: items 4 and 5 landed - the bridge sees everything (2026-09-21)
+
+**Item 4.** The seven GPU ports allocated with plain `cudaMalloc`, which on HIP the force-included
+`cuda_to_hip.h` turned into bridge calls and on CUDA reached the driver directly: the CUDA
+summaries had no `other` line and a CUDA card's VRAM had a population the planner could not see.
+The ports now call `cheshire::devMalloc` / `devFree` (`cheshire/devalloc.h`, the bridge on either
+backend); 53 call sites, none left.
+
+**Item 5.** The camera mipmaps were never counted on CUDA - `cudaMallocMipmappedArray` is driver
+memory - and, it turned out, not on the RX 9070 either: the Windows HIP build passes
+`-DCHESHIRE_NATIVE_MIPMAP`, so its mipmaps are `hipMallocMipmappedArray`, equally invisible. The
+9070's summaries had never had an `image` line. The bridge gained `noteExternal` / `forgetExternal`
+(count bytes it does not own; free() never sees the keys), the depth-map code notes every array
+after creation and forgets it before freeing, guarded on `CHESHIRE_EMULATE_MIPMAP` so the Linux
+RDNA1 emulation, which allocates its levels through the bridge, is untouched; the emulation's
+array-storage mode counts its levels too. The estimate sums every level at the build's texel size
+and is generous next to upstream's own "single mipmap image size" figure (62 MB against 35 MB per
+image on mini6); it errs on the side of a smaller budget, which is the side to err on.
+
+Gate on the rebuilt gfx1201, RX 9070, mini6: `base` 65 s, `cpufallback` 80 s, `blast` 160 s,
+`texcheck` 65 s, 4/4, 6/6 ports each. Under `blast` the summaries now read: DepthMap `map` 1179 MB
+/ `volume` 7485 MB / **`image` 372 MB (6 allocs)**; DepthMapFilter `other` 1186 MB; Meshing `other`
+853 MB; Texturing `other` 3847 MB; FeatureMatching `other` 6 MB. The `blast` config asserts the
+`image` and `other` lines from here on, so a build that loses either fails the gate. The CUDA side
+of both items is proven on bench-pc once the CUDA package is rebuilt.
+
+One bug on the way: upstream's `if (_mipmappedArray != nullptr)` has no braces, so the first
+inserted `forgetExternal` became the if-body and the free ran unconditionally on a null handle -
+"invalid argument" from every destructor. Braced now; a patch that inserts a statement after an
+unbraced `if` is a pattern to look for.

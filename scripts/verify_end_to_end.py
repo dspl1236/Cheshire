@@ -176,8 +176,14 @@ CONFIGS = {
     # Most acceleration is already default-on; what this adds is the 7-point QR nullspace (held
     # opt-in, docs/15) and a larger filter cache.
     "blast": dict(overrides=SIFT + ["DepthMap:downscale=1"], checks={
-        "FeatureMatching": [r"7-point nullspace: Householder QR \(CHESHIRE_QR_NULLSPACE=1\)"],
-        "DepthMapFilter": [r"depth map filter cache: cap 8192 MB"]}, env={
+        "FeatureMatching": [r"7-point nullspace: Householder QR \(CHESHIRE_QR_NULLSPACE=1\)",
+                            r"other +vram: [1-9]\d* allocs"],
+        # 0.3.2 items 4 and 5: the bridge summary (CHESHIRE_BRIDGE_LOG=1) must show the camera
+        # mipmaps as "image" and the ports' buffers as "other" - on both backends.
+        "DepthMap": [r"image +vram: [1-9]\d* allocs, peak [1-9]\d* MB"],
+        "DepthMapFilter": [r"depth map filter cache: cap 8192 MB", r"other +vram: [1-9]\d* allocs"],
+        "Meshing": [r"other +vram: [1-9]\d* allocs"],
+        "Texturing": [r"other +vram: [1-9]\d* allocs"]}, env={
         "CHESHIRE_BRIDGE_LOG": "1", "CHESHIRE_QR_NULLSPACE": "1", "CHESHIRE_FILTER_CACHE_MB": "8192",
         "CHESHIRE_GPU_VOTE_LOG": "1", "CHESHIRE_GPU_VIS_LOG": "1", "CHESHIRE_GPU_TEX_LOG": "1",
         "CHESHIRE_GPU_MATCHER_LOG": "1", "CHESHIRE_FILTER_LOG": "1"}),

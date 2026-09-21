@@ -10,6 +10,7 @@
 // accum_dist and the initial bounding-box distances are unfused products in both builds.
 #include "knnGPU.hpp"
 #include <cuda_runtime.h>
+#include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
 #include <cfloat>
 #include <cstdio>
 #include <cstdlib>
@@ -251,10 +252,10 @@ bool Index::build(const double* points, std::size_t nbPoints, const Node* nodes,
         if (!ok(cudaEventCreate(&e), "event")) return false;
         _events[i] = e;
     }
-    if (!ok(cudaMalloc(&_points, nbPoints * 3 * sizeof(double)), "alloc points")) return false;
-    if (!ok(cudaMalloc(&_nodes, nbNodes * sizeof(Node)), "alloc nodes")) return false;
-    if (!ok(cudaMalloc(&_perm, nbPoints * sizeof(std::uint32_t)), "alloc perm")) return false;
-    if (!ok(cudaMalloc(&_overflowCounter, sizeof(unsigned int)), "alloc counter")) return false;
+    if (!ok(cheshire::devMalloc(&_points, nbPoints * 3 * sizeof(double)), "alloc points")) return false;
+    if (!ok(cheshire::devMalloc(&_nodes, nbNodes * sizeof(Node)), "alloc nodes")) return false;
+    if (!ok(cheshire::devMalloc(&_perm, nbPoints * sizeof(std::uint32_t)), "alloc perm")) return false;
+    if (!ok(cheshire::devMalloc(&_overflowCounter, sizeof(unsigned int)), "alloc counter")) return false;
     _overflowHost = hostAlloc(sizeof(unsigned int));
     if (_overflowHost == nullptr) return false;
     if (!reserve(maxQueries)) return false;
@@ -271,13 +272,13 @@ bool Index::reserve(std::size_t maxQueries)
     if (!wait()) return false;
     for (void** p : {&_queries, &_outIndex, &_outDist})
     {
-        if (*p) cudaFree(*p);
+        if (*p) cheshire::devFree(*p);
         *p = nullptr;
     }
     _queryCapacity = 0;
-    if (!ok(cudaMalloc(&_queries, maxQueries * 3 * sizeof(double)), "alloc queries")) return false;
-    if (!ok(cudaMalloc(&_outIndex, maxQueries * sizeof(std::uint32_t)), "alloc out index")) return false;
-    if (!ok(cudaMalloc(&_outDist, maxQueries * sizeof(double)), "alloc out dist")) return false;
+    if (!ok(cheshire::devMalloc(&_queries, maxQueries * 3 * sizeof(double)), "alloc queries")) return false;
+    if (!ok(cheshire::devMalloc(&_outIndex, maxQueries * sizeof(std::uint32_t)), "alloc out index")) return false;
+    if (!ok(cheshire::devMalloc(&_outDist, maxQueries * sizeof(double)), "alloc out dist")) return false;
     _queryCapacity = maxQueries;
     return true;
 }
@@ -333,7 +334,7 @@ void Index::release()
     _inFlight = false;
     for (void** p : {&_points, &_nodes, &_perm, &_queries, &_outIndex, &_outDist, &_overflowCounter})
     {
-        if (*p) cudaFree(*p);
+        if (*p) cheshire::devFree(*p);
         *p = nullptr;
     }
     hostFree(_overflowHost);

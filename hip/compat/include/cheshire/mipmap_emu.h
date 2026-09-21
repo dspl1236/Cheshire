@@ -123,7 +123,7 @@ inline hipError_t mallocMipmappedArray(hipMipmappedArray_t* out, const hipChanne
     size_t w = extent.width, h = extent.height;
     auto fail = [&](hipError_t e) {
         for (Level* l : rec.levels) {
-            if (l->arr) (void)hipFreeArray(l->arr);
+            if (l->arr) { cheshire::bridge::forgetExternal(l->arr); (void)hipFreeArray(l->arr); }
             if (l->dev) (void)cheshire::bridge::free(l->dev);
             delete l;
         }
@@ -137,6 +137,8 @@ inline hipError_t mallocMipmappedArray(hipMipmappedArray_t* out, const hipChanne
             e = cheshire::bridge::mallocPitch(&lv->dev, &lv->pitch, lv->w * rec.elemBytes, lv->h);
         } else {
             e = hipMallocArray(&lv->arr, desc, lv->w, lv->h, hipArrayDefault);
+            // array storage is driver memory the bridge cannot own; count it (0.3.2 item 5)
+            if (e == hipSuccess) cheshire::bridge::noteExternal(lv->arr, lv->w * lv->h * rec.elemBytes, cheshire::bridge::Class::Image);
         }
         if (e != hipSuccess) { delete lv; return fail(e); }
         rec.levels.push_back(lv);
@@ -169,6 +171,7 @@ inline hipError_t freeMipmappedArray(hipMipmappedArray_t mip) {
       for (Level* l : rec.levels) reg().linear.erase(l); }
     hipError_t err = hipSuccess;
     for (Level* l : rec.levels) {
+        if (l->arr) cheshire::bridge::forgetExternal(l->arr);
         hipError_t e = l->arr ? hipFreeArray(l->arr) : cheshire::bridge::free(l->dev);
         if (e != hipSuccess) err = e;
         delete l;

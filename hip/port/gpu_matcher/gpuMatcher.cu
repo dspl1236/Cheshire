@@ -11,6 +11,7 @@
 // calls; __global__/__shared__/__syncthreads are the same in both.
 #include "gpuMatcher.hpp"
 #include <cuda_runtime.h>
+#include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -200,12 +201,12 @@ struct KnnMatcher::Impl {
     size_t rowBytes() const { return size_t(dim) * (isFloat ? 4 : 1); }
     static bool grow(void** p, size_t* cap, size_t need) {
         if (need <= *cap) return true;
-        if (*p) cudaFree(*p);
+        if (*p) cheshire::devFree(*p);
         *p = nullptr; *cap = 0;
-        if (cudaMalloc(p, need) != cudaSuccess) return false;
+        if (cheshire::devMalloc(p, need) != cudaSuccess) return false;
         *cap = need; return true;
     }
-    ~Impl() { if (db) cudaFree(db); if (dbNorm) cudaFree(dbNorm); if (q) cudaFree(q); if (idx) cudaFree(idx); if (dist) cudaFree(dist); }
+    ~Impl() { if (db) cheshire::devFree(db); if (dbNorm) cheshire::devFree(dbNorm); if (q) cheshire::devFree(q); if (idx) cheshire::devFree(idx); if (dist) cheshire::devFree(dist); }
 };
 
 KnnMatcher::KnnMatcher() : impl_(new Impl) {}
@@ -239,10 +240,10 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
     const size_t qBytes = size_t(nbQuery) * m.rowBytes();
     if (!Impl::grow(&m.q, &m.qCap, qBytes)) return false;
     if (size_t(nbQuery) > m.outCap) {
-        if (m.idx) cudaFree(m.idx); if (m.dist) cudaFree(m.dist);
+        if (m.idx) cheshire::devFree(m.idx); if (m.dist) cheshire::devFree(m.dist);
         m.idx = nullptr; m.dist = nullptr; m.outCap = 0;
-        if (cudaMalloc((void**)&m.idx, size_t(nbQuery) * 2 * sizeof(int)) != cudaSuccess) return false;
-        if (cudaMalloc((void**)&m.dist, size_t(nbQuery) * 2 * sizeof(float)) != cudaSuccess) return false;
+        if (cheshire::devMalloc((void**)&m.idx, size_t(nbQuery) * 2 * sizeof(int)) != cudaSuccess) return false;
+        if (cheshire::devMalloc((void**)&m.dist, size_t(nbQuery) * 2 * sizeof(float)) != cudaSuccess) return false;
         m.outCap = size_t(nbQuery);
     }
     if (cudaMemcpy(m.q, queries, qBytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;

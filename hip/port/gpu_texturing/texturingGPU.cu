@@ -11,6 +11,7 @@
 #endif
 #include "texturingGPU.hpp"
 #include <cuda_runtime.h>
+#include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
 #include <cfloat>
 #include <chrono>
 #include <cmath>
@@ -504,9 +505,9 @@ struct Texturer::Impl {
     std::vector<float> hostTmp;
 
     ~Impl() {
-        for (void* p : {(void*)accRgb, (void*)accCnt, (void*)triPts, (void*)triPix, (void*)img, (void*)dTri, (void*)dScore, (void*)padCnt}) if (p) cudaFree(p);
-        for (float* p : levels) if (p) cudaFree(p);
-        for (float* p : down) if (p) cudaFree(p);
+        for (void* p : {(void*)accRgb, (void*)accCnt, (void*)triPts, (void*)triPix, (void*)img, (void*)dTri, (void*)dScore, (void*)padCnt}) if (p) cheshire::devFree(p);
+        for (float* p : levels) if (p) cheshire::devFree(p);
+        for (float* p : down) if (p) cheshire::devFree(p);
     }
     static int levelDim(int d, int downscale, int level) { for (int i = 0; i < level; ++i) d /= downscale; return d; }
     size_t slotRgb(int slot) const { return size_t(slot) * nbBand * levelStride * 3; }
@@ -524,15 +525,15 @@ bool Texturer::init(int nbSlots, unsigned textureSide, int nbBand, int downscale
     p->nbSlots = nbSlots; p->texSide = textureSide; p->nbBand = nbBand; p->downscale = downscale; p->maxW = maxImgW; p->maxH = maxImgH;
     p->levelStride = size_t(textureSide) * textureSide;
     const size_t rgbN = size_t(nbSlots) * nbBand * p->levelStride * 3, cntN = size_t(nbSlots) * nbBand * p->levelStride;
-    if (cudaMalloc((void**)&p->accRgb, rgbN * sizeof(float)) != cudaSuccess) return false;
-    if (cudaMalloc((void**)&p->accCnt, cntN * sizeof(float)) != cudaSuccess) return false;
+    if (cheshire::devMalloc((void**)&p->accRgb, rgbN * sizeof(float)) != cudaSuccess) return false;
+    if (cheshire::devMalloc((void**)&p->accCnt, cntN * sizeof(float)) != cudaSuccess) return false;
     if (cudaMemset(p->accRgb, 0, rgbN * sizeof(float)) != cudaSuccess || cudaMemset(p->accCnt, 0, cntN * sizeof(float)) != cudaSuccess) return false;
-    if (cudaMalloc((void**)&p->img, size_t(maxImgW) * maxImgH * 12) != cudaSuccess) return false;
+    if (cheshire::devMalloc((void**)&p->img, size_t(maxImgW) * maxImgH * 12) != cudaSuccess) return false;
     p->levels.assign(nbBand, nullptr); p->down.assign(nbBand > 1 ? nbBand - 1 : 0, nullptr);
     for (int l = 0; l < nbBand; ++l) {
         const size_t n = size_t(Impl::levelDim(maxImgW, downscale, l)) * Impl::levelDim(maxImgH, downscale, l) * 12;
-        if (cudaMalloc((void**)&p->levels[l], n) != cudaSuccess) return false;
-        if (l + 1 < nbBand && cudaMalloc((void**)&p->down[l], size_t(Impl::levelDim(maxImgW, downscale, l + 1)) * Impl::levelDim(maxImgH, downscale, l + 1) * 12) != cudaSuccess) return false;
+        if (cheshire::devMalloc((void**)&p->levels[l], n) != cudaSuccess) return false;
+        if (l + 1 < nbBand && cheshire::devMalloc((void**)&p->down[l], size_t(Impl::levelDim(maxImgW, downscale, l + 1)) * Impl::levelDim(maxImgH, downscale, l + 1) * 12) != cudaSuccess) return false;
     }
     return true;
 }
@@ -540,8 +541,8 @@ bool Texturer::init(int nbSlots, unsigned textureSide, int nbBand, int downscale
 bool Texturer::setTriangles(std::uint32_t nbTris, const double* pts, const double* texPix)
 {
     p->nbTris = nbTris;
-    if (cudaMalloc((void**)&p->triPts, size_t(nbTris) * 9 * sizeof(double)) != cudaSuccess) return false;
-    if (cudaMalloc((void**)&p->triPix, size_t(nbTris) * 6 * sizeof(double)) != cudaSuccess) return false;
+    if (cheshire::devMalloc((void**)&p->triPts, size_t(nbTris) * 9 * sizeof(double)) != cudaSuccess) return false;
+    if (cheshire::devMalloc((void**)&p->triPix, size_t(nbTris) * 6 * sizeof(double)) != cudaSuccess) return false;
     return cudaMemcpy(p->triPts, pts, size_t(nbTris) * 9 * sizeof(double), cudaMemcpyHostToDevice) == cudaSuccess
         && cudaMemcpy(p->triPix, texPix, size_t(nbTris) * 6 * sizeof(double), cudaMemcpyHostToDevice) == cudaSuccess;
 }
@@ -582,9 +583,9 @@ bool Texturer::raster(int slot, int band, const std::uint32_t* triIds, const flo
     if (n == 0) return true;
     const auto t0 = std::chrono::steady_clock::now();
     if (n > p->listCap) {
-        if (p->dTri) cudaFree(p->dTri); if (p->dScore) cudaFree(p->dScore);
+        if (p->dTri) cheshire::devFree(p->dTri); if (p->dScore) cheshire::devFree(p->dScore);
         p->listCap = n < 65536 ? 65536 : n;
-        if (cudaMalloc((void**)&p->dTri, size_t(p->listCap) * 4) != cudaSuccess || cudaMalloc((void**)&p->dScore, size_t(p->listCap) * 4) != cudaSuccess) return false;
+        if (cheshire::devMalloc((void**)&p->dTri, size_t(p->listCap) * 4) != cudaSuccess || cheshire::devMalloc((void**)&p->dScore, size_t(p->listCap) * 4) != cudaSuccess) return false;
     }
     if (cudaMemcpy(p->dTri, triIds, size_t(n) * 4, cudaMemcpyHostToDevice) != cudaSuccess) return false;
     if (cudaMemcpy(p->dScore, scores, size_t(n) * 4, cudaMemcpyHostToDevice) != cudaSuccess) return false;
@@ -614,7 +615,7 @@ bool Texturer::finish(int slot, float* rgb, float* count, int padding)
               && cudaMemcpy(cnt.data(), c, n * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess;
             for (size_t i = 0; i < n; ++i) refPc[i] = cnt[i] > 0.0f ? 1 : 0;
         }
-        if (ok && !p->padCnt) ok = cudaMalloc((void**)&p->padCnt, n * sizeof(int)) == cudaSuccess;
+        if (ok && !p->padCnt) ok = cheshire::devMalloc((void**)&p->padCnt, n * sizeof(int)) == cudaSuccess;
         if (ok) {
             padInitKernel<<<unsigned((n + 255) / 256), 256>>>(c, p->padCnt, n);
             // forward: diagonals d = x + y over 1 <= x, y <= S-2

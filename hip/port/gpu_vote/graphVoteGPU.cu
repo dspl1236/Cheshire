@@ -12,6 +12,7 @@
 #endif
 #include "graphVoteGPU.hpp"
 #include <cuda_runtime.h>
+#include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
 #include <cfloat>
 #include <chrono>
 #include <climits>
@@ -360,7 +361,7 @@ bool g_checked = false, g_available = false, g_tedgesDone = false;
 std::mutex g_mutex;
 
 template<class T> bool up(T** d, const T* h, size_t n) {
-    if (cudaMalloc((void**)d, n * sizeof(T)) != cudaSuccess) return false;
+    if (cheshire::devMalloc((void**)d, n * sizeof(T)) != cudaSuccess) return false;
     return cudaMemcpy(*d, h, n * sizeof(T), cudaMemcpyHostToDevice) == cudaSuccess;
 }
 
@@ -393,8 +394,8 @@ bool fillGraph(const VoteInput& in, float* cellAttr)
            && up(&dvco, in.vertexCellsOffset, size_t(in.nbVertices) + 1) && up(&dvcl, in.vertexCells, size_t(in.vertexCellsOffset[in.nbVertices]))
            && up(&dattr, cellAttr, size_t(in.nbCells) * A_STRIDE);
     const uint32_t chunk = kRayChunk;
-    if (ok) ok = cudaMalloc((void**)&drv, chunk * 4) == cudaSuccess && cudaMalloc((void**)&drc, chunk * 4) == cudaSuccess && cudaMalloc((void**)&drw, chunk * 4) == cudaSuccess
-              && cudaMalloc((void**)&drt, chunk * 4) == cudaSuccess && cudaMalloc((void**)&drd, chunk * 8) == cudaSuccess && cudaMalloc((void**)&drcc, size_t(chunk) * 24) == cudaSuccess;
+    if (ok) ok = cheshire::devMalloc((void**)&drv, chunk * 4) == cudaSuccess && cheshire::devMalloc((void**)&drc, chunk * 4) == cudaSuccess && cheshire::devMalloc((void**)&drw, chunk * 4) == cudaSuccess
+              && cheshire::devMalloc((void**)&drt, chunk * 4) == cudaSuccess && cheshire::devMalloc((void**)&drd, chunk * 8) == cudaSuccess && cheshire::devMalloc((void**)&drcc, size_t(chunk) * 24) == cudaSuccess;
     const auto t1 = now();
     const bool tedges = in.rayTedgeDist != nullptr;
     double voteSec = 0, tedgeSec = 0;
@@ -425,7 +426,7 @@ bool fillGraph(const VoteInput& in, float* cellAttr)
         if (log) std::fprintf(stderr, "[cheshire] meshing votes profile: %u rays, %u cells: uploads %.2f s, vote kernels %.2f s, tedge kernels %.2f s (ray uploads incl.), download %.2f s\n",
                               in.nbRays, in.nbCells, secs(t0, t1), voteSec, tedgeSec, secs(t2, now()));
     }
-    for (void* p : {(void*)dv, (void*)dcv, (void*)dca, (void*)dvco, (void*)dvcl, (void*)dattr, (void*)drv, (void*)drc, (void*)drw, (void*)drt, (void*)drd, (void*)drcc}) if (p) cudaFree(p);
+    for (void* p : {(void*)dv, (void*)dcv, (void*)dca, (void*)dvco, (void*)dvcl, (void*)dattr, (void*)drv, (void*)drc, (void*)drw, (void*)drt, (void*)drd, (void*)drcc}) if (p) cheshire::devFree(p);
     {
         std::lock_guard<std::mutex> g(g_mutex);
         g_tedgesDone = ok && tedges;
