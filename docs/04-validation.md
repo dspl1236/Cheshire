@@ -855,3 +855,8 @@ read 50.6, undistort 36.5, write 94.7 - so it is bound on the JPEG read and the 
 the arithmetic the map removed; the 6 s it lost matches the 9070 measurement. SfM and Meshing are
 untouched by 0.3.3 so far and moved within noise (SfM sees a different landmark set every run,
 152,179 here). The node app on house-pc is paired to this build.
+
+**Published (2026-09-21 evening).** The Windows CUDA asset on the v0.3.2 GitHub release is now the
+rebuild (sha `2832289c…`), SHA256SUMS carries the new hash, and the release body says what was
+replaced and why; both were downloaded back and checked. Anyone whose copy hashes to `14ecee08…`
+has the CPU-extractor zip. The Forgejo release carries notes only, nothing to swap there.
