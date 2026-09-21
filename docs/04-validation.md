@@ -834,3 +834,24 @@ with the mipmaps counted, Texturing 3850 MB), which is what one expects when onl
 changed. With this every one of the four v0.3.2 packages has run its full matrix on its own
 hardware - RX 9070, RX 5500 XT, RX 6750 XT, GTX 1050 Ti and now the GTX 1080 Ti under Windows -
 and the published Windows CUDA asset is the only one that is not the build validated here.
+
+## 0.3.3-dev on the engine bay, RX 6750 XT (2026-09-21)
+
+The Linux HIP bundle built from main after the undistortion map and the GPU downscale ran the
+engine bay (107 photos, `ds1`) through Meshroom on house-pc: **ok**, 6/6 ports, 2794 s against
+2863 s for 0.3.2 on the same box. By node, against the 0.3.2 run:
+
+| node | 0.3.2 | 0.3.3-dev |
+|---|---|---|
+| PrepareDenseScene | 133 s | 127 s |
+| Texturing | 176 s | 124 s |
+| StructureFromMotion | 140 s | 143 s |
+| Meshing | 310 s | 314 s |
+
+Texturing is the win: edge padding and the 2x downscale both report "done on the GPU", and the
+node lost 52 s. PrepareDenseScene shows the map computed once for the one intrinsic (4032x2268,
+139 MB, 1 cached) but the profile line says where the node's time goes on this box - thread-seconds
+read 50.6, undistort 36.5, write 94.7 - so it is bound on the JPEG read and the EXR write, not on
+the arithmetic the map removed; the 6 s it lost matches the 9070 measurement. SfM and Meshing are
+untouched by 0.3.3 so far and moved within noise (SfM sees a different landmark set every run,
+152,179 here). The node app on house-pc is paired to this build.
