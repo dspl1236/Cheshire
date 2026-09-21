@@ -86,8 +86,14 @@ if not defined CHESHIRE_CUDA_ARCHS set CHESHIRE_CUDA_ARCHS=61
 
 rem GPU SIFT: needs a CUDA PopSIFT (scripts\windows\build-popsift-cuda.cmd). Default OFF until
 rem that exists, because a bundle without it silently loses GPU feature extraction.
-if not defined CHESHIRE_POPSIFT set CHESHIRE_POPSIFT=OFF
 if not defined CHESHIRE_POPSIFT_DIR set CHESHIRE_POPSIFT_DIR=%R%/build/popsift-cuda-install/lib/cmake/PopSift
+rem GPU SIFT defaults to ON when the CUDA PopSift install is there. It defaulted to OFF, and the
+rem v0.3.2 Windows CUDA zip was built in a shell without CHESHIRE_POPSIFT set: it shipped with CPU
+rem feature extraction and a popsift.dll nothing imported (found by the GTX 1080 Ti gate).
+if not defined CHESHIRE_POPSIFT (
+  if exist "%CHESHIRE_POPSIFT_DIR:/=\%\PopSiftConfig.cmake" (set CHESHIRE_POPSIFT=ON) else (set CHESHIRE_POPSIFT=OFF)
+)
+echo [cheshire] CHESHIRE_POPSIFT=%CHESHIRE_POPSIFT% (%CHESHIRE_POPSIFT_DIR%)
 
 if not exist "%CHESHIRE_CUDA_PATH%\bin\nvcc.exe" (
   echo no nvcc at "%CHESHIRE_CUDA_PATH%\bin\nvcc.exe" - set CHESHIRE_CUDA_PATH

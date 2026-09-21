@@ -95,6 +95,18 @@ Copy-Item $launcher (Join-Path $stage "meshroom-pair-launcher.exe") -Force
 Copy-Item "D:\MMI\cheshire\scripts\windows\meshroom-pair.cmd" (Join-Path $stage "meshroom-pair.cmd") -Force
 Write-Output ("=== pairing: meshroom-pair.cmd + launcher ({0:N0} bytes, knows CHESHIRE_BACKEND)" -f $bytes.Length)
 
+# GPU SIFT by substance: if a popsift.dll is staged, the feature library must import it. The v0.3.2
+# zip staged popsift.dll (this script copies it from its install tree regardless) while
+# aliceVision_feature.dll had been built with ALICEVISION_USE_POPSIFT=OFF and imported nothing -
+# a package that says GPU SIFT and runs the CPU extractor. Refuse that here.
+if (Test-Path (Join-Path $bin "popsift.dll")) {
+    $feat = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $bin "aliceVision_feature.dll")))
+    if ($feat -notmatch 'popsift\.dll') {
+        throw "aliceVision_feature.dll does not import popsift.dll: the build ran with ALICEVISION_USE_POPSIFT=OFF (set CHESHIRE_POPSIFT=ON and rebuild)"
+    }
+    Write-Output "=== GPU SIFT: aliceVision_feature.dll imports popsift.dll"
+}
+
 # share/aliceVision carries the OCIO config and sensor database the binaries look for
 $share = "D:\MMI\cheshire\build\av-cuda-install\share"
 if (Test-Path $share) {
