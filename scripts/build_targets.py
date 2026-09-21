@@ -108,6 +108,15 @@ def main(argv):
                 bad.append(f"{dll}: carries {', '.join(sorted(got)) or 'no code object'}, "
                            f"wanted {', '.join(sorted(want))}"); continue
             shutil.copy2(src, logdir / dll)
+            # ...and put the verified copy back into aliceVision's install tree. That tree is what
+            # package_windows.py turns into a family's BASE package, and for the same reason the
+            # comment above gives - install treats an already-present popsift.dll as up to date -
+            # it otherwise keeps the previous target's copy. The bundler's architecture guard
+            # catches the result, but only after a full build: a base package declaring
+            # gfx12-generic while carrying a gfx11 PopSIFT, which is a package that looks right
+            # and hands GPU SIFT the wrong code objects.
+            if dll == 'popsift.dll' and src != avbin / dll:
+                shutil.copy2(src, avbin / dll)
         if bad:
             print(f"    WRONG ARCHITECTURE, not harvested:")
             for b in bad: print(f"      {b}")
