@@ -298,3 +298,30 @@ Three of the nine hip6.2 targets failed the first time with "Access is denied" w
 *different* auxiliary executable each - exportAlembic, exportMeshroomMaya, imageSegmentation. That
 is a real-time antivirus scan holding a freshly linked exe while ninja replaces it; which one gets
 hit is random, and none are GPU payload DLLs. Re-running is the fix.
+
+### v0.3.1: the AMD packages rebuilt for the clamp, 2026-09-20
+
+Both AMD bundles rebuilt with the VRAM-cap clamp; both CUDA packages carried over byte-identical,
+having had it already. Every artifact validated as the file a user downloads.
+
+| | Windows AMD zip, RX 9070 | Linux AMD tarball, RX 6750 XT |
+|---|---|---|
+| stage gate | 6/6 | (Windows-only harness) |
+| `base` | 60 s | 86 s |
+| `tiles` | 57 s | 86 s |
+| `coarse` | 38 s | 57 s |
+| `texbig` | 56 s | 80 s |
+| `cpufallback` | 68 s | 136 s |
+
+All 6/6 ports, every node proving which binary ran. On the Windows artifact the clamp was run
+directly (`clamping to 14537 MB`, 5 cameras + 2 tiles) and its `gfx12-generic` payload is
+byte-identical to the verified payload directory.
+
+The first Linux bundle of the day passed every packaging check and saw no GPU: `libamd_comgr.so.3.0.0`
+was a symlink to itself (docs/06). The gate reported `ports=0/6`, DepthMap exit 1. The second, from
+the fixed script, is the one in the table.
+
+The clamp on the Linux artifact, RX 6750 XT (12272 MB), `CHESHIRE_BRIDGE_VRAM_MB=32000`, one view:
+v0.3.0 reports `vram cap 32000 MB` and plans 12 full cameras against a 25600 MB budget; v0.3.1
+reports `requested vram cap 32000 MB exceeds this device (12272 MB total); clamping to 11014 MB`
+and plans 4 against 8811 MB.

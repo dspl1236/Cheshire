@@ -287,6 +287,8 @@ comgr check was an `ls` on the name as well. Both now demand a real file of libr
 placement uses `readlink -f` and `cp -L` unconditionally. The end-to-end gate reported the failure
 as `ports=0/6` with DepthMap exiting 1 - it has no CPU path - which is the right verdict from the
 wrong end: forty seconds of pipeline to learn what one `ls -la` on the library would have shown.
+The bundle regenerated from the fixed script - comgr placed by the script as a real 152 MB file,
+tarball back to 123 MB - passed the end-to-end gate on house-pc's RX 6750 XT 5/5, 6/6 ports each.
 
 Run it detached, as everything long-running in WSL: a process started from the session that
 launched it dies with that session.
