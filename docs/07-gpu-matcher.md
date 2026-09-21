@@ -110,3 +110,23 @@ package without the GPU matcher must not be put in Meshroom's way: its plain CPU
 would reject the 2023.3 options). The launcher takes its role from its own file name and applies
 the `--sgmFilteringAxes` drop only for DepthMap. An NVIDIA box keeps Meshroom's own (CPU) matcher
 until a CUDA build of the package exists; the source compiles as CUDA, the packaging does not yet.
+
+## A sliced, register-tiled variant, measured and shelved (0.3.3)
+
+At Meshroom's own settings (dspsift, 2048 AC-RANSAC iterations) FeatureMatching's chunk 0 of the
+engine bay is 24 s on the RX 9070 + 5600X: 2 s of loading, 13 s of GPU search (1930 searches,
+38.6 M query descriptors), 8 s of geometric filtering. The search is about a quarter of the card's
+dot4 rate, so a second kernel was tried: Q queries per thread reading each database word once for
+all Q (uint4 reads), and the database sliced along `blockIdx.y` so a search is hundreds of blocks
+rather than tens, with a merge of the per-slice 2-NN by (distance, index). Byte-identical output
+(165,162 match lines, verified against both the original kernel and the 0.3.2 bundle), and slower:
+Q=4 23.0 s (192 VGPRs, 48 B/lane of scratch, occupancy 8), Q=2 13.8 s (119 VGPRs, no scratch,
+occupancy 12) against the original's 12.6 s (52 VGPRs, occupancy 16). The original's tile reads are
+wavefront broadcasts, as its header says, so it was never LDS-bound and register reuse buys
+nothing; the remaining gap to the roofline is per-search transfer and launch (about 1 ms of 6.5)
+and the scan itself, and closing it is 2-D register tiling with tuned occupancy - a project, not a
+patch. The variant stays in the source behind `CHESHIRE_MATCHER_SLICED=1` so it can be measured on
+cards with fewer CUs, where the block count may matter more.
+
+The compiler remarks that settled it (`-Rpass-analysis=kernel-resource-usage` on a standalone
+`clang++ -x hip` compile of the port) are the cheap way to ask this question before a rebuild.

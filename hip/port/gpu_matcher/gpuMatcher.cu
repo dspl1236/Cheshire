@@ -111,6 +111,118 @@ __global__ void knn2_u8(const unsigned int* __restrict__ db, const unsigned int*
     }
 }
 
+// The same search with two structural changes, kept as an opt-in experiment (0.3.3): each thread
+// carries Q queries and reads each database word once for all Q (uint4 reads, Q dot4 per read),
+// and the database is cut into slices along blockIdx.y so a search is hundreds of blocks rather
+// than tens; each slice yields its own 2-NN per query and merge2 picks the global two.
+//
+// Measured on the engine bay (1930 searches, 38.6 M query descriptors, RX 9070): knn2_u8 12.6 s,
+// this with Q=4 23.0 s (192 VGPRs, 48 B/lane of scratch, occupancy 8) and with Q=2 13.8 s
+// (119 VGPRs, no scratch, occupancy 12). So the original is NOT LDS-bound - its tile reads are
+// wavefront broadcasts, as its header says - and register reuse buys nothing; the original sits
+// at roughly a quarter of the card's dot4 rate with about 1 ms of transfer and launch per search,
+// and closing that gap is a different kind of work (2-D register tiles, tuned occupancy). Off by
+// default; CHESHIRE_MATCHER_SLICED=1 selects it, for measuring on other cards.
+//
+// Byte-identical to knn2_u8 by construction: distances are the same integers (dot4 is exact and
+// the order of accumulation over the 32 words is the same), rows within a slice are pushed in
+// index order with the same strict '<', and the merge takes the two smallest (distance, index)
+// pairs, which is what a sequential push over all rows produces - on a tie the lower index was
+// pushed first and kept. Verified byte-identical on the engine bay chunk (165,162 match lines).
+constexpr int kSliceRows = 2048;        // rows per slice (8 tiles); slices = ceil(rows / this)
+constexpr int kQ = 2;                   // queries per thread (4 spilled: 192 VGPRs, 48 B scratch, half the occupancy; 2 = 119 VGPRs, none)
+
+template<int DIM, int Q>
+__global__ void knn2_u8_sliced(const unsigned int* __restrict__ db, const unsigned int* __restrict__ dbNorm, int rows,
+                               const unsigned int* __restrict__ q, int nbQuery,
+                               int* __restrict__ partIdx, float* __restrict__ partDist)
+{
+    constexpr int W = DIM / 4;
+    __shared__ __align__(16) unsigned int tile[kTileRowsU8 * W];
+    __shared__ unsigned int tileNorm[kTileRowsU8];
+    const int slice = blockIdx.y;
+    const int rBegin = slice * kSliceRows;
+    const int rEnd = min(rows, rBegin + kSliceRows);
+    const int q0 = (blockIdx.x * blockDim.x + threadIdx.x) * Q;
+    unsigned int qreg[Q][W];
+    unsigned int qnorm[Q];
+    Best2 best[Q];
+#pragma unroll
+    for (int j = 0; j < Q; ++j) {
+        qnorm[j] = 0;
+        const int qi = q0 + j;
+        if (qi < nbQuery) {
+#pragma unroll
+            for (int k = 0; k < W; ++k) { qreg[j][k] = q[size_t(qi) * W + k]; qnorm[j] = dot4u8(qreg[j][k], qreg[j][k], qnorm[j]); }
+        } else {
+#pragma unroll
+            for (int k = 0; k < W; ++k) qreg[j][k] = 0u;
+        }
+    }
+    for (int base = rBegin; base < rEnd; base += kTileRowsU8) {
+        const int n = min(kTileRowsU8, rEnd - base);
+        for (int t = threadIdx.x; t < n * W; t += blockDim.x) tile[t] = db[size_t(base) * W + t];
+        for (int t = threadIdx.x; t < n; t += blockDim.x) tileNorm[t] = dbNorm[base + t];
+        __syncthreads();
+        if (q0 < nbQuery) {
+            for (int r = 0; r < n; ++r) {
+                const uint4* row4 = reinterpret_cast<const uint4*>(tile + r * W);
+                unsigned int dot[Q];
+#pragma unroll
+                for (int j = 0; j < Q; ++j) dot[j] = 0;
+#pragma unroll
+                for (int k = 0; k < W / 4; ++k) {
+                    const uint4 w = row4[k];
+#pragma unroll
+                    for (int j = 0; j < Q; ++j) {
+                        dot[j] = dot4u8(qreg[j][4 * k], w.x, dot[j]);
+                        dot[j] = dot4u8(qreg[j][4 * k + 1], w.y, dot[j]);
+                        dot[j] = dot4u8(qreg[j][4 * k + 2], w.z, dot[j]);
+                        dot[j] = dot4u8(qreg[j][4 * k + 3], w.w, dot[j]);
+                    }
+                }
+                const unsigned int rn = tileNorm[r];
+#pragma unroll
+                for (int j = 0; j < Q; ++j) {
+                    const int d2 = int(qnorm[j] + rn) - 2 * int(dot[j]);   // exact, >= 0
+                    best[j].push(base + r, float(d2));
+                }
+            }
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int j = 0; j < Q; ++j) {
+        const int qi = q0 + j;
+        if (qi < nbQuery) {
+            const size_t o = (size_t(slice) * nbQuery + qi) * 2;
+            partIdx[o] = best[j].i0; partIdx[o + 1] = best[j].i1;
+            partDist[o] = best[j].d0; partDist[o + 1] = best[j].d1;
+        }
+    }
+}
+
+// One thread per query: the two smallest (distance, index) pairs over every slice's two.
+__global__ void merge2(const int* __restrict__ partIdx, const float* __restrict__ partDist, int slices, int nbQuery,
+                       int* __restrict__ outIdx, float* __restrict__ outDist)
+{
+    const int qi = blockIdx.x * blockDim.x + threadIdx.x;
+    if (qi >= nbQuery) return;
+    int i0 = -1, i1 = -1; float d0 = 3.4e38f, d1 = 3.4e38f;
+    for (int s = 0; s < slices; ++s) {
+        const size_t o = (size_t(s) * nbQuery + qi) * 2;
+        for (int t = 0; t < 2; ++t) {
+            const int i = partIdx[o + t]; const float d = partDist[o + t];
+            if (i < 0) continue;
+            // (d, i) lexicographic: a sequential push keeps the lower index on equal distances
+            if (d < d0 || (d == d0 && i < i0)) { d1 = d0; i1 = i0; d0 = d; i0 = i; }
+            else if (d < d1 || (d == d1 && i < i1)) { d1 = d; i1 = i; }
+        }
+    }
+    outIdx[2 * qi] = i0; outIdx[2 * qi + 1] = i1;
+    outDist[2 * qi] = d0; outDist[2 * qi + 1] = d1;
+}
+
 template<int DIM>
 __global__ void knn2_f32(const float* __restrict__ db, int rows, const float* __restrict__ q, int nbQuery,
                          int* __restrict__ outIdx, float* __restrict__ outDist)
@@ -197,6 +309,8 @@ struct KnnMatcher::Impl {
     void* dbNorm = nullptr; size_t dbNormCap = 0;   // uint8 path: |row|^2 per database row
     void* q = nullptr; size_t qCap = 0;
     int* idx = nullptr; float* dist = nullptr; size_t outCap = 0;   // in queries
+    void* pIdx = nullptr; size_t pIdxCap = 0;       // per-slice partial 2-NN (sliced kernel)
+    void* pDist = nullptr; size_t pDistCap = 0;
     int rows = 0, dim = 0; bool isFloat = false;
     size_t rowBytes() const { return size_t(dim) * (isFloat ? 4 : 1); }
     static bool grow(void** p, size_t* cap, size_t need) {
@@ -206,7 +320,8 @@ struct KnnMatcher::Impl {
         if (cheshire::devMalloc(p, need) != cudaSuccess) return false;
         *cap = need; return true;
     }
-    ~Impl() { if (db) cheshire::devFree(db); if (dbNorm) cheshire::devFree(dbNorm); if (q) cheshire::devFree(q); if (idx) cheshire::devFree(idx); if (dist) cheshire::devFree(dist); }
+    ~Impl() { if (db) cheshire::devFree(db); if (dbNorm) cheshire::devFree(dbNorm); if (q) cheshire::devFree(q); if (idx) cheshire::devFree(idx); if (dist) cheshire::devFree(dist);
+              if (pIdx) cheshire::devFree(pIdx); if (pDist) cheshire::devFree(pDist); }
 };
 
 KnnMatcher::KnnMatcher() : impl_(new Impl) {}
@@ -252,8 +367,23 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
         if (m.dim == 128) knn2_f32<128><<<grid, block>>>((const float*)m.db, m.rows, (const float*)m.q, nbQuery, m.idx, m.dist);
         else              knn2_f32<64><<<grid, block>>>((const float*)m.db, m.rows, (const float*)m.q, nbQuery, m.idx, m.dist);
     } else {
-        if (m.dim == 128) knn2_u8<128><<<grid, block>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);
-        else              knn2_u8<64><<<grid, block>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);
+        static const bool sliced = std::getenv("CHESHIRE_MATCHER_SLICED") != nullptr;
+        if (!sliced) {
+            if (m.dim == 128) knn2_u8<128><<<grid, block>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);
+            else              knn2_u8<64><<<grid, block>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);
+        } else {
+            // sliced: Q queries per thread, the database in slices along y, partials merged after
+            const int slices = (m.rows + kSliceRows - 1) / kSliceRows;
+            const size_t partN = size_t(slices) * nbQuery * 2;
+            if (!Impl::grow(&m.pIdx, &m.pIdxCap, partN * sizeof(int))) return false;
+            if (!Impl::grow(&m.pDist, &m.pDistCap, partN * sizeof(float))) return false;
+            const int threads = 128;  // x 2 queries = 256 queries per block
+            const dim3 sblock(threads), sgrid((nbQuery + threads * kQ - 1) / (threads * kQ), slices);
+            if (m.dim == 128) knn2_u8_sliced<128, kQ><<<sgrid, sblock>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, (int*)m.pIdx, (float*)m.pDist);
+            else              knn2_u8_sliced<64, kQ><<<sgrid, sblock>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, (int*)m.pIdx, (float*)m.pDist);
+            if (cudaGetLastError() != cudaSuccess) return false;
+            merge2<<<grid, block>>>((const int*)m.pIdx, (const float*)m.pDist, slices, nbQuery, m.idx, m.dist);
+        }
     }
     if (cudaGetLastError() != cudaSuccess) return false;
     if (cudaMemcpy(idx, m.idx, size_t(nbQuery) * 2 * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
