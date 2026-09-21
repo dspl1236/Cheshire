@@ -275,6 +275,19 @@ recorded as `:UNINITIALIZED=`, one `find_package` searched for as `:PATH=` - bec
 version of that check matched only `:PATH=` and would have failed every correct fresh configure
 while passing the stale one.
 
+The rebuilt bundle then passed every packaging check and could not see the card. Its tarball was
+67 MB against v0.3.0's 123 MB, `hardwareResources` on house-pc said "No CUDA-Enabled GPU", and
+HIP's own log (`AMD_LOG_LEVEL=4`) said why: "Failed to load COMGR library". `libamd_comgr.so.3.0.0`
+was in the bundle as a 21-byte symlink **to itself**. HIP `dlopen`s comgr to load code objects, so
+the bundler never sees it as a dependency and `build-alicevision.sh` places it by hand - and that
+block's alias line expanded `${C##*.so.}` to the full version, so after copying the 160 MB file it
+ran `ln -sfn libamd_comgr.so.3.0.0 libamd_comgr.so.3.0.0` and replaced the copy with the self-link.
+Its guard was `if ! ls libamd_comgr.so.*`, which a dangling symlink satisfies; the pack script's
+comgr check was an `ls` on the name as well. Both now demand a real file of library size, and the
+placement uses `readlink -f` and `cp -L` unconditionally. The end-to-end gate reported the failure
+as `ports=0/6` with DepthMap exiting 1 - it has no CPU path - which is the right verdict from the
+wrong end: forty seconds of pipeline to learn what one `ls -la` on the library would have shown.
+
 Run it detached, as everything long-running in WSL: a process started from the session that
 launched it dies with that session.
 

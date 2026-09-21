@@ -69,8 +69,18 @@ bad_elf=$(for f in "$B"/bin/* "$B"/lib/*.so*; do
 done | tr '\n' ' ')
 [ -z "$bad_elf" ] && note ok "no ELF in the bundle needs libcudart or a versioned libpopsift" \
                   || note FAIL "CUDA linkage in a HIP bundle: $bad_elf"
-cg=$(ls "$B"/lib/libamd_comgr.so.* 2>/dev/null | head -1)
-[ -n "$cg" ] && note ok "comgr: $(basename "$cg")" || note FAIL "no libamd_comgr (HIP dlopens it; hipGetDeviceCount finds no GPU without it)"
+# comgr has to be a REAL file of library size, not merely a name. HIP dlopens it to load code
+# objects; without it every device call reports hipErrorNoDevice. The 2026-09-20 0.3.1 bundle
+# carried libamd_comgr.so.3.0.0 as a 21-byte dangling symlink - the tarball was 56 MB short and the
+# bundle saw no GPU - and the first version of this check, an `ls` on the name, passed it.
+cg=$(readlink -f "$B/lib/libamd_comgr.so.3" 2>/dev/null)
+if [ -z "$cg" ] || [ ! -f "$cg" ]; then
+  note FAIL "libamd_comgr.so.3 is missing or a dangling symlink (HIP dlopens it; no GPU without it)"
+elif [ "$(stat -c %s "$cg")" -lt 50000000 ]; then
+  note FAIL "libamd_comgr resolves to $(basename "$cg") of only $(stat -c %s "$cg") bytes; the library is ~150 MB"
+else
+  note ok "comgr: $(basename "$cg"), $(( $(stat -c %s "$cg") / 1048576 )) MB, a real file"
+fi
 
 [ "$fail" = 1 ] && { echo "=== not packing"; exit 1; }
 echo "=== packing -> $OUT"

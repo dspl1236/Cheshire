@@ -153,15 +153,24 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     # "Choosing device 0" line, so on an NVIDIA box an UNPAIRED node scored a pass here
     # (found 2026-09-20 on Linux, where the CUDA bundle's versioned libpopsift.so.0.10.0 made the
     # pairing script decline GPU SIFT silently). Both launchers announce the binary they run.
-    paired = {n: bool(re.search(rf"\[cheshire\] {BINARY[n]}: Cheshire build", node_logs(cache, n)))
+    logs = {n: node_logs(cache, n) for n in markers}
+    # A node with no log at all never ran - an earlier node failed and Meshroom stopped there. That
+    # is a different fact from "ran Meshroom's own binary", and the first version of this report
+    # called it NOT PAIRED: when a comgr-less bundle made DepthMap exit 1, the three nodes behind
+    # it were reported as having run the wrong binary, which sent the diagnosis the wrong way.
+    never_ran = [n for n in markers if not logs[n].strip()]
+    paired = {n: bool(re.search(rf"\[cheshire\] {BINARY[n]}: Cheshire build", logs[n]))
               for n in markers}
     missing = [n for n, pat in markers.items()
-               if paired[n] and not re.search(pat, node_logs(cache, n))]
-    unpaired = [n for n in markers if not paired[n]]
+               if paired[n] and not re.search(pat, logs[n])]
+    unpaired = [n for n in markers if not paired[n] and n not in never_ran]
 
-    ok = rc == 0 and mesh and tex and not missing and not unpaired
+    ok = rc == 0 and mesh and tex and not missing and not unpaired and not never_ran
     print(f"  {'ok  ' if ok else 'FAIL'}  {name:<14} exit={rc:<4} mesh={len(mesh)} tex={len(tex)} "
-          f"ports={len(markers) - len(missing) - len(unpaired)}/{len(markers)}  {secs}s")
+          f"ports={len(markers) - len(missing) - len(unpaired) - len(never_ran)}/{len(markers)}  {secs}s")
+    if never_ran:
+        print(f"        did not run: {', '.join(never_ran)}"
+              f" - an earlier node failed and the pipeline stopped before them")
     if unpaired:
         print(f"        NOT PAIRED: {', '.join(unpaired)}"
               f" - the node ran Meshroom's own binary, so nothing here tested the package")
