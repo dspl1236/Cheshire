@@ -709,3 +709,38 @@ from the same source as the Linux CUDA bundle that passed 12/12, its package lay
 files are the ones 0.3.1 validated, and the new literals are present in its DLLs; that is
 inference, stated here. bench-pc (the only Windows NVIDIA box) bugchecks under load until its RAM
 is sorted.
+
+## 0.3.3 item 2: PrepareDenseScene, profiled and the undistortion mapped (2026-09-21)
+
+`CHESHIRE_PDS_PROFILE=1` splits the node into read (JPEG decode + sRGB→linear), exposure + mask,
+undistort and EXR write, summed over threads. Engine bay, 107 views (4032x2268), RX 9070 box (6
+cores / 12 threads), 34.5 s wall: **read 134, undistort 153, write 80 thread-seconds**, exposure
+0. Threads were all busy; the lever is the work.
+
+The undistortion evaluated the camera model per output pixel for every view - `ima2cam`, the
+radial polynomial, `cam2ima` - while all 107 views share one intrinsic. Generator step 5h computes
+the distorted source coordinate once per (intrinsic parameters, output size, principal-point
+correction) with exactly the expression the loop used, keeps it (139 MB for this size, capped by
+`CHESHIRE_UNDISTORT_MAP_MB`, default 2048; `CHESHIRE_UNDISTORT_MAP=0` disables), and the per-view
+work is the bilinear sample alone. **107 of 107 EXRs byte-identical** to the reference run;
+undistort 153 → 79 thread-seconds.
+
+Wall clock on this box: unchanged, 34.1 s against 34.5. Where the saved 75 thread-seconds went:
+
+| threads | map | wall | read | undistort | write | sum |
+|---|---|---|---|---|---|---|
+| 12 | on | 33.9 s | 171 | 80 | 108 | 359 |
+| 12 | on, output on the other SSD | 33.8 s | 177 | 87 | 101 | 365 |
+| 6 | on | 35.2 s | 89 | 56 | 55 | 200 |
+| 6 | off | 36.6 s | 66 | 106 | 37 | 209 |
+| 3 | on | 48.7 s | 43 | 32 | 66 | 141 |
+
+Six threads run as fast as twelve, and which SSD the output goes to makes no difference, so the
+node is not disk-bound and the SMT threads add nothing: it is bound by the six cores and the memory
+they share. With the map, the undistortion turns from arithmetic into a gather - 16 bytes of map
+plus a bilinear read of the source per pixel - and the read and write phases of the other views
+slow by about what the undistortion gained, which is the signature of memory bandwidth, not CPU.
+On this machine PrepareDenseScene is a memory-bound 34 s and the map moves work, not time. On a
+CPU-bound box - house-pc's four slow threads at 133 s - the saved CPU should be wall time, and the
+next Linux build carries the change to measure it. What remains here is the read phase (JPEG
+decode and the OCIO colour conversion, now 47 % of thread time), which is upstream OIIO/OCIO work.
