@@ -175,8 +175,13 @@ together as its `verify` configuration ([docs/04](docs/04-validation.md)):
 | `CHESHIRE_GPU_VOTE_LOG=1` | includes `facet weight check: N facets, differing from the sequential computation: 0` |
 | `CHESHIRE_GPU_BLUR_CHECK=1` | how many pixels differ from OpenImageIO, and the worst |
 
-**Memory**, if your card is short of VRAM. The bridge is a switch (on by default); the rest are
-tuning values:
+**Memory.** Defaults fit the card you have; the bridge settings exist to give it *less* than it
+has, never more. The bridge reads the card at every run - cap = total minus about 1.1 GB of
+headroom, budget = 80 % of that - and plans full cameras, tiles and host spill from there: a 12 GB
+RX 6750 XT and a 4 GB GTX 1050 Ti both ran 107 full-resolution photographs with nothing set and no
+spill (docs/04). Reach for these to share the card with a display or another job, to bound the
+host pool on a RAM-tight box, or to reproduce a smaller card. The bridge is a switch (on by
+default); the rest are tuning values:
 
 | setting | default | effect |
 |---|---|---|
