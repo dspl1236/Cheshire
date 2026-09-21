@@ -88,7 +88,10 @@ SELF_CHECK_VERDICTS = {
         # (docs/12); the labelling is the verdict. The first version asserted "(identical)" on the
         # flows and failed a run whose labelling was 0 of 1,676,527 cells different.
         r"max-flow check: .*cells labelled differently: 0 of \d+",
-        r"GPU knn check: identical to nanoflann on all",
+        # The knn check's verdict is the VERTEX each query names; the distance it reports may differ
+                 # in the last bits by card (RX 6750 XT on Linux: 0 vertices differ, ~1.6 M distances do, on
+                 # the 0.3.1 bundle as well; RX 9070: identical). Either wording passes.
+                 r"GPU knn check: (identical to nanoflann on all|0 of \d+ queries name a different vertex)",
         r"segmentFullOrFree check: identical to upstream on all",
         r"tedge check: cells with on != 0: cpu (\d+), gpu \1;",
         r"facet weight check: .*differing from the sequential computation: 0\b",

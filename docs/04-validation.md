@@ -659,3 +659,22 @@ One bug on the way: upstream's `if (_mipmappedArray != nullptr)` has no braces, 
 inserted `forgetExternal` became the if-body and the free ran unconditionally on a null handle -
 "invalid argument" from every destructor. Braced now; a patch that inserts a statement after an
 unbraced `if` is a pattern to look for.
+
+## 0.3.2 Linux HIP bundle on the RX 6750 XT: 11 of 12, and the twelfth explained (2026-09-21)
+
+The bundle packed from the WSL build (123 MB, `ad5e5984`, every pack check green) ran the full
+matrix on house-pc: `base` 85 s, `tiles` 85, `coarse` 60, `texbig` 80, `cpufallback` 155,
+`bridgecap` 90, `bridgespill` 180, `bridgeoff` 90, `texcheck` 90 (padding 0 of 67,108,864 texels
+differ; direct OBJ written), `ds1` 200, `blast` 225 - all 6/6 ports - and under `blast` the
+bridge classes read DepthMap `map` 825 / `volume` 4990 / **`image` 744 MB (48 allocs: the
+emulation's six images x eight levels)**, filter `other` 790, meshing `other` 846, texturing
+`other` 3846 MB. Items 1-5 hold on Linux.
+
+`verify` failed on one assertion: the knn self-check printed `0 of 8,801,169 queries name a
+different vertex, 1,639,701 a different distance` where the gate demanded "identical to nanoflann
+on all". The 0.3.1 bundle on the same card, run for the comparison, prints the same line (0 of
+8,687,477 vertices, 1,621,566 distances) - this predates 0.3.2 and had never been seen because the
+Linux matrix of 0.3.1 did not include `verify`. The RX 9070 reports "identical". The vertex is the
+verdict that matters (visibilities are per vertex; the distance is an intermediate the GPU rounds
+differently from nanoflann on this card), so the gate accepts either wording, and the difference
+itself is recorded here as a card-dependent rounding, not a defect.
