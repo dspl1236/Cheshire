@@ -41,11 +41,19 @@ from pathlib import Path
 # plus the Linux bundle), so it is scheduled rather than slipped in. Under `verify`, where the
 # check flags are on, the knn port proves itself through its self-check verdict instead.
 GPU_MARKERS = {
-    "FeatureExtraction": [r"Choosing device \d+:"],
-    "FeatureMatching":   [r"GPU brute-force L2 2-NN on"],
+    "FeatureExtraction": [r"Choosing device \d+:",
+                          r"GPU SIFT keypoints in stable order"],
+    "FeatureMatching":   [r"GPU brute-force L2 2-NN on",
+                          r"7-point nullspace: (SVD \(default|Householder QR \(CHESHIRE_QR_NULLSPACE=1\))"],
     "DepthMap":          [r"Number of GPU devices"],
-    "DepthMapFilter":    [r"depth map filter: group votes on"],
-    "Meshing":           [r"meshing votes: ray marching on"],
+    "DepthMapFilter":    [r"depth map filter: group votes on",
+                          r"depth map filter cache: cap \d+ MB"],
+    # 0.3.2: every port announces on both paths, so the three that were silent on success
+    # (max-flow, sim blur, visibility knn) are required here like the rest.
+    "Meshing":           [r"meshing votes: ray marching on",
+                          r"max-flow: GPU push-relabel on",
+                          r"sim blur: Gaussian on the GPU",
+                          r"visibility knn on the GPU"],
     "Texturing":         [r"texturing: pyramid \+ rasterisation on"],
 }
 # ... and the lines printed when switched off. FeatureExtraction and DepthMap have no such switch,
@@ -58,10 +66,12 @@ CPU_MARKERS = {
     "FeatureMatching":   [r"GPU brute-force disabled by CHESHIRE_GPU_MATCHER=0"],
     "DepthMapFilter":    [r"depth map filter: disabled by CHESHIRE_GPU_FILTER=0"],
     "Meshing":           [r"meshing votes: disabled by CHESHIRE_GPU_VOTE=0",
-                          r"sim blur: disabled by CHESHIRE_GPU_BLUR=0"],
+                          r"sim blur: disabled by CHESHIRE_GPU_BLUR=0",
+                          r"max-flow: disabled by CHESHIRE_GPU_MAXFLOW=0",
+                          r"visibility knn: disabled by CHESHIRE_GPU_VIS=0"],
     "Texturing":         [r"texturing: disabled by CHESHIRE_GPU_TEX=0"],
 }
-SILENT_PORTS = "CHESHIRE_GPU_MAXFLOW and CHESHIRE_GPU_VIS are set but neither port prints on either path; not proven here"
+SILENT_PORTS = None  # 0.3.2: no port is silent on either path any more
 
 # In-process self-checks: the port runs the CPU reference alongside itself and compares. These are
 # the strongest correctness tests the project has, and until 2026-09-20 no gate switched them on.
@@ -158,7 +168,9 @@ CONFIGS = {
     # ds1 plus every opt-in speed path and the profile logs, so the run reports where time went.
     # Most acceleration is already default-on; what this adds is the 7-point QR nullspace (held
     # opt-in, docs/15) and a larger filter cache.
-    "blast": dict(overrides=SIFT + ["DepthMap:downscale=1"], env={
+    "blast": dict(overrides=SIFT + ["DepthMap:downscale=1"], checks={
+        "FeatureMatching": [r"7-point nullspace: Householder QR \(CHESHIRE_QR_NULLSPACE=1\)"],
+        "DepthMapFilter": [r"depth map filter cache: cap 8192 MB"]}, env={
         "CHESHIRE_BRIDGE_LOG": "1", "CHESHIRE_QR_NULLSPACE": "1", "CHESHIRE_FILTER_CACHE_MB": "8192",
         "CHESHIRE_GPU_VOTE_LOG": "1", "CHESHIRE_GPU_VIS_LOG": "1", "CHESHIRE_GPU_TEX_LOG": "1",
         "CHESHIRE_GPU_MATCHER_LOG": "1", "CHESHIRE_FILTER_LOG": "1"}),

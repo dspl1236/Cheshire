@@ -1453,7 +1453,14 @@ struct CheshireDepthMapCache
     std::unordered_map<int, Entry> entries;
     std::size_t bytes = 0;
     std::size_t capBytes = 4096ull << 20;
-    CheshireDepthMapCache() { if (const char* e = std::getenv("CHESHIRE_FILTER_CACHE_MB")) capBytes = std::size_t(std::atoll(e)) << 20; }
+    CheshireDepthMapCache()
+    {
+        if (const char* e = std::getenv("CHESHIRE_FILTER_CACHE_MB")) capBytes = std::size_t(std::atoll(e)) << 20;
+        if (capBytes == 0)
+            ALICEVISION_LOG_INFO("cheshire: depth map filter cache: disabled by CHESHIRE_FILTER_CACHE_MB=0");
+        else
+            ALICEVISION_LOG_INFO("cheshire: depth map filter cache: cap " << (capBytes >> 20) << " MB (CHESHIRE_FILTER_CACHE_MB)");
+    }
     std::shared_ptr<aliceVision::image::Image<float>> get(int tc, const aliceVision::mvsUtils::MultiViewParams& mp)
     {
         if (capBytes == 0)
@@ -2774,6 +2781,11 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                + "        // without an iterative SVD. A different basis of the same nullspace spans the same" + nl_f7
                + "        // pencil, so det(F1 + a*F2) = 0 has the same solutions to rounding." + nl_f7
                + "        static const bool cheshireQrNullspace = (std::getenv(\"CHESHIRE_QR_NULLSPACE\") != nullptr);" + nl_f7
+               + "        static const bool cheshireQrAnnounced = []() {  // once per process, both paths (docs/04 marker rule)" + nl_f7
+               + "            std::fprintf(stderr, cheshireQrNullspace ? \"[cheshire] 7-point nullspace: Householder QR (CHESHIRE_QR_NULLSPACE=1)\\n\"" + nl_f7
+               + "                                                     : \"[cheshire] 7-point nullspace: SVD (default; CHESHIRE_QR_NULLSPACE=1 for QR)\\n\");" + nl_f7
+               + "            return true; }();" + nl_f7
+               + "        (void)cheshireQrAnnounced;" + nl_f7
                + "        if (cheshireQrNullspace)" + nl_f7
                + "            Nullspace2RankDeficient(A, f1, f2);" + nl_f7
                + "        else" + nl_f7
@@ -2783,8 +2795,74 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
         inc = "#include <aliceVision/numeric/polynomial.hpp>" + nl_f7
         if t.count(inc) != 1:
             sys.exit("polynomial.hpp include not found once in Fundamental7PSolver.cpp")
-        t = t.replace(inc, inc + "#include <cstdlib>  // cheshire: CHESHIRE_QR_NULLSPACE" + nl_f7, 1)
+        t = t.replace(inc, inc + "#include <cstdlib>  // cheshire: CHESHIRE_QR_NULLSPACE" + nl_f7 + "#include <cstdio>   // cheshire: the announce line" + nl_f7, 1)
         f7.write_text(t, encoding="utf-8", newline="")
+
+    # 5c. A stable order for GPU SIFT keypoints. PopSIFT returns the same keypoint set run to run
+    #     (sorted diff 0 lines on 24,500 keypoints) in a different order each time, because octaves
+    #     and orientations finish on the GPU in whatever order they finish. Downstream, order is
+    #     not neutral: matching and the RANSAC seeds in SfM see it, so two runs on the same
+    #     photographs pick different initial pairs and no pipeline is reproducible (docs/04, the
+    #     skull turntable). Sorting by (x, y, scale, orientation), descriptor bytes as the tie-break,
+    #     makes the .feat files a function of the image alone. CHESHIRE_SIFT_SORT=0 keeps the
+    #     arrival order.
+    ps = AV / "src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp"
+    t = ps.read_text(encoding="utf-8")
+    if "cheshireSiftSort" not in t:
+        inc = "#include <atomic>" + NL
+        if t.count(inc) != 1:
+            sys.exit("<atomic> include not found once in ImageDescriber_SIFT_popSIFT.cpp")
+        t = t.replace(inc, inc + "#include <algorithm>  // cheshire: stable keypoint order" + NL
+                      + "#include <cstdlib>" + NL + "#include <cstring>" + NL + "#include <numeric>" + NL, 1)
+        tail = '    ALICEVISION_LOG_TRACE("aliceVision PopSIFT feature count : " << regionsCasted->RegionCount() << std::endl);' + NL
+        if t.count(tail) != 1:
+            sys.exit("PopSIFT feature-count trace not found once")
+        sort_block = """    // cheshire: the keypoints arrive in GPU completion order, which differs run to run; put them
+    // in an order that depends only on the image (see scripts/apply_hip_patch.py, step 5c)
+    {
+        static const bool cheshireSiftSort = []() {
+            const char* e = std::getenv("CHESHIRE_SIFT_SORT");
+            const bool on = !(e != nullptr && e[0] == '0');
+            // if/else, not a ternary: ALICEVISION_LOG_INFO(a) expands to `stream << a` without
+            // parentheses, so `stream << on ? A : B` logs the bool and discards both strings.
+            if (on)
+                ALICEVISION_LOG_INFO("cheshire: GPU SIFT keypoints in stable order (CHESHIRE_SIFT_SORT=0 for arrival order)");
+            else
+                ALICEVISION_LOG_INFO("cheshire: GPU SIFT keypoints in arrival order (CHESHIRE_SIFT_SORT=0)");
+            return on;
+        }();
+        if (cheshireSiftSort)
+        {
+            auto& feats = regionsCasted->Features();
+            auto& descs = regionsCasted->Descriptors();
+            std::vector<std::size_t> order(feats.size());
+            std::iota(order.begin(), order.end(), std::size_t(0));
+            std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+                const auto& fa = feats[a];
+                const auto& fb = feats[b];
+                if (fa.x() != fb.x()) return fa.x() < fb.x();
+                if (fa.y() != fb.y()) return fa.y() < fb.y();
+                if (fa.scale() != fb.scale()) return fa.scale() < fb.scale();
+                if (fa.orientation() != fb.orientation()) return fa.orientation() < fb.orientation();
+                return std::memcmp(descs[a].getData(), descs[b].getData(), 128) < 0;
+            });
+            std::vector<PointFeature> sortedFeats;
+            std::vector<Descriptor<unsigned char, 128>> sortedDescs;
+            sortedFeats.reserve(feats.size());
+            sortedDescs.reserve(descs.size());
+            for (std::size_t i : order)
+            {
+                sortedFeats.push_back(feats[i]);
+                sortedDescs.push_back(descs[i]);
+            }
+            feats.swap(sortedFeats);
+            descs.swap(sortedDescs);
+        }
+    }
+
+"""
+        t = t.replace(tail, sort_block.replace("\n", NL) + tail, 1)
+        ps.write_text(t, encoding="utf-8", newline="")
 
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu

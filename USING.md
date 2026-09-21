@@ -145,6 +145,7 @@ these are *on* unless set to `0`:
 | `CHESHIRE_GPU_TEX=0` | texturing on the CPU |
 | `CHESHIRE_BACKEND=auto\|cheshire\|meshroom` | force the launcher's choice (`CHESHIRE_DEPTHMAP=cuda\|hip` is the older spelling and still works) |
 | `CHESHIRE_GPU_VIS=0` | the visibility passes' nearest-neighbour search through upstream's nanoflann on the CPU ([docs/13](docs/13-gpu-visibilities.md)) |
+| `CHESHIRE_SIFT_SORT=0` | keep GPU SIFT keypoints in the order the card finished them (v0.3.2 sorts them by position, scale and orientation, so `.feat` files - and everything downstream - are a function of the image alone) |
 
 The memory bridge has more knobs than the two above, and one of them has mattered on a real box
 ([docs/02](docs/02-memory-bridge.md) defines all of them):

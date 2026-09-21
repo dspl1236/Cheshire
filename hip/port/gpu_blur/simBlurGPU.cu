@@ -78,6 +78,11 @@ void probe()
         std::fprintf(stderr, "[cheshire] sim blur: no GPU device, OIIO\n");
         return;
     }
+    // Announced on the success path as well: a port that prints only when it is NOT used cannot
+    // be shown to have run (the end-to-end gate's marker rule, docs/04).
+    cudaDeviceProp p{};
+    const char* name = (cudaGetDeviceProperties(&p, 0) == cudaSuccess) ? p.name : "device 0";
+    std::fprintf(stderr, "[cheshire] sim blur: Gaussian on the GPU (%s; CHESHIRE_GPU_BLUR=0 for OIIO)\n", name);
     g_available = true;
 }
 

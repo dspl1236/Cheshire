@@ -28,6 +28,14 @@ bool cheshireGpuVisEnabled()
     {
         const char* e = std::getenv("CHESHIRE_GPU_VIS");
         v = (e != nullptr && *e == '0') ? 0 : (cheshire::knn::available() ? 1 : 0);
+        // Announced on both paths, unconditionally: until 0.3.2 the only line on the GPU path was
+        // behind CHESHIRE_GPU_VIS_LOG, so a default run could not show the port had run.
+        if (v == 1)
+            ALICEVISION_LOG_INFO("cheshire: visibility knn on the GPU (CHESHIRE_GPU_VIS=0 for nanoflann)");
+        else if (e != nullptr && *e == '0')
+            ALICEVISION_LOG_INFO("cheshire: visibility knn: disabled by CHESHIRE_GPU_VIS=0, nanoflann");
+        else
+            ALICEVISION_LOG_INFO("cheshire: visibility knn: no GPU device, nanoflann");
     }
     return v == 1;
 }

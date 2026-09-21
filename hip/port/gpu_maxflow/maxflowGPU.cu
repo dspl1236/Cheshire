@@ -267,9 +267,22 @@ bool available()
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_checked) return g_available;
     g_checked = true;
-    if (const char* e = std::getenv("CHESHIRE_GPU_MAXFLOW")) if (e[0] == '0') return g_available = false;
+    // Every decision is announced, on the GPU path too, so a run can prove which cut it took.
+    if (const char* e = std::getenv("CHESHIRE_GPU_MAXFLOW"))
+        if (e[0] == '0')
+        {
+            std::fprintf(stderr, "[cheshire] max-flow: disabled by CHESHIRE_GPU_MAXFLOW=0, Boykov-Kolmogorov\n");
+            return g_available = false;
+        }
     int n = 0;
-    if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1) return g_available = false;
+    if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1)
+    {
+        std::fprintf(stderr, "[cheshire] max-flow: no GPU device, Boykov-Kolmogorov\n");
+        return g_available = false;
+    }
+    cudaDeviceProp p{};
+    const char* name = (cudaGetDeviceProperties(&p, 0) == cudaSuccess) ? p.name : "device 0";
+    std::fprintf(stderr, "[cheshire] max-flow: GPU push-relabel on %s (CHESHIRE_GPU_MAXFLOW=0 for Boykov-Kolmogorov)\n", name);
     return g_available = true;
 }
 
