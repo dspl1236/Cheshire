@@ -135,8 +135,53 @@ def main(argv):
             for line in log.read_text(encoding='utf-8', errors='replace').splitlines()[-3:]:
                 print(f"        {line[:100]}")
 
+    # The memory bridge, on a fixed input. Byte identity across caps is the bridge's standing
+    # criterion (docs/02) and it can only be asserted where the input is identical: the end-to-end
+    # harness regenerates SfM per run, and GPU SIFT is not bit-reproducible, so it is asserted here.
+    # 1500 MB is absorbed by planner v2 through smaller tiles (no spill); 500 MB is below one tile
+    # and must spill; bridge off is plain device allocation. All must match the uncapped bytes.
+    import hashlib
+    print("\nmemory bridge, fixed SfM, DepthMap views 0-1:")
+    cases = [("uncapped", {}, None),
+             ("cap 1500 MB (planner absorbs)", {"CHESHIRE_BRIDGE_VRAM_MB": "1500", "CHESHIRE_BRIDGE_LOG": "1"},
+              r"bridge planner 1: VRAM budget 1200"),
+             ("cap 500 MB (must spill)", {"CHESHIRE_BRIDGE_VRAM_MB": "500", "CHESHIRE_BRIDGE_LOG": "1"},
+              r"bridge summary: [1-9]\d* spills"),
+             ("bridge off", {"CHESHIRE_BRIDGE": "0"}, None)]
+    digests = {}
+    for label, extra, expect in cases:
+        dest = out / "bridge" / re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+        if dest.exists():
+            for f in dest.rglob("*"):
+                if f.is_file(): f.unlink()
+        dest.mkdir(parents=True, exist_ok=True)
+        log = out / f"bridge-{dest.name}.log"
+        env = dict(os.environ); env.update(extra)
+        cmd = [str(runner), "aliceVision_depthMapEstimation", "--input", sfm, "--imagesFolder", pds,
+               "--downscale", "2", "--rangeStart", "0", "--rangeSize", "2",
+               "--output", dest.as_posix(), "--verboseLevel", "info"]
+        with log.open("w", encoding="utf-8", errors="replace") as f:
+            rc = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, shell=True, env=env).returncode
+        h = hashlib.sha256()
+        exrs = sorted(dest.glob("*.exr"))
+        for f in exrs:
+            h.update(f.name.encode()); h.update(f.read_bytes())
+        digests[label] = h.hexdigest()[:16]
+        saw = bool(re.search(expect, log.read_text(encoding="utf-8", errors="replace"))) if expect else True
+        ok = rc == 0 and len(exrs) > 0 and saw
+        results.append((f"bridge: {label}", ok, rc, len(exrs), 0))
+        print(f"  {'ok ' if ok else 'FAIL'}  {label:<32} exit={rc:<4} produced {len(exrs):<4} digest {digests[label]}"
+              + ("" if saw else f"  - nothing matched /{expect}/"))
+    ref = digests.get("uncapped")
+    differ = [l for l, d in digests.items() if d != ref]
+    if differ:
+        results.append(("bridge: byte identity", False, 0, 0, 0))
+        print(f"  FAIL  byte identity: {', '.join(differ)} differ from uncapped")
+    else:
+        print(f"  ok    byte identity: all {len(digests)} cases produced the same bytes")
+
     bad = [r for r in results if not r[1]]
-    print(f"\n{len(results) - len(bad)} of {len(results)} stages ran from this bundle")
+    print(f"\n{len(results) - len(bad)} of {len(results)} checks passed from this bundle")
     return 1 if bad else 0
 
 

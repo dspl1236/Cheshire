@@ -325,3 +325,50 @@ The clamp on the Linux artifact, RX 6750 XT (12272 MB), `CHESHIRE_BRIDGE_VRAM_MB
 v0.3.0 reports `vram cap 32000 MB` and plans 12 full cameras against a 25600 MB budget; v0.3.1
 reports `requested vram cap 32000 MB exceeds this device (12272 MB total); clamping to 11014 MB`
 and plans 4 against 8811 MB.
+
+## Capability review: what the gates exercise against what the binaries can do (2026-09-20)
+
+The binaries read 57 `CHESHIRE_*` settings. Before this review the end-to-end gate set five of
+them, and the phrase "every GPU port switched off" described a run in which three of seven were
+still on. What the inventory found, in order of consequence:
+
+* **Three ports are silent on success.** Max-flow prints only under its verbose flag; the sim blur
+  prints only when it is *not* used; the visibility knn's `GPU knn index: N points` is behind
+  `CHESHIRE_GPU_VIS_LOG` / `_CHECK`. None can be shown to have run on a default run, which is the
+  situation the marker rule exists to forbid. They *do* run - the knn's unconditional fallback
+  warning is absent, and under `verify` its self-check reports identical answers on 8,770,375
+  queries - but proving it needs an unconditional announce on both paths in each, which is a source
+  change, a rebuild of every payload and the Linux bundle, and a full re-gate. Scheduled for 0.3.2.
+* **The in-process self-checks were never on in any gate.** `CHESHIRE_FILTER_CHECK`,
+  `MAXFLOW_CHECK`, `GPU_VIS_CHECK`, `SEGMENT_CHECK`, `GPU_TEDGE_CHECK` and the facet-weight
+  comparison under `GPU_VOTE_LOG` each run the CPU reference alongside the port and say so - the
+  strongest correctness tests the project has. The gate's `verify` config now turns all of them on
+  and requires each verdict in the port's own words. Max-flow's verdict is the *labelling*
+  ("cells labelled differently: 0 of N"); its float flow totals are never equal and are documented
+  as such, and the first version of the assertion required them equal and failed a perfect run.
+* **End-to-end runs are not byte-reproducible, and the reason is benign.** GPU SIFT finds the
+  identical keypoint set run to run (sorted, the `.feat` files differ in 0 lines; unsorted, in
+  24,500) in a different order; SfM consumes them in order, so everything downstream differs. The
+  first version of the matrix asserted byte-identical depth maps across configs with the same
+  DepthMap parameters and failed every pair for this reason. Byte identity across bridge caps -
+  the bridge's standing criterion - is asserted in the stage gate on a fixed SfM instead:
+  uncapped, 1500 MB, 500 MB and bridge-off must produce the same bytes. A stable sort after
+  extraction would make whole pipelines reproducible; a candidate for 0.3.2.
+* **Planner v2 absorbs a 1.5 GB cap on the six-view set with no spill** - budget 1200 MB, 0 full
+  cameras + 2 tiles - exactly as docs/02 says. The matrix's first bridge config asserted "must
+  spill" at 1.5 GB, a planner-v1 fact three versions stale. 500 MB is below one tile and spills.
+* Eleven settings a user might reach for were undocumented, `CHESHIRE_BRIDGE_HOST_MB` among them.
+  USING.md now lists them.
+
+The matrix grew from five configs to nine (`verify`, `bridgecap`, `bridgespill`, `bridgeoff`), the
+fallback run switches all seven ports off and says which two it cannot prove, and the stage gate
+gained the fixed-SfM bridge pass.
+
+Run on the v0.3.1 Windows bundle, RX 9070, 2026-09-20, after the corrections above:
+
+* stage gate 10/10 - six stages plus the fixed-SfM bridge pass, where uncapped, 1500 MB, 500 MB
+  and bridge-off produced byte-identical depth and sim maps (digest `7c9f1102f0141e58`);
+* end to end 9/9: `base` 59 s, `tiles` 57, `coarse` 38, `texbig` 56, `cpufallback` 76 (all seven
+  switches off, the two unprovable ones labelled), `verify` 80 (all six self-checks satisfied:
+  max-flow labelling 0 of 1,676,527 cells different, knn identical on 8,770,375 queries),
+  `bridgecap` 91 (planner absorbed 1.5 GB), `bridgespill` 122 (spilled at 500 MB), `bridgeoff` 57.

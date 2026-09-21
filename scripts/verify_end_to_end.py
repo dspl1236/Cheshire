@@ -29,24 +29,59 @@ Bare 'GPU brute-force' matches "GPU brute-force disabled by CHESHIRE_GPU_MATCHER
 import os, re, shutil, subprocess, sys, time
 from pathlib import Path
 
-# The line each port prints when its GPU path is live. Absent = that node ran something else.
+# The lines each node's ports print when their GPU paths are live - every one must appear. Absent
+# = that node ran something else, or a port fell back without saying so. Meshing carries four
+# ports (votes, max-flow, visibility knn, sim blur) and only the votes are provable on a default
+# run: max-flow prints only under its verbose flag, sim blur prints only when it is NOT used, and
+# the visibility knn's "GPU knn index: N points" is behind CHESHIRE_GPU_VIS_LOG / _CHECK - a first
+# version of this table required it and would have failed every default run while the port was
+# in fact running. Three ports silent on success is a source defect of the kind the marker rule
+# forbids, found 2026-09-20 while inventorying the knobs; it is a rebuild to fix (every payload
+# plus the Linux bundle), so it is scheduled rather than slipped in. Under `verify`, where the
+# check flags are on, the knn port proves itself through its self-check verdict instead.
 GPU_MARKERS = {
-    "FeatureExtraction": r"Choosing device \d+:",
-    "FeatureMatching":   r"GPU brute-force L2 2-NN on",
-    "DepthMap":          r"Number of GPU devices",
-    "DepthMapFilter":    r"depth map filter: group votes on",
-    "Meshing":           r"meshing votes: ray marching on",
-    "Texturing":         r"texturing: pyramid \+ rasterisation on",
+    "FeatureExtraction": [r"Choosing device \d+:"],
+    "FeatureMatching":   [r"GPU brute-force L2 2-NN on"],
+    "DepthMap":          [r"Number of GPU devices"],
+    "DepthMapFilter":    [r"depth map filter: group votes on"],
+    "Meshing":           [r"meshing votes: ray marching on"],
+    "Texturing":         [r"texturing: pyramid \+ rasterisation on"],
 }
-# ... and the line it prints when switched off. FeatureExtraction and DepthMap have no such switch,
-# so they stay on the GPU in the fallback run and keep their markers.
+# ... and the lines printed when switched off. FeatureExtraction and DepthMap have no such switch,
+# so they stay on the GPU in the fallback run and keep their markers. Sim blur announces its
+# disabled state; max-flow and visibility do not, so with CHESHIRE_GPU_MAXFLOW=0 and
+# CHESHIRE_GPU_VIS=0 set the fallback run exercises their CPU paths without being able to prove it.
 CPU_MARKERS = {
     "FeatureExtraction": GPU_MARKERS["FeatureExtraction"],
     "DepthMap":          GPU_MARKERS["DepthMap"],
-    "FeatureMatching":   r"GPU brute-force disabled by CHESHIRE_GPU_MATCHER=0",
-    "DepthMapFilter":    r"depth map filter: disabled by CHESHIRE_GPU_FILTER=0",
-    "Meshing":           r"meshing votes: disabled by CHESHIRE_GPU_VOTE=0",
-    "Texturing":         r"texturing: disabled by CHESHIRE_GPU_TEX=0",
+    "FeatureMatching":   [r"GPU brute-force disabled by CHESHIRE_GPU_MATCHER=0"],
+    "DepthMapFilter":    [r"depth map filter: disabled by CHESHIRE_GPU_FILTER=0"],
+    "Meshing":           [r"meshing votes: disabled by CHESHIRE_GPU_VOTE=0",
+                          r"sim blur: disabled by CHESHIRE_GPU_BLUR=0"],
+    "Texturing":         [r"texturing: disabled by CHESHIRE_GPU_TEX=0"],
+}
+SILENT_PORTS = "CHESHIRE_GPU_MAXFLOW and CHESHIRE_GPU_VIS are set but neither port prints on either path; not proven here"
+
+# In-process self-checks: the port runs the CPU reference alongside itself and compares. These are
+# the strongest correctness tests the project has, and until 2026-09-20 no gate switched them on.
+# All fire inside Meshing. The tedge check's SUMS are not asserted - they differ by an ulp of
+# summation order (docs/09) - only its cell counts, which must be equal.
+SELF_CHECK_ENV = {
+    "CHESHIRE_FILTER_CHECK": "1", "CHESHIRE_MAXFLOW_CHECK": "1", "CHESHIRE_GPU_VIS_CHECK": "1",
+    "CHESHIRE_SEGMENT_CHECK": "1", "CHESHIRE_GPU_TEDGE_CHECK": "1", "CHESHIRE_GPU_VOTE_LOG": "1",
+}
+SELF_CHECK_VERDICTS = {
+    "Meshing": [
+        r"filterByPixSize check: identical to single-threaded upstream on all",
+        # The float flow totals of the two algorithms are never equal and are documented as junk
+        # (docs/12); the labelling is the verdict. The first version asserted "(identical)" on the
+        # flows and failed a run whose labelling was 0 of 1,676,527 cells different.
+        r"max-flow check: .*cells labelled differently: 0 of \d+",
+        r"GPU knn check: identical to nanoflann on all",
+        r"segmentFullOrFree check: identical to upstream on all",
+        r"tedge check: cells with on != 0: cpu (\d+), gpu \1;",
+        r"facet weight check: .*differing from the sequential computation: 0\b",
+    ],
 }
 
 # Meshroom's FeatureExtraction defaults to dspsift, which goes through vlfeat on the CPU whatever
@@ -94,9 +129,38 @@ CONFIGS = {
     "texbig": dict(overrides=SIFT + [
         "Texturing:textureSide=8192", "Texturing:downscale=1"], env={}),
     # Every GPU port switched off. Must still produce a mesh, and must say it went to the CPU.
-    "cpufallback": dict(overrides=SIFT, markers="cpu", env={
-        "CHESHIRE_GPU_MATCHER": "0", "CHESHIRE_GPU_FILTER": "0",
-        "CHESHIRE_GPU_VOTE": "0", "CHESHIRE_GPU_TEX": "0"}),
+    # Until 2026-09-20 this set four of the seven switches and was described as "every port off".
+    "cpufallback": dict(overrides=SIFT, markers="cpu", note=SILENT_PORTS, env={
+        "CHESHIRE_GPU_MATCHER": "0", "CHESHIRE_GPU_FILTER": "0", "CHESHIRE_GPU_VOTE": "0",
+        "CHESHIRE_GPU_TEX": "0", "CHESHIRE_GPU_BLUR": "0", "CHESHIRE_GPU_MAXFLOW": "0",
+        "CHESHIRE_GPU_VIS": "0"}),
+    # Every in-process self-check on: each port must agree with its CPU reference, in its own words.
+    "verify": dict(overrides=SIFT, env=dict(SELF_CHECK_ENV), checks=SELF_CHECK_VERDICTS),
+    # The memory bridge under caps. Planner v2 absorbs 1.5 GB on the six-view set by planning
+    # smaller tiles - budget 1200 MB, 0 full cameras + 2 tiles, no spill (docs/02) - so that run
+    # asserts the re-plan, not a spill; the first version asserted "must spill", which was true of
+    # planner v1 and encoded a fact three versions stale. 500 MB is below one tile and must spill.
+    # Byte identity across caps is NOT asserted here: every config regenerates SfM from photos and
+    # GPU SIFT is not bit-reproducible run to run, so no two runs share an input. That assertion
+    # lives in the stage gate, on a fixed SfM, where it belongs.
+    "bridgecap": dict(overrides=SIFT, env={"CHESHIRE_BRIDGE_VRAM_MB": "1500", "CHESHIRE_BRIDGE_LOG": "1"},
+                      checks={"DepthMap": [r"bridge: vram cap 1500 MB", r"bridge planner 1: VRAM budget 1200"]}),
+    "bridgespill": dict(overrides=SIFT, env={"CHESHIRE_BRIDGE_VRAM_MB": "500", "CHESHIRE_BRIDGE_LOG": "1"},
+                        checks={"DepthMap": [r"bridge: vram cap 500 MB", r"bridge summary: [1-9]\d* spills"]}),
+    # And the bridge switched off entirely: plain device allocation.
+    "bridgeoff": dict(overrides=SIFT, env={"CHESHIRE_BRIDGE": "0"}),
+    # Full-resolution depth maps, uncapped: the card's own VRAM is the constraint. Per-view working
+    # set is 4x the default, so on a large high-resolution set this is what makes the bridge spill
+    # naturally rather than under an artificial cap - and on CUDA, where camera mipmaps never pass
+    # through the bridge, it is where a small card may run out of what the bridge cannot see.
+    "ds1": dict(overrides=SIFT + ["DepthMap:downscale=1"], env={"CHESHIRE_BRIDGE_LOG": "1"}),
+    # ds1 plus every opt-in speed path and the profile logs, so the run reports where time went.
+    # Most acceleration is already default-on; what this adds is the 7-point QR nullspace (held
+    # opt-in, docs/15) and a larger filter cache.
+    "blast": dict(overrides=SIFT + ["DepthMap:downscale=1"], env={
+        "CHESHIRE_BRIDGE_LOG": "1", "CHESHIRE_QR_NULLSPACE": "1", "CHESHIRE_FILTER_CACHE_MB": "8192",
+        "CHESHIRE_GPU_VOTE_LOG": "1", "CHESHIRE_GPU_VIS_LOG": "1", "CHESHIRE_GPU_TEX_LOG": "1",
+        "CHESHIRE_GPU_MATCHER_LOG": "1", "CHESHIRE_FILTER_LOG": "1"}),
 }
 
 
@@ -161,13 +225,30 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     never_ran = [n for n in markers if not logs[n].strip()]
     paired = {n: bool(re.search(rf"\[cheshire\] {BINARY[n]}: Cheshire build", logs[n]))
               for n in markers}
-    missing = [n for n, pat in markers.items()
-               if paired[n] and not re.search(pat, logs[n])]
+    missing = [n for n, pats in markers.items()
+               if paired[n] and not all(re.search(p, logs[n]) for p in pats)]
     unpaired = [n for n in markers if not paired[n] and n not in never_ran]
+    # Config-specific assertions on top of the port lines: self-check verdicts, bridge announcements.
+    unmet = [f"{n}: /{p}/" for n, pats in cfg.get("checks", {}).items()
+             for p in pats if not re.search(p, node_logs(cache, n))]
+    # Depth and sim maps as bytes, for the cross-config identity check in main().
+    dm_dir = next(iter(sorted((cache / "DepthMap").glob("*/"))), None)
+    dm_digest = None
+    if dm_dir is not None:
+        import hashlib
+        h = hashlib.sha256()
+        for f in sorted(dm_dir.glob("*_depthMap.exr")) + sorted(dm_dir.glob("*_simMap.exr")):
+            h.update(f.name.encode()); h.update(f.read_bytes())
+        dm_digest = h.hexdigest()[:16]
 
-    ok = rc == 0 and mesh and tex and not missing and not unpaired and not never_ran
+    ok = rc == 0 and mesh and tex and not missing and not unpaired and not never_ran and not unmet
     print(f"  {'ok  ' if ok else 'FAIL'}  {name:<14} exit={rc:<4} mesh={len(mesh)} tex={len(tex)} "
-          f"ports={len(markers) - len(missing) - len(unpaired) - len(never_ran)}/{len(markers)}  {secs}s")
+          f"ports={len(markers) - len(missing) - len(unpaired) - len(never_ran)}/{len(markers)}"
+          f"  dm={dm_digest or '-'}  {secs}s")
+    if cfg.get("note"):
+        print(f"        note: {cfg['note']}")
+    if unmet:
+        print(f"        assertions not met: {'; '.join(unmet)}")
     if never_ran:
         print(f"        did not run: {', '.join(never_ran)}"
               f" - an earlier node failed and the pipeline stopped before them")
@@ -180,7 +261,22 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     if rc != 0:
         for line in log.read_text(encoding="utf-8", errors="replace").splitlines()[-4:]:
             print(f"        {line[:110]}")
-    return bool(ok)
+    return bool(ok), dm_digest
+
+
+def depthmap_identity(results: dict) -> bool:
+    """Informational. The first version asserted byte-identical depth maps across configs with the
+    same DepthMap parameters and failed every pair: each run regenerates features and SfM from the
+    photographs, and GPU SIFT is not bit-reproducible run to run, so no two runs share an input.
+    The bridge's byte-identity criterion is asserted by the stage gate on a fixed SfM instead. This
+    reports the digests so a run-to-run coincidence is visible, and never fails the matrix."""
+    rows = [(n, d) for n, (_, d) in results.items() if d]
+    if len(rows) > 1:
+        print("  depth-map digests (inputs differ per run - GPU SIFT is not bit-reproducible - so"
+              " identity is asserted by the stage gate on a fixed SfM, not here):")
+        for n, d in rows:
+            print(f"    {n:<14} {d}")
+    return True
 
 
 def main(argv):
@@ -224,9 +320,10 @@ def main(argv):
                            capture_output=True, text=True, shell=win)
         print("\n" + (u.stdout.strip() or u.stderr.strip()))
 
-    passed = sum(1 for v in results.values() if v)
+    passed = sum(1 for ok, _ in results.values() if ok)
     print(f"\n{passed} of {len(results)} pipelines ran end to end on this package")
-    return 0 if passed == len(results) else 1
+    identical = depthmap_identity(results)
+    return 0 if passed == len(results) and identical else 1
 
 
 if __name__ == "__main__":
