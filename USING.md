@@ -140,6 +140,21 @@ Every one of these is off by default. Set to `0` to disable a GPU path, `1` to e
 | `CHESHIRE_GPU_BLUR=0` | the similarity-map blur through OpenImageIO |
 | `CHESHIRE_GPU_TEX=0` | texturing on the CPU |
 | `CHESHIRE_BACKEND=auto\|cheshire\|meshroom` | force the launcher's choice (`CHESHIRE_DEPTHMAP=cuda\|hip` is the older spelling and still works) |
+| `CHESHIRE_GPU_VIS=0` | the visibility passes' nearest-neighbour search through upstream's nanoflann on the CPU ([docs/13](docs/13-gpu-visibilities.md)) |
+
+The memory bridge has more knobs than the two above, and one of them has mattered on a real box
+([docs/02](docs/02-memory-bridge.md) defines all of them):
+
+| setting | effect |
+|---|---|
+| `CHESHIRE_BRIDGE_HOST_MB` | the host-RAM budget for spilled buffers; default 25 % of RAM, which stopped a 14 GB node until `=7000` lifted it |
+| `CHESHIRE_BRIDGE_MIN_SPILL_MB` | allocations under this always stay in VRAM (default 4) |
+| `CHESHIRE_BRIDGE_PLANNER=0\|1\|2` | how the tile planner fits the job under the cap; `1` (default) plans to fit and lets volumes and maps spill rather than refusing |
+| `CHESHIRE_BRIDGE_IMAGE_SPILL=1` | allow camera images out to host memory; off by default because it costs about 13x behind PCIe |
+| `CHESHIRE_BRIDGE_HOST_CLASSES=a,b` / `CHESHIRE_BRIDGE_VRAM_ONLY_CLASSES=a,b` | force buffer classes (`image`, `map`, `volume`, `other`) to host, or pin them to VRAM; experiment knobs |
+| `CHESHIRE_FILTER_CACHE_MB` | DepthMapFilter's decoded-map cache, default 4096; `0` disables ([docs/08](docs/08-gpu-depth-map-filter.md)) |
+| `CHESHIRE_PDS_THREADS`, `CHESHIRE_FUSION_THREADS` | thread counts for PrepareDenseScene's image loop and Meshing's point-cloud fusion; default one per core |
+| `CHESHIRE_TEX_PARTS=1` | texturing's camera scoring done sequentially instead of in parallel parts; for comparing against the parallel order, not for speed |
 
 **Verify rather than trust** - this runs the CPU reference alongside the GPU and reports the
 difference:
