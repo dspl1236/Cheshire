@@ -568,3 +568,32 @@ The order for 0.3.3, by what the numbers say rather than by which node sounds mo
 Not targets: MeshFiltering (37 s, not the 2-5 s a generic estimate gives, but 1.3 %) and
 ImageMatching (below the resolution of the timestamps on 107 photographs; only a 1000-photo
 scan would move it).
+
+## 0.3.2 progress: items 1 and 2 landed (2026-09-21)
+
+Built for gfx1201 only (the release rebuild of all payloads comes at the end), packaged flat, gated
+on the RX 9070 with mini6: `base` 65 s, `cpufallback` 90 s, `blast` 181 s, 3/3, 6/6 ports each.
+
+**Item 1, announce lines.** Every port now prints on both paths, and the logs show it:
+`max-flow: GPU push-relabel on AMD Radeon RX 9070` / `disabled by CHESHIRE_GPU_MAXFLOW=0,
+Boykov-Kolmogorov`; `sim blur: Gaussian on the GPU (...)` / `disabled by CHESHIRE_GPU_BLUR=0,
+OIIO`; `visibility knn on the GPU` / `disabled by CHESHIRE_GPU_VIS=0, nanoflann`; `7-point
+nullspace: SVD (default...)` in `base` and `Householder QR (CHESHIRE_QR_NULLSPACE=1)` in `blast`;
+`depth map filter cache: cap 4096 MB` / `cap 8192 MB`. The gate requires all of them, and the
+fallback run now proves the max-flow and visibility CPU paths instead of noting that it cannot.
+
+**Item 2, keypoint order.** Generator step 5c sorts PopSIFT's keypoints by (x, y, scale,
+orientation, descriptor bytes). Two `base` runs on the same package: **12 of 12 feature and
+descriptor files byte-identical, `0.matches.txt` byte-identical** - extraction and matching are now
+a function of the images. SfM is not: same 6 poses and 9433 landmarks both times, but
+`cameras.sfm` differs from the fourth significant digit (focal 3.98899 vs 3.98876), which is
+upstream incremental SfM's own run-to-run variation (unseeded RANSAC, threaded bundle adjustment)
+and was there before Cheshire. The skull's initial-pair coin toss is settled by this - pair choice
+reads the matches - while byte-identical pipelines end at SfM. Seeding SfM is a 0.3.3 question.
+
+**One bug found by its absence.** The sort's announce line did not print, and the DLL did not
+contain the literal though it contained the `getenv` string beside it. `ALICEVISION_LOG_INFO(a)`
+expands to `stream << a` without parentheses, so `stream << on ? "A" : "B"` parsed as
+`(stream << on) ? "A" : "B"`: it logged the bool and both strings were dead. Any ternary handed to
+that macro does this; the fix is an if/else, and the check that caught it - search the binary for
+the literal - is now the habit for every new line.
