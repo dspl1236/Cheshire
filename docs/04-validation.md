@@ -402,3 +402,26 @@ PopSIFT has the same order nondeterminism, so stock users see the same rate. Two
 this project: the end-to-end report now names the failed node and whether it was a paired binary,
 so this is read off the summary rather than dug out of a log; and the stable keypoint sort already
 listed for 0.3.2 would make which initial pair a dataset draws a fixed fact rather than a coin toss.
+
+## The strain run that tested nothing (2026-09-20)
+
+The GTX 1050 Ti's full-resolution engine-bay run was two hours in, 24 depth maps written at 480 s
+a chunk, when the DepthMap log's first line was read: `[cheshire] aliceVision_depthMapEstimation:
+Meshroom's own binary`. Every node before it had done the same. The launcher beside the package on
+bench-pc (sha `3ce7c1e6`, built 2026-09-19 16:56) predates `CHESHIRE_BACKEND` (f50f8df, 19:04 the
+next day): it read only `CHESHIRE_DEPTHMAP`, saw an NVIDIA card, and handed every node back to
+Meshroom, ignoring the `cheshire` the harness set. And the shipped v0.3.0 CUDA Windows zip has no
+launcher or pairing script at all - the CUDA packager never staged them - so a user following the
+README could not have paired it either.
+
+Fixes: `package-cuda.ps1` stages both files and checks the launcher by substance (the wide-string
+`CHESHIRE_BACKEND` must be present; the old launcher is refused, verified); the 0.3.1 CUDA zip is
+repacked, 484 entries byte-identical plus the two files. The run was restarted with the current
+launcher, all seven nodes announcing the Cheshire build, and started through WMI
+(`Win32_Process.Create`) rather than `Start-Process` - a process started from an ssh session's
+PowerShell dies with that session, which is what killed the first relaunch.
+
+Two lessons for the gates. The end-to-end harness *would* have caught this at the end of the run,
+which is the wrong end of a two-hour job: it should check the first paired node's provenance line
+as soon as that node's log exists and abort. And a file's name and date are not its version - the
+launcher was checked by the pairing script's "exists" test and nothing else.

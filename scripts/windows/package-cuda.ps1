@@ -77,6 +77,24 @@ Copy-Item "$ompSrc\libomp.dll" (Join-Path $bin "libomp140.x86_64.dll") -Force
 Copy-Item "$ompSrc\LICENSE.TXT" (Join-Path $stage "LICENSE.llvm-openmp.txt") -Force
 Write-Output ("  LLVM OpenMP runtime {0:N2} MB + its licence" -f ((Get-Item "$ompSrc\libomp.dll").Length/1MB))
 
+# Pairing: the script and the launcher, the same two files the HIP zip carries. The v0.3.0 CUDA
+# Windows zip shipped WITHOUT them (492 entries, none for pairing) while the README sent NVIDIA
+# users to meshroom-pair.cmd; and the copy that reached bench-pc by hand was a launcher built
+# before CHESHIRE_BACKEND existed, which on an NVIDIA box hands every node back to Meshroom -
+# a two-hour full-resolution run on the 1050 Ti tested nothing (2026-09-20). So the launcher is
+# checked by substance: it must carry the CHESHIRE_BACKEND string (wide, as the exe stores it),
+# not merely exist.
+$launcher = "D:\MMI\cheshire\build\meshroom-pair-launcher.exe"
+if (-not (Test-Path $launcher)) { throw "no launcher at $launcher - run scripts\windows\build-launcher.cmd" }
+$bytes = [IO.File]::ReadAllBytes($launcher)
+$wide = [Text.Encoding]::Unicode.GetString($bytes)
+if ($wide -notmatch 'CHESHIRE_BACKEND') {
+    throw "$launcher predates CHESHIRE_BACKEND (no such string in it) - rebuild it before packaging"
+}
+Copy-Item $launcher (Join-Path $stage "meshroom-pair-launcher.exe") -Force
+Copy-Item "D:\MMI\cheshire\scripts\windows\meshroom-pair.cmd" (Join-Path $stage "meshroom-pair.cmd") -Force
+Write-Output ("=== pairing: meshroom-pair.cmd + launcher ({0:N0} bytes, knows CHESHIRE_BACKEND)" -f $bytes.Length)
+
 # share/aliceVision carries the OCIO config and sensor database the binaries look for
 $share = "D:\MMI\cheshire\build\av-cuda-install\share"
 if (Test-Path $share) {
