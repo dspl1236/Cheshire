@@ -238,3 +238,59 @@ ACTION=="add|change", SUBSYSTEM=="pci", DRIVER=="amdgpu", ATTR{power/control}="o
 (`udevadm control --reload-rules && udevadm trigger --subsystem-match=pci --action=change` applies
 it without a reboot; `amdgpu.runpm=0` on the kernel command line is the equivalent.) A few watts
 idle; `power/runtime_status` stays `active`.
+
+## Rebuilding the bundle on the WSL box, and the tree that had been used for both backends (2026-09-20)
+
+v0.3.0's Linux HIP bundle shipped without the bridge's clamp for a VRAM cap set above the card's
+total memory (docs/04), so the bundle had to be rebuilt. The first attempt produced a bundle whose
+`aliceVision_feature` was linked against the **CUDA** PopSift - `libpopsift.so.0.10.0` from
+`/opt/popsift-cuda` - and it said nothing at link time. It surfaced seven minutes later as the
+bundle step's `cannot resolve item 'libpopsift.so.0.10.0'`, which does not read as "wrong library".
+
+Two causes, and each alone would have been enough:
+
+* **The build directory had been configured for the CUDA backend in between.** `/root/av-hip-build`
+  carried 164 CUDA-named cache entries and `PopSift_DIR:PATH=/opt/popsift-cuda/...`. The configure
+  step never clears a cache, so the next HIP configure inherited it.
+* **`CHESHIRE_POPSIFT_INSTALL` was not set.** The HIP PopSift is built on the Windows side (all
+  code objects verified there, docs/14) and reached from WSL through `/mnt/d`; the script's default
+  points at a directory that does not exist on this box, `-DPopSift_DIR` pointed nowhere, and
+  `find_package` kept the cached CUDA one rather than failing.
+
+The recipe that avoided both had lived in `build/wsl_av_build.sh` - gitignored, so the only record
+of how to build the Linux artifact correctly was outside the repository. It is now
+`scripts/linux/wsl-bundle.sh`, with a fresh build directory and install prefix per run (a
+directory used for one backend is not reused for the other), the PopSift path set explicitly, and
+a verification tail that prints what the bundle actually carries: `amdhsa` code-object markers and
+the clamp string in the depthMap library, and what `featureExtraction` links. The pack step is
+`scripts/linux/wsl-pack-bundle.sh`, promoted from `build/wsl_pack_release_*.sh` for the same
+reason; it refuses to pack a bundle whose HSA runtime is the WSL flavour, whose PopSift is absent
+or CUDA, or which lacks `libamd_comgr`.
+
+`build-alicevision.sh` gained two hard stops so this cannot recur quietly: with `CHESHIRE_POPSIFT=ON`
+and no `PopSiftConfig.cmake` under `$POPSIFT_INSTALL` it exits before configuring, and after every
+configure it reads `PopSift_DIR` back out of the cache and requires it to sit under
+`$POPSIFT_INSTALL`. The cache type is deliberately not matched - a value taken from `-D` is
+recorded as `:UNINITIALIZED=`, one `find_package` searched for as `:PATH=` - because the first
+version of that check matched only `:PATH=` and would have failed every correct fresh configure
+while passing the stale one.
+
+Run it detached, as everything long-running in WSL: a process started from the session that
+launched it dies with that session.
+
+```
+setsid nohup bash scripts/linux/wsl-bundle.sh 031 >/dev/null 2>&1 < /dev/null &
+tail -f ~/hip-rebuild-031.log
+scripts/linux/wsl-pack-bundle.sh /opt/AliceVision_hip_031 /mnt/d/.../release/0.3.1/cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz
+```
+
+One measurement trap, specific to driving WSL from the Windows side and worth its own line: a
+shell variable inside `wsl -d Ubuntu-24.04 -- bash -lc "..."` arrives **empty** - the outer shell
+and wsl.exe's argument re-parsing consume it, single or double quoted. `grep -ac x $f` with an
+empty `$f` reads stdin and prints `0`, which read as "the rebuilt depthMap library has no code
+objects" and was reasoned about for two turns before the calibration against a known-good bundle
+(21 markers) exposed the check, not the library. Anything with a variable goes through a script
+file; fixed literal paths are fine inline - but only *inside* the `-c '...'` string, because a bare
+POSIX path given to `wsl.exe` as its own argument is rewritten to a Windows path by Git Bash's
+MSYS layer first. The delivery that survives everything: pipe the script in on stdin
+(`wsl -- bash -c 'cat > /tmp/x.sh' <<'EOF'`), then `wsl -- bash -c 'bash /tmp/x.sh'`.
