@@ -196,6 +196,26 @@ against reference values ([docs/04](docs/04-validation.md)). There are about fif
 `CHESHIRE_*` variables in the code for profiling and debugging - they are in the docs for each
 stage, and none of them are needed to use this.
 
+### Where a setting lives, and how to find one that is not listed here
+
+Three layers, set in three different places:
+
+| layer | examples | where you set it |
+|---|---|---|
+| **Meshroom node parameters** | `downscale`, `tileBufferWidth`, `sgmDepthListPerTile`, `maxPoints`, `textureSide` | the node's attribute panel in Meshroom (some sit behind the *advanced* toggle), or `meshroom_batch --paramOverrides Node:attr=value`. The attribute path is not the command-line flag: `--sgmDepthListPerTile` is `DepthMap:sgm.sgmDepthListPerTile` and `--tileBufferWidth` is `DepthMap:tiling.tileBufferWidth`, but `Meshing:maxPoints` is top level. The authority is `<Meshroom>/lib/meshroom/nodes/aliceVision/<Node>.py` |
+| **`CHESHIRE_*` environment variables** | every switch, option and tuning value in this section | the environment the node starts in. **Windows:** start Meshroom or `meshroom_batch` from a shell where the variable is set - the paired launcher inherits it and passes it through. **Linux:** the same, and the wrapper also sources `<bundle>/../env.sh`, so a file beside the bundle is the persistent place. Standalone: set them before `cheshire-run.cmd <node> …` |
+| **Tested combinations** | `base`, `tiles`, `coarse`, `verify`, `bridgecap`, `ds1`, `blast` | `CONFIGS` in [`scripts/verify_end_to_end.py`](scripts/verify_end_to_end.py): each is a parameter set plus an environment that is known to run end to end, and a copyable example of the two layers above together. `verify_end_to_end.py … <name>` runs one |
+
+To find any knob that is not on this page: every one is a `getenv("CHESHIRE_…")` in the source,
+with its default beside it -
+
+```
+grep -rn 'getenv("CHESHIRE_' third_party/aliceVision/src hip/
+```
+
+- and the doc for the stage that owns it ([docs/07](docs/07-gpu-matcher.md) through
+[docs/17](docs/17-svd-nullspace.md)) explains what it does and what was measured when it was added.
+
 ## 6. Getting help
 
 Open an issue with the node's log (the `[cheshire]` lines especially), the output of
