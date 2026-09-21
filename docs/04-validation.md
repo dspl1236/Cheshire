@@ -522,3 +522,42 @@ the items were scattered through the sections above.
 
 Not source, and not waiting for 0.3.2: memtest on bench-pc; the RX 5500 XT gate on the Windows
 hip6.2 gfx1012/gfx1031 payloads (closes the one inference in 0.3.1's notes).
+
+## 0.3.3 - the CPU nodes, ranked by the clock (2026-09-21)
+
+Per-node wall clock of the engine bay at full resolution on the RX 6750 XT (`ds1`, 2863 s), from
+Meshroom's status timestamps:
+
+| node | wall | share | today |
+|---|---|---|---|
+| DepthMap | 1612 s | 56 % | ported |
+| Meshing | 310 s | 11 % | ported; CPU fusion remains |
+| FeatureMatching | 255 s | 9 % | GPU 2-NN ported; the rest is geometric filtering |
+| Texturing | 176 s | 6 % | ported; padding, atlas writes and Assimp are 0.3.2 item 3 |
+| DepthMapFilter | 168 s | 6 % | ported |
+| StructureFromMotion | 140 s | 4.9 % | stock, not a paired node |
+| PrepareDenseScene | 133 s | 4.6 % | stock: image conversion to EXR |
+| MeshFiltering | 37 s | 1.3 % | stock |
+| FeatureExtraction | 31 s | 1 % | GPU SIFT |
+| ImageMatching | ~0 s | - | stock |
+
+The order for 0.3.3, by what the numbers say rather than by which node sounds most algorithmic:
+
+1. **Geometric filtering in FeatureMatching.** Already Cheshire code, already deterministic, and
+   the byte-identity gate exists; `CHESHIRE_QR_NULLSPACE` showed 1.86x on this phase at a measured
+   cost (docs/17). The 7-point solver's remaining time is the same kind of allocation and
+   vectorisation work that carried the AC-RANSAC and meshing CPU wins.
+2. **PrepareDenseScene.** 133 s of reading photographs and writing EXR, embarrassingly parallel,
+   no algorithm in it and nothing to change in the output: a throughput problem.
+3. **StructureFromMotion, profiled first.** The split between Ceres and resectioning is not known;
+   our vcpkg Ceres already links CHOLMOD, SPQR, METIS and OpenBLAS, so "a better sparse backend" is
+   not a lever - the profile decides between Ceres assembly overhead and the PnP/RANSAC loops.
+   Two costs specific to this node: it would be the eighth paired binary on both platforms, and
+   nothing counts until the launcher carries it. One thing 0.3.2 gives for free: with keypoints in
+   stable order SfM becomes deterministic, so a resectioning optimisation can be gated on a
+   byte-identical `sfm.abc`. Global SfM (rotation + translation averaging) is a different product -
+   it changes the geometry - and stays out.
+
+Not targets: MeshFiltering (37 s, not the 2-5 s a generic estimate gives, but 1.3 %) and
+ImageMatching (below the resolution of the timestamps on 107 photographs; only a 1000-photo
+scan would move it).
