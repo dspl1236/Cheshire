@@ -181,6 +181,18 @@ def node_logs(cache: Path, node: str) -> str:
     return "\n".join(text)
 
 
+def wrong_binary(cache: Path):
+    """The first paired node whose log exists and names Meshroom's own binary, as a message; None
+    while nothing has been decided yet or every decision so far was the Cheshire build. Read on a
+    timer while meshroom_batch runs, so a mis-paired graph is stopped at its first node."""
+    for node in BINARY:
+        text = node_logs(cache, node)
+        m = re.search(r"\[cheshire\] (\S+): Meshroom's own binary.*", text)
+        if m:
+            return f"{node} ran {m.group(0)[:120]}"
+    return None
+
+
 def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     out = outroot / name
     cache = out / "cache"
@@ -204,8 +216,24 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     log = out / "meshroom_batch.log"
     t0 = time.time()
     with log.open("w", encoding="utf-8", errors="replace") as f:
-        rc = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, env=env).returncode
+        proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env)
+        aborted = None
+        while proc.poll() is None:
+            time.sleep(5)
+            aborted = wrong_binary(cache)
+            if aborted:
+                proc.kill()
+        rc = proc.wait()
     secs = round(time.time() - t0)
+    if aborted:
+        # Do not let a wrong pairing run for hours to be reported at the end. The 1050 Ti's
+        # full-resolution run of 2026-09-20 was two hours and 24 depth maps in before anyone read
+        # the first log line: a launcher predating CHESHIRE_BACKEND had handed every node to
+        # Meshroom, and the harness would have said so only once the whole graph had finished.
+        print(f"  FAIL  {name:<14} ABORTED after {secs}s: {aborted}")
+        print("        the launcher paired here does not honour CHESHIRE_BACKEND=cheshire, or the"
+              " package was never paired - nothing this run does tests the package")
+        return False, None
 
     mesh = list((out / "out").glob("*.obj"))
     # Any extension: Meshroom's Texturing writes texture_1001.exr by default, not .png, so globbing
