@@ -127,11 +127,15 @@ automatic choice hands every node back to Meshroom and the package never runs.
 
 ## 5. Knobs worth knowing
 
-Every one of these is off by default. Set to `0` to disable a GPU path, `1` to enable an option.
+Three kinds, and the difference is the whole point. **Switches** are on by default - every GPU
+path runs unless you set it to `0`. **Options** are off by default and take `1`. **Tuning values**
+are numbers with a default you can see here. An earlier version of this section said everything
+was off by default, which was true of the options and the opposite of the truth for the switches.
 
-**If something looks wrong,** turn stages back to the CPU one at a time to find which:
+**If something looks wrong,** turn stages back to the CPU one at a time to find which. All of
+these are *on* unless set to `0`:
 
-| | |
+| switch (default: on) | `=0` gives you |
 |---|---|
 | `CHESHIRE_GPU_MATCHER=0` | feature matching on the CPU |
 | `CHESHIRE_GPU_FILTER=0` | depth map filtering on the CPU |
@@ -156,21 +160,30 @@ The memory bridge has more knobs than the two above, and one of them has mattere
 | `CHESHIRE_PDS_THREADS`, `CHESHIRE_FUSION_THREADS` | thread counts for PrepareDenseScene's image loop and Meshing's point-cloud fusion; default one per core |
 | `CHESHIRE_TEX_PARTS=1` | texturing's camera scoring done sequentially instead of in parallel parts; for comparing against the parallel order, not for speed |
 
-**Verify rather than trust** - this runs the CPU reference alongside the GPU and reports the
-difference:
+**Verify rather than trust** - each of these runs the CPU reference alongside the GPU port, in
+the same process, and prints its verdict. All off by default; `=1` enables. They cost time (the
+CPU reference runs too) and change nothing in the output. The release gate runs all of them
+together as its `verify` configuration ([docs/04](docs/04-validation.md)):
 
-| | |
+| option (default: off) | what `=1` prints in the Meshing log |
 |---|---|
-| `CHESHIRE_GPU_BLUR_CHECK=1` | prints how many pixels differ from OpenImageIO, and the worst |
+| `CHESHIRE_FILTER_CHECK=1` | `filterByPixSize check: identical to single-threaded upstream on all N slots` |
+| `CHESHIRE_MAXFLOW_CHECK=1` | `max-flow check: ... cells labelled differently: 0 of N` - the labelling is the verdict; the two float flow totals it also prints are never equal and are not the test |
+| `CHESHIRE_GPU_VIS_CHECK=1` | `GPU knn check: identical to nanoflann on all N queries` |
+| `CHESHIRE_SEGMENT_CHECK=1` | `segmentFullOrFree check: identical to upstream on all N cells` |
+| `CHESHIRE_GPU_TEDGE_CHECK=1` | `tedge check: cells with on != 0: cpu N, gpu N` - the counts must match; the sums differ by an ulp of summation order |
+| `CHESHIRE_GPU_VOTE_LOG=1` | includes `facet weight check: N facets, differing from the sequential computation: 0` |
+| `CHESHIRE_GPU_BLUR_CHECK=1` | how many pixels differ from OpenImageIO, and the worst |
 
-**Memory**, if your card is short of VRAM:
+**Memory**, if your card is short of VRAM. The bridge is a switch (on by default); the rest are
+tuning values:
 
-| | |
-|---|---|
-| `CHESHIRE_BRIDGE=0` | turn the VRAM-to-RAM bridge off entirely |
-| `CHESHIRE_BRIDGE_VRAM_FRACTION=0.7` | use at most 70 % of VRAM before spilling |
-| `CHESHIRE_BRIDGE_VRAM_MB=4096` | a hard cap instead of a fraction |
-| `CHESHIRE_BRIDGE_LOG=1` | show what spilled and why |
+| setting | default | effect |
+|---|---|---|
+| `CHESHIRE_BRIDGE=0` | on | turn the VRAM-to-RAM bridge off entirely |
+| `CHESHIRE_BRIDGE_VRAM_FRACTION=0.7` | `0.9` of free VRAM at start | use at most this fraction before spilling |
+| `CHESHIRE_BRIDGE_VRAM_MB=4096` | unset | a hard cap instead of a fraction; a cap above the card's total memory is clamped (v0.3.1) |
+| `CHESHIRE_BRIDGE_LOG=1` | off | show the cap, the plan, and what spilled and why |
 
 **Speed, at a measured cost** - the only setting here that changes what is produced:
 
