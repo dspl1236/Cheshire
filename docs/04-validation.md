@@ -1055,3 +1055,9 @@ default is OFF and the build accepted the new Ceres without a change.
 matrix on house-pc, `verify` and `texcheck` included - scored at 6/6 ports because the harness
 copy on that box predated the eighth node; the pairing script did pair `aliceVision_incrementalSfM`.
 The release bundle's run below is scored at 7/7 with the current harness.
+
+The damaged EXR was regenerated after the run: PrepareDenseScene's chunks index every view in the
+scene (1678, by view id), not the posed ones, so the view sat in chunk 26 rather than the 25 a
+posed-only count gave; rerunning that one chunk with the bundle's binary rewrote the file, which
+now decodes on every channel. The Rubble texture caveat stands for the run as it was scored; the
+cache is clean for what comes next.
