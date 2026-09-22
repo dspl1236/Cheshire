@@ -906,3 +906,14 @@ three times - 5, 7 and 9 views pending at the end of a pass - which is exactly t
 resected-but-orphaned views the debug run showed, and the graph guard never had to fire: with
 the engine handing every view over, no edge reaches a view without a node. Three of three
 upstream runs died at 830-834; the fixed binary went past that point in every pass and finished.
+
+**The pipeline, end to end, on the RX 9070** (the `useLocalBA=False` workaround run, started before
+the fix existed; the fixed-SfM run with every self-check on follows): **ok**, 6/6 ports, 21,139 s
+wall from the resume. Per node: FeatureExtraction 558 s (884 views, GPU SIFT), FeatureMatching
+824 s, StructureFromMotion 2436 s (839 poses), PrepareDenseScene 817 s, DepthMap 11,979 s (839
+depth maps at downscale 2 on 20-megapixel frames - 53 % of the 6.25 h of compute), DepthMapFilter
+460 s, Meshing 320 s, MeshFiltering 80 s, Texturing 5022 s (51 atlases of 8192^2, thirteen passes
+over the 839 cameras). The textured mesh is 4,055,488 vertices and 8,104,312 faces, 679 MB as OBJ.
+The two nodes that had never seen this many views, Meshing and Texturing, went through on the
+first attempt; Texturing's cost is the atlas count times the camera count, which is the thing to
+look at next for large sets.
