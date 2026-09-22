@@ -1564,7 +1564,9 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
     pc = AV / "src/aliceVision/fuseCut/PointCloud.cpp"
     patch(pc, "#include <aliceVision/fuseCut/Kdtree.hpp>" + NL,
           '#ifdef ALICEVISION_HAVE_GPU_FILTER' + NL + '#include "aliceVision/fuseCut/gpu/knnGPU.hpp"  // cheshire' + NL
-          + '#include <chrono>' + NL + '#include <future>' + NL + '#include <cstdint>' + NL + '#include <cstdlib>' + NL + '#include <limits>' + NL + '#endif' + NL)
+          + '#include <chrono>' + NL + '#include <future>' + NL + '#include <cstdint>' + NL + '#include <cstdlib>' + NL + '#include <limits>' + NL
+          # the visibility pass's digest and CHECK comparison (visibilitiesGPU.inc)
+          + '#include <algorithm>' + NL + '#include <cmath>' + NL + '#include <cstdio>' + NL + '#include <cstring>' + NL + '#include <string>' + NL + '#endif' + NL)
     t = pc.read_text(encoding="utf-8")
     if "createVerticesWithVisibilitiesUpstream" not in t:
         old = "void createVerticesWithVisibilities(const StaticVector<int>& cams,"
