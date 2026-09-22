@@ -13,7 +13,7 @@ Every harvested DLL is checked against the offload bundle it actually carries. A
 quietly kept an older architecture is the failure this guards - it produces a package that looks
 right and returns wrong data (docs/16), and it has happened here.
 """
-import os, re, shutil, subprocess, sys
+import os, re, shutil, subprocess, sys, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,11 +51,33 @@ FAMILIES = {
 def targets_of(path: Path) -> set:
     return {m.decode() for m in OFFLOAD.findall(path.read_bytes())}
 
-def run(cmd, env, log: Path):
+# Failures that say nothing about the source. On 2026-09-22 the 0.3.3 release build lost five of nine
+# hip6.2 targets this way: two links refused by the virus scanner holding the executable it had just
+# been handed ("being used by another process", "Access is denied."), three steps that could not start
+# at all (0xC0000142, STATUS_DLL_INIT_FAILED) when the session that launched the build went away.
+TRANSIENT = ('being used by another process', 'Access is denied.', 'code=3221225794')
+
+def run(cmd, env, log: Path, attempts: int = 3):
+    """Run one build step into its log. A failure whose output (this attempt's only) carries one of
+    the TRANSIENT signatures is retried: ninja resumes, so a retry relinks the one file that failed."""
     log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open('w', encoding='utf-8', errors='replace') as f:
-        p = subprocess.run(cmd, env=env, stdout=f, stderr=subprocess.STDOUT, shell=False)
-    return p.returncode
+    rc = 1
+    for attempt in range(1, attempts + 1):
+        start = log.stat().st_size if (attempt > 1 and log.exists()) else 0
+        with log.open('w' if attempt == 1 else 'a', encoding='utf-8', errors='replace') as f:
+            if attempt > 1:
+                f.write(f"\n=== retry {attempt} of {attempts}: the previous attempt failed on a locked file or a process that could not start ===\n")
+            rc = subprocess.run(cmd, env=env, stdout=f, stderr=subprocess.STDOUT, shell=False).returncode
+        if rc == 0:
+            return 0
+        with log.open('r', encoding='utf-8', errors='replace') as f:
+            f.seek(start)
+            tail = f.read()
+        if attempt == attempts or not any(sig in tail for sig in TRANSIENT):
+            return rc
+        print(f"    transient failure (locked file or process start), retrying {attempt + 1} of {attempts}")
+        time.sleep(15)
+    return rc
 
 def main(argv):
     if len(argv) < 3:
