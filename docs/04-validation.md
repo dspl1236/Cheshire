@@ -925,10 +925,10 @@ SfM fix announcing itself. All twelve configs passed - `base` 60 s through `blas
 `verify` (all six Meshing self-checks) and `texcheck` (padding, resize and the direct OBJ writer
 against Assimp). One trap on the way: the first launch reported DepthMap "NOT PAIRED" in every
 config with no `paired:` line for it, while the same script paired all eight nodes by hand a
-minute later and on the relaunch. The harness unpairs in a `finally` at the end of every run, and
-the launch came seconds after the previous run's unpair; the rename of the freshly restored
-`aliceVision_depthMapEstimation.exe` most likely lost to a virus-scanner lock. Not reproduced;
-noted so the next reader of a "NOT PAIRED DepthMap, 20 s" matrix retries before digging.
+minute later and on the relaunch. **Corrected the same afternoon:** this was not a scanner race.
+`meshroom-pair.cmd` had become LF-only (see "The package that could not pair DepthMap" below), and
+cmd.exe's label search failed the first `call :pair`; converting the file to CRLF before the relaunch
+is what made it pass.
 
 ## Rubble, 1678 views, RX 6750 XT: 1054 depth maps in, then the system disk (2026-09-22)
 
@@ -1086,3 +1086,35 @@ payload builder now retries build steps whose own output carries one of those si
 resumed build runs detached from the session, and both HIP build folders turned out to hold the
 old `libspqr.dll`/`libcholmod.dll` from earlier applocal deployments (moved out before the resume,
 as the CUDA tree's had been).
+
+**Linux CUDA (`cheshire-alicevision-cuda-linux-x64-cuda12.9.tar.gz`, sha `2809619a…`) on a GTX 1080 Ti
+in house-pc: 12 of 12, 7/7 ports.** `base` 85 s, `tiles` 80, `coarse` 50, `texbig` 85, `cpufallback`
+160, `verify` 115, `bridgecap` 105, `bridgespill` 210, `bridgeoff` 85, `texcheck` 95, `ds1` 210, `blast`
+235. Self-checks: max-flow 0 of 1,671,337 cells labelled differently, knn identical to nanoflann on
+all 8,790,341 queries, segments identical on all 1,671,337 cells, padding 0 of 67,108,864 texels,
+resize 0 of 50,331,648 channels - the resize check now exact on CUDA because the port kernels are
+built with `--fmad=false`. Bridge peaks under `blast`: DepthMap maps 553 MB and camera mipmaps
+372 MB, DepthMapFilter 790 MB, Meshing 845 MB, Texturing 4038 MB.
+
+## The package that could not pair DepthMap (2026-09-22)
+
+The first run of the bundled Windows package failed every configuration on both cards at 3/7 ports:
+DepthMap ran Meshroom's own CUDA binary ("This program needs a CUDA-Enabled GPU") and the three
+nodes after it never ran. Pairing by hand showed why: `The system cannot find the batch label
+specified - pair` on the first `call :pair`, while the seven later calls to the same label worked.
+`meshroom-pair.cmd` in the package was LF-only - the earlier CR count had come from Git Bash's
+`grep`, which misreports it; Python reads zero CRs - and cmd.exe's label search is unreliable in
+LF-only batch files, depending on where the label falls against its 512-byte reads.
+
+The file became LF-only in this checkout. It is the Windows checkout, written by Windows git with
+`core.autocrlf=true`, and `scripts/linux/wsl-bundle.sh` had been run on it from WSL: the script
+stashes local changes and hard-resets to `origin/main`, and Linux git, with no autocrlf, writes every
+text file with LF as it does. At 11:53 that rewrote `meshroom-pair.cmd`; the morning's first
+stage-gate failure had the same cause through the previous evening's build, not a scanner race. The
+stashes held nothing but line-ending churn and one regenerated patch export.
+
+Fixed four ways (04b30fe): `.gitattributes` pins `*.cmd`, `*.bat` and `*.ps1` to CRLF and `*.sh` to LF
+for whichever git writes the checkout; all three Windows packagers rewrite every staged batch file
+with CRLF and verify it; `wsl-bundle.sh` refuses a checkout under `/mnt`; and the bundle was rebuilt
+from the unchanged payloads, after which all eight nodes pair by hand, DepthMap first. The Windows
+CUDA zip built at 10:45 was unaffected: its copy had CRLF endings.
