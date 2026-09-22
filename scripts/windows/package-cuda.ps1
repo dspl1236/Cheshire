@@ -137,7 +137,7 @@ Write-Output "=== compressing"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 # Windows' own tar (bsdtar) by full path: with Git's usrin ahead on PATH the name resolves to GNU tar,
 # which reads 'D:' as a remote host and produces nothing (2026-09-22, the 0.3.3 package chain).
-& (Join-Path $env:SystemRoot 'System32	ar.exe') -a -c -f $zip -C (Split-Path $stage) (Split-Path $stage -Leaf)
+& (Join-Path $env:SystemRoot 'System32\tar.exe') -a -c -f $zip -C (Split-Path $stage) (Split-Path $stage -Leaf)
 if (-not (Test-Path $zip)) { throw "tar produced no archive at $zip" }
 "  $zip  ($([math]::Round((Get-Item $zip).Length/1MB,1)) MB)"
 "  sha256: $((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower())"
