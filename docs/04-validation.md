@@ -943,3 +943,25 @@ cache sat under the home directory on house-pc's 219 GB system disk, not the dat
 of depth maps filled it. The cache was moved to the data disk, symlinked back, and the run resumed
 from its 1054 finished chunks (`CHESHIRE_E2E_RESUME=1` clears the SUBMITTED and RUNNING statuses).
 The rule for this box: large-set outputs go under `/data`.
+
+## The False Door with the fixed SfM paired, local BA on, every self-check on: ok, 7 of 7 (2026-09-22)
+
+The same 884 photographs through the harness with the 0.3.3 stage tree's incrementalSfM paired,
+upstream's default local bundle adjustment, and every self-check switched on: **ok**, 7/7 ports,
+23,054 s wall, 6.40 h of compute. StructureFromMotion took 1636 s to 833 poses and 1,355,362
+landmarks - the fix fired twice, 5 and 6 views pending at the end of a pass, and the run went past
+the 830-834 range where upstream's binary died three times without a fatal. That is 800 s faster
+than the global-BA workaround (2436 s), which is the point of local BA. Per node: FeatureExtraction
+560 s, FeatureMatching 796 s, PrepareDenseScene 721 s, DepthMap 12,010 s, DepthMapFilter 521 s,
+Meshing 852 s (with five self-checks running alongside; 320 s without), MeshFiltering 83 s,
+Texturing 5847 s (52 atlases, with the padding and resize checks; 5022 s without). Textured mesh:
+4,071,685 vertices, 8,136,271 faces, 679 MB.
+
+**Every self-check, at 884 views, zero:** filterByPixSize identical to single-threaded upstream on
+all 52,305,736 slots and on each of the four later passes; GPU knn identical to nanoflann on all
+3,124,680,410 queries, twice; max-flow 0 of 29,080,924 cells labelled differently (the two flow
+totals differ as documented, docs/12); segmentFullOrFree identical on all 29,080,924 cells, both
+passes; tedge 175,896 cells on both sides, 0 beyond 1e-3 relative; GPU padding 0 of 67,108,864
+texels differing on each of 52 atlases; GPU resize 0 of 50,331,648 channels differing on each of
+52. VRAM peaks: DepthMap image  vram: 99 allocs, peak 1133 MB;map    vram: 848 allocs, peak 1146 MB;volume vram: 96 allocs, peak 7734 MB; DepthMapFilter other  vram: 120 allocs, peak 946 MB;other  vram: 120 allocs, peak 965 MB;other  vram: 120 allocs, peak 985 MB;other  vram: 85 allocs, peak 985 MB; Meshing 3910 MB, Texturing 14,162 MB on the 16 GB
+card - the largest allocation of the whole run, as on the engine bay. Planner:      70 planner 1: VRAM budget 11630.2 MB, 3 full R cameras + 7 tiles.
