@@ -1050,3 +1050,8 @@ factorisation with METIS ordering keeps up with CHOLMOD's supernodal one; the re
 the two runs' different trajectories (incremental SfM's initial pair and resection order vary run
 to run, 815 against 831 poses), not the solver. Upstream's `ALICEVISION_REQUIRE_CERES_WITH_SUITESPARSE`
 default is OFF and the build accepted the new Ceres without a change.
+
+**Linux, RX 6750 XT, the fixed bundle (b033b, pre-release tree): 12 of 12** through the mini6
+matrix on house-pc, `verify` and `texcheck` included - scored at 6/6 ports because the harness
+copy on that box predated the eighth node; the pairing script did pair `aliceVision_incrementalSfM`.
+The release bundle's run below is scored at 7/7 with the current harness.
