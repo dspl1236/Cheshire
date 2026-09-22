@@ -6,7 +6,7 @@ rem Eigen 3.4.1 / glog 0.7.1 / gflags 2.3.0 / OpenBLAS LAPACK as the prebuilt vc
 rem backend with METIS ordering (Apache 2) instead. Installs to build\ceres-nosuitesparse-install; the
 rem splice into tools\vcpkg-deps is a separate step.
 setlocal
-call "%~dp0..\scripts\env.cmd"
+call "%~dp0..\env.cmd"
 set R=%CHESHIRE_ROOT:\=/%
 set V=%R%/tools/vcpkg-deps/x64-windows-release
 set SRC=%R%/build/ceres-solver-2.2.0
