@@ -929,3 +929,17 @@ minute later and on the relaunch. The harness unpairs in a `finally` at the end 
 the launch came seconds after the previous run's unpair; the rename of the freshly restored
 `aliceVision_depthMapEstimation.exe` most likely lost to a virus-scanner lock. Not reproduced;
 noted so the next reader of a "NOT PAIRED DepthMap, 20 s" matrix retries before digging.
+
+## Rubble, 1678 views, RX 6750 XT: 1054 depth maps in, then the system disk (2026-09-22)
+
+The Mill 19 Rubble set (Mega-NeRF, 1678 drone photographs at 4608x3456) through Meshroom on
+house-pc with the 0.3.3-dev bundle: GPU SIFT 10 min for all views, ImageMatching 44,377 pairs,
+FeatureMatching 40 min, StructureFromMotion 4265 s to 1591 poses under Meshroom's own binary
+(no crash: this set's candidate search never ran dry mid-pass), PrepareDenseScene 1590 EXRs,
+then DepthMap at about 3 views a minute, 3 full R cameras + 5 tiles per view on the 12 GB card.
+It stopped at 1054 of 1590 after 9.3 hours: `Can't write output image file ... Failed OpenEXR
+write` followed by a segfault in the HIP runtime on the error path. Not a GPU fault - the run's
+cache sat under the home directory on house-pc's 219 GB system disk, not the data disk, and 124 GB
+of depth maps filled it. The cache was moved to the data disk, symlinked back, and the run resumed
+from its 1054 finished chunks (`CHESHIRE_E2E_RESUME=1` clears the SUBMITTED and RUNNING statuses).
+The rule for this box: large-set outputs go under `/data`.
