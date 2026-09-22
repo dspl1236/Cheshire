@@ -1,0 +1,9 @@
+# Windows batch files keep CRLF in every checkout, whichever git writes them. cmd.exe's label search
+# is unreliable in LF-only files: on 2026-09-22 the first `call :pair` in meshroom-pair.cmd failed with
+# "The system cannot find the batch label specified" after WSL git (no autocrlf) reset this shared
+# checkout and rewrote the file with LF, and DepthMap went unpaired on every card.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+# Scripts that run on Linux keep LF, so a copy taken from a Windows checkout runs as it is.
+*.sh text eol=lf

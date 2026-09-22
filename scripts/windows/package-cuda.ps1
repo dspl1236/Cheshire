@@ -133,6 +133,18 @@ Write-Output "=== staged: $n files, $mb MB"
 # A zip, like the Windows HIP package: Explorer opens one without a tool, and a .tar.gz asset on a
 # Windows release is a papercut even though tar.exe has shipped in Windows since 1809. bsdtar's -a
 # picks the format from the extension, which is far faster than Compress-Archive at this size.
+# Batch files with CRLF line endings, whatever the checkout holds: cmd.exe's label search is unreliable
+# in LF-only files (2026-09-22: `call :pair` failed after WSL git rewrote the shared checkout with LF).
+$batch = @(Get-ChildItem $stage -Recurse -Include *.cmd, *.bat -File)
+foreach ($f in $batch) {
+    $b = [IO.File]::ReadAllBytes($f.FullName)
+    $t = [Text.Encoding]::UTF8.GetString($b) -replace "`r`n", "`n" -replace "`n", "`r`n"
+    [IO.File]::WriteAllBytes($f.FullName, [Text.Encoding]::UTF8.GetBytes($t))
+    $lf = ([regex]::Matches($t, "`n")).Count; $crlf = ([regex]::Matches($t, "`r`n")).Count
+    if ($lf -ne $crlf) { throw "$($f.FullName): line endings still not CRLF" }
+}
+Write-Output "=== $($batch.Count) batch files written with CRLF line endings"
+
 Write-Output "=== compressing"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 # Windows' own tar (bsdtar) by full path: with Git's usrin ahead on PATH the name resolves to GNU tar,

@@ -24,6 +24,18 @@ set -u
 SUFFIX="${1:-$(date +%m%d%H%M)}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT" || exit 1
+# A checkout under /mnt is the Windows checkout, shared with Windows git. This script stashes local
+# changes and resets to origin/main, and Linux git rewrites every text file with LF as it does: on
+# 2026-09-22 that turned meshroom-pair.cmd LF-only and broke Windows pairing, and it stashed an
+# uncommitted patch export. Build from a WSL-side checkout (/root/cheshire) instead.
+case "$ROOT" in
+  /mnt/*)
+    if [ "${CHESHIRE_ALLOW_SHARED_CHECKOUT:-0}" != 1 ]; then
+      echo "refusing: $ROOT is the Windows checkout (shared with Windows git); run this from /root/cheshire" >&2
+      echo "  (git -C /root/cheshire fetch && bash /root/cheshire/scripts/linux/wsl-bundle.sh <suffix>)" >&2
+      exit 1
+    fi ;;
+esac
 
 export CHESHIRE_POPSIFT=ON
 export CHESHIRE_POPSIFT_INSTALL="${CHESHIRE_POPSIFT_INSTALL:-/mnt/d/MMI/cheshire/build/popsift-linux-install}"

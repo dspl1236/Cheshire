@@ -6,6 +6,25 @@ usage: package_windows.py <install dir> <vcpkg bin> <rocm bin> <llvm-objdump.exe
 import sys
 import os, shutil, subprocess, sys, zipfile
 from pathlib import Path
+
+
+def crlf_batch_files(root: Path) -> int:
+    """Rewrite every .cmd/.bat under root with CRLF line endings, and return how many there were.
+
+    cmd.exe's label search is unreliable in LF-only batch files: on 2026-09-22 a package whose
+    meshroom-pair.cmd had been rewritten with LF (WSL git resetting the shared checkout) failed its
+    first `call :pair` with "The system cannot find the batch label specified", and DepthMap went
+    unpaired on every card. The package must not depend on how the checkout was written."""
+    n = 0
+    for f in list(root.rglob('*.cmd')) + list(root.rglob('*.bat')):
+        b = f.read_bytes()
+        fixed = b.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+        if fixed != b:
+            f.write_bytes(fixed)
+        if fixed.count(b'\n') != fixed.count(b'\r\n'):
+            sys.exit(f"{f}: line endings still not CRLF")
+        n += 1
+    return n
 inst, vbin, rbin, objdump, outzip = map(Path, sys.argv[1:6])
 stage = outzip.with_suffix(''); shutil.rmtree(stage, ignore_errors=True); shutil.copytree(inst, stage)
 search = {p.name.lower(): p for d in (vbin, rbin) for p in d.glob('*.dll')}
@@ -100,6 +119,7 @@ shutil.copy2(Path(__file__).parent / 'windows' / 'meshroom-pair.cmd', stage / 'm
 launcher = Path(__file__).parent.parent / 'build' / 'meshroom-pair-launcher.exe'
 if launcher.exists(): shutil.copy2(launcher, stage / 'meshroom-pair-launcher.exe')
 else: print('WARNING: build/meshroom-pair-launcher.exe missing (run scripts/windows/build-launcher.cmd); zip has no pairing launcher')
+print(f'=== {crlf_batch_files(stage)} batch files written with CRLF line endings')
 with zipfile.ZipFile(outzip, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
     for p in stage.rglob('*'):
         if p.is_file(): z.write(p, p.relative_to(stage.parent))

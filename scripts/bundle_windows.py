@@ -32,6 +32,25 @@ import hashlib, os, re, shutil, sys, zipfile
 from collections import defaultdict
 from pathlib import Path
 
+
+def crlf_batch_files(root: Path) -> int:
+    """Rewrite every .cmd/.bat under root with CRLF line endings, and return how many there were.
+
+    cmd.exe's label search is unreliable in LF-only batch files: on 2026-09-22 a package whose
+    meshroom-pair.cmd had been rewritten with LF (WSL git resetting the shared checkout) failed its
+    first `call :pair` with "The system cannot find the batch label specified", and DepthMap went
+    unpaired on every card. The package must not depend on how the checkout was written."""
+    n = 0
+    for f in list(root.rglob('*.cmd')) + list(root.rglob('*.bat')):
+        b = f.read_bytes()
+        fixed = b.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+        if fixed != b:
+            f.write_bytes(fixed)
+        if fixed.count(b'\n') != fixed.count(b'\r\n'):
+            sys.exit(f"{f}: line endings still not CRLF")
+        n += 1
+    return n
+
 # Which GPU targets a binary carries, read from its offload bundle entry IDs
 # ("...amdhsa--gfx1031", "...amdhsa--gfx12-generic"). Detecting rather than hard-coding a list of
 # five means a newly GPU-bearing DLL is picked up without anyone remembering to add it.
@@ -202,6 +221,7 @@ def main(argv):
           f"target ({len(inputs)} targets, {len(families)} runtime "
           f"famil{'y' if len(families)==1 else 'ies'})")
 
+    print(f'=== {crlf_batch_files(stage)} batch files written with CRLF line endings')
     with zipfile.ZipFile(outzip, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for p in sorted(stage.rglob('*')):
             if p.is_file(): z.write(p, p.relative_to(stage.parent))

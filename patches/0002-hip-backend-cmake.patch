@@ -2380,10 +2380,10 @@ index 97f4ed5..3809a4e 100644
  
      return true;
 diff --git a/src/aliceVision/fuseCut/CMakeLists.txt b/src/aliceVision/fuseCut/CMakeLists.txt
-index 1b7f39c..4cd0f1e 100644
+index 1b7f39c..70c80a0 100644
 --- a/src/aliceVision/fuseCut/CMakeLists.txt
 +++ b/src/aliceVision/fuseCut/CMakeLists.txt
-@@ -24,6 +24,17 @@ set(fuseCut_files_sources
+@@ -24,6 +24,21 @@ set(fuseCut_files_sources
      Mesher.cpp
  )
  
@@ -2392,6 +2392,10 @@ index 1b7f39c..4cd0f1e 100644
 +if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
 +    list(APPEND fuseCut_files_headers gpu/depthMapFilterGPU.hpp gpu/graphVoteGPU.hpp gpu/maxflowGPU.hpp gpu/knnGPU.hpp gpu/simBlurGPU.hpp)
 +    list(APPEND fuseCut_files_sources gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu gpu/maxflowGPU.cu gpu/knnGPU.cu gpu/simBlurGPU.cu)
++    if (ALICEVISION_HAVE_CUDA AND NOT ALICEVISION_HAVE_HIP)
++        # cheshire: the ports round a*b+c twice, as the CPU reference does (nvcc ignores the clang pragma)
++        set_source_files_properties(gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu gpu/maxflowGPU.cu gpu/knnGPU.cu gpu/simBlurGPU.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
++    endif()
 +    if (ALICEVISION_HAVE_HIP)
 +        set_source_files_properties(gpu/depthMapFilterGPU.cu gpu/graphVoteGPU.cu gpu/maxflowGPU.cu gpu/knnGPU.cu gpu/simBlurGPU.cu PROPERTIES LANGUAGE HIP)
 +    endif()
@@ -2401,7 +2405,7 @@ index 1b7f39c..4cd0f1e 100644
  alicevision_add_library(aliceVision_fuseCut
      SOURCES ${fuseCut_files_headers} ${fuseCut_files_sources}
      PUBLIC_LINKS
-@@ -37,9 +48,14 @@ alicevision_add_library(aliceVision_fuseCut
+@@ -37,9 +52,14 @@ alicevision_add_library(aliceVision_fuseCut
          Boost::container
      PRIVATE_LINKS
          nanoflann::nanoflann
@@ -3480,10 +3484,10 @@ index 1f29fe2..7055c2a 100644
                     image::Image<float>& outBuffer,
                     const std::string& kernel = "gaussian",
 diff --git a/src/aliceVision/matching/CMakeLists.txt b/src/aliceVision/matching/CMakeLists.txt
-index a7544f6..af70d7c 100644
+index a7544f6..381f19b 100644
 --- a/src/aliceVision/matching/CMakeLists.txt
 +++ b/src/aliceVision/matching/CMakeLists.txt
-@@ -30,6 +30,17 @@ set(matching_files_sources
+@@ -30,6 +30,21 @@ set(matching_files_sources
      svgVisualization.cpp
  )
  
@@ -3492,6 +3496,10 @@ index a7544f6..af70d7c 100644
 +if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
 +    list(APPEND matching_files_headers gpu/gpuMatcher.hpp gpu/ArrayMatcher_gpuBruteForce.hpp)
 +    list(APPEND matching_files_sources gpu/gpuMatcher.cu)
++    if (ALICEVISION_HAVE_CUDA AND NOT ALICEVISION_HAVE_HIP)
++        # cheshire: the ports round a*b+c twice, as the CPU reference does (nvcc ignores the clang pragma)
++        set_source_files_properties(gpu/gpuMatcher.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
++    endif()
 +    if (ALICEVISION_HAVE_HIP)
 +        set_source_files_properties(gpu/gpuMatcher.cu PROPERTIES LANGUAGE HIP)
 +    endif()
@@ -3501,7 +3509,7 @@ index a7544f6..af70d7c 100644
  alicevision_add_library(aliceVision_matching
      SOURCES ${matching_files_headers} ${matching_files_sources}
      PUBLIC_LINKS
-@@ -42,8 +53,14 @@ alicevision_add_library(aliceVision_matching
+@@ -42,8 +57,14 @@ alicevision_add_library(aliceVision_matching
      PRIVATE_LINKS
          Boost::boost
          ${FLANN_LIBRARIES}
@@ -3565,10 +3573,10 @@ index 00d1c75..72c300e 100644
              {
                  case BRUTE_FORCE_L2:
 diff --git a/src/aliceVision/mesh/CMakeLists.txt b/src/aliceVision/mesh/CMakeLists.txt
-index ed90dd3..9f87b0c 100644
+index ed90dd3..b10258e 100644
 --- a/src/aliceVision/mesh/CMakeLists.txt
 +++ b/src/aliceVision/mesh/CMakeLists.txt
-@@ -30,6 +30,33 @@ set(mesh_files_sources
+@@ -30,6 +30,37 @@ set(mesh_files_sources
      MeshIntersection.cpp
  )
  
@@ -3593,6 +3601,10 @@ index ed90dd3..9f87b0c 100644
 +    endforeach()
 +    list(APPEND mesh_files_headers gpu/texturingGPU.hpp)
 +    list(APPEND mesh_files_sources gpu/texturingGPU.cu)
++    if (ALICEVISION_HAVE_CUDA AND NOT ALICEVISION_HAVE_HIP)
++        # cheshire: the ports round a*b+c twice, as the CPU reference does (nvcc ignores the clang pragma)
++        set_source_files_properties(gpu/texturingGPU.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
++    endif()
 +    if (ALICEVISION_HAVE_HIP)
 +        set_source_files_properties(gpu/texturingGPU.cu PROPERTIES LANGUAGE HIP)
 +    endif()
@@ -3602,7 +3614,7 @@ index ed90dd3..9f87b0c 100644
  alicevision_add_library(aliceVision_mesh
      SOURCES ${mesh_files_headers} ${mesh_files_sources}
      PUBLIC_LINKS
-@@ -41,4 +68,9 @@ alicevision_add_library(aliceVision_mesh
+@@ -41,4 +72,9 @@ alicevision_add_library(aliceVision_mesh
          aliceVision_system
          Boost::boost
          OpenMeshCore
