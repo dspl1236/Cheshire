@@ -979,3 +979,14 @@ has ever run on the CUDA build - the Meshing checks compare labels, counts and v
 which is why nothing said so before. Generator step 5l gives the port sources `--fmad=false` on
 the CUDA backend; upstream's own depth-map kernels are left as they were built, since byte-identity
 with the CUDA reference depends on it. The rebuilt package's matrix follows.
+
+**A second disk incident on the same run (2026-09-22).** During the 124 GB cache move, one SATA
+write to house-pc's data disk timed out (`sd 5:0:0:0: [sdb] FAILED Result: hostbyte=DID_TIME_OUT`,
+31 s command age) and ext4 reported "potential data loss" for one inode: PrepareDenseScene's
+undistorted image for view 1387742125. SMART is clean on both disks (0 reallocated, 0 pending, 0
+CRC errors) and nothing has recurred. The file decodes as damaged - `EXR_ERR_CORRUPT_CHUNK` on every
+channel with the OpenEXR reader - yet Texturing read it three times with "contributions to 3 texture
+files" and no error, so OpenImageIO tolerated the bad chunk and that camera contributed whatever
+came out of it to three atlases. One camera of 1590; the mesh and counts are unaffected, the
+texture of the affected patches is suspect, and the run stands as a scale test with that caveat.
+The lesson is the harness's: a resumed run has no check that its cached inputs still decode.
