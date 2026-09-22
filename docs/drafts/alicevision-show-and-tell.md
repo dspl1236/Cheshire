@@ -24,16 +24,17 @@ Meshroom 2023.3's `photogrammetry` pipeline, default parameters except `describe
 
 | node | time | notes |
 |---|---|---|
-| FeatureExtraction | 10 min | 1678 views of GPU SIFT (HIP PopSift) |
-| ImageMatching | seconds | 44,377 pairs selected |
-| FeatureMatching | 40 min | exact GPU brute-force 2-NN, then AC-RANSAC on 2 cores |
-| StructureFromMotion | 71 min | 1591 poses, upstream's binary, CPU |
-| PrepareDenseScene | TBD | 1590 undistorted EXR, 98 GB |
-| DepthMap | ~9 h | 1590 full-resolution depth maps, 3 per minute; bridge: 3 full R cameras + 5 tiles per view on 12 GB |
-| DepthMapFilter | ~40 min | on the GPU |
-| Meshing | 17 min | GPU votes, GPU max-flow, GPU visibility; 8 GB RAM peak, no swap |
+| FeatureExtraction | 756 s | 1678 views of GPU SIFT (HIP PopSift), 42 chunks |
+| ImageMatching | 37 s | 44,377 pairs selected |
+| FeatureMatching | 2265 s | exact GPU brute-force 2-NN, then AC-RANSAC on 2 cores |
+| StructureFromMotion | 4291 s | 1591 poses, upstream's binary, CPU |
+| PrepareDenseScene | 3364 s | 1590 undistorted EXR, 98 GB |
+| DepthMap | 34,267 s | 1590 full-resolution (downscale 2) depth maps, 140 chunks; bridge: 3 full R cameras + 5 tiles per view on 12 GB |
+| DepthMapFilter | 1545 s | on the GPU |
+| Meshing | 1020 s | GPU votes, GPU max-flow, GPU visibility; 8 GB RAM peak, no swap |
+| MeshFiltering | 37 s | |
 | Texturing | TBD | |
-| total | TBD | |
+| total compute | TBD (about 14 h) | |
 
 What that means in plain terms: stock Meshroom on this box would spend about a day on CPU
 feature extraction alone before the parts that need a CUDA card, which it does not have. The CPU is
