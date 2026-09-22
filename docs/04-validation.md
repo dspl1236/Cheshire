@@ -1032,3 +1032,21 @@ FeatureMatching 2265 s, StructureFromMotion 4291 s (1591 poses, upstream's binar
 share of the 16 hours is the SfM and the AC-RANSAC half of matching; the rest was the RX 6750 XT.
 Two disk incidents along the way (the system disk filling, one write timeout that damaged one
 undistorted image) are recorded above; the result stands with the one-camera texture caveat.
+
+**The bundle-adjustment cost of leaving SuiteSparse, measured.** Two replays of the False Door's
+StructureFromMotion on the same cached features and matches, upstream's default local BA,
+`CHESHIRE_BA_PROFILE=1`, on an idle RX 9070 box (a first attempt overlapped the CUDA rebuild and
+was discarded: its Jacobian time, which does not depend on the sparse backend, was 903 s against
+421 s):
+
+| Ceres | SfM wall | BA solves | BA total | Jacobians | linear solver | poses / landmarks |
+|---|---|---|---|---|---|---|
+| SuiteSparse (CHOLMOD/SPQR) | 1944 s | 938 | 1069 s | 597 s | 323 s | 815 / 1,342,489 |
+| Eigen sparse + METIS (0.3.3) | 1498 s | 904 | 733 s | 421 s | 304 s | 831 / 1,354,886 |
+
+The linear solver, the only part the backend touches, is 304 s against 323 s: no penalty at this
+size. The reduced camera system of a few hundred poses is small enough that Eigen's simplicial
+factorisation with METIS ordering keeps up with CHOLMOD's supernodal one; the rest of the gap is
+the two runs' different trajectories (incremental SfM's initial pair and resection order vary run
+to run, 815 against 831 poses), not the solver. Upstream's `ALICEVISION_REQUIRE_CERES_WITH_SUITESPARSE`
+default is OFF and the build accepted the new Ceres without a change.
