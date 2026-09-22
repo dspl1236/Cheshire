@@ -1,6 +1,8 @@
 # Draft: comment for alicevision/Meshroom issue #2344 ("map::at" crash in StructureFromMotion)
 
 *Posted 2026-09-22: https://github.com/alicevision/Meshroom/issues/2344#issuecomment-5777656385
+Edited 2026-09-22: reflowed, and the verification split into its two runs (same inputs: 830 poses,
+fix fired three times; end to end on fresh features: 833 poses, twice).
 
 Original note: Review before posting; the diff is against AliceVision `develop` as vendored in
 Cheshire (third_party/aliceVision, 2026 upstream) and applies to 2023.3 with the same lines.*
@@ -83,8 +85,10 @@ if (skipped != 0)
     ALICEVISION_LOG_WARNING("local BA graph: " << skipped << " edges to posed views the graph was never handed were skipped");
 ```
 
-Verified: the fixed binary on the same features and matches, local BA on, completed with 833 poses
-and 1,355,362 landmarks (the fix fired on two passes, 5 and 6 pending views; the guard never had to);
-the same set through Meshroom end to end afterwards. Without the fix, `useLocalBA=False` is a
+Verified: the fixed binary on the same features and matches, local BA on, completed with 830 poses
+and 1,354,686 landmarks (the fix fired on three passes, with 5, 7 and 9 views pending; the guard never
+had to); then the same set through Meshroom end to end, 833 poses and 1,355,362 landmarks (two
+passes, 5 and 6 pending; its matches were byte-identical, so the difference is incremental SfM's
+run-to-run variation). Without the fix, `useLocalBA=False` is a
 workaround (every BA global: 839 poses, 2436 s against 1636 s with the fix). Happy to open a PR if
 that is useful.

@@ -901,7 +901,7 @@ runs.
 **Verified on the same features and matches, local BA on (upstream's default), with the fixed
 binary from the 0.3.3 stage tree: completed.** 830 poses and 1,354,686 landmarks in 3 passes
 (64 resection groups), against 839 poses and 1,351,101 landmarks from the `useLocalBA=False`
-workaround run that also got through (2383 s, every bundle adjustment global). The fix fired
+workaround run that also got through (2436 s, every bundle adjustment global). The fix fired
 three times - 5, 7 and 9 views pending at the end of a pass - which is exactly the count of
 resected-but-orphaned views the debug run showed, and the graph guard never had to fire: with
 the engine handing every view over, no edge reaches a view without a node. Three of three
@@ -950,7 +950,10 @@ The same 884 photographs through the harness with the 0.3.3 stage tree's increme
 upstream's default local bundle adjustment, and every self-check switched on: **ok**, 7/7 ports,
 23,054 s wall, 6.40 h of compute. StructureFromMotion took 1636 s to 833 poses and 1,355,362
 landmarks - the fix fired twice, 5 and 6 views pending at the end of a pass, and the run went past
-the 830-834 range where upstream's binary died three times without a fatal. That is 800 s faster
+the 830-834 range where upstream's binary died three times without a fatal. Its inputs were the
+crash run's: all 44 match files byte-identical, and 1,767 of 1,768 feature files (one descriptor file,
+view 216823232, differs in a few bytes and changes no match), so its 833 poses against the replay's
+830 are incremental SfM's own run-to-run variation, not different input. That is 800 s faster
 than the global-BA workaround (2436 s), which is the point of local BA. Per node: FeatureExtraction
 560 s, FeatureMatching 796 s, PrepareDenseScene 721 s, DepthMap 12,010 s, DepthMapFilter 521 s,
 Meshing 852 s (with five self-checks running alongside; 320 s without), MeshFiltering 83 s,
