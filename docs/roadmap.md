@@ -93,7 +93,13 @@ L items can slide.
   backprojecting pixels (23-63 s), camera by camera - while the knn kernels overlap and the GPU
   waits (device wait 1.7 s of 72 s in pass 1). The work is to move backprojection and vote
   collection onto the device with each point's camera list in upstream's order, checked in-process.
-  A design panel is running (2026-09-22). Pass 2's 133 s against 66 s in two runs is unexplained.
+  Designed 2026-09-22 (three designs judged; the plan is in the session record and docs/04). Done the
+  same day: step 1, the knn contraction pragma (5d6045b); step 2, the per-pass digest, diagnostics
+  and the votes check against a host-fed reference (7213bfa); step 3, bucketed host votes (ebc33f0):
+  exact on 6, 41 and 833 views, visibility passes 110.5 -> 94.5 s and Meshing 357-439 -> 340 s at 833
+  views, pass 1 now at the device's 62 ms per camera. Next: measure the kernel time on an idle box
+  (it rose once the host stopped holding it up), the Linux rerun for step 1, then steps 4-7, the
+  device votes behind CHESHIRE_GPU_VIS_VOTES with guards and recovery. The 133 s pass 2 was load.
 - **Fusion: the rest** (M). filterByPixSize's CPU kd-tree is about 16 s at 833 views (the GPU
   radius filter that was briefed was never built), removeInvalidPoints plus margin setup about 9 s,
   and the depth-map load 43 s warm or 111 s cold, which is disk and EXR decode, not a GPU job.
