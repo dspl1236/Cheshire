@@ -347,6 +347,10 @@ Expected: mask agreement 1.000, median relative depth error 0.0000, 97-99 % of p
 
 ## Roadmap
 
+**The current plan is [docs/roadmap.md](docs/roadmap.md)**, rebuilt on 2026-09-22 from every open item
+in the docs, the validation log and the code, each checked against the tree. The numbered list
+below is how the project got here; parts of it are out of date, and docs/roadmap.md lists which.
+
 The aim is a small PC with a big GPU that runs a Meshroom job as fast as a workstation and just
 as precisely. In order, each timed on the 41-view and engine bay sets and checked against the CPU
 output - bit-identity where the same computation moved to another device, and equivalence at the
