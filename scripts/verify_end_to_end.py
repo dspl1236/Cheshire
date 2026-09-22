@@ -55,6 +55,7 @@ GPU_MARKERS = {
                           r"sim blur: Gaussian on the GPU",
                           r"visibility knn on the GPU"],
     "Texturing":         [r"texturing: pyramid \+ rasterisation on"],
+    "StructureFromMotion": [r"cheshire: incremental SfM: a resection pass that ends without a bundle adjustment gets one"],
 }
 # ... and the lines printed when switched off. FeatureExtraction and DepthMap have no such switch,
 # so they stay on the GPU in the fallback run and keep their markers. Sim blur announces its
@@ -70,6 +71,7 @@ CPU_MARKERS = {
                           r"max-flow: disabled by CHESHIRE_GPU_MAXFLOW=0",
                           r"visibility knn: disabled by CHESHIRE_GPU_VIS=0"],
     "Texturing":         [r"texturing: disabled by CHESHIRE_GPU_TEX=0"],
+    "StructureFromMotion": GPU_MARKERS["StructureFromMotion"],
 }
 SILENT_PORTS = None  # 0.3.2: no port is silent on either path any more
 
@@ -116,6 +118,8 @@ BINARY = {
     "DepthMapFilter":    "aliceVision_depthMapFiltering",
     "Meshing":           "aliceVision_meshing",
     "Texturing":         "aliceVision_texturing",
+    # 0.3.3: the eighth paired node. CPU only; its marker is the fix announcing itself.
+    "StructureFromMotion": "aliceVision_incrementalSfM",
 }
 
 # Override paths are Meshroom ATTRIBUTE paths, not AliceVision command-line flags, and the two are
@@ -264,8 +268,12 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     cmd = [str(batch),
            "--input", str(photos), "--output", str(out / "out"), "--cache", str(cache),
            "--pipeline", "photogrammetry"]
-    if cfg["overrides"]:
-        cmd += ["--paramOverrides"] + cfg["overrides"]
+    # CHESHIRE_E2E_OVERRIDES adds Meshroom parameter overrides to any config without editing the table
+    # (space-separated, e.g. "StructureFromMotion:useLocalBA=False"), for one-off runs such as the
+    # 884-view False Door where incremental SfM's local bundle adjustment crashes upstream.
+    overrides = list(cfg["overrides"]) + os.environ.get("CHESHIRE_E2E_OVERRIDES", "").split()
+    if overrides:
+        cmd += ["--paramOverrides"] + overrides
 
     log = out / "meshroom_batch.log"
     t0 = time.time()
@@ -358,7 +366,7 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
               f" - the Cheshire binary ran and its GPU port did not announce itself")
     if rc != 0:
         # Name the node that failed and whose binary it was. The skull-turntable run of 2026-09-20
-        # died in StructureFromMotion, a node the launcher never pairs: Meshroom's own
+        # died in StructureFromMotion, a node the launcher did not pair before 0.3.3: Meshroom's own
         # aliceVision_incrementalSfM hit a Ceres CHECK (zero-rotation pose after resection), and the
         # report should say so rather than leave the reader to work out from the log that no
         # Cheshire code ran there.

@@ -3310,6 +3310,104 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
         t = t.replace(old, new.replace("\n", NL), 1)
         tx.write_text(t, encoding="utf-8", newline="")
 
+    # 5k. Incremental SfM: the resection pass that ends without its bundle adjustment. The main
+    #     loop runs a BA every N resected views; when findNextBestViews finds no candidate above its
+    #     score threshold the loop exits with the views resected since the last BA still pending -
+    #     never bundle-adjusted, never handed to the local-BA graph - and the next pass records them
+    #     as previously reconstructed. They keep their poses and observe landmarks, so a later new
+    #     view's edge to one of them is _nodePerViewId.at() on a view the graph never saw: the
+    #     "[fatal] invalid map<K, T> key" of Meshroom #2344, reproduced three times on the 884-view
+    #     False Door at views 830-834 (docs/04). Two changes: the pass finishes with the BA it owed
+    #     (CHESHIRE_SFM_PENDING_BA=0 restores upstream), and the graph skips an edge whose endpoint
+    #     it does not hold instead of throwing. Both announce.
+    eng = AV / "src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp"
+    t = eng.read_text(encoding="utf-8")
+    if "CHESHIRE_SFM_PENDING_BA" not in t:
+        old = "    std::size_t globalIteration = 0;" + NL
+        if t.count(old) != 1:
+            sys.exit("globalIteration declaration not found once in ReconstructionEngine_sequentialSfM.cpp")
+        t = t.replace(old, old + r"""    // cheshire: see the block after the resection loop (scripts/apply_hip_patch.py, step 5k)
+    static const bool cheshirePendingBA = [] {
+        const char* v = std::getenv("CHESHIRE_SFM_PENDING_BA");
+        return v == nullptr || std::string(v) != "0";
+    }();
+    if (cheshirePendingBA)
+        ALICEVISION_LOG_INFO("cheshire: incremental SfM: a resection pass that ends without a bundle adjustment gets one before the next pass (CHESHIRE_SFM_PENDING_BA=0 restores upstream)");
+    else
+        ALICEVISION_LOG_INFO("cheshire: incremental SfM: pending bundle adjustment disabled by CHESHIRE_SFM_PENDING_BA=0 (upstream behaviour)");
+""".replace("\n", NL), 1)
+        old = ('        if (_params.rig.useRigConstraint && !_sfmData.getRigs().empty())' + NL + '        {' + NL
+               + '            ALICEVISION_LOG_INFO("Rig(s) calibration start");')
+        if t.count(old) != 1:
+            sys.exit("rig calibration block not found once in ReconstructionEngine_sequentialSfM.cpp")
+        t = t.replace(old, r"""        // cheshire: the views resected since the last bundle adjustment, when the loop above ended
+        // without one (no candidate reached the score threshold). Upstream leaves them with their
+        // resection pose, no refinement and no node in the local-BA graph, and the next pass counts
+        // them as old; a later edge to one of them throws. Finish the pass as a full group would.
+        // (scripts/apply_hip_patch.py, step 5k)
+        if (cheshirePendingBA)
+        {
+            std::set<IndexT> pendingViews;
+            const std::set<IndexT> reconstructedNow = _sfmData.getValidViews();
+            std::set_difference(reconstructedNow.begin(), reconstructedNow.end(),
+                                prevReconstructedViews.begin(), prevReconstructedViews.end(),
+                                std::inserter(pendingViews, pendingViews.end()));
+            if (!pendingViews.empty())
+            {
+                ALICEVISION_LOG_INFO("cheshire: " << pendingViews.size() << " views resected since the last bundle adjustment were still pending when the resection loop ended; triangulating and bundle-adjusting them");
+                triangulate(prevReconstructedViews, pendingViews);
+                bundleAdjustment(pendingViews);
+                prevReconstructedViews = _sfmData.getValidViews();
+                registerChanges(linkedViewIds, pendingViews);
+                std::set_union(potentials.begin(), potentials.end(), linkedViewIds.begin(), linkedViewIds.end(),
+                               std::inserter(potentials, potentials.end()));
+                ++_resectionId;
+            }
+        }
+
+""".replace("\n", NL) + old, 1)
+        for h in ("<cstdlib>", "<iterator>", "<string>"):
+            if ("#include " + h) not in t:
+                inc0 = t.index("#include")
+                t = t[:inc0] + "#include " + h + "  // cheshire: step 5k" + NL + t[inc0:]
+        eng.write_text(t, encoding="utf-8", newline="")
+
+    lbg = AV / "src/aliceVision/sfm/LocalBundleAdjustmentGraph.cpp"
+    t = lbg.read_text(encoding="utf-8")
+    if "cheshireSkippedEdges" not in t:
+        old = ("        for (const Pair& edge : newEdges)" + NL
+               + "            _graph.addEdge(_nodePerViewId.at(edge.first), _nodePerViewId.at(edge.second));" + NL)
+        if t.count(old) != 1:
+            sys.exit("edge loop not found once in LocalBundleAdjustmentGraph.cpp")
+        t = t.replace(old, r"""        // cheshire: an edge to a posed view the graph was never handed is skipped, not thrown on
+        // (scripts/apply_hip_patch.py, step 5k; the engine now hands every view over, this is the guard)
+        std::size_t cheshireSkippedEdges = 0;
+        for (const Pair& edge : newEdges)
+        {
+            const auto a = _nodePerViewId.find(edge.first);
+            const auto b = _nodePerViewId.find(edge.second);
+            if (a == _nodePerViewId.end() || b == _nodePerViewId.end())
+            {
+                ++cheshireSkippedEdges;
+                continue;
+            }
+            _graph.addEdge(a->second, b->second);
+        }
+        if (cheshireSkippedEdges != 0)
+            ALICEVISION_LOG_WARNING("cheshire: local BA graph: " << cheshireSkippedEdges << " edges to posed views the graph was never handed were skipped (upstream throws here)");
+""".replace("\n", NL), 1)
+        lbg.write_text(t, encoding="utf-8", newline="")
+
+    # the switch in the --help text, which is what meshroom-pair gates a package on
+    msf = AV / "src/software/pipeline/main_incrementalSfM.cpp"
+    t = msf.read_text(encoding="utf-8")
+    if "CHESHIRE_SFM_PENDING_BA" not in t:
+        old = 'CmdLine cmdline("Sequential/Incremental reconstruction.' + chr(92) + 'n"'
+        if t.count(old) != 1:
+            sys.exit("incrementalSfM CmdLine description not found once")
+        t = t.replace(old, 'CmdLine cmdline("Sequential/Incremental reconstruction (cheshire: a resection pass that ends without a bundle adjustment gets one; CHESHIRE_SFM_PENDING_BA=0 restores upstream).' + chr(92) + 'n"', 1)
+        msf.write_text(t, encoding="utf-8", newline="")
+
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
     #     when the cards in front of us are both compute 6.1. FORCE beats -D on the command line, so

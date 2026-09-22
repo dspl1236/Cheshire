@@ -4643,6 +4643,34 @@ index bb91d4e..1043533 100644
                      better = true;
                      minNFA = best.first;
                      vec_inliers.resize(best.second);
+diff --git a/src/aliceVision/sfm/LocalBundleAdjustmentGraph.cpp b/src/aliceVision/sfm/LocalBundleAdjustmentGraph.cpp
+index 9500f70..b12c078 100644
+--- a/src/aliceVision/sfm/LocalBundleAdjustmentGraph.cpp
++++ b/src/aliceVision/sfm/LocalBundleAdjustmentGraph.cpp
+@@ -296,8 +296,22 @@ void LocalBundleAdjustmentGraph::updateGraphWithNewViews(const sfmData::SfMData&
+         std::vector<Pair> newEdges = getNewEdges(sfmData, map_tracksPerView, addedViewsId, minNbOfMatches, minNbOfEdgesPerView);
+         numAddedEdges = newEdges.size();
+ 
++        // cheshire: an edge to a posed view the graph was never handed is skipped, not thrown on
++        // (scripts/apply_hip_patch.py, step 5k; the engine now hands every view over, this is the guard)
++        std::size_t cheshireSkippedEdges = 0;
+         for (const Pair& edge : newEdges)
+-            _graph.addEdge(_nodePerViewId.at(edge.first), _nodePerViewId.at(edge.second));
++        {
++            const auto a = _nodePerViewId.find(edge.first);
++            const auto b = _nodePerViewId.find(edge.second);
++            if (a == _nodePerViewId.end() || b == _nodePerViewId.end())
++            {
++                ++cheshireSkippedEdges;
++                continue;
++            }
++            _graph.addEdge(a->second, b->second);
++        }
++        if (cheshireSkippedEdges != 0)
++            ALICEVISION_LOG_WARNING("cheshire: local BA graph: " << cheshireSkippedEdges << " edges to posed views the graph was never handed were skipped (upstream throws here)");
+ 
+         numAddedEdges += addIntrinsicEdgesToTheGraph(sfmData, addedViewsId);
+     }
 diff --git a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
 index bd0bf27..c73e84a 100644
 --- a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
@@ -4689,6 +4717,68 @@ index 1f23958..5491985 100644
          int N = pointCloud.pts.size();
  
          if (N == 0)
+diff --git a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
+index 097f8c9..27fa6f0 100644
+--- a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
++++ b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
+@@ -5,6 +5,9 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <string>  // cheshire: step 5k
++#include <iterator>  // cheshire: step 5k
++#include <cstdlib>  // cheshire: step 5k
+ #include <aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.hpp>
+ #include <aliceVision/sfm/pipeline/RelativePoseInfo.hpp>
+ #include <aliceVision/sfm/utils/statistics.hpp>
+@@ -452,6 +455,15 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+     aliceVision::system::Timer timer;
+     std::size_t nbValidPoses = 0;
+     std::size_t globalIteration = 0;
++    // cheshire: see the block after the resection loop (scripts/apply_hip_patch.py, step 5k)
++    static const bool cheshirePendingBA = [] {
++        const char* v = std::getenv("CHESHIRE_SFM_PENDING_BA");
++        return v == nullptr || std::string(v) != "0";
++    }();
++    if (cheshirePendingBA)
++        ALICEVISION_LOG_INFO("cheshire: incremental SfM: a resection pass that ends without a bundle adjustment gets one before the next pass (CHESHIRE_SFM_PENDING_BA=0 restores upstream)");
++    else
++        ALICEVISION_LOG_INFO("cheshire: incremental SfM: pending bundle adjustment disabled by CHESHIRE_SFM_PENDING_BA=0 (upstream behaviour)");
+ 
+     do
+     {
+@@ -544,6 +556,31 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+             ++_resectionId;
+         }
+ 
++        // cheshire: the views resected since the last bundle adjustment, when the loop above ended
++        // without one (no candidate reached the score threshold). Upstream leaves them with their
++        // resection pose, no refinement and no node in the local-BA graph, and the next pass counts
++        // them as old; a later edge to one of them throws. Finish the pass as a full group would.
++        // (scripts/apply_hip_patch.py, step 5k)
++        if (cheshirePendingBA)
++        {
++            std::set<IndexT> pendingViews;
++            const std::set<IndexT> reconstructedNow = _sfmData.getValidViews();
++            std::set_difference(reconstructedNow.begin(), reconstructedNow.end(),
++                                prevReconstructedViews.begin(), prevReconstructedViews.end(),
++                                std::inserter(pendingViews, pendingViews.end()));
++            if (!pendingViews.empty())
++            {
++                ALICEVISION_LOG_INFO("cheshire: " << pendingViews.size() << " views resected since the last bundle adjustment were still pending when the resection loop ended; triangulating and bundle-adjusting them");
++                triangulate(prevReconstructedViews, pendingViews);
++                bundleAdjustment(pendingViews);
++                prevReconstructedViews = _sfmData.getValidViews();
++                registerChanges(linkedViewIds, pendingViews);
++                std::set_union(potentials.begin(), potentials.end(), linkedViewIds.begin(), linkedViewIds.end(),
++                               std::inserter(potentials, potentials.end()));
++                ++_resectionId;
++            }
++        }
++
+         if (_params.rig.useRigConstraint && !_sfmData.getRigs().empty())
+         {
+             ALICEVISION_LOG_INFO("Rig(s) calibration start");
 diff --git a/src/cmake/config.hpp.in b/src/cmake/config.hpp.in
 index 27e3ec0..027ba01 100644
 --- a/src/cmake/config.hpp.in
@@ -4779,6 +4869,19 @@ index cc6313f..7e5c3ac 100644
 +    const std::string filePrefix = std::to_string(legacyChunkIndex >= 0 ? legacyChunkIndex : rangeIteration) + ".";  // cheshire
  
      ALICEVISION_LOG_INFO(std::to_string(mapPutativesMatches.size()) << " putative image pair matches");
+ 
+diff --git a/src/software/pipeline/main_incrementalSfM.cpp b/src/software/pipeline/main_incrementalSfM.cpp
+index cfbdfe8..560e390 100644
+--- a/src/software/pipeline/main_incrementalSfM.cpp
++++ b/src/software/pipeline/main_incrementalSfM.cpp
+@@ -166,7 +166,7 @@ int aliceVision_main(int argc, char** argv)
+          "If set to true, the current state of the scene will be dumped as an SfMData file every 3 resections.");
+     // clang-format on
+ 
+-    CmdLine cmdline("Sequential/Incremental reconstruction.\n"
++    CmdLine cmdline("Sequential/Incremental reconstruction (cheshire: a resection pass that ends without a bundle adjustment gets one; CHESHIRE_SFM_PENDING_BA=0 restores upstream).\n"
+                     "This program performs incremental SfM (Initial Pair Essential + Resection).\n"
+                     "AliceVision incrementalSfM");
  
 diff --git a/src/software/pipeline/main_meshing.cpp b/src/software/pipeline/main_meshing.cpp
 index 4fe193b..a271a2f 100644

@@ -30,7 +30,7 @@ if "%PKG%"=="" ( echo usage: %~nx0 ^<Meshroom dir^> ^<Cheshire package dir^> ^| 
 set BIN=%MR%\aliceVision\bin
 if not exist "%BIN%\" ( echo %BIN% not found: is %MR% a Meshroom 2023.x Windows install? & exit /b 1 )
 if /i "%PKG%"=="--unpair" (
-  for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_featureExtraction aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene) do call :unpair %%N
+  for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_featureExtraction aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene aliceVision_incrementalSfM) do call :unpair %%N
   exit /b 0
 )
 
@@ -73,6 +73,10 @@ if defined TXOK ( call :pair aliceVision_texturing ) else ( echo package's alice
 rem PrepareDenseScene (v0.2.9+): the package's prepareDenseScene runs its image loop on every core; gate on its help text
 call :gate aliceVision_prepareDenseScene "CHESHIRE_PDS_THREADS" PDOK
 if defined PDOK ( call :pair aliceVision_prepareDenseScene ) else ( echo package's aliceVision_prepareDenseScene is upstream's ^(pre-v0.2.9^): not paired )
+rem StructureFromMotion (v0.3.3+): the package's incrementalSfM finishes a resection pass with the bundle
+rem adjustment upstream skips, the crash of Meshroom #2344 on large sets (docs\04); gate on its help text
+call :gate aliceVision_incrementalSfM "CHESHIRE_SFM_PENDING_BA" SFOK
+if defined SFOK ( call :pair aliceVision_incrementalSfM ) else ( echo package's aliceVision_incrementalSfM is upstream's ^(pre-v0.3.3^): not paired )
 rem GPU SIFT (v0.2.13+, docs\14-gpu-sift.md): gate on popsift.dll being in the package, since
 rem without it this node would move CPU SIFT from one build to another for nothing. Note the
 rem describer falls back to the CPU silently when no GPU is visible, so a paired node that

@@ -145,6 +145,7 @@ these are *on* unless set to `0`:
 | `CHESHIRE_GPU_TEX=0` | texturing on the CPU |
 | `CHESHIRE_BACKEND=auto\|cheshire\|meshroom` | force the launcher's choice (`CHESHIRE_DEPTHMAP=cuda\|hip` is the older spelling and still works) |
 | `CHESHIRE_GPU_VIS=0` | the visibility passes' nearest-neighbour search through upstream's nanoflann on the CPU ([docs/13](docs/13-gpu-visibilities.md)) |
+| `CHESHIRE_SFM_PENDING_BA=0` | upstream's incremental SfM loop exit: a resection pass that ends because no candidate view reaches the score threshold leaves the views resected since the last bundle adjustment without one, and without a node in the local-BA graph; a later edge to one of them is the `[fatal] invalid map<K, T> key` of Meshroom #2344 (three of three runs on an 884-photo set, v0.3.3 finishes the pass with that bundle adjustment and the graph never throws) |
 | `CHESHIRE_SIFT_SORT=0` | keep GPU SIFT keypoints in the order the card finished them (v0.3.2 sorts them by position, scale and orientation, so `.feat` files and the matches are a function of the images alone; SfM itself still varies run to run within upstream's own band - same poses and landmark count, parameters differing in the fourth digit) |
 
 The memory bridge has more knobs than the two above, and one of them has mattered on a real box

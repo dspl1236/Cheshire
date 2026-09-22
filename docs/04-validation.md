@@ -860,3 +860,49 @@ untouched by 0.3.3 so far and moved within noise (SfM sees a different landmark 
 rebuild (sha `2832289c…`), SHA256SUMS carries the new hash, and the release body says what was
 replaced and why; both were downloaded back and checked. Anyone whose copy hashes to `14ecee08…`
 has the CPU-extractor zip. The Forgejo release carries notes only, nothing to swap there.
+
+## 884 photographs: incremental SfM's loop exit, found and fixed (2026-09-21)
+
+The first large set. The False Door of Ptahshepses (British Museum, Daniel Pett, CC BY-NC-SA:
+884 JPEGs at 6000x3376 from a Sony A6000 over three mornings) ran through Meshroom on the RX
+9070 with the 0.3.3 tree: FeatureExtraction 8 min for all 884 views on GPU SIFT, FeatureMatching
+10 min, then **StructureFromMotion died at view 826 of 884** with `[fatal] invalid map<K, T> key`,
+two seconds after "Bundle adjustment start". Meshroom's own binary, not a paired node. A resume
+(cached features and matches kept, SfM rerun; the initial pair varies) died at 834 the same way,
+and a third run of Meshroom's own incrementalSfM with `--verboseLevel debug` died at 833. Three of
+three. Meshroom issue #2344 reports the same signature (`map::at` during bundle adjustment,
+18,000 images, 21 hours in, open). Not memory: 5 GB in use with 43 GB free, and the message is a
+map lookup, not an allocation.
+
+**The mechanism**, from the debug log and the source. The main loop resects views in groups and
+runs a bundle adjustment every ten resected views; a group below that count `continue`s and the
+views accumulate as "reconstructed since the last BA". `findNextBestViews` returns false when no
+remaining candidate reaches its score threshold, and the `while` exits there - with the
+accumulated views still pending. Nothing after the loop bundle-adjusts them, and nothing hands
+them to `LocalBundleAdjustmentGraph::updateGraphWithNewViews`. The outer pass then re-reads
+`prevReconstructedViews = getValidViews()`, so from then on they are old. In the debug run nine
+such views (resected at 650-656 in single-image groups, each "succeed") never appear in the
+graph; every later bundle adjustment prints `The pose #... does not exist in the
+'_mapDistancePerPoseId'` for them. They keep their resection pose, they observe landmarks, and
+`getNewEdges` proposes an edge from every new view that shares landmarks with them - to a view
+that has no node. `_graph.addEdge(_nodePerViewId.at(a), _nodePerViewId.at(b))` throws. It takes a
+set where the candidate search runs dry mid-way, which is why 107 photographs never showed it and
+884 did three times, and why upstream's 18,000-image report is the same crash.
+
+**The fix**, generator step 5k, and the eighth paired node: after the resection loop, the views
+resected since the last bundle adjustment are triangulated and bundle-adjusted the way a full
+group is (same calls, same order, `registerChanges` included), before the next pass; and the
+graph skips an edge whose endpoint it does not hold, with a warning, instead of throwing. Both
+announce - the fix at the start of the reconstruction, the guard if it ever fires - the switch is
+named in `--help` so the pairing scripts gate on it, and `CHESHIRE_SFM_PENDING_BA=0` restores
+upstream's loop for comparison. Everything the fix runs is upstream code; the change is that it
+runs.
+
+**Verified on the same features and matches, local BA on (upstream's default), with the fixed
+binary from the 0.3.3 stage tree: completed.** 830 poses and 1,354,686 landmarks in 3 passes
+(64 resection groups), against 839 poses and 1,351,101 landmarks from the `useLocalBA=False`
+workaround run that also got through (2383 s, every bundle adjustment global). The fix fired
+three times - 5, 7 and 9 views pending at the end of a pass - which is exactly the count of
+resected-but-orphaned views the debug run showed, and the graph guard never had to fire: with
+the engine handing every view over, no edge reaches a view without a node. Three of three
+upstream runs died at 830-834; the fixed binary went past that point in every pass and finished.
