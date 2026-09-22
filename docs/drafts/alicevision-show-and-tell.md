@@ -1,6 +1,6 @@
 # Draft: AliceVision Discussions, Show and tell - "Meshroom on AMD, and 1678 views through a 2013 dual-core"
 
-*Not posted; held for the 0.3.3 release. All numbers final. Review before posting.*
+*Not posted. v0.3.3 is out (2026-09-22) and every number below is final; ready to post once reviewed.*
 
 ---
 
@@ -78,10 +78,11 @@ to the CUDA 11.3 reference.
 
 ## What it runs on
 
-Windows: one 181 MB package with eleven GPU payloads (RDNA1 through RDNA4, both HIP runtimes); a
+Windows: one 184 MB package with eleven GPU payloads (RDNA1 through RDNA4, both HIP runtimes); a
 probe picks the payload. Linux: a relocatable bundle on ROCm 7.2. NVIDIA: the same tree built as
 CUDA 12.9 for both platforms. Validated on RX 5500 XT, RX 6750 XT, RX 9070, GTX 1050 Ti, GTX 1080 Ti.
 Polaris (RX 400/500) is out: ROCm dropped it.
 
-Packages, docs and the validation log: https://github.com/dspl1236/Cheshire (docs/04 is the
-per-card record). Questions welcome.
+Packages: https://github.com/dspl1236/Cheshire/releases/tag/v0.3.3 (all four passed their gates
+on their own hardware). Docs and the validation log are in the repo (docs/04 is the per-card
+record). Questions welcome.
