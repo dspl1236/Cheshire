@@ -3082,7 +3082,7 @@ index 38d5a37..0d76dd5 100644
                  }
              }
 diff --git a/src/aliceVision/fuseCut/PointCloud.cpp b/src/aliceVision/fuseCut/PointCloud.cpp
-index 50a15fd..b0df1b0 100644
+index 50a15fd..cfdc605 100644
 --- a/src/aliceVision/fuseCut/PointCloud.cpp
 +++ b/src/aliceVision/fuseCut/PointCloud.cpp
 @@ -4,6 +4,12 @@
@@ -3098,7 +3098,7 @@ index 50a15fd..b0df1b0 100644
  #include "PointCloud.hpp"
  
  #include <aliceVision/utils/filesIO.hpp>
-@@ -15,6 +21,15 @@
+@@ -15,6 +21,18 @@
  #include <aliceVision/mvsData/geometry.hpp>
  
  #include <aliceVision/fuseCut/Kdtree.hpp>
@@ -3110,11 +3110,14 @@ index 50a15fd..b0df1b0 100644
 +#include <cstdint>
 +#include <cstdlib>
 +#include <limits>
++#include <algorithm>
++#include <cstdio>
++#include <string>
 +#endif
  
  #include <geogram/mesh/mesh.h>
  #include <geogram/basic/geometry_nd.h>
-@@ -27,7 +42,7 @@ namespace fuseCut {
+@@ -27,7 +45,7 @@ namespace fuseCut {
  namespace fs = std::filesystem;
  
  /// Filter by pixSize
@@ -3123,7 +3126,7 @@ index 50a15fd..b0df1b0 100644
                       std::vector<double>& pixSizePrepare,
                       double pixSizeMarginCoef,
                       std::vector<float>& simScorePrepare)
-@@ -35,7 +50,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
+@@ -35,7 +53,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
  
      ALICEVISION_LOG_INFO("Build nanoflann KdTree index.");
      PointVectorAdaptator pointCloudRef(verticesCoordsPrepare);
@@ -3132,7 +3135,7 @@ index 50a15fd..b0df1b0 100644
      kdTree.buildIndex();
  
      ALICEVISION_LOG_INFO("KdTree created for " << verticesCoordsPrepare.size() << " points.");
-@@ -64,6 +79,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
+@@ -64,6 +82,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
      }
      ALICEVISION_LOG_INFO("Filtering done.");
  }
@@ -3140,7 +3143,7 @@ index 50a15fd..b0df1b0 100644
  
  /// Remove invalid points based on invalid pixSize
  void removeInvalidPoints(std::vector<Point3d>& verticesCoordsPrepare, std::vector<double>& pixSizePrepare, std::vector<float>& simScorePrepare)
-@@ -119,7 +135,7 @@ void removeInvalidPoints(std::vector<Point3d>& verticesCoordsPrepare,
+@@ -119,7 +138,7 @@ void removeInvalidPoints(std::vector<Point3d>& verticesCoordsPrepare,
      verticesAttrPrepare.swap(verticesAttrTmp);
  }
  
@@ -3149,7 +3152,7 @@ index 50a15fd..b0df1b0 100644
                                      std::vector<Point3d>& verticesCoordsPrepare,
                                      std::vector<double>& pixSizePrepare,
                                      std::vector<float>& simScorePrepare,
-@@ -132,7 +148,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
+@@ -132,7 +151,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
  {
  
      PointVectorAdaptator pointCloudRef(verticesCoordsPrepare);
@@ -3158,7 +3161,7 @@ index 50a15fd..b0df1b0 100644
      kdTree.buildIndex();
      ALICEVISION_LOG_INFO("NANOFLANN: KdTree created.");
  
-@@ -244,6 +260,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
+@@ -244,6 +263,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
  
      ALICEVISION_LOG_INFO("Visibilities created.");
  }
@@ -3166,7 +3169,7 @@ index 50a15fd..b0df1b0 100644
  
  
  PointCloud::PointCloud(mvsUtils::MultiViewParams& mp) : _mp(mp)
-@@ -294,8 +311,28 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
+@@ -294,8 +314,28 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
  
      ALICEVISION_LOG_INFO("Load depth maps and add points.");
      {
@@ -3197,7 +3200,7 @@ index 50a15fd..b0df1b0 100644
          for (int c = 0; c < cams.size(); c++)
          {
              image::Image<float> depthMap;
-@@ -320,7 +357,38 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
+@@ -320,7 +360,38 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
                  {
                      mvsUtils::readMap(c, _mp, mvsUtils::EFileType::simMapFiltered, simMap);
                      image::Image<float> simMapTmp;
@@ -3237,7 +3240,7 @@ index 50a15fd..b0df1b0 100644
                      simMap.swap(simMapTmp);
                  }
                  catch (const std::exception& e)
-@@ -425,6 +493,9 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
+@@ -425,6 +496,9 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
              }
          }
          omp_set_nested(0);
@@ -3247,7 +3250,7 @@ index 50a15fd..b0df1b0 100644
      }
  
      ALICEVISION_LOG_INFO("Filter initial 3D points by pixel size to remove duplicates.");
-@@ -769,7 +840,13 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
+@@ -769,7 +843,13 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
      Point3d center = (voxel[0] + voxel[1] + voxel[2] + voxel[3] + voxel[4] + voxel[5] + voxel[6] + voxel[7]) / 8.0;
  
      const unsigned int seed = (unsigned int)_mp.userParams.get<unsigned int>("delaunaycut.seed", 0);
@@ -3262,7 +3265,7 @@ index 50a15fd..b0df1b0 100644
      auto rand = std::bind(std::uniform_real_distribution<float>{-1.0, 1.0}, generator);
  
      const double minDist2 = minDist * minDist;
-@@ -778,7 +855,22 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
+@@ -778,7 +858,22 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
  
      ALICEVISION_LOG_TRACE("GRID: Allocate vertices");
      std::vector<Point3d> gridVerticesCoords(std::pow(float(ns + 1), 3.f));
@@ -3286,7 +3289,7 @@ index 50a15fd..b0df1b0 100644
  
      ALICEVISION_LOG_TRACE("Create helper points.");
  #pragma omp parallel for
-@@ -790,7 +882,9 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
+@@ -790,7 +885,9 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
              {
                  int i = x * (ns + 1) * (ns + 1) + y * (ns + 1) + z;
                  const Point3d pt = voxel[0] + vx * ((double)x / double(ns)) + vy * ((double)y / double(ns)) + vz * ((double)z / double(ns));
@@ -3297,7 +3300,7 @@ index 50a15fd..b0df1b0 100644
                  const Point3d p = pt + noise;
                  std::size_t vi{};
                  double sq_dist{};
-@@ -812,17 +906,24 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
+@@ -812,17 +909,24 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
      _verticesCoords.reserve(_verticesCoords.size() + gridVerticesCoords.size());
      _verticesAttr.reserve(_verticesAttr.size() + gridVerticesCoords.size());
      int addedPoints = 0;

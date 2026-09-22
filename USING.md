@@ -145,6 +145,7 @@ these are *on* unless set to `0`:
 | `CHESHIRE_GPU_TEX=0` | texturing on the CPU |
 | `CHESHIRE_BACKEND=auto\|cheshire\|meshroom` | force the launcher's choice (`CHESHIRE_DEPTHMAP=cuda\|hip` is the older spelling and still works) |
 | `CHESHIRE_GPU_VIS=0` | the visibility passes' nearest-neighbour search through upstream's nanoflann on the CPU ([docs/13](docs/13-gpu-visibilities.md)) |
+| `CHESHIRE_GPU_VIS_BUCKETS=0` | the visibility votes through the ordered loop (one vertex range per thread) instead of vertex buckets spread over all threads; same result, slower at scale |
 | `CHESHIRE_SFM_PENDING_BA=0` | upstream's incremental SfM loop exit: a resection pass that ends because no candidate view reaches the score threshold leaves the views resected since the last bundle adjustment without one, and without a node in the local-BA graph; a later edge to one of them is the `[fatal] invalid map<K, T> key` of Meshroom #2344 (three of three runs on an 884-photo set, v0.3.3 finishes the pass with that bundle adjustment and the graph never throws) |
 | `CHESHIRE_SIFT_SORT=0` | keep GPU SIFT keypoints in the order the card finished them (v0.3.2 sorts them by position, scale and orientation, so `.feat` files and the matches are a function of the images alone; SfM itself still varies run to run within upstream's own band - same poses and landmark count, parameters differing in the fourth digit) |
 
@@ -171,7 +172,7 @@ together as its `verify` configuration ([docs/04](docs/04-validation.md)):
 |---|---|
 | `CHESHIRE_FILTER_CHECK=1` | `filterByPixSize check: identical to single-threaded upstream on all N slots` |
 | `CHESHIRE_MAXFLOW_CHECK=1` | `max-flow check: ... cells labelled differently: 0 of N` - the labelling is the verdict; the two float flow totals it also prints are never equal and are not the test |
-| `CHESHIRE_GPU_VIS_CHECK=1` | `GPU knn check: identical to nanoflann on all N queries` |
+| `CHESHIRE_GPU_VIS_CHECK=1` | `GPU knn check: identical to nanoflann on all N queries`, and per pass `visibility votes check (pass N, ...): identical to the ordered host reference on all N vertices` (the votes redone from the host's own answers) |
 | `CHESHIRE_SEGMENT_CHECK=1` | `segmentFullOrFree check: identical to upstream on all N cells` |
 | `CHESHIRE_GPU_TEDGE_CHECK=1` | `tedge check: cells with on != 0: cpu N, gpu N` - the counts must match; the sums differ by an ulp of summation order |
 | `CHESHIRE_GPU_VOTE_LOG=1` | includes `facet weight check: N facets, differing from the sequential computation: 0` |

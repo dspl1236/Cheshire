@@ -463,6 +463,99 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
         votesOut += total;
         contribOut += contrib;
     };
+    // cheshireVotesBucketed: the same votes as cheshireVotesOrdered, with the work spread over threads.
+    // 1. decide every query in parallel (vote, contribute: pass-start data only, so order-free);
+    // 2. count the voting queries per (chunk of queries, bucket of 4096 vertices);
+    // 3. scan bucket-major, so a bucket's queries come chunk by chunk, i.e. in pixel order;
+    // 4. scatter each chunk's voting queries in order (stable);
+    // 5. apply the buckets in parallel, each in its stored order: one thread per vertex, pixel order.
+    // Chunks are fixed-size, so the layout does not depend on the thread count.
+    const bool bucketedVotes = []() {
+        const char* e = std::getenv("CHESHIRE_GPU_VIS_BUCKETS");
+        return !(e != nullptr && *e == '0');
+    }();
+    constexpr int kBucketShift = 12;
+    constexpr std::size_t kChunk = 65536;
+    const std::size_t nbBuckets = (nbVertices >> kBucketShift) + 1;
+    std::vector<unsigned char> decision;    // bit 0 vote, bit 1 contribute
+    std::vector<std::uint32_t> bucketCount;  // [chunk][bucket], then the scatter cursors
+    std::vector<std::uint32_t> bucketStart;  // first slot of each bucket in `order`, plus the end
+    std::vector<std::uint32_t> order;        // the voting queries, bucket by bucket, pixel order within
+    auto cheshireVotesBucketed = [&](int c, std::size_t nq, const std::uint32_t* nn, const double* nnDist, const double* q,
+                                     const double* pixSizeQ, std::vector<Point3d>& coords, std::vector<GC_vertexInfo>& attrs,
+                                     std::size_t& votesOut, std::size_t& contribOut) {
+        const long long nChunks = (long long)((nq + kChunk - 1) / kChunk);
+        decision.assign(nq, 0);
+        bucketCount.assign((std::size_t)nChunks * nbBuckets, 0);
+#pragma omp parallel for schedule(dynamic)
+        for (long long ch = 0; ch < nChunks; ++ch)
+        {
+            std::uint32_t* cnt = &bucketCount[(std::size_t)ch * nbBuckets];
+            const std::size_t kHi = std::min(nq, (std::size_t)(ch + 1) * kChunk);
+            for (std::size_t k = (std::size_t)ch * kChunk; k < kHi; ++k)
+            {
+                const std::size_t v = nn[k];
+                if (v >= nbVertices)
+                    continue;  // as the ordered loop: an index no thread owns is never applied
+                const double dist = nnDist[k];
+                const double pixSize = pixSizeQ[k];
+                const float pixSizeScoreI = simScorePrepare[v] * pixSize * pixSize;
+                const float pixSizeScoreV = scoreV[v];
+                if (dist < voteMarginFactor * std::max(pixSizeScoreI, pixSizeScoreV))
+                {
+                    decision[k] = (unsigned char)(1 | ((dist < contributeMarginFactor * pixSizeScoreV) ? 2 : 0));
+                    ++cnt[v >> kBucketShift];
+                }
+            }
+        }
+        // bucket-major exclusive scan; bucketCount becomes each (chunk, bucket)'s first slot
+        bucketStart.assign(nbBuckets + 1, 0);
+        std::uint32_t run = 0;
+        for (std::size_t b = 0; b < nbBuckets; ++b)
+        {
+            bucketStart[b] = run;
+            for (long long ch = 0; ch < nChunks; ++ch)
+            {
+                std::uint32_t& x = bucketCount[(std::size_t)ch * nbBuckets + b];
+                const std::uint32_t n = x;
+                x = run;
+                run += n;
+            }
+        }
+        bucketStart[nbBuckets] = run;
+        order.resize(run);
+#pragma omp parallel for schedule(dynamic)
+        for (long long ch = 0; ch < nChunks; ++ch)
+        {
+            std::uint32_t* cur = &bucketCount[(std::size_t)ch * nbBuckets];
+            const std::size_t kHi = std::min(nq, (std::size_t)(ch + 1) * kChunk);
+            for (std::size_t k = (std::size_t)ch * kChunk; k < kHi; ++k)
+                if (decision[k] & 1)
+                    order[cur[nn[k] >> kBucketShift]++] = (std::uint32_t)k;
+        }
+        std::size_t total = run, contrib = 0;
+#pragma omp parallel for schedule(dynamic) reduction(+ : contrib)
+        for (long long b = 0; b < (long long)nbBuckets; ++b)
+        {
+            for (std::uint32_t i = bucketStart[b]; i < bucketStart[b + 1]; ++i)
+            {
+                const std::uint32_t k = order[i];
+                const std::size_t v = nn[k];
+                GC_vertexInfo& va = attrs[v];
+                va.cams.push_back_distinct(c);
+                if (decision[k] & 2)
+                {
+                    Point3d& vc = coords[v];
+                    const Point3d p(q[3 * k], q[3 * k + 1], q[3 * k + 2]);
+                    vc = (vc * (double)va.nrc + p) / double(va.nrc + 1);
+                    va.nrc += 1;
+                    ++contrib;
+                }
+            }
+        }
+        votesOut += total;
+        contribOut += contrib;
+    };
     std::vector<std::uint32_t> refNn;  // CHECK: the host's answers for the current camera
     std::vector<double> refDist;
 
@@ -546,8 +639,12 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
             msCheck += cheshireVisMs(t1);
         }
         t1 = Clock::now();
-        cheshireVotesOrdered(cur.cam, cur.nq, cur.nnp, cur.nnDistp, cur.qp, cur.pixSize.data(), verticesCoordsPrepare, verticesAttrPrepare,
-                             nbVotes, nbContrib);
+        if (bucketedVotes)
+            cheshireVotesBucketed(cur.cam, cur.nq, cur.nnp, cur.nnDistp, cur.qp, cur.pixSize.data(), verticesCoordsPrepare, verticesAttrPrepare,
+                                  nbVotes, nbContrib);
+        else
+            cheshireVotesOrdered(cur.cam, cur.nq, cur.nnp, cur.nnDistp, cur.qp, cur.pixSize.data(), verticesCoordsPrepare, verticesAttrPrepare,
+                                 nbVotes, nbContrib);
         msVotes += cheshireVisMs(t1);
         nbQueries += cur.nq;
     }
@@ -609,17 +706,17 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
         }
         const bool sizes = shadowAttrs.size() == verticesAttrPrepare.size() && shadowCoords.size() == verticesCoordsPrepare.size();
         if (dAny == 0 && sizes && refVotes == nbVotes && refContrib == nbContrib)
-            ALICEVISION_LOG_INFO("cheshire: visibility votes check (pass " << pass << ", host votes): identical to the ordered host reference on all "
+            ALICEVISION_LOG_INFO("cheshire: visibility votes check (pass " << pass << ", " << (bucketedVotes ? "bucketed host votes" : "host votes") << "): identical to the ordered host reference on all "
                                  << nv << " vertices (coordinates, nrc, camera lists in order, pixSize); " << nbQueries << " queries, " << nbVotes
                                  << " votes, " << nbContrib << " contributions");
         else
-            ALICEVISION_LOG_WARNING("cheshire: visibility votes check (pass " << pass << ", host votes): " << dAny << " of " << nv
+            ALICEVISION_LOG_WARNING("cheshire: visibility votes check (pass " << pass << ", " << (bucketedVotes ? "bucketed host votes" : "host votes") << "): " << dAny << " of " << nv
                                     << " vertices differ: coordinates " << dCoord << ", nrc " << dNrc << ", cams " << (dCams + dOrder) << " (order only "
                                     << dOrder << "), pixSize " << dPix << "; votes " << nbVotes << " vs " << refVotes << ", contributions "
                                     << nbContrib << " vs " << refContrib << (sizes ? "" : "; vertex counts differ"));
     }
     ALICEVISION_LOG_INFO("Visibilities created.");
-    return "GPU knn, host votes";
+    return bucketedVotes ? "GPU knn, bucketed host votes" : "GPU knn, host votes";
 }
 #endif
 
