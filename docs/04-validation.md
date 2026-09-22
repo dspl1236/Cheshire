@@ -917,3 +917,15 @@ over the 839 cameras). The textured mesh is 4,055,488 vertices and 8,104,312 fac
 The two nodes that had never seen this many views, Meshing and Texturing, went through on the
 first attempt; Texturing's cost is the atlas count times the camera count, which is the thing to
 look at next for large sets.
+
+## 0.3.3 stage tree on the RX 9070: 12 of 12 at 7 of 7 ports (2026-09-22)
+
+With incrementalSfM paired the mini6 matrix reads seven ports per config, the seventh being the
+SfM fix announcing itself. All twelve configs passed - `base` 60 s through `blast` - including
+`verify` (all six Meshing self-checks) and `texcheck` (padding, resize and the direct OBJ writer
+against Assimp). One trap on the way: the first launch reported DepthMap "NOT PAIRED" in every
+config with no `paired:` line for it, while the same script paired all eight nodes by hand a
+minute later and on the relaunch. The harness unpairs in a `finally` at the end of every run, and
+the launch came seconds after the previous run's unpair; the rename of the freshly restored
+`aliceVision_depthMapEstimation.exe` most likely lost to a virus-scanner lock. Not reproduced;
+noted so the next reader of a "NOT PAIRED DepthMap, 20 s" matrix retries before digging.
