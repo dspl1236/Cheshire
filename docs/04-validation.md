@@ -965,3 +965,17 @@ passes; tedge 175,896 cells on both sides, 0 beyond 1e-3 relative; GPU padding 0
 texels differing on each of 52 atlases; GPU resize 0 of 50,331,648 channels differing on each of
 52. VRAM peaks: DepthMap image  vram: 99 allocs, peak 1133 MB;map    vram: 848 allocs, peak 1146 MB;volume vram: 96 allocs, peak 7734 MB; DepthMapFilter other  vram: 120 allocs, peak 946 MB;other  vram: 120 allocs, peak 965 MB;other  vram: 120 allocs, peak 985 MB;other  vram: 85 allocs, peak 985 MB; Meshing 3910 MB, Texturing 14,162 MB on the 16 GB
 card - the largest allocation of the whole run, as on the engine bay. Planner:      70 planner 1: VRAM budget 11630.2 MB, 3 full R cameras + 7 tiles.
+
+## The 0.3.3 Windows CUDA package on the GTX 1080 Ti: 11 of 12, and what the twelfth found (2026-09-22)
+
+The CUDA package built from the fixed tree (SuiteSparse still in, see the next section) ran the
+matrix on bench-pc: 11 of 12, 7/7 ports everywhere, 0 bugchecks. The one failure is `texcheck`:
+padding 0 of 67,108,864 texels as on every card, OBJ identical, but **GPU resize 7,772,469 of
+50,331,648 channels differing from OpenImageIO**, where every HIP card reports 0. The cause is the
+compiler, not the kernel: every port file keeps FMA contraction off with `#pragma clang fp
+contract(off)`, so a*b+c rounds twice as the CPU reference does; nvcc does not honour that pragma
+and contracts by default (`--fmad=true`). The resize check is the first float-exact self-check that
+has ever run on the CUDA build - the Meshing checks compare labels, counts and vertex choices -
+which is why nothing said so before. Generator step 5l gives the port sources `--fmad=false` on
+the CUDA backend; upstream's own depth-map kernels are left as they were built, since byte-identity
+with the CUDA reference depends on it. The rebuilt package's matrix follows.

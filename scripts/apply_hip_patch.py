@@ -18,6 +18,7 @@ What it does
 """
 from __future__ import annotations
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -3407,6 +3408,32 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
             sys.exit("incrementalSfM CmdLine description not found once")
         t = t.replace(old, 'CmdLine cmdline("Sequential/Incremental reconstruction (cheshire: a resection pass that ends without a bundle adjustment gets one; CHESHIRE_SFM_PENDING_BA=0 restores upstream).' + chr(92) + 'n"', 1)
         msf.write_text(t, encoding="utf-8", newline="")
+
+    # 5l. No FMA contraction in the ports on the CUDA backend either. Every port file carries
+    #     `#pragma clang fp contract(off)` so a*b+c rounds twice as the CPU reference does; nvcc
+    #     ignores that pragma and contracts by default (--fmad=true), so the CUDA build of the same
+    #     kernels rounded once. Found by the GTX 1080 Ti gate on the first float-exact self-check that
+    #     ran there: GPU resize 7,772,469 of 50,331,648 channels differing from OpenImageIO, against
+    #     0 on every HIP card. Upstream's own depth-map kernels are left alone: they were built with
+    #     contraction on, and byte-identity with the CUDA reference depends on it.
+    fmad_re = re.compile(r"^(\s*)list\(APPEND (\w+)_files_sources ((?:gpu/\S+\.cu\s?)+)\)\s*$", re.M)
+    for cml in (AV / "src/aliceVision/matching/CMakeLists.txt",
+                AV / "src/aliceVision/fuseCut/CMakeLists.txt",
+                AV / "src/aliceVision/mesh/CMakeLists.txt"):
+        t = cml.read_text(encoding="utf-8")
+        if "fmad=false" in t:
+            continue
+        def add_fmad(m):
+            ind, files = m.group(1), m.group(3).strip()
+            return (m.group(0) + NL
+                    + ind + "if (ALICEVISION_HAVE_CUDA AND NOT ALICEVISION_HAVE_HIP)" + NL
+                    + ind + "    # cheshire: the ports round a*b+c twice, as the CPU reference does (nvcc ignores the clang pragma)" + NL
+                    + ind + "    set_source_files_properties(" + files + " PROPERTIES COMPILE_OPTIONS \"--fmad=false\")" + NL
+                    + ind + "endif()")
+        t2, n = fmad_re.subn(add_fmad, t)
+        if n == 0:
+            sys.exit(f"no port source list found in {cml}")
+        cml.write_text(t2, encoding="utf-8", newline="")
 
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
