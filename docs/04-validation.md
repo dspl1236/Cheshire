@@ -1036,7 +1036,10 @@ FeatureMatching 2265 s, StructureFromMotion 4291 s (1591 poses, upstream's binar
 12 GB card), DepthMapFilter 1544 s, Meshing 1020 s (8 GB RAM peak on 14.6 GB, no swap), MeshFiltering
 37 s, Texturing 10,013 s (34 atlases of 8192^2). The textured mesh is 1,679,493 vertices and
 3,350,047 faces, 265 MB; the cache is 164 GB, 98 GB of it PrepareDenseScene's EXRs. The i3-4330's
-share of the 16 hours is the SfM and the AC-RANSAC half of matching; the rest was the RX 6750 XT.
+CPU-only nodes - the SfM, the AC-RANSAC part of matching (the split was not measured on this box)
+and PrepareDenseScene's decode, undistortion and EXR write (3363 s) - are about 2.5 of the 16 hours;
+Meshing's host-side phases and MeshFiltering add a few hundred seconds, and the GPU nodes decode
+their images on the two cores.
 Two disk incidents along the way (the system disk filling, one write timeout that damaged one
 undistorted image) are recorded above; the result stands with the one-camera texture caveat.
 

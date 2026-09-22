@@ -50,8 +50,8 @@ waiting on the card.
 | PrepareDenseScene | 721 s |
 | DepthMap | 12,010 s (833 maps, downscale 2) |
 | DepthMapFilter | 521 s |
-| Meshing | 852 s with five self-checks running alongside (320 s without) |
-| Texturing | 5847 s, 52 atlases of 8192^2, with checks (5022 s without) |
+| Meshing | 852 s with five self-checks running alongside (479 s without them, rerun on the same cache) |
+| Texturing | 5847 s, 52 atlases of 8192^2, with the padding and resize checks |
 | total compute | 6.4 h; textured mesh 8,136,271 faces |
 
 This set is also where we found and fixed an upstream crash in incremental SfM
@@ -65,7 +65,7 @@ differences. On the 884-view set, with all of them on:
 
 | check | result |
 |---|---|
-| depth-map filter vote pass (parallel vs upstream single-threaded) | identical on all 52,305,736 slots |
+| Meshing's point filter by pixel size (parallel vs upstream single-threaded) | identical on all 52,305,736 slots |
 | GPU nearest-neighbour vs nanoflann | identical on all 3,124,680,410 queries |
 | GPU max-flow vs Boykov-Kolmogorov | 0 of 29,080,924 cells labelled differently |
 | segment classification | identical on all 29,080,924 cells |
