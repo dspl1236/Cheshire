@@ -185,8 +185,11 @@ GPS image pairing and reconstruction quality. This was 0.3.4 in the earlier prop
 - **GPS-radius image pairing** (M). On a 444-photo DJI survey, the vocabulary tree proposed
   partners a median 214 m apart and SfM placed 49 of 444. Upstream has no GPS mode
   (`imageMatching/ImageMatching.cpp:31-43`), but it has `ImageInfo::getGpsPositionFromMetadata`.
+  Measured on the exhaustive rerun (docs/04, "A 444-photo drone survey"): the real pairs sit a median
+  29 m apart, 99 % within 56 m; an 80 m radius (5.4x the shot spacing) proposes 9,071 pairs, 9.2 % of
+  exhaustive, and catches 2,376 of 2,377 verified pairs (the last is 302 m away, a false match).
   Steps:
-  1. Record the exhaustive house-pc rerun as the baseline.
+  1. The exhaustive house-pc rerun is the baseline: 444/444 views, 2,377 verified pairs.
   2. Add an opt-in mode in `aliceVision_imageMatching` with a fallback for views without GPS, paired
      as the ninth binary.
   3. Validate on views placed and on pair count (about 5-8k against 98,346).

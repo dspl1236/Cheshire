@@ -1238,3 +1238,41 @@ Pass 1 now runs at 62 ms per camera, the device-bound figure the design predicte
 yet: the device's own kernel time rose once it ran back to back (21.5 -> 36.5 s in pass 1, 0.64 ->
 2.26 s at 41 views) - clocks under sustained load or the event timing; it is the floor from here,
 so it is measured before any device work.
+
+## A 444-photo drone survey: pairing, not matching (2026-09-22)
+
+The user's DJI Phantom 4 set (FC330, 4000x3000, 444 photos over a 400 m x 400 m grid, shots about
+15 m apart, GPS in every EXIF) through house-pc's node app, Standard preset, `CHESHIRE_QR_NULLSPACE=1`.
+**First run: SfM placed 49 of 444 views** (94,238 landmarks), and the rest of the pipeline built a
+5.5 M-face mesh of one 267 m x 134 m patch in 28 minutes.
+
+Not the matcher and not QR: one matching chunk rerun with QR on and off kept the same 29 of 1051
+pairs, 40,236 against 40,344 matches. The pairs themselves were wrong. Above `minNbImages=200`
+Meshroom's ImageMatching stops comparing every pair and takes ~50 partners per photo from the
+vocabulary tree; on uniform ground the partners it chose were a median 214 m away, only 20 % of each
+shot's 8 GPS-nearest neighbours were ever proposed (95 % of those verified), and 419 of 10,922
+proposed pairs survived geometric verification (3.8 %). The 150-250-photo captures the app was
+built for never see this: below 200 photos the pairing is exhaustive.
+
+**Rerun with `ImageMatching:method=Exhaustive`** (the app's new "Image pairing" option, everything
+else unchanged): 98,346 pairs, 2377 verified, **444 of 444 views placed**, 829,908 landmarks,
+6,455,085 faces, 26 atlases, 3.66 h on the i3-4330 + RX 6750 XT. Per node: FeatureExtraction 175 s,
+FeatureMatching 2542 s (23 chunks), StructureFromMotion 871 s, PrepareDenseScene 717 s, DepthMap
+6219 s, DepthMapFilter 291 s, Meshing 348 s, MeshFiltering 81 s, Texturing 1917 s.
+
+**What GPS pairing would have done**, from the rerun's verified pairs and the photos' coordinates:
+the real pairs sit a median 29 m apart, 90 % within 39 m, 99 % within 56 m, one at 302 m (almost
+certainly a false match).
+
+| radius | pairs proposed | share of exhaustive | verified pairs caught |
+|---|---|---|---|
+| 40 m | 2,584 | 2.6 % | 2,169 of 2,377 (91.2 %) |
+| 50 m | 3,593 | 3.7 % | 2,330 (98.0 %) |
+| 60 m | 5,674 | 5.8 % | 2,360 (99.3 %) |
+| 80 m | 9,071 | 9.2 % | 2,376 (100 % but the outlier) |
+| 100 m | 13,687 | 13.9 % | 2,376 |
+
+An 80 m radius (5.4x the shot spacing) finds every real pair with a tenth of the exhaustive
+matching, about 4 minutes instead of 42 on this box; that is the target for the GPS pairing item in
+docs/roadmap.md (0.3.5). The first run's folder was deleted after the rerun completed; the rerun's
+photos are hard links and keep their data.
