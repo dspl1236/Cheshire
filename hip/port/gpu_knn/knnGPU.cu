@@ -7,7 +7,14 @@
 //   if (mindist <= worst) walk the other child; dists[idx] = dst;
 // The metric is L2_Simple_Adaptor's: diff = q - p per axis, result += diff * diff, in double, in
 // axis order; with fma set, the fused form clang-cl emits for that statement under /arch:AVX2.
-// accum_dist and the initial bounding-box distances are unfused products in both builds.
+// accum_dist and the initial bounding-box distances are unfused products in both host builds, and
+// nanoflann's unfused metric is what a generic x86-64 host (the Linux bundle) computes. On HIP the
+// __dadd_rn/__dmul_rn intrinsics are the plain operators and device code contracts by default, so
+// without the pragma the "unfused" form was fused anyway: that is the ~1.6 M last-bit distance
+// differences the Linux knn check reported (docs/13). CUDA gets --fmad=false from the build instead.
+#ifdef __clang__
+#pragma clang fp contract(off)
+#endif
 #include "knnGPU.hpp"
 #include <cuda_runtime.h>
 #include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
