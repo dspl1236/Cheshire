@@ -990,3 +990,32 @@ files" and no error, so OpenImageIO tolerated the bad chunk and that camera cont
 came out of it to three atlases. One camera of 1590; the mesh and counts are unaffected, the
 texture of the affected patches is suspect, and the run stands as a scale test with that caveat.
 The lesson is the harness's: a resumed run has no check that its cached inputs still decode.
+
+## SuiteSparse out, fmad off: the 0.3.3 Windows packages on both cards (2026-09-22)
+
+Ceres 2.2.0 rebuilt without SuiteSparse (`scripts/windows/build-ceres-nosuitesparse.cmd`: Eigen's
+sparse backend with METIS ordering, LAPACK from the tree's OpenBLAS, the same MSVC, Eigen 3.4.1,
+glog 0.7.1 and gflags 2.3.0 as the prebuilt vcpkg tree), spliced into `tools/vcpkg-deps`
+(`splice_ceres.py`, the old files in `build/ceres-vcpkg-backup`). The new `ceres.dll` imports glog,
+METIS and LAPACK only. Both packagers now refuse a stage carrying `libspqr.dll` or `libcholmod.dll`,
+and the guard earned its keep twice on the first day: the CUDA install tree and then the CUDA
+build's output folder each still held the old DLLs from the previous build's applocal deployment,
+and the packager staged them until they were removed. The packager also deletes its previous zip
+before staging, after a guard failure left the day's earlier zip in place and it travelled to the
+bench as if it were new.
+
+- **RX 9070, HIP package (`test033c-gfx1201`)**: 12 of 12, 7/7 ports; the packager reported no
+  GPL library. Timings of five configs are inflated (`coarse` 451 s, `cpufallback` 456 s, `verify`
+  467 s) because the CUDA rebuild compiled on the same CPU alongside them.
+- **GTX 1080 Ti, CUDA package (sha `861ec66c…`)**: 12 of 12, 7/7 ports, 0 bugchecks, no GPL
+  library in the extracted package, and `texcheck` now passes: GPU padding 0 of 67,108,864 texels,
+  **GPU resize 0 of 50,331,648 channels** - step 5l's `--fmad=false` on the port sources is what
+  turned the 7,772,469 of the morning into 0. Depth-map digests differ from the SuiteSparse
+  package's run as they must: Eigen's sparse solver rounds the bundle adjustment differently, the
+  poses move in the last digits, and the depth maps follow; within the run every bridge
+  configuration still matches `base` bit for bit.
+
+Meshroom 2023.3's own Windows release ships `libspqr.dll` and `libcholmod.dll` as well, and so does
+AliceVision's 2026.09.01 prebuilt vcpkg zip this tree came from, so 0.3.0-0.3.2 matched upstream's
+practice; the maintainers' ruling in discussion #2116 (no SPQR in pre-built binaries) is the one
+0.3.3 follows. The Linux bundle's Ceres was built without SuiteSparse from the start.
