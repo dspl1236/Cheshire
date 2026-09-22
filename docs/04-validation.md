@@ -1061,3 +1061,28 @@ scene (1678, by view id), not the posed ones, so the view sat in chunk 26 rather
 posed-only count gave; rerunning that one chunk with the bundle's binary rewrote the file, which
 now decodes on every channel. The Rubble texture caveat stands for the run as it was scored; the
 cache is clean for what comes next.
+
+## 0.3.3 release packages: the Linux pair, and a restart mid-build (2026-09-22)
+
+**Linux HIP (`cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz`, sha `2ab6d229…`) on the RX 6750 XT:
+12 of 12, 7/7 ports** with the release harness, `aliceVision_incrementalSfM` paired and announcing
+the fix. `base` 80 s, `tiles` 80, `coarse` 55, `texbig` 85, `cpufallback` 155, `verify` 110,
+`bridgecap` 85, `bridgespill` 175, `bridgeoff` 80, `texcheck` 90, `ds1` 195, `blast` 220. Self-checks:
+max-flow 0 of 1,673,871 cells labelled differently, knn 0 of 8,791,919 queries naming a different
+vertex, segments identical on all 1,673,871 cells, padding 0 of 67,108,864 texels, resize 0 of
+50,331,648 channels. house-pc's node app is paired with this bundle.
+
+**Linux CUDA (`cheshire-alicevision-cuda-linux-x64-cuda12.9.tar.gz`, sha `2809619a…`)**: packaging
+checks all pass (no libcuda, libcudart 12.9.79, PopSIFT a CUDA build linked by the feature library,
+no HIP artefacts, every dependency resolved from the bundle); all seven port kernels compiled with
+`--fmad=false`; the SfM binary names `CHESHIRE_SFM_PENDING_BA` in its help. Its matrix waits for an
+NVIDIA card in house-pc.
+
+**Windows: the build that the app restart interrupted.** The release build's hip6.2 family lost five
+of nine targets without a source error: two links refused by the virus scanner holding a freshly
+linked executable ("being used by another process", "Access is denied."), and three steps that
+could not start (`0xC0000142`) once the Claude session that had launched the build went away. The
+payload builder now retries build steps whose own output carries one of those signatures, the
+resumed build runs detached from the session, and both HIP build folders turned out to hold the
+old `libspqr.dll`/`libcholmod.dll` from earlier applocal deployments (moved out before the resume,
+as the CUDA tree's had been).
