@@ -1126,3 +1126,43 @@ card in September: **82 of 82 files byte-identical** - all 41 depth maps and all
 whole-file SHA-256 - in 213 s against the reference's 379 s. The bridge planned 2 full R cameras +
 2 tiles on the 11 GB card with images resident. Step 5l's `--fmad=false` applies only to the ports,
 so this is also the check that it left upstream's depth-map kernels as they were.
+
+## The rebuilt Windows bundle on both AMD cards (2026-09-22)
+
+The bundle with CRLF batch files (`cheshire-alicevision-windows-x64.zip`, 192,889,989 bytes, sha
+`eadce479…`), all eight nodes paired, DepthMap first:
+
+- **RX 9070 (rocm7.2 gfx12-generic payload): 12 of 12, 7/7 ports.** `base` 70 s, `tiles` 65,
+  `coarse` 40, `texbig` 65, `cpufallback` 85, `verify` 90, `bridgecap` 100, `bridgespill` 141,
+  `bridgeoff` 65, `texcheck` 75, `ds1` 146, `blast` 171. Self-checks: max-flow 0 of 1,669,809 cells
+  labelled differently, knn identical to nanoflann on all 8,770,744 queries, segments identical on
+  all 1,669,809 cells, neighbour table and facet weights 0 differing, filterByPixSize identical on
+  all 18,289,152 slots, padding 0 of 67,108,864 texels, resize 0 of 50,331,648 channels.
+- **RX 5500 XT on bench-pc (hip6.2 gfx1012 payload): 12 of 12, 7/7 ports, 0 bugchecks.** `base`
+  161 s, `tiles` 146, `coarse` 100, `texbig` 151, `cpufallback` 217, `verify` 206, `bridgecap` 191,
+  `bridgespill` 412, `bridgeoff` 151, `texcheck` 171, `ds1` 372, `blast` 417. Self-checks: max-flow
+  0 of 1,699,013 cells, knn 0 of 8,802,911 queries naming a different vertex (1,635,610 report a
+  different distance in the last bits, the RDNA1 behaviour the vertex verdict exists for), segments
+  identical on all 1,699,013 cells, neighbour table and facet weights 0 differing, filterByPixSize
+  identical on all 18,289,152 slots, padding 0 of 67,108,864 texels, resize 0 of 50,331,648 channels.
+
+The RDNA2 payloads (hip6.2 gfx1030-1036) come from the same source and build as the gfx1012 one
+and were not run on hardware this round; the RX 6750 XT is in house-pc under Linux.
+
+## 0.3.3 release gates (2026-09-22)
+
+Every artifact gated as the file a user downloads, with the harness that scores seven ports
+(StructureFromMotion paired as the eighth node, checked by its announce line).
+
+| artifact | hardware | end to end | beyond the matrix |
+|---|---|---|---|
+| `cheshire-alicevision-windows-x64.zip` (AMD, 11 payloads) | RX 9070, Windows | 12/12 at 7/7 | stage tree 12/12 at 7/7 before bundling |
+| same | RX 5500 XT, Windows (bench-pc) | 12/12 at 7/7, 0 bugchecks | - |
+| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` | RX 6750 XT, Linux | 12/12 at 7/7 | - |
+| `cheshire-alicevision-cuda-linux-x64-cuda12.9.tar.gz` | GTX 1080 Ti, Linux | 12/12 at 7/7 | 41-view depth maps 82/82 byte-identical to upstream's CUDA 11.3 |
+| `cheshire-alicevision-cuda-windows-x64-cuda12.9.zip` | GTX 1080 Ti, Windows (bench-pc) | 12/12 at 7/7, 0 bugchecks | no GPL library; resize exact with `--fmad=false` |
+
+The Windows packages carry no SuiteSparse (both packagers refuse one that does), and every batch
+file in them is CRLF (all three packagers rewrite and verify it). Outside the matrix, the fixed
+StructureFromMotion carried the 884-view False Door through Meshroom with every self-check on and
+zero differences, and the 1678-view Rubble ran to a textured mesh on a 2013 dual-core.
