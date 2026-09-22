@@ -956,9 +956,13 @@ view 216823232, differs in a few bytes and changes no match), so its 833 poses a
 830 are incremental SfM's own run-to-run variation, not different input. That is 800 s faster
 than the global-BA workaround (2436 s), which is the point of local BA. Per node: FeatureExtraction
 560 s, FeatureMatching 796 s, PrepareDenseScene 721 s, DepthMap 12,010 s, DepthMapFilter 521 s,
-Meshing 852 s (with five self-checks running alongside; 320 s without), MeshFiltering 83 s,
-Texturing 5847 s (52 atlases, with the padding and resize checks; 5022 s without). Textured mesh:
-4,071,685 vertices, 8,136,271 faces, 679 MB.
+Meshing 852 s (with five self-checks running alongside), MeshFiltering 83 s, Texturing 5847 s (52
+atlases, with the padding and resize checks). Textured mesh: 4,071,685 vertices, 8,136,271 faces,
+679 MB. *Corrected 2026-09-22:* this entry first gave "320 s without" for Meshing and "5022 s
+without" for Texturing. Both came from the earlier `useLocalBA=False` workaround run (839 poses,
+51 atlases), a different reconstruction, not this one without its checks. This run's Meshing,
+rerun from the same cache with no self-checks through the 0.3.3 release package, takes 479 s with
+the depth maps read cold from disk and 489 s warm (see the fusion profile below).
 
 **Every self-check, at 884 views, zero:** filterByPixSize identical to single-threaded upstream on
 all 52,305,736 slots and on each of the four later passes; GPU knn identical to nanoflann on all
@@ -1169,3 +1173,27 @@ The Windows packages carry no SuiteSparse (both packagers refuse one that does),
 file in them is CRLF (all three packagers rewrite and verify it). Outside the matrix, the fixed
 StructureFromMotion carried the 884-view False Door through Meshroom with every self-check on and
 zero differences, and the 1678-view Rubble ran to a textured mesh on a 2013 dual-core.
+
+## Meshing at 833 views: where fusion's time goes (2026-09-22)
+
+The False Door fix run's Meshing, rerun from its kept cache with no self-checks through the 0.3.3
+release package (`cheshire-run.cmd aliceVision_meshing`, the node's own command line, Ryzen 5 5600X +
+RX 9070): **479 s** with the depth maps read cold from disk, **489 s** warm with
+`CHESHIRE_GPU_VIS_LOG=1`. `fuseFromDepthMaps` is about 290 s of it:
+
+| phase | cold run | warm run, profiled |
+|---|---|---|
+| load depth maps (12 threads, gaussian on the GPU) | 111 s | 43 s |
+| `filterByPixSize` x5 (kd-trees on the CPU, index-order rounds) | ~16 s | ~16 s |
+| removeInvalidPoints, margin setup | ~9 s | ~9 s |
+| visibility pass 1 (9,937,481 points, 831 cameras) | 84 s | 72 s |
+| visibility pass 2 (4,699,910 points) | 66 s | 133 s |
+
+The visibility accounting (pass 1): votes 38.3 s, backproject 23.3 s, maps 4.7 s, index 3.2 s,
+device wait 1.7 s; the device's own kernel time, 38.7 s, overlaps the host work. So the two
+visibility passes are bound by host work - collecting votes and backprojecting pixels, camera by
+camera - not by the knn kernels and not by the disk. The kd-tree filter that was left on the CPU
+after step 4p is about 16 s of 480. After fusion: tetrahedralisation 25 s (geogram), votes, graph
+and cut about 60 s, post-cut processing and cleaning about 95 s, writes about 20 s. Pass 2's 133 s
+in the profiled run against 66 s in the cold one is not explained yet; other work was running on
+the box during the second run.
