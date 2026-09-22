@@ -3,6 +3,7 @@
 transitive DLL closure (vcpkg runtime + ROCm runtime) next to the executables, so it runs from
 any folder with only the AMD display driver installed.
 usage: package_windows.py <install dir> <vcpkg bin> <rocm bin> <llvm-objdump.exe> <out zip>"""
+import sys
 import os, shutil, subprocess, sys, zipfile
 from pathlib import Path
 inst, vbin, rbin, objdump, outzip = map(Path, sys.argv[1:6])
@@ -27,6 +28,18 @@ while todo:
 # holds two, amd_comgr_2.dll and amd_comgr0602.dll, 107 MB each; amdhip64_6.dll names the first and
 # nothing in the package mentions the second, so globbing shipped a quarter of the zip as dead
 # weight. A LoadLibrary name is a plain string in the binary, so grep for it (docs/16).
+# GPL contamination guard (2026-09-22). The Windows packages up to 0.3.2 carried libspqr.dll and
+# libcholmod.dll: vcpkg's Ceres links SuiteSparse, and the import walk above copies whatever a DLL
+# names. The AliceVision maintainers ruled the same day that pre-built binaries must not package
+# SPQR (discussion #2116), and Cheshire is MPL-2.0. 0.3.3's Ceres is built without SuiteSparse
+# (build/ceres-nosuitesparse.cmd); this refuses a stage where any of these came back.
+gpl = sorted(p.name for p in (stage / 'bin').glob('*.dll')
+             if p.name.lower() in ('libspqr.dll', 'libcholmod.dll', 'libumfpack.dll', 'libklu.dll'))
+if gpl:
+    sys.exit(f"GPL SuiteSparse libraries in the package: {', '.join(gpl)} - a DLL still imports them "
+             f"(ceres.dll built with SUITESPARSE=ON?); rebuild Ceres without SuiteSparse first")
+print('=== no SuiteSparse GPL libraries in the package')
+
 cand = list(rbin.glob('amd_comgr*.dll'))
 wanted = set()
 for pe in list((stage / 'bin').glob('*.dll')) + list((stage / 'bin').glob('*.exe')):

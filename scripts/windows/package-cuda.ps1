@@ -107,6 +107,15 @@ if (Test-Path (Join-Path $bin "popsift.dll")) {
     Write-Output "=== GPU SIFT: aliceVision_feature.dll imports popsift.dll"
 }
 
+# GPL contamination guard (2026-09-22): the 0.3.0-0.3.2 Windows packages carried libspqr.dll and
+# libcholmod.dll through vcpkg's Ceres. 0.3.3's Ceres is built without SuiteSparse; refuse a stage
+# where a DLL still imports them (alicevision discussion #2116: no SPQR in pre-built binaries).
+$gpl = Get-ChildItem $bin -Filter *.dll | Where-Object { $_.Name -in @("libspqr.dll", "libcholmod.dll", "libumfpack.dll", "libklu.dll") }
+if ($gpl) {
+    throw "GPL SuiteSparse libraries in the package: $($gpl.Name -join ', ') - rebuild Ceres without SuiteSparse first"
+}
+Write-Output "=== no SuiteSparse GPL libraries in the package"
+
 # share/aliceVision carries the OCIO config and sensor database the binaries look for
 $share = "D:\MMI\cheshire\build\av-cuda-install\share"
 if (Test-Path $share) {
