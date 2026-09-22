@@ -24,5 +24,8 @@ export LD_LIBRARY_PATH="$AV/lib:$AV/aliceVision/lib:${LD_LIBRARY_PATH:-}"
   --colorOptimizationEnabled True --colorOptimizationNbIterations 100 --sgmUseCustomPatchPattern False --refineUseCustomPatchPattern False \
   --nbGPUs 0 --verboseLevel info --output "$OUT" ${CHESHIRE_DEPTHMAP_EXTRA:-}
 if [ -n "$REF" ]; then
-  python3 "$(dirname "$0")/../compare_depthmaps.py" "$REF" "$OUT" --png "$OUT/compare"
+  # the repo keeps the comparer one level up (scripts/); a deployed copy keeps it beside this script
+  CMP="$(dirname "$0")/../compare_depthmaps.py"
+  [ -f "$CMP" ] || CMP="$(dirname "$0")/compare_depthmaps.py"
+  python3 "$CMP" "$REF" "$OUT" --png "$OUT/compare"
 fi

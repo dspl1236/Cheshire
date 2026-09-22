@@ -1118,3 +1118,11 @@ for whichever git writes the checkout; all three Windows packagers rewrite every
 with CRLF and verify it; `wsl-bundle.sh` refuses a checkout under `/mnt`; and the bundle was rebuilt
 from the unchanged payloads, after which all eight nodes pair by hand, DepthMap first. The Windows
 CUDA zip built at 10:45 was unaffected: its copy had CRLF endings.
+
+**The release CUDA package against upstream's own CUDA, on the GTX 1080 Ti in house-pc.** The 41-view
+depth maps (`scripts/linux/run-depthmap.sh`, Meshroom's standard DepthMap parameters) from the Linux
+CUDA release bundle, compared with the CUDA 11.3 reference computed by upstream's binary on this
+card in September: **82 of 82 files byte-identical** - all 41 depth maps and all 41 similarity maps,
+whole-file SHA-256 - in 213 s against the reference's 379 s. The bridge planned 2 full R cameras +
+2 tiles on the 11 GB card with images resident. Step 5l's `--fmad=false` applies only to the ports,
+so this is also the check that it left upstream's depth-map kernels as they were.
