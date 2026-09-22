@@ -12,6 +12,9 @@ $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin"
 $stage = "D:\MMI\cheshire\build\cheshire-alicevision-cuda-windows-x64"
 $zip = "D:\MMI\cheshire\build\cheshire-alicevision-cuda-windows-x64-cuda12.9.zip"
 
+# The previous zip goes first: a guard that throws later must not leave yesterday's artifact behind
+# looking like today's (2026-09-22: a stale zip with libspqr.dll shipped to the bench that way).
+if (Test-Path $zip) { Remove-Item $zip -Force }
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Path $stage | Out-Null
 
