@@ -1,6 +1,8 @@
 # Draft: reply to alicevision discussion #2116 ("Proposal: Rework the build system from scratch")
 
-*Not posted. Review before posting. This is a reply in the build-system thread, so it stays on
+*Posted 2026-09-22: https://github.com/alicevision/AliceVision/discussions/2116#discussioncomment-18553696
+
+Original note: Review before posting. This is a reply in the build-system thread, so it stays on
 build, bundling and portability; the metrics and large-set results go in a separate show-and-tell.*
 
 ---

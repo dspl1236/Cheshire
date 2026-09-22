@@ -1,6 +1,8 @@
 # Draft: comment for alicevision/Meshroom issue #2344 ("map::at" crash in StructureFromMotion)
 
-*Not posted. Review before posting; the diff is against AliceVision `develop` as vendored in
+*Posted 2026-09-22: https://github.com/alicevision/Meshroom/issues/2344#issuecomment-5777656385
+
+Original note: Review before posting; the diff is against AliceVision `develop` as vendored in
 Cheshire (third_party/aliceVision, 2026 upstream) and applies to 2023.3 with the same lines.*
 
 ---
