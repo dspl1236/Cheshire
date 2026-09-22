@@ -15,7 +15,7 @@ anything we had tested on, on the hardware below. The numbers are the point of t
 | box | CPU | RAM | GPU | OS |
 |---|---|---|---|---|
 | house-pc | Intel i3-4330, 2 cores / 4 threads (2013) | 14.6 GB | Radeon RX 6750 XT, 12 GB | Ubuntu 24.04, ROCm 7.2 |
-| power-pc | Ryzen desktop | 64 GB | Radeon RX 9070, 16 GB | Windows 11, HIP SDK |
+| power-pc | AMD Ryzen 5 5600X, 6 cores / 12 threads | 64 GB | Radeon RX 9070, 16 GB | Windows 11, HIP SDK |
 
 ## Mill 19 "Rubble" (Mega-NeRF): 1678 drone photographs, 4608x3456, 9.2 GB of JPEG, on the i3
 
