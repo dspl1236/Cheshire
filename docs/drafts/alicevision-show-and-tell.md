@@ -1,7 +1,6 @@
 # Draft: AliceVision Discussions, Show and tell - "Meshroom on AMD, and 1678 views through a 2013 dual-core"
 
-*Not posted. Rubble's final rows (Meshing, Texturing, total, mesh size) are marked TBD until the run
-lands. Review before posting.*
+*Not posted; held for the 0.3.3 release. All numbers final. Review before posting.*
 
 ---
 
@@ -33,8 +32,8 @@ Meshroom 2023.3's `photogrammetry` pipeline, default parameters except `describe
 | DepthMapFilter | 1545 s | on the GPU |
 | Meshing | 1020 s | GPU votes, GPU max-flow, GPU visibility; 8 GB RAM peak, no swap |
 | MeshFiltering | 37 s | |
-| Texturing | TBD | |
-| total compute | TBD (about 14 h) | |
+| Texturing | 10,013 s | 34 atlases of 8192^2, thirteen passes over 1590 cameras |
+| total compute | 16.0 h | textured mesh 3,350,047 faces, 1,679,493 vertices; 164 GB of cache |
 
 What that means in plain terms: stock Meshroom on this box would spend about a day on CPU
 feature extraction alone before the parts that need a CUDA card, which it does not have. The CPU is

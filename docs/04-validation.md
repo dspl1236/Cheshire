@@ -1019,3 +1019,16 @@ Meshroom 2023.3's own Windows release ships `libspqr.dll` and `libcholmod.dll` a
 AliceVision's 2026.09.01 prebuilt vcpkg zip this tree came from, so 0.3.0-0.3.2 matched upstream's
 practice; the maintainers' ruling in discussion #2116 (no SPQR in pre-built binaries) is the one
 0.3.3 follows. The Linux bundle's Ceres was built without SuiteSparse from the start.
+
+## Rubble, complete: 1678 views through a 2013 dual-core (2026-09-22)
+
+The resumed run finished: **ok**, 6/6 ports (the b033 bundle predates the SfM pairing), 16.0 h
+of compute over the two sessions. Per node: FeatureExtraction 756 s, ImageMatching 37 s,
+FeatureMatching 2265 s, StructureFromMotion 4291 s (1591 poses, upstream's binary), PrepareDenseScene
+3363 s, DepthMap 34,267 s (1590 maps at downscale 2, 3 full R cameras + 5 tiles per view on the
+12 GB card), DepthMapFilter 1544 s, Meshing 1020 s (8 GB RAM peak on 14.6 GB, no swap), MeshFiltering
+37 s, Texturing 10,013 s (34 atlases of 8192^2). The textured mesh is 1,679,493 vertices and
+3,350,047 faces, 265 MB; the cache is 164 GB, 98 GB of it PrepareDenseScene's EXRs. The i3-4330's
+share of the 16 hours is the SfM and the AC-RANSAC half of matching; the rest was the RX 6750 XT.
+Two disk incidents along the way (the system disk filling, one write timeout that damaged one
+undistorted image) are recorded above; the result stands with the one-camera texture caveat.
