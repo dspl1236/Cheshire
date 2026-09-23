@@ -1371,3 +1371,30 @@ The analytic check on this set (929,238 evaluations, 421,505 with Jacobians): re
 1,858,476 values differ; Jacobians 2,847,747 of 7,036,470 differ, by at most 4.55e-13 absolute and
 5.45e-11 relative. Jacobians 1.9x and 2.75x, BA 34.7 s to 25.5 s and 24.2 s, the node 69 s to
 60 s and 59 s; the landmark spread (140,387 to 140,647) is the run-to-run kind again.
+
+**False Door (884 views, sift), the kept cache of the 0.3.3 end-to-end run, one run per setting,
+same box, idle (the residual-evaluation cost per unit of work, the same code in all three, is
+45-52 ns in every run above and below, which is the check that nothing else was running).** Here
+the wall clock says nothing about the Jacobians, because incremental SfM's trajectory varies run
+to run far more than the change does: the three runs did 1.42, 0.57 and 1.54 billion
+residual-block-iterations of bundle adjustment (960, 922 and 936 solves; 48, 36 and 39 of them
+global, over 300 k blocks), ended at 825, 831 and 828 poses, and took 2368 s, 1302 s and 1667 s.
+The two earlier autodiff replays of the same cache (the CHOLMOD table above) spread the same way,
+1069 s against 733 s of BA. What is comparable is the cost per residual-block-iteration, which
+`CHESHIRE_BA_PROFILE` gives per solve:
+
+| Jacobians | Jacobians, ns per residual-block-iteration (global solves) | same, all solves | residuals | SfM wall | poses / landmarks |
+|---|---|---|---|---|---|
+| autodiff (upstream) | 709 | 711 | 51 | 2368 s | 825 / 1,345,755 |
+| stride 32 | 440 (1.6x) | 443 | 52 | 1302 s | 831 / 1,355,046 |
+| analytic | 251 (2.8x) | 251 | 45 | 1667 s | 828 / 1,350,277 |
+
+The same measure on the small sets: 41 views 865-899 / 453-461 / 293-322 ns, engine bay 701 /
+380 / 216 ns (global solves), so the per-work gain is the same at every size and the small sets'
+wall-clock ratios are the honest ones there because their trajectories barely vary. Two things
+follow. A bundle-adjustment change at 884 views cannot be judged by wall clock until SfM is
+seeded per task (the 0.3.4 determinism item), and the per-work numbers are what
+`scripts/sfmbench.py`'s logs should be read for at that size. And the stride mode's 1.6x here
+against 1.9x on the small sets is the intrinsics: at 884 views one intrinsic block is shared by
+every camera and locked most of the time, so the active parameter count is 9 and upstream needs
+three passes, not five.

@@ -35,7 +35,10 @@ L items can slide.
   `sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp:627-667, :1796`). Start with a
   one-thread rerun (S). Then derive the generator from (seed, viewId) and (seed, trackId), decide
   what to do about Ceres' threaded Schur order, and gate later SfM changes on a byte-identical
-  `sfm.abc`.
+  `sfm.abc`. Evidence of the cost (2026-09-23, docs/04 "0.3.4: bundle adjustment's Jacobians"):
+  three replays of the False Door SfM cache did 0.57 to 1.54 billion residual-block-iterations of
+  bundle adjustment and took 1302 s to 2368 s, so no BA change can be judged by wall clock at that
+  size until this lands; per-work costs from `CHESHIRE_BA_PROFILE` are the workaround.
 - **GPU SIFT: one descriptor file differs at 884 views** (M). Across two False Door runs, 1,767 of
   1,768 feature files matched (`docs/04-validation.md:953-955`). Rerun view 216823232 on one package
   to separate run-to-run noise from a build difference. The float atomics in the orientation
