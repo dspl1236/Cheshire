@@ -1470,3 +1470,50 @@ writing the same 2.5 KB of generator state - but the drift is of the same size a
 
 `scripts/sfmbench.py run <set> --tag X --json CHESHIRE_SFM_DETERMINISTIC=1`, twice, and equal
 digests, is the gate for every later SfM change; it replaces the n=10 repeats docs/17 needed.
+
+## 0.3.4: what a bundle adjustment costs around Ceres' Solve (2026-09-23)
+
+The 5i profile is Ceres' own clock and stops at `Solve`. Step 5o times the rest of
+`BundleAdjustmentCeres::adjust` (`CHESHIRE_BA_PROFILE=1` now prints a second line per solve,
+`cheshire: BA adjust: build ... solve ... update ... destroy`), and the first run said where the
+"other" was. 41 views, 68 solves, 4.42 million residual blocks in all, the box busy (residual
+evaluation 62 ns per residual-block-iteration against 49 idle):
+
+| phase | total | per residual block | what it is |
+|---|---|---|---|
+| build | 9.2 s | 2090 ns | `createProblem`: a cost function, a `std::vector` of four pointers, nine `std::map` lookups, four ordering inserts and Ceres' `AddResidualBlock` per observation |
+| log-only evaluations | (skipped) | | upstream evaluates every landmark residual before and after the solve, single-threaded, for the two `landmarksBlocks cost` log lines; off unless `CHESHIRE_BA_LOG_COST=1` |
+| Ceres preprocessor | 5.5 s | 1253 ns | program reordering and the evaluator's block structure, per `Solve` |
+| Ceres minimizer | 20.4 s | | residuals 0.9 s, Jacobians 8.8 s, linear solver 7.9 s, trust-region bookkeeping the rest |
+| update | 0.2 s | | the solution back into the SfMData |
+| destroy | 2.1 s | 476 ns | the Problem's destructor: every cost function and residual block freed |
+
+So building and tearing down the problem cost more than evaluating its Jacobians. Two steps on it:
+
+* 5p: a block enters the Ceres ordering once (upstream did four `AddElementToGroup` calls per
+  observation, each a `std::map` find over every block, nearly all on a block already there).
+  **No measurable change** (2160 ns on a busier box): the ordering was never the cost.
+* 5q: the per-view part of the lookup - view, pose state, the three block pointers, the
+  intrinsic object, the ordering - is done once per view per solve through an `unordered_map`
+  filled on first use; the landmark enters the ordering once; the four pointers go through
+  Ceres' array overload instead of a heap-allocated vector; and the problem is built with
+  `disable_all_safety_checks` (the sort and duplicate scan of the pointers per residual block; the
+  problem is well-formed by construction).
+
+| Jacobians | build, before | build, after 5q | box (residual ns) |
+|---|---|---|---|
+| stride (default) | 2160 ns per block (9.55 s) | 1486 ns (6.57 s) | 68 -> 58 |
+| analytic | 1811 ns (8.01 s) | 1177 ns (5.20 s) | 56 -> 49 |
+
+Corrected for the box drift that is 19 % and 27 % off the build. What is left, 1.2-1.5 us per
+residual block, is Ceres' `AddResidualBlock` (its own allocations and hash lookups) and the cost
+function's allocations - the analytic cost function is one object holding the intrinsic part by
+value, the autodiff one is a functor, an inner cost function and a wrapper - and the destroy is
+their mirror image. Only a Problem that lives across solves would remove those, and Ceres would
+still run its preprocessor per `Solve`, so the ceiling of that redesign is build + destroy, about
+1.9 of the 7.5 us every residual block costs per solve here (a quarter of bundle adjustment, a
+tenth of the node). It is on the roadmap with that number, not in the code.
+
+The deterministic gate after these steps: the 6-view and 41-view runs with
+`CHESHIRE_SFM_DETERMINISTIC=1` reproduce the digests recorded above exactly (41 views:
+`1321c85863ce62fe` / `b45f6f46859ae678`), so none of 5o-5q changed a number.

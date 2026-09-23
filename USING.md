@@ -181,6 +181,7 @@ together as its `verify` configuration ([docs/04](docs/04-validation.md)):
 | `CHESHIRE_GPU_BLUR_CHECK=1` | how many pixels differ from OpenImageIO, and the worst |
 | `CHESHIRE_GPU_PAD_CHECK=1` | `GPU padding check: texels differing from the sequential sweeps: 0 of N` - texturing's edge padding on the device against upstream's two host sweeps (v0.3.2) |
 | `CHESHIRE_SFM_DETERMINISTIC=1` | not a check but the condition for one: bundle adjustment on one Ceres thread (SfM's own loops keep every core), which with the per-task generators makes two runs of StructureFromMotion on the same input byte-identical (`--output x.sfm`; the Alembic file carries the date). `CHESHIRE_BA_THREADS=n` sets the Ceres thread count directly. Cost on 41 views in docs/04 |
+| `CHESHIRE_BA_LOG_COST=1` | upstream's two `landmarksBlocks cost` log lines per bundle adjustment, each a full single-threaded residual evaluation; skipped by default since 0.3.4 (docs/04, "what a bundle adjustment costs around Ceres' Solve") |
 | `CHESHIRE_BA_CHECK=1` | in the StructureFromMotion log, after every bundle adjustment: `BA check (stride against autodiff): ... residuals 0 of N values differ; Jacobians 0 of M values differ - identical`; with `CHESHIRE_BA_JACOBIANS=analytic` the Jacobians differ by rounding (max rel 4.4e-10 on 41 views) and the line says by how much |
 | `CHESHIRE_OBJ_CHECK=1` | Meshing and Texturing also write Assimp's file beside the direct writer's (`mesh.assimp.obj`, `texturedMesh.assimp.obj`); `scripts/check_textured_obj.py` compares the textured pair by content |
 

@@ -89,6 +89,7 @@ TRACKED = [
     "src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp",
     "src/aliceVision/sfm/pipeline/ReconstructionEngine.hpp",
     "src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp",
+    "src/aliceVision/sfm/bundle/costfunctions/intrinsicsProject.hpp",
 ]
 
 
@@ -3626,6 +3627,273 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
             if t.count(old) != 1:
                 sys.exit(f"not found once: {old}")
             t = t.replace(old, old.replace("_ceresOptions.nbThreads", "cheshire::baThreads(_ceresOptions.nbThreads)") + "  // cheshire: step 5n", 1)
+        bac.write_text(t, encoding="utf-8", newline="")
+
+    # 5o. What a bundle adjustment costs around Ceres' Solve. The 5i profile is Ceres' own clock;
+    #     adjust() also builds the Problem (a cost function and four ordering-group inserts per
+    #     observation), evaluates every landmark residual twice for two log lines, writes the
+    #     solution back and destroys the Problem. CHESHIRE_BA_PROFILE=1 now prints those phases
+    #     too ("cheshire: BA adjust: ..."), and the two log-only evaluations are skipped unless
+    #     CHESHIRE_BA_LOG_COST=1: they are a full single-threaded residual pass each and feed
+    #     nothing but "landmarksBlocks cost".
+    t = bac.read_text(encoding="utf-8")
+    if "cheshireAdjustClock" not in t:
+        old = ("    problemOptions.evaluation_callback = this;" + NL
+               + "    ceres::Problem problem(problemOptions);" + NL
+               + "    createProblem(sfmData, refineOptions, problem, landmarksBlockIds, temporalConstraintBlockIds);" + NL)
+        if t.count(old) != 1:
+            sys.exit("Problem creation not found once in adjust()")
+        t = t.replace(old, "    problemOptions.evaluation_callback = this;" + NL + r"""    // cheshire (step 5o): the phases around Ceres' Solve, printed with CHESHIRE_BA_PROFILE=1. The
+    // guard is declared before the Problem so its destructor runs after the Problem's and times it.
+    static const bool cheshireBaProfile = std::getenv("CHESHIRE_BA_PROFILE") != nullptr;
+    static const bool cheshireBaLogCost = std::getenv("CHESHIRE_BA_LOG_COST") != nullptr;
+    using cheshireAdjustClock = std::chrono::steady_clock;
+    struct CheshireDestroyTimer
+    {
+        bool on;
+        cheshireAdjustClock::time_point t;
+        ~CheshireDestroyTimer()
+        {
+            if (on)
+                ALICEVISION_LOG_INFO("cheshire: BA adjust: destroy " << std::chrono::duration<double>(cheshireAdjustClock::now() - t).count() << " s");
+        }
+    } cheshireDestroyTimer{false, cheshireAdjustClock::now()};
+    const cheshireAdjustClock::time_point cheshireT0 = cheshireAdjustClock::now();
+    ceres::Problem problem(problemOptions);
+    createProblem(sfmData, refineOptions, problem, landmarksBlockIds, temporalConstraintBlockIds);
+    const double cheshireBuildS = std::chrono::duration<double>(cheshireAdjustClock::now() - cheshireT0).count();
+    const cheshireAdjustClock::time_point cheshireT1 = cheshireAdjustClock::now();
+""".replace("\n", NL), 1)
+        # the two log-only evaluations: the post-solve one first, its text is a substring of the pre-solve one once patched
+        post = ('    ALICEVISION_LOG_INFO("landmarksBlockIds : " << landmarksBlockIds.size());' + NL
+                + "    evaluateOptions.residual_blocks = landmarksBlockIds;" + NL
+                + "    problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);" + NL
+                + '    ALICEVISION_LOG_INFO("landmarksBlocks cost : " << cost);' + NL
+                + NL
+                + "    if (temporalConstraintBlockIds.size() != 0)" + NL
+                + "    {" + NL
+                + "        evaluateOptions.residual_blocks = temporalConstraintBlockIds;" + NL
+                + "        problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);" + NL
+                + '        ALICEVISION_LOG_INFO("temporalConstraintBlocks cost : " << cost);' + NL
+                + "    }" + NL)
+        if t.count(post) != 1:
+            sys.exit("post-solve evaluation block not found once in adjust()")
+        t = t.replace(post, ("    if (cheshireBaLogCost)  // cheshire (step 5o)" + NL + "    {" + NL + post + "    }" + NL
+                             + "    const double cheshireEval2S = std::chrono::duration<double>(cheshireAdjustClock::now() - cheshireT3).count();" + NL), 1)
+        pre = ('    ALICEVISION_LOG_INFO("landmarksBlockIds : " << landmarksBlockIds.size());' + NL
+               + "    ceres::Problem::EvaluateOptions evaluateOptions;" + NL
+               + "    evaluateOptions.residual_blocks = landmarksBlockIds;" + NL
+               + "    double cost;" + NL
+               + "    problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);" + NL
+               + '    ALICEVISION_LOG_INFO("landmarksBlocks cost : " << cost);' + NL
+               + NL
+               + "    if (temporalConstraintBlockIds.size() != 0)" + NL
+               + "    {" + NL
+               + "        evaluateOptions.residual_blocks = temporalConstraintBlockIds;" + NL
+               + "        problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);" + NL
+               + '        ALICEVISION_LOG_INFO("temporalConstraintBlocks cost : " << cost);' + NL
+               + "    }" + NL)
+        if t.count(pre) != 1:
+            sys.exit("pre-solve evaluation block not found once in adjust()")
+        t = t.replace(pre, ("    ceres::Problem::EvaluateOptions evaluateOptions;" + NL
+                            + "    double cost = 0.0;" + NL
+                            + "    if (cheshireBaLogCost)  // cheshire (step 5o): a full residual pass for a log line, off unless asked" + NL
+                            + "    {" + NL
+                            + '    ALICEVISION_LOG_INFO("landmarksBlockIds : " << landmarksBlockIds.size());' + NL
+                            + "    evaluateOptions.residual_blocks = landmarksBlockIds;" + NL
+                            + "    problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);" + NL
+                            + '    ALICEVISION_LOG_INFO("landmarksBlocks cost : " << cost);' + NL
+                            + NL
+                            + "    if (temporalConstraintBlockIds.size() != 0)" + NL
+                            + "    {" + NL
+                            + "        evaluateOptions.residual_blocks = temporalConstraintBlockIds;" + NL
+                            + "        problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);" + NL
+                            + '        ALICEVISION_LOG_INFO("temporalConstraintBlocks cost : " << cost);' + NL
+                            + "    }" + NL
+                            + "    }" + NL
+                            + "    const double cheshireEval1S = std::chrono::duration<double>(cheshireAdjustClock::now() - cheshireT1).count();" + NL), 1)
+        old = "    ceres::Solve(options, &problem, &summary);" + NL
+        if t.count(old) != 1:
+            sys.exit("ceres::Solve not found once in adjust() (5o)")
+        t = t.replace(old, ("    const cheshireAdjustClock::time_point cheshireT2 = cheshireAdjustClock::now();" + NL + old
+                            + "    const double cheshireSolveS = std::chrono::duration<double>(cheshireAdjustClock::now() - cheshireT2).count();" + NL
+                            + "    const cheshireAdjustClock::time_point cheshireT3 = cheshireAdjustClock::now();" + NL), 1)
+        old = "    updateFromSolution(sfmData, refineOptions);" + NL
+        if t.count(old) != 1:
+            sys.exit("updateFromSolution call not found once in adjust()")
+        t = t.replace(old, "    const cheshireAdjustClock::time_point cheshireT4 = cheshireAdjustClock::now();" + NL + old, 1)
+        old = '    ALICEVISION_LOG_INFO("BundleAdjustmentCeres::adjust end");' + NL
+        if t.count(old) != 1:
+            sys.exit("adjust end log not found once")
+        t = t.replace(old, r"""    if (cheshireBaProfile)
+    {
+        ALICEVISION_LOG_INFO("cheshire: BA adjust: build " << cheshireBuildS << " s, log evaluations " << cheshireEval1S + cheshireEval2S
+                             << " s, solve " << cheshireSolveS << " s (Ceres preprocessor " << summary.preprocessor_time_in_seconds << ", minimizer "
+                             << summary.minimizer_time_in_seconds << ", postprocessor " << summary.postprocessor_time_in_seconds << "), update "
+                             << std::chrono::duration<double>(cheshireAdjustClock::now() - cheshireT4).count() << " s; " << summary.num_residual_blocks
+                             << " residual blocks");
+        cheshireDestroyTimer.on = true;
+        cheshireDestroyTimer.t = cheshireAdjustClock::now();
+    }
+""".replace("\n", NL) + old, 1)
+        if "#include <chrono>" not in t:
+            inc0 = t.index("#include")
+            t = t[:inc0] + "#include <chrono>  // cheshire: step 5o" + NL + t[inc0:]
+        bac.write_text(t, encoding="utf-8", newline="")
+
+    # 5p. The problem build, measured by 5o at 9.2 s of a 27 s bundle-adjustment budget on 41 views
+    #     (68 solves). Upstream adds every parameter block of every observation to the Ceres
+    #     ordering - four AddElementToGroup calls per observation, each a std::map find over all
+    #     the blocks, on a block that is almost always already there. Now a block enters the
+    #     ordering once (an unordered_set of pointers says whether it has). And the cost functions'
+    #     parameter-block-size vectors are reserved before the push_backs.
+    t = bah.read_text(encoding="utf-8")
+    if "_cheshireOrdered" not in t:
+        old = "#include <memory>" + NL
+        if t.count(old) != 1:
+            sys.exit("<memory> include not found once in BundleAdjustmentCeres.hpp")
+        t = t.replace(old, old + "#include <unordered_set>  // cheshire: step 5p" + NL, 1)
+        old = "    int cheshireRigGroup(IndexT rigId, IndexT subPoseId)" + NL
+        if t.count(old) != 1:
+            sys.exit("cheshireRigGroup not found once in BundleAdjustmentCeres.hpp")
+        t = t.replace(old, r"""    // cheshire (step 5p): a block enters the ordering once
+    std::unordered_set<const double*> _cheshireOrdered;
+    void cheshireOrder(double* block, int group)
+    {
+        if (_cheshireOrdered.insert(block).second)
+            _linearSolverOrdering.AddElementToGroup(block, group);
+    }
+""".replace("\n", NL) + old, 1)
+        bah.write_text(t, encoding="utf-8", newline="")
+
+    t = bac.read_text(encoding="utf-8")
+    if "cheshireOrder(" not in t:
+        n = t.count("_linearSolverOrdering.AddElementToGroup(")
+        if n != 10:
+            sys.exit(f"expected 10 AddElementToGroup calls in BundleAdjustmentCeres.cpp, found {n}")
+        t = t.replace("_linearSolverOrdering.AddElementToGroup(", "cheshireOrder(")
+        old = "    _cheshireRigGroup.clear();" + NL
+        if t.count(old) != 1:
+            sys.exit("_cheshireRigGroup.clear not found once in BundleAdjustmentCeres.cpp")
+        t = t.replace(old, old + "    _cheshireOrdered.clear();  // cheshire: step 5p" + NL, 1)
+        bac.write_text(t, encoding="utf-8", newline="")
+
+    ip = AV / "src/aliceVision/sfm/bundle/costfunctions/intrinsicsProject.hpp"
+    t = ip.read_text(encoding="utf-8")
+    if "cheshire: step 5p" not in t:
+        old = "        mutable_parameter_block_sizes()->push_back(intrinsics->getParametersSize());" + NL
+        if t.count(old) != 1:
+            sys.exit("CostIntrinsicsProject push_back not found once")
+        t = t.replace(old, "        mutable_parameter_block_sizes()->reserve(3);  // cheshire: step 5p" + NL + old, 1)
+        ip.write_text(t, encoding="utf-8", newline="")
+
+    # 5q. The problem build, lean. Per observation upstream did nine std::map lookups (view, pose,
+    #     intrinsic and distortion blocks, the intrinsic object), a shared_ptr copy, a heap-allocated
+    #     std::vector for four pointers, and Ceres' safety checks (a sort of the pointers and a
+    #     duplicate scan); measured by 5o at about 2 us per residual block, 9.2 s of 27 s on 41 views.
+    #     Now: the per-view blocks are looked up once per view per solve (an unordered_map filled on
+    #     first use, which also enters them into the ordering), the landmark enters the ordering once,
+    #     the four pointers go through Ceres' array overload, and the problem is built with
+    #     disable_all_safety_checks (the problem is well-formed by construction).
+    t = bac.read_text(encoding="utf-8")
+    if "CheshireViewBlocks" not in t:
+        old = "    problemOptions.evaluation_callback = this;" + NL
+        if t.count(old) != 1:
+            sys.exit("evaluation_callback line not found once (5q)")
+        t = t.replace(old, old + "    problemOptions.disable_all_safety_checks = true;  // cheshire (step 5q): the problem is well-formed by construction" + NL, 1)
+        sig = "void BundleAdjustmentCeres::addLandmarksToProblem("
+        if t.count(sig) != 1:
+            sys.exit("addLandmarksToProblem definition not found once")
+        i = t.index(sig)
+        j = t.index("{" + NL, i) + len("{" + NL)
+        t = t[:j] + """    // cheshire (step 5q): what an observation needs of its view, looked up once per view per solve
+    struct CheshireViewBlocks
+    {
+        const sfmData::View* view = nullptr;
+        IndexT intrinsicId = UndefinedIndexT;
+        double* pose = nullptr;
+        double* intrinsic = nullptr;
+        double* distortion = nullptr;
+        std::shared_ptr<IntrinsicBase> intrinsicObject;
+        bool ok = false;
+    };
+    std::unordered_map<IndexT, CheshireViewBlocks> cheshireViews;
+    cheshireViews.reserve(sfmData.getViews().size());
+""".replace("\n", NL) + t[j:]
+        old = "        _allParametersBlocks.push_back(landmarkBlockPtr);" + NL
+        if t.count(old) != 1:
+            sys.exit("_allParametersBlocks.push_back(landmarkBlockPtr) not found once")
+        t = t.replace(old, old + "        if (_ceresOptions.useParametersOrdering)  // cheshire (step 5q): once per landmark, not per observation" + NL
+                      + "            cheshireOrder(landmarkBlockPtr, 0);" + NL, 1)
+        old = ("            const sfmData::View& view = sfmData.getView(viewId);" + NL
+               + "            const IndexT intrinsicId = view.getIntrinsicId();" + NL)
+        if t.count(old) != 1:
+            sys.exit("observation view lookup not found once")
+        i = t.index(old)
+        end_marker = ("                cheshireOrder(distortionBlockPtr, cheshireDistortionGroup(intrinsicId, distortionBlockPtr == fakeDistortionBlockPtr));  // cheshire: step 5n" + NL
+                      + "            }" + NL)
+        k = t.index(end_marker, i)
+        if t.count(end_marker) != 1:
+            sys.exit("distortion ordering line count unexpected (5q)")
+        k += len(end_marker)
+        t = t[:i] + """            // cheshire (step 5q): one lookup per view per solve instead of nine per observation
+            auto cheshireViewIt = cheshireViews.find(viewId);
+            if (cheshireViewIt == cheshireViews.end())
+            {
+                CheshireViewBlocks e;
+                e.view = &sfmData.getView(viewId);
+                e.intrinsicId = e.view->getIntrinsicId();
+                e.ok = sfmData.isPoseAndIntrinsicDefined(*e.view);
+                if (!e.ok)
+                {
+                    ALICEVISION_LOG_ERROR("We should not have an undefined pose here");
+                }
+                else if (sfmData.getAbsolutePose(e.view->getPoseId()).getState() == EEstimatorParameterState::IGNORED)
+                {
+                    ALICEVISION_LOG_ERROR("We should not have an ignored pose here");
+                    e.ok = false;
+                }
+                if (e.ok)
+                {
+                    e.pose = _posesBlocks.at(e.view->getPoseId()).data();
+                    e.intrinsic = _intrinsicsBlocks.at(e.intrinsicId).data();
+                    e.intrinsicObject = _intrinsicObjects[e.intrinsicId];
+                    e.distortion = fakeDistortionBlockPtr;
+                    if (_distortionsBlocks.find(e.intrinsicId) != _distortionsBlocks.end())
+                        e.distortion = _distortionsBlocks.at(e.intrinsicId).data();
+                    if (_ceresOptions.useParametersOrdering)
+                    {
+                        cheshireOrder(e.pose, cheshirePoseGroup(e.view->getPoseId()));
+                        cheshireOrder(e.intrinsic, cheshireIntrinsicGroup(e.intrinsicId));
+                        cheshireOrder(e.distortion, cheshireDistortionGroup(e.intrinsicId, e.distortion == fakeDistortionBlockPtr));
+                    }
+                }
+                cheshireViewIt = cheshireViews.emplace(viewId, e).first;
+            }
+            const CheshireViewBlocks& cheshireView = cheshireViewIt->second;
+            if (!cheshireView.ok)
+                continue;
+            const sfmData::View& view = *cheshireView.view;
+            const IndexT intrinsicId = cheshireView.intrinsicId;
+            double* poseBlockPtr = cheshireView.pose;
+            double* intrinsicBlockPtr = cheshireView.intrinsic;
+            const std::shared_ptr<IntrinsicBase>& intrinsic = cheshireView.intrinsicObject;
+            double* distortionBlockPtr = cheshireView.distortion;
+""".replace("\n", NL) + t[k:]
+        old = ("                std::vector<double*> params;" + NL
+               + "                params.push_back(intrinsicBlockPtr);" + NL
+               + "                params.push_back(distortionBlockPtr);" + NL
+               + "                params.push_back(poseBlockPtr);" + NL
+               + "                params.push_back(landmarkBlockPtr);" + NL
+               + NL
+               + "                ceres::ResidualBlockId blockId = problem.AddResidualBlock(costFunction, weightedLossFunction, params);" + NL)
+        if t.count(old) != 1:
+            sys.exit("simple-case params block not found once (5q)")
+        t = t.replace(old, ("                double* params[4] = {intrinsicBlockPtr, distortionBlockPtr, poseBlockPtr, landmarkBlockPtr};  // cheshire (step 5q): no vector per observation" + NL
+                            + "                ceres::ResidualBlockId blockId = problem.AddResidualBlock(costFunction, weightedLossFunction, params, 4);" + NL), 1)
+        if "#include <unordered_map>" not in t:
+            inc0 = t.index("#include")
+            t = t[:inc0] + "#include <unordered_map>  // cheshire: step 5q" + NL + t[inc0:]
         bac.write_text(t, encoding="utf-8", newline="")
 
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9

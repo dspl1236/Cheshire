@@ -163,6 +163,7 @@ class CostProjectionSimpleAnalytic final : public ceres::CostFunction
         _hasDistortion(intrinsicHasDistortion(intrinsic))
     {
         const auto& s = _inner.parameter_block_sizes();  // intrinsics, distortion, point
+        mutable_parameter_block_sizes()->reserve(4);
         mutable_parameter_block_sizes()->push_back(s[0]);
         mutable_parameter_block_sizes()->push_back(s[1]);
         mutable_parameter_block_sizes()->push_back(6);
@@ -236,6 +237,7 @@ class CostProjectionRigAnalytic final : public ceres::CostFunction
         _hasDistortion(intrinsicHasDistortion(intrinsic))
     {
         const auto& s = _inner.parameter_block_sizes();
+        mutable_parameter_block_sizes()->reserve(5);
         mutable_parameter_block_sizes()->push_back(s[0]);
         mutable_parameter_block_sizes()->push_back(s[1]);
         mutable_parameter_block_sizes()->push_back(6);

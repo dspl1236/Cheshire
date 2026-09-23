@@ -118,6 +118,8 @@ def prepare(s: str, describer: str) -> None:
 
 
 PROFILE = re.compile(r"BA profile: total ([0-9.e+-]+) s = residuals ([0-9.e+-]+) \+ jacobians ([0-9.e+-]+) \+ linear solver ([0-9.e+-]+)")
+ADJUST = re.compile(r"BA adjust: build ([0-9.e+-]+) s, log evaluations ([0-9.e+-]+) s, solve ([0-9.e+-]+) s \(Ceres preprocessor ([0-9.e+-]+), minimizer ([0-9.e+-]+), postprocessor ([0-9.e+-]+)\), update ([0-9.e+-]+) s")
+DESTROY = re.compile(r"BA adjust: destroy ([0-9.e+-]+) s")
 
 
 def parse_log(log: Path) -> dict:
@@ -135,6 +137,16 @@ def parse_log(log: Path) -> dict:
         out["ba_residuals_s"] = round(sum(float(p[1]) for p in prof), 2)
         out["ba_jacobians_s"] = round(sum(float(p[2]) for p in prof), 2)
         out["ba_linear_s"] = round(sum(float(p[3]) for p in prof), 2)
+    adj = ADJUST.findall(t)
+    if adj:
+        out["adj_build_s"] = round(sum(float(a[0]) for a in adj), 2)
+        out["adj_logeval_s"] = round(sum(float(a[1]) for a in adj), 2)
+        out["adj_solve_s"] = round(sum(float(a[2]) for a in adj), 2)
+        out["adj_preprocess_s"] = round(sum(float(a[3]) for a in adj), 2)
+        out["adj_minimizer_s"] = round(sum(float(a[4]) for a in adj), 2)
+        out["adj_postprocess_s"] = round(sum(float(a[5]) for a in adj), 2)
+        out["adj_update_s"] = round(sum(float(a[6]) for a in adj), 2)
+        out["adj_destroy_s"] = round(sum(float(d) for d in DESTROY.findall(t)), 2)
     m = re.findall(r"cheshire: BA jacobians: ([^\r\n]+)", t)
     if m:
         out["ba_jacobians_mode"] = m[0].strip()
@@ -207,6 +219,7 @@ def row(r: dict) -> str:
             f" + lin {r.get('ba_linear_s', 0):>6.1f} + res {r.get('ba_residuals_s', 0):>5.1f} ({r.get('ba_solves', 0)} solves)"
             f" | {r.get('poses', '?')} poses, {r.get('landmarks', '?')} landmarks, RMSE {r.get('rmse', '?')}"
             + (f" | {r['ba_check_last'].replace('cheshire: ', '')}" if r.get("ba_check_last") else "")
+            + (f" | adjust: build {r['adj_build_s']} + logeval {r['adj_logeval_s']} + solve {r['adj_solve_s']} (pre {r['adj_preprocess_s']}, min {r['adj_minimizer_s']}, post {r['adj_postprocess_s']}) + update {r['adj_update_s']} + destroy {r['adj_destroy_s']} s" if r.get("adj_build_s") is not None else "")
             + (f" | abc {r['sfm_abc_sha256']} cams {r.get('cameras_sfm_sha256', '?')}" if r.get("sfm_abc_sha256") else "")
             + (f" | sfm {r['sfm_sfm_sha256']} cams {r.get('cameras_sfm_sha256', '?')}" if r.get("sfm_sfm_sha256") else ""))
 

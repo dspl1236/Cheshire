@@ -95,6 +95,20 @@ L items can slide.
   `analytic` (the chain rule by hand) is opt-in at 3.0x with rounding-level differences (max
   4.4e-10 relative), residuals identical. 41 views: SfM 67 s to 61 s and 57 s; engine bay: 69 s
   to 60 s and 59 s (Jacobians 18.7 s to 9.9 s and 6.8 s).
+- **Bundle adjustment: the problem build** (M). **Done 2026-09-23 (steps 5o-5q; docs/04 "what a
+  bundle adjustment costs around Ceres' Solve").** Measured first: at 41 views the build was
+  2.1 us per residual block (9.2 s of a 27 s BA), Ceres' preprocessor 1.25 us, the destroy 0.5 us,
+  and two log-only full residual evaluations per solve. The evaluations are skipped
+  (`CHESHIRE_BA_LOG_COST=1` restores them); the build is 1.5 us (default) and 1.2 us (analytic)
+  after per-view lookup caching, once-per-landmark ordering, Ceres' array overload and
+  `disable_all_safety_checks`; the once-per-block ordering alone changed nothing.
+- **Bundle adjustment: a Problem that lives across solves** (L). What is left of the build and
+  destroy is Ceres' own per-residual-block bookkeeping; only keeping the Problem across solves
+  removes it, and Ceres' preprocessor stays per `Solve`. Ceiling measured at 41 views: build +
+  destroy is 1.9 of the 7.5 us every residual block costs per solve, a quarter of BA and a tenth
+  of the node. It needs residual blocks added and removed as landmarks and observations change
+  between solves and ignored blocks toggled constant, so it is an engine change, not a BA one.
+  Judge it with the deterministic gate, not wall clock.
 - **CPU share on weak hosts** (S; M if FeatureMatching has to be rerun for the split). On the
   Rubble box (i3-4330, 2 cores) SfM took 4291 s and FeatureMatching 2265 s
   (`docs/04-validation.md:1034`), but the matcher vs AC-RANSAC split there is a guess. Measure it,
