@@ -1517,3 +1517,54 @@ tenth of the node). It is on the roadmap with that number, not in the code.
 The deterministic gate after these steps: the 6-view and 41-view runs with
 `CHESHIRE_SFM_DETERMINISTIC=1` reproduce the digests recorded above exactly (41 views:
 `1321c85863ce62fe` / `b45f6f46859ae678`), so none of 5o-5q changed a number.
+
+## 0.3.4: a bundle-adjustment Problem that lives across solves (2026-09-23)
+
+Step 5r (`hip/port/sfm_ba/persistent.inc`). The engine keeps one `BundleAdjustmentCeres` for the
+whole reconstruction (`ReconstructionEngine_sequentialSfM::_cheshireBA`), and each `adjust()`
+applies the delta to a `ceres::Problem` that is never torn down: a merge walk of the scene's
+landmarks against the records adds residual blocks for new landmarks and observations, removes
+them for gone ones, copies values in, toggles constant/variable; ignored landmarks lose their
+residual blocks and ignored poses go constant (upstream leaves both out of a fresh problem; Ceres
+drops blocks without residuals and residuals whose blocks are all constant from the reduced
+program, so the solver sees the same problem). Rigs, survey points, 2D and point constraints,
+rotation priors, temporal smoothness, depth observations and mesh-referenced landmarks fall back
+to the rebuild; `CHESHIRE_BA_PERSIST=0` restores it.
+
+Two upstream traps on the way, both invisible while the problem was rebuilt every solve. The
+intrinsic block vector was assigned `intrinsicPtr->getParameters()`, a temporary, so it was
+move-assigned a fresh buffer every solve under the pointer the Problem held: one extra parameter
+block per intrinsic per solve, then residuals evaluating freed memory (an access violation, or
+Ceres' "Map key not found" when the stale block's index no longer existed). It is copied in place
+now. And a kept observation whose view had lost its pose since the residual was created would
+dangle once the pose block went; kept observations are re-validated.
+
+**The invariant, checked.** `CHESHIRE_BA_PERSIST_CHECK=1` recomputes after every sync the set of
+(landmark, view) pairs the scene says should have a residual block - the non-ignored landmarks'
+observations from posed, non-ignored views - and compares it with the records, and asks Ceres for
+the residual ids it holds per landmark block and compares those with the records too; before
+each sync it checks the ids again, so a change between solves would show. Consistent on every
+solve: 13 of 13 checks on 6 views, 96 of 96 on 41, and **1036 of 1036 on the 884-view False
+Door** - the first set above 100 poses, so the first with local bundle adjustment and its
+ignored/constant states (961 solves, 815 poses; the landmark slab, reserved at 1 M, overflowed
+once at 1.34 M landmarks and the problem was rebuilt, so the minimum is 2 M now). The
+deterministic gate: two runs byte-identical on 6 views (`40d4bbb85c8d521f`) and on 41
+(`50759f7d5b5e2eb3`); the digests differ from the rebuild's, since the residual and landmark-block
+order is creation order rather than key order, which is the order of floating-point sums.
+
+**Cost, 41 views, rebuild against persistent back to back, twice each** (the per-solve line of
+`CHESHIRE_BA_PROFILE=1`; the second persistent run overlapped the start of a Linux build):
+
+| | build | destroy | Ceres preprocessor | update | SfM wall |
+|---|---|---|---|---|---|
+| rebuild (`CHESHIRE_BA_PERSIST=0`) | 6.54 s, 6.43 s | 1.87 s, 1.71 s | 5.97 s, 5.84 s | 0.16 s | 65.3 s, 64.5 s |
+| persistent | 2.40 s, 2.31 s | 0.09 s, 0.08 s | 8.25 s, 7.40 s | 0.29 s | 63.8 s, 60.0 s |
+
+Build 6.5 s to 2.4 s (the sync still walks every landmark and adds the new observations) and
+destroy 1.8 s to 0.1 s, against Ceres' preprocessor 5.9 s to 7.8 s: it reorders and scans the
+residual blocks every `Solve`, and in a persistent problem those objects were allocated at
+different times and shuffled by removals, so its scans miss cache more. Net about 4 s of 65 s at
+41 views, 6 % of the node - the ceiling of a quarter of BA was optimistic, as the preprocessor
+does not shrink with the build. The False Door's build and preprocessor per residual block are
+not measured yet without the check (the check is O(observations) per solve and sat inside the
+build figure); the rebuild-against-persistent pair there is queued.

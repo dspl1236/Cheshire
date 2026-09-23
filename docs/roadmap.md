@@ -110,6 +110,15 @@ L items can slide.
   of the node. It needs residual blocks added and removed as landmarks and observations change
   between solves and ignored blocks toggled constant, so it is an engine change, not a BA one.
   Judge it with the deterministic gate, not wall clock.
+  **Done 2026-09-23 (step 5r, `hip/port/sfm_ba/persistent.inc`; docs/04 "a bundle-adjustment
+  Problem that lives across solves").** Build 6.5 s to 2.4 s and destroy 1.8 s to 0.1 s at 41
+  views, but Ceres' preprocessor 5.9 s to 7.8 s (its per-solve scans miss cache on residual blocks
+  allocated over time), so net 6 % of the node, not a quarter of BA. Invariant-checked on every
+  solve of 6, 41 and 884 views; deterministic gate byte-identical. Two upstream traps fixed on
+  the way (the intrinsic block vector move-assigned under Ceres' pointer; kept observations of a
+  view that lost its pose). Still open: the False Door rebuild-against-persistent pair without
+  the check, and whether the preprocessor cost can be brought back down (it is Ceres' allocation
+  order, not ours).
 - **CPU share on weak hosts** (S; M if FeatureMatching has to be rerun for the split). On the
   Rubble box (i3-4330, 2 cores) SfM took 4291 s and FeatureMatching 2265 s
   (`docs/04-validation.md:1034`), but the matcher vs AC-RANSAC split there is a guess. Measure it,
