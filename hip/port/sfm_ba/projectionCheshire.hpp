@@ -35,7 +35,17 @@
 // function, so the report then measures the analytic path while the solver sees upstream's numbers.
 #pragma once
 
+// No FMA contraction here, as in every port: the fused projection re-states upstream's chain in
+// scalar form, and a contracted a*b+c where Eigen evaluated a multiply and an add separately would
+// move the residuals off upstream's by a rounding; with contraction off they match bit for bit.
+#ifdef __clang__
+#pragma clang fp contract(off)
+#endif
+
 #include <aliceVision/sfm/bundle/costfunctions/projection.hpp>
+#include <aliceVision/camera/Pinhole.hpp>
+#include <aliceVision/camera/IntrinsicScaleOffsetDisto.hpp>
+#include <aliceVision/camera/cameraCommon.hpp>
 #include <aliceVision/system/Logger.hpp>
 
 #include <ceres/ceres.h>
@@ -150,6 +160,227 @@ inline bool intrinsicHasDistortion(const std::shared_ptr<camera::IntrinsicBase>&
 }
 
 // ---------------------------------------------------------------------------------------------
+// The inner projection, fused. CostIntrinsicsProject computes the projection and its three
+// Jacobian blocks by four separate walks of the same chain - project(), then the derivative with
+// respect to the intrinsics, the distortion and the point - each recomputing P = X/z and the
+// distortion polynomial through virtual calls, and three of them return dynamic Eigen matrices,
+// i.e. heap allocations. For a pinhole with no distortion or a radial K1 / K3 / Brown one, which
+// is what incremental SfM sees, this walks the chain once: P, the distortion value and its two
+// derivatives, cam2ima, straight into Ceres' row-major blocks. The formulas are upstream's, in
+// upstream's order of operations where it has one (the K3 value squares a square root, its
+// derivatives do not; mirrored). Anything else - fisheye, 3DE, an undistortion model - keeps
+// CostIntrinsicsProject, as does CHESHIRE_BA_FUSED_PROJECTION=0.
+
+inline bool fusedProjectionEnabled()
+{
+    static const bool on = [] {
+        const char* v = std::getenv("CHESHIRE_BA_FUSED_PROJECTION");
+        return v == nullptr || std::string(v) != "0";
+    }();
+    return on;
+}
+
+class CheshireIntrinsicsProject
+{
+  public:
+    CheshireIntrinsicsProject(const sfmData::Observation& obs, const std::shared_ptr<camera::IntrinsicBase>& intrinsic)
+      : _measured(obs),
+        _intrinsic(intrinsic)
+    {
+        _sizes = {static_cast<std::int32_t>(intrinsic->getParametersSize()), 1, 3};
+        const auto isod = camera::IntrinsicScaleOffsetDisto::cast(intrinsic);
+        const auto pinhole = camera::Pinhole::cast(intrinsic);
+        _isod = isod.get();
+        if (isod && isod->getDistortion())
+        {
+            _distortion = isod->getDistortion().get();
+            _sizes[1] = static_cast<std::int32_t>(_distortion->getParameters().size());
+        }
+        _model = -1;
+        if (fusedProjectionEnabled() && pinhole && isod && _sizes[0] == 4 && !(isod->getUndistortion() && _distortion == nullptr))
+        {
+            if (_distortion == nullptr)
+                _model = 0;
+            else if (_distortion->getType() == camera::EDISTORTION::DISTORTION_RADIALK1 && _sizes[1] == 1)
+                _model = 1;
+            else if (_distortion->getType() == camera::EDISTORTION::DISTORTION_RADIALK3 && _sizes[1] == 3)
+                _model = 3;
+            else if (_distortion->getType() == camera::EDISTORTION::DISTORTION_BROWN && _sizes[1] == 5)
+                _model = 5;
+        }
+        if (_model < 0)
+            _upstream = std::make_unique<CostIntrinsicsProject>(obs, intrinsic);
+    }
+
+    const std::vector<std::int32_t>& parameter_block_sizes() const { return _sizes; }
+    bool fused() const { return _model >= 0; }
+
+    bool Evaluate(double const* const* parameters, double* residuals, double** jacobians) const
+    {
+        if (_upstream)
+            return _upstream->Evaluate(parameters, residuals, jacobians);
+
+        const double* pt = parameters[2];
+        const double x = pt[0], y = pt[1], z = pt[2];
+        const double px = x / z, py = y / z;  // Pinhole::project: pt.head<2>() / pt(2)
+
+        // the distortion: value D, dD/dP (row-major 2x2), dD/dk (row-major 2 x nd)
+        double D0 = px, D1 = py;
+        double dP00 = 1.0, dP01 = 0.0, dP10 = 0.0, dP11 = 1.0;
+        double dK[10] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        const int nd = _sizes[1];
+        if (_model == 1)
+        {
+            const std::vector<double>& k = _distortion->getParameters();
+            const double k1 = k[0];
+            const double r2 = px * px + py * py;
+            const double r_coeff = 1. + k1 * r2;
+            D0 = px * r_coeff;
+            D1 = py * r_coeff;
+            // Identity * r_coeff + p * [2 k1 px, 2 k1 py]
+            dP00 = 1.0 * r_coeff + px * (2.0 * k1 * px);
+            dP01 = 0.0 * r_coeff + px * (2.0 * k1 * py);
+            dP10 = 0.0 * r_coeff + py * (2.0 * k1 * px);
+            dP11 = 1.0 * r_coeff + py * (2.0 * k1 * py);
+            dK[0] = px * r2;
+            dK[1] = py * r2;
+        }
+        else if (_model == 3)
+        {
+            const std::vector<double>& k = _distortion->getParameters();
+            const double k1 = k[0], k2 = k[1], k3 = k[2];
+            {
+                // addDistortion: r via sqrt, then r2 = r * r
+                const double r = std::sqrt(px * px + py * py);
+                const double r2 = r * r;
+                const double r4 = r2 * r2;
+                const double r6 = r4 * r2;
+                const double r_coeff = (1. + k1 * r2 + k2 * r4 + k3 * r6);
+                D0 = px * r_coeff;
+                D1 = py * r_coeff;
+            }
+            const double r2 = px * px + py * py;
+            if (!(r2 < 1e-21))
+            {
+                const double r4 = r2 * r2;
+                const double r6 = r4 * r2;
+                const double r_coeff = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
+                const double d_coeff = 2.0 * k1 + 4.0 * k2 * r2 + 6.0 * k3 * r4;
+                dP00 = r_coeff + px * d_coeff * px;
+                dP01 = px * d_coeff * py;
+                dP10 = py * d_coeff * px;
+                dP11 = r_coeff + py * d_coeff * py;
+                dK[0] = px * r2;
+                dK[1] = px * r4;
+                dK[2] = px * r6;
+                dK[3] = py * r2;
+                dK[4] = py * r4;
+                dK[5] = py * r6;
+            }
+        }
+        else if (_model == 5)
+        {
+            const std::vector<double>& k = _distortion->getParameters();
+            const double k1 = k[0], k2 = k[1], k3 = k[2], t1 = k[3], t2 = k[4];
+            const double r2 = px * px + py * py;
+            const double r4 = r2 * r2;
+            const double r6 = r4 * r2;
+            const double k_diff = (k1 * r2 + k2 * r4 + k3 * r6);
+            const double t_x = t2 * (r2 + 2 * px * px) + 2 * t1 * px * py;
+            const double t_y = t1 * (r2 + 2 * py * py) + 2 * t2 * px * py;
+            D0 = px + px * k_diff + t_x;
+            D1 = py + py * k_diff + t_y;
+            dP00 = k1 * r2 + k2 * r4 + k3 * r6 + 2 * px * px * (k1 + 2 * k2 * r2 + 3 * k3 * r4) + 6 * px * t2 + 2 * py * t1 + 1;
+            dP01 = 2 * px * py * (k1 + 2 * k2 * r2 + 3 * k3 * r4) + 2 * px * t1 + 2 * py * t2;
+            dP10 = 2 * px * py * (k1 + 2 * k2 * r2 + 3 * k3 * r4) + 2 * px * t1 + 2 * py * t2;
+            dP11 = k1 * r2 + k2 * r4 + k3 * r6 + 2 * px * t2 + 2 * py * py * (k1 + 2 * k2 * r2 + 3 * k3 * r4) + 6 * py * t1 + 1;
+            dK[0] = px * r2;
+            dK[1] = px * r4;
+            dK[2] = px * r6;
+            dK[3] = 2 * px * py;
+            dK[4] = 3 * px * px + py * py;
+            dK[5] = py * r2;
+            dK[6] = py * r4;
+            dK[7] = py * r6;
+            dK[8] = px * px + 3 * py * py;
+            dK[9] = 2 * px * py;
+        }
+
+        // cam2ima: p.cwiseProduct(scale) + principal point
+        const Vec2 scale = _isod->getScale();
+        const Vec2 pp = _isod->getPrincipalPoint();
+        const double s0 = scale(0), s1 = scale(1);
+        const double u = D0 * s0 + pp(0);
+        const double v = D1 * s1 + pp(1);
+        const double obsScale = (_measured.getScale() > 1e-12) ? _measured.getScale() : 1.0;
+        residuals[0] = (u - _measured.getX()) / obsScale;
+        residuals[1] = (v - _measured.getY()) / obsScale;
+        if (jacobians == nullptr)
+            return true;
+        const double inv = 1.0 / obsScale;
+
+        if (jacobians[0] != nullptr)
+        {
+            // d cam2ima / d [scale0, scale1, offset0, offset1] = [D0 0 1 0; 0 D1 0 1]
+            double* J = jacobians[0];
+            J[0] = inv * D0;
+            J[1] = 0.0;
+            J[2] = inv * 1.0;
+            J[3] = 0.0;
+            J[4] = 0.0;
+            J[5] = inv * D1;
+            J[6] = 0.0;
+            J[7] = inv * 1.0;
+        }
+        if (jacobians[1] != nullptr)
+        {
+            double* J = jacobians[1];
+            if (nd == 1 && _model == 0)
+            {
+                J[0] = 0.0;
+                J[1] = 0.0;
+            }
+            else
+            {
+                // diag(scale) * dD/dk
+                for (int j = 0; j < nd; ++j)
+                {
+                    J[j] = inv * (s0 * dK[j]);
+                    J[nd + j] = inv * (s1 * dK[nd + j]);
+                }
+            }
+        }
+        if (jacobians[2] != nullptr)
+        {
+            // diag(scale) * dD/dP * dP/dX, dP/dX = [invz 0 -x invz^2; 0 invz -y invz^2]
+            const double invz = 1.0 / z;
+            const double invzsq = invz * invz;
+            const double mxinvzsq = -x * invzsq;
+            const double myinvzsq = -y * invzsq;
+            const double a00 = dP00 * invz, a01 = dP01 * invz, a02 = dP00 * mxinvzsq + dP01 * myinvzsq;
+            const double a10 = dP10 * invz, a11 = dP11 * invz, a12 = dP10 * mxinvzsq + dP11 * myinvzsq;
+            double* J = jacobians[2];
+            J[0] = inv * (s0 * a00);
+            J[1] = inv * (s0 * a01);
+            J[2] = inv * (s0 * a02);
+            J[3] = inv * (s1 * a10);
+            J[4] = inv * (s1 * a11);
+            J[5] = inv * (s1 * a12);
+        }
+        return true;
+    }
+
+  private:
+    const sfmData::Observation _measured;
+    std::shared_ptr<camera::IntrinsicBase> _intrinsic;
+    const camera::IntrinsicScaleOffsetDisto* _isod = nullptr;
+    const camera::Distortion* _distortion = nullptr;
+    int _model = -1;
+    std::vector<std::int32_t> _sizes;
+    std::unique_ptr<CostIntrinsicsProject> _upstream;
+};
+
+// ---------------------------------------------------------------------------------------------
 // The single-camera projection residual: blocks intrinsics, distortion, pose (angle-axis, centre),
 // point. Residual and inner Jacobians from CostIntrinsicsProject, exactly as upstream's functor
 // uses it; the pose and point Jacobians by the chain rule.
@@ -220,7 +451,7 @@ class CostProjectionSimpleAnalytic final : public ceres::CostFunction
     }
 
   private:
-    CostIntrinsicsProject _inner;
+    CheshireIntrinsicsProject _inner;
     bool _hasDistortion;
 };
 
@@ -315,7 +546,7 @@ class CostProjectionRigAnalytic final : public ceres::CostFunction
     }
 
   private:
-    CostIntrinsicsProject _inner;
+    CheshireIntrinsicsProject _inner;
     bool _hasDistortion;
 };
 

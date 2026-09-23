@@ -3905,6 +3905,10 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
 
     t = bah.read_text(encoding="utf-8")
     if "_cheshireProblem" not in t:
+        old = "        bool useParametersOrdering = true;" + NL
+        if t.count(old) != 1:
+            sys.exit("useParametersOrdering option not found once in BundleAdjustmentCeres.hpp")
+        t = t.replace(old, old + "        bool cheshirePersist = true;  // cheshire (step 5r): keep the Problem across solves; the engine turns it off under the local strategy" + NL, 1)
         old = "    bool adjust(sfmData::SfMData& sfmData, ERefineOptions refineOptions = REFINE_ALL);" + NL
         if t.count(old) != 1:
             sys.exit("adjust declaration not found once in BundleAdjustmentCeres.hpp")
@@ -3920,6 +3924,7 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
     };
     struct CheshireLandmarkRec
     {
+        double* block = nullptr;  // its slot in _landmarksBlocks; no map lookup per landmark per solve
         bool active = false;
         bool constant = false;
         std::vector<CheshireObs> obs;
@@ -4017,7 +4022,9 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
         old = "    BundleAdjustmentCeres BA(options, _params.minNbCamerasToRefinePrincipalPoint);" + NL
         if t.count(old) != 1:
             sys.exit("BA construction not found once in ReconstructionEngine_sequentialSfM.cpp")
-        t = t.replace(old, r"""    // cheshire (step 5r): the same bundle adjuster every time, so its Problem can live across solves
+        t = t.replace(old, r"""    // cheshire (step 5r): the same bundle adjuster every time, so its Problem can live across solves;
+    // persistence pays only while every landmark is active (persistent.inc), so the local strategy turns it off
+    options.cheshirePersist = !enableLocalStrategy;
     if (!_cheshireBA)
         _cheshireBA = std::make_shared<BundleAdjustmentCeres>(options, _params.minNbCamerasToRefinePrincipalPoint);
     else

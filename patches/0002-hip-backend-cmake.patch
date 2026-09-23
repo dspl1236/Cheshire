@@ -5123,7 +5123,7 @@ index bd0bf27..c2e23a9 100644
 +
 +#include "aliceVision/sfm/bundle/persistent.inc"  // cheshire: step 5r
 diff --git a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp
-index ee14887..87e459b 100644
+index ee14887..e6ab8e2 100644
 --- a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp
 +++ b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp
 @@ -10,6 +10,7 @@
@@ -5142,7 +5142,15 @@ index ee14887..87e459b 100644
  
  namespace aliceVision {
  
-@@ -136,6 +138,7 @@ class BundleAdjustmentCeres : public BundleAdjustment, ceres::EvaluationCallback
+@@ -54,6 +56,7 @@ class BundleAdjustmentCeres : public BundleAdjustment, ceres::EvaluationCallback
+         unsigned int nbThreads;
+         unsigned int maxNumIterations;
+         bool useParametersOrdering = true;
++        bool cheshirePersist = true;  // cheshire (step 5r): keep the Problem across solves; the engine turns it off under the local strategy
+         bool summary = false;
+         bool verbose = true;
+         bool useFocalPrior = true;
+@@ -136,6 +139,7 @@ class BundleAdjustmentCeres : public BundleAdjustment, ceres::EvaluationCallback
       * @see BundleAdjustment::Adjust
       */
      bool adjust(sfmData::SfMData& sfmData, ERefineOptions refineOptions = REFINE_ALL);
@@ -5150,7 +5158,7 @@ index ee14887..87e459b 100644
  
      virtual void PrepareForEvaluation(bool evaluate_jacobians, bool new_evaluation_point);
  
-@@ -284,7 +287,7 @@ class BundleAdjustmentCeres : public BundleAdjustment, ceres::EvaluationCallback
+@@ -284,7 +288,7 @@ class BundleAdjustmentCeres : public BundleAdjustment, ceres::EvaluationCallback
      double _fakeDistortionBlock;
      /// landmarks blocks wrapper
      /// block: 3d position(3)
@@ -5159,7 +5167,7 @@ index ee14887..87e459b 100644
      /// rig sub-poses blocks wrapper
      /// block: ceres angleAxis(3) + translation(3)
      std::map<IndexT, std::map<IndexT, std::array<double, 6>>> _rigBlocks;
-@@ -292,6 +295,50 @@ class BundleAdjustmentCeres : public BundleAdjustment, ceres::EvaluationCallback
+@@ -292,6 +296,51 @@ class BundleAdjustmentCeres : public BundleAdjustment, ceres::EvaluationCallback
      /// hinted order for ceres to eliminate blocks when solving.
      /// note: this ceres parameter is built internally and must be reset on each call to the solver.
      ceres::ParameterBlockOrdering _linearSolverOrdering;
@@ -5189,6 +5197,7 @@ index ee14887..87e459b 100644
 +    };
 +    struct CheshireLandmarkRec
 +    {
++        double* block = nullptr;  // its slot in _landmarksBlocks; no map lookup per landmark per solve
 +        bool active = false;
 +        bool constant = false;
 +        std::vector<CheshireObs> obs;
@@ -5274,7 +5283,7 @@ index 1f23958..5491985 100644
  
          if (N == 0)
 diff --git a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
-index 097f8c9..6f15206 100644
+index 097f8c9..197d3ec 100644
 --- a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 +++ b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 @@ -5,6 +5,9 @@
@@ -5335,12 +5344,14 @@ index 097f8c9..6f15206 100644
          if (_params.rig.useRigConstraint && !_sfmData.getRigs().empty())
          {
              ALICEVISION_LOG_INFO("Rig(s) calibration start");
-@@ -740,7 +777,12 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+@@ -740,7 +777,14 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
          }
      }
  
 -    BundleAdjustmentCeres BA(options, _params.minNbCamerasToRefinePrincipalPoint);
-+    // cheshire (step 5r): the same bundle adjuster every time, so its Problem can live across solves
++    // cheshire (step 5r): the same bundle adjuster every time, so its Problem can live across solves;
++    // persistence pays only while every landmark is active (persistent.inc), so the local strategy turns it off
++    options.cheshirePersist = !enableLocalStrategy;
 +    if (!_cheshireBA)
 +        _cheshireBA = std::make_shared<BundleAdjustmentCeres>(options, _params.minNbCamerasToRefinePrincipalPoint);
 +    else
@@ -5349,7 +5360,7 @@ index 097f8c9..6f15206 100644
  
      // give the local strategy graph is local strategy is enable
      if (!enableLocalStrategy)
-@@ -1010,7 +1052,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
+@@ -1010,7 +1054,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
  
      // Sort by the image score
      std::sort(out_connectedViews.begin(), out_connectedViews.end(), [](const ViewConnectionScore& t1, const ViewConnectionScore& t2) {
@@ -5359,7 +5370,7 @@ index 097f8c9..6f15206 100644
      });
      return !out_connectedViews.empty();
  }
-@@ -1545,9 +1588,12 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
+@@ -1545,9 +1590,12 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
      // C. Do the resectioning: compute the camera pose.
      ALICEVISION_LOG_INFO("[" << _sfmData.getValidViews().size() + 1 << "/" << _sfmData.getViews().size() << "] Robust Resection of view: " << viewId);
  
@@ -5373,7 +5384,7 @@ index 097f8c9..6f15206 100644
                                                          resectionData,
                                                          resectionData.pose,
                                                          _params.localizerEstimator);
-@@ -1842,7 +1888,10 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+@@ -1842,7 +1890,10 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
              Vec4 X_homogeneous = Vec4::Zero();
              std::vector<std::size_t> inliersIndex;
  

@@ -23,6 +23,16 @@
 // order of floating-point sums, so the trajectory is not bit-identical to the rebuild's; it is
 // bit-identical run to run, which is what the deterministic gate checks.
 //
+// Where it pays. With every landmark active (no local strategy, i.e. up to 100 poses) a solve's
+// delta is the new landmarks and observations, and the 41-view build went from 6.5 s to 2.4 s.
+// Under the local strategy the ignored region moves with the frontier every solve: on the 884-view
+// False Door 23.6 M residual blocks were added and 18.4 M removed over 419 solves against 70.8 M
+// active in all, and Ceres' preprocessor scans every residual block in the Problem per Solve, not
+// the active ones, so persistence cost more than the rebuild there. The engine therefore sets
+// CeresOptions::cheshirePersist to "local strategy off", and the Problem is dropped when the
+// strategy switches on. The state-toggling code stays (it is what the checks validated) for the
+// solves before that switch.
+//
 // Covered: poses, intrinsics with distortion, projection residuals - incremental SfM. Rigs,
 // survey points, 2D and point constraints, rotation priors, temporal smoothness, depth observations
 // and mesh-referenced landmarks fall back to the rebuild (cheshirePersistAllowed), as does
@@ -63,7 +73,7 @@ bool cheshireLogCostEnabled()
 
 bool BundleAdjustmentCeres::cheshirePersistAllowed(const sfmData::SfMData& sfmData, ERefineOptions refineOptions) const
 {
-    if (!cheshirePersistEnabled())
+    if (!cheshirePersistEnabled() || !_ceresOptions.cheshirePersist)
         return false;
     if (refineOptions & BundleAdjustment::REFINE_TEMPORAL_SMOOTHNESS_CONSTRAINT)
         return false;
@@ -245,6 +255,7 @@ bool BundleAdjustmentCeres::cheshirePersistentBuild(const sfmData::SfMData& sfmD
             problem.AddParameterBlock(block.data(), 3);
             _linearSolverOrdering.AddElementToGroup(block.data(), 0);
             CheshireLandmarkRec r;
+            r.block = block.data();
             r.constant = !refineStructure || landmark.getState() == EEstimatorParameterState::CONSTANT || landmark.isLocked() ||
                          landmark.getState() == EEstimatorParameterState::IGNORED;
             if (r.constant)
@@ -280,7 +291,7 @@ bool BundleAdjustmentCeres::cheshirePersistentBuild(const sfmData::SfMData& sfmD
             for (const CheshireObs& o : rec->second.obs)
                 problem.RemoveResidualBlock(o.id);
             removed += rec->second.obs.size();
-            double* block = _landmarksBlocks.at(rec->first).data();
+            double* block = rec->second.block;
             problem.RemoveParameterBlock(block);
             _linearSolverOrdering.Remove(block);
             rec = _cheshireLandmarkRecs.erase(rec);
@@ -296,17 +307,19 @@ bool BundleAdjustmentCeres::cheshirePersistentBuild(const sfmData::SfMData& sfmD
                 break;
             }
             CheshireLandmarkRec& r = rec->second;
-            std::array<double, 3>& block = _landmarksBlocks.at(landmarkId);
-            for (std::size_t i = 0; i < 3; ++i)
-                block[i] = landmark.getX()(Eigen::Index(i));
+            double* const blockPtr = r.block;
+            const Vec3& X = landmark.getX();
+            blockPtr[0] = X(0);
+            blockPtr[1] = X(1);
+            blockPtr[2] = X(2);
             const bool constant = !refineStructure || landmark.getState() == EEstimatorParameterState::CONSTANT || landmark.isLocked() ||
                                   landmark.getState() == EEstimatorParameterState::IGNORED;
             if (constant != r.constant)
             {
                 if (constant)
-                    problem.SetParameterBlockConstant(block.data());
+                    problem.SetParameterBlockConstant(blockPtr);
                 else
-                    problem.SetParameterBlockVariable(block.data());
+                    problem.SetParameterBlockVariable(blockPtr);
                 r.constant = constant;
             }
             const bool wantActive = landmark.getState() != EEstimatorParameterState::IGNORED;
@@ -338,7 +351,7 @@ bool BundleAdjustmentCeres::cheshirePersistentBuild(const sfmData::SfMData& sfmD
                             unsupported = true;
                             break;
                         }
-                        const ceres::ResidualBlockId id = addResidual(block.data(), ob->first, ob->second);
+                        const ceres::ResidualBlockId id = addResidual(blockPtr, ob->first, ob->second);
                         if (id != nullptr)
                         {
                             next.push_back({ob->first, id});
@@ -444,7 +457,7 @@ void BundleAdjustmentCeres::cheshirePersistCheck(const sfmData::SfMData& sfmData
         {
             recordedPre += r.obs.size();
             std::vector<ceres::ResidualBlockId> held;
-            problem.GetResidualBlocksForParameterBlock(_landmarksBlocks.at(landmarkId).data(), &held);
+            problem.GetResidualBlocksForParameterBlock(r.block, &held);
             std::vector<ceres::ResidualBlockId> mine;
             for (const CheshireObs& o : r.obs)
                 mine.push_back(o.id);
@@ -491,7 +504,7 @@ void BundleAdjustmentCeres::cheshirePersistCheck(const sfmData::SfMData& sfmData
             stale += r.obs.size() + 1;
         // the residual blocks Ceres holds for this landmark block must be exactly the recorded ids
         std::vector<ceres::ResidualBlockId> held;
-        problem.GetResidualBlocksForParameterBlock(_landmarksBlocks.at(landmarkId).data(), &held);
+        problem.GetResidualBlocksForParameterBlock(r.block, &held);
         std::vector<ceres::ResidualBlockId> mine;
         mine.reserve(r.obs.size());
         for (const CheshireObs& o : r.obs)
