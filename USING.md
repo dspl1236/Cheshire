@@ -147,7 +147,7 @@ these are *on* unless set to `0`:
 | `CHESHIRE_GPU_VIS=0` | the visibility passes' nearest-neighbour search through upstream's nanoflann on the CPU ([docs/13](docs/13-gpu-visibilities.md)) |
 | `CHESHIRE_GPU_VIS_BUCKETS=0` | the visibility votes through the ordered loop (one vertex range per thread) instead of vertex buckets spread over all threads; same result, slower at scale |
 | `CHESHIRE_SFM_PENDING_BA=0` | upstream's incremental SfM loop exit: a resection pass that ends because no candidate view reaches the score threshold leaves the views resected since the last bundle adjustment without one, and without a node in the local-BA graph; a later edge to one of them is the `[fatal] invalid map<K, T> key` of Meshroom #2344 (three of three runs on an 884-photo set, v0.3.3 finishes the pass with that bundle adjustment and the graph never throws) |
-| `CHESHIRE_BA_JACOBIANS=autodiff` | bundle adjustment's Jacobians through upstream's 4-wide autodiff passes; the default (`stride`) runs the same functor in one pass, bit-identical (0 of 67,949,760 values differed on 41 views) and 1.9x faster on that phase (docs/04, 0.3.4) |
+| `CHESHIRE_BA_JACOBIANS=stride` / `=autodiff` | bundle adjustment's Jacobians through upstream's autodiff functor in one 32-wide pass (bit-identical to upstream, 1.9x on that phase) or upstream's own 4-wide passes; the default since 2026-09-23 is `analytic` (below) |
 | `CHESHIRE_SFM_TASK_SEED=0` | incremental SfM draws its RANSAC samples from upstream's one generator shared across threads again, so the result follows thread scheduling; the default gives every view's resection and every track's triangulation its own generator from (seed, view or track, pass), which is what makes `CHESHIRE_SFM_DETERMINISTIC=1` possible (docs/04, 0.3.4) |
 | `CHESHIRE_SIFT_SORT=0` | keep GPU SIFT keypoints in the order the card finished them (v0.3.2 sorts them by position, scale and orientation, so `.feat` files and the matches are a function of the images alone; SfM itself still varies run to run within upstream's own band - same poses and landmark count, parameters differing in the fourth digit) |
 
@@ -205,7 +205,7 @@ default); the rest are tuning values:
 | | |
 |---|---|
 | `CHESHIRE_QR_NULLSPACE=1` | 1.86x on geometric filtering, for 0.12 % fewer landmarks and 0.14 % more reprojection error ([docs/17](docs/17-svd-nullspace.md)) |
-| `CHESHIRE_BA_JACOBIANS=analytic` | bundle adjustment's Jacobians by the chain rule instead of autodiff: 3.0x on that phase (13.0 s to 4.3 s on 41 views, the SfM node 67 s to 57 s), for rounding-level differences (max 4.4e-10 relative) that move the final landmark count within its run-to-run spread ([docs/04](docs/04-validation.md), 0.3.4) |
+| `CHESHIRE_BA_JACOBIANS=analytic` (the default) | bundle adjustment's Jacobians by the chain rule instead of autodiff: 3.0x on that phase (13.0 s to 4.3 s on 41 views, the SfM node 67 s to 57 s), for rounding-level differences from upstream (max 4.4e-10 relative) that move the final landmark count within its run-to-run spread ([docs/04](docs/04-validation.md), 0.3.4); `=stride` keeps upstream's numbers bit for bit |
 
 Everything else produces the same output as the unmodified CPU build; that is checked per release
 against reference values ([docs/04](docs/04-validation.md)). There are about fifty more

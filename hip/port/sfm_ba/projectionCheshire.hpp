@@ -15,7 +15,7 @@
 //
 // Three ways to the same numbers, chosen by CHESHIRE_BA_JACOBIANS:
 //   autodiff   upstream, unchanged
-//   stride     upstream's functor with Stride 32, so one pass (the default). A derivative component
+//   stride     upstream's functor with Stride 32, so one pass. A derivative component
 //              is computed by the same operations whatever the stride, so the Jacobian is
 //              bit-identical to upstream's: on the 41-view set, 0 of 67,949,760 Jacobian values and
 //              0 of 7,089,684 residuals differed over 68 solves, for a Jacobian phase 1.9x faster
@@ -26,7 +26,9 @@
 //              itself uses for it - so what differs from upstream is only the order of the chain-rule
 //              sums, i.e. rounding: on the same set 18.7 % of Jacobian values differ, by at most
 //              9.1e-13 absolute and 4.4e-10 relative, residuals identical; the Jacobian phase is
-//              3.0x faster (13.0 s to 4.3 s). Opt-in until the quality gate of 0.3.5 exists.
+//              3.0x faster (13.0 s to 4.3 s). The default since 2026-09-23: across seven 41-view
+//              runs its landmark counts and RMSE sit inside upstream's own run-to-run spread, and
+//              it is one object to build where the autodiff cost is three.
 // CHESHIRE_BA_CHECK=1 evaluates a reference cost function next to the selected one on every call and
 // reports after each solve how many residual and Jacobian values differed and by how much. The
 // reference is upstream's autodiff; when autodiff itself is selected the reference is the analytic
@@ -66,13 +68,13 @@ inline BaJacobians baJacobiansMode()
     static const BaJacobians mode = [] {
         const char* v = std::getenv("CHESHIRE_BA_JACOBIANS");
         if (v == nullptr)
-            return BaJacobians::Stride;
+            return BaJacobians::Analytic;
         const std::string s(v);
         if (s == "autodiff")
             return BaJacobians::Autodiff;
-        if (s == "analytic")
-            return BaJacobians::Analytic;
-        return BaJacobians::Stride;
+        if (s == "stride")
+            return BaJacobians::Stride;
+        return BaJacobians::Analytic;
     }();
     return mode;
 }
@@ -497,7 +499,7 @@ inline ceres::CostFunction* createProjectionCost(bool rig, const std::shared_ptr
 {
     const BaJacobians mode = baJacobiansMode();
     static const bool announced = [mode] {
-        ALICEVISION_LOG_INFO("cheshire: BA jacobians: " << baJacobiansName(mode) << " (CHESHIRE_BA_JACOBIANS=stride|analytic|autodiff, stride is the default), check "
+        ALICEVISION_LOG_INFO("cheshire: BA jacobians: " << baJacobiansName(mode) << " (CHESHIRE_BA_JACOBIANS=analytic|stride|autodiff, analytic is the default), check "
                                                         << (baCheckEnabled() ? "on" : "off") << " (CHESHIRE_BA_CHECK=1)");
         return true;
     }();

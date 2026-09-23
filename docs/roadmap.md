@@ -91,9 +91,10 @@ L items can slide.
   **Done 2026-09-23 (step 5m, `hip/port/sfm_ba/projectionCheshire.hpp`; docs/04 "0.3.4: bundle
   adjustment's Jacobians").** Upstream's inner cost was already analytic; the waste was Ceres'
   4-wide autodiff passes re-running it 3 to 5 times per block. `CHESHIRE_BA_JACOBIANS=stride` (one
-  pass, bit-identical: 0 of 67,949,760 values differed) is the default, 1.9x on the Jacobian phase;
-  `analytic` (the chain rule by hand) is opt-in at 3.0x with rounding-level differences (max
-  4.4e-10 relative), residuals identical. 41 views: SfM 67 s to 61 s and 57 s; engine bay: 69 s
+  pass, bit-identical: 0 of 67,949,760 values differed) was the default for a day, 1.9x on the
+  Jacobian phase; `analytic` (the chain rule by hand) is the default since 2026-09-23 at 3.0x with
+  rounding-level differences (max 4.4e-10 relative), residuals identical - the user's call, on
+  seven 41-view runs whose landmark counts and RMSE sit inside upstream's run-to-run spread. 41 views: SfM 67 s to 61 s and 57 s; engine bay: 69 s
   to 60 s and 59 s (Jacobians 18.7 s to 9.9 s and 6.8 s).
 - **Bundle adjustment: the problem build** (M). **Done 2026-09-23 (steps 5o-5q; docs/04 "what a
   bundle adjustment costs around Ceres' Solve").** Measured first: at 41 views the build was

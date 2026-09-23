@@ -90,6 +90,7 @@ TRACKED = [
     "src/aliceVision/sfm/pipeline/ReconstructionEngine.hpp",
     "src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp",
     "src/aliceVision/sfm/bundle/costfunctions/intrinsicsProject.hpp",
+    "src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.hpp",
 ]
 
 
@@ -3895,6 +3896,135 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
             inc0 = t.index("#include")
             t = t[:inc0] + "#include <unordered_map>  // cheshire: step 5q" + NL + t[inc0:]
         bac.write_text(t, encoding="utf-8", newline="")
+
+    # 5r. A Problem that lives across solves. hip/port/sfm_ba/persistent.inc has the reasoning and
+    #     the sync; the engine keeps one BundleAdjustmentCeres for the whole reconstruction and
+    #     each adjust() applies the delta. CHESHIRE_BA_PERSIST=0 restores the rebuild,
+    #     CHESHIRE_BA_PERSIST_CHECK=1 verifies the residual set against the scene after every sync.
+    shutil.copy2(ROOT / "hip" / "port" / "sfm_ba" / "persistent.inc", AV / "src/aliceVision/sfm/bundle/persistent.inc")
+
+    t = bah.read_text(encoding="utf-8")
+    if "_cheshireProblem" not in t:
+        old = "    bool adjust(sfmData::SfMData& sfmData, ERefineOptions refineOptions = REFINE_ALL);" + NL
+        if t.count(old) != 1:
+            sys.exit("adjust declaration not found once in BundleAdjustmentCeres.hpp")
+        t = t.replace(old, old + "    void setOptions(const CeresOptions& options);  // cheshire (step 5r): new solver options for a bundle adjuster kept across solves" + NL, 1)
+        old = "    int cheshireRigGroup(IndexT rigId, IndexT subPoseId)" + NL
+        if t.count(old) != 1:
+            sys.exit("cheshireRigGroup not found once in BundleAdjustmentCeres.hpp (5r)")
+        t = t.replace(old, r"""    // cheshire (step 5r): the Problem that lives across solves (persistent.inc)
+    struct CheshireObs
+    {
+        IndexT viewId;
+        ceres::ResidualBlockId id;
+    };
+    struct CheshireLandmarkRec
+    {
+        bool active = false;
+        bool constant = false;
+        std::vector<CheshireObs> obs;
+    };
+    std::unique_ptr<ceres::Problem> _cheshireProblem;
+    std::map<IndexT, CheshireLandmarkRec> _cheshireLandmarkRecs;
+    std::size_t _cheshireSlab = 0;
+    bool cheshirePersistAllowed(const sfmData::SfMData& sfmData, ERefineOptions refineOptions) const;
+    void cheshireDropPersistent();
+    bool cheshirePersistentBuild(const sfmData::SfMData& sfmData, ERefineOptions refineOptions, std::vector<ceres::ResidualBlockId>& landmarksBlockIds);
+    void cheshirePersistCheck(const sfmData::SfMData& sfmData, const ceres::Problem& problem, bool preSync) const;
+""".replace("\n", NL) + old, 1)
+        bah.write_text(t, encoding="utf-8", newline="")
+
+    t = bac.read_text(encoding="utf-8")
+    if "cheshirePersistentBuild" not in t:
+        # the block vectors must keep their buffers: the Problem holds their pointers across solves,
+        # and "block = intrinsicPtr->getParameters()" move-assigns a fresh buffer under them
+        old = "        intrinsicBlock = intrinsicPtr->getParameters();" + NL
+        if t.count(old) != 1:
+            sys.exit("intrinsic block assignment not found once (5r)")
+        t = t.replace(old, ("        {" + NL
+                            + "            // cheshire (step 5r): in place - a persistent Problem holds this vector's pointer" + NL
+                            + "            const std::vector<double> cheshireParams = intrinsicPtr->getParameters();" + NL
+                            + "            if (intrinsicBlock.size() == cheshireParams.size())" + NL
+                            + "                std::copy(cheshireParams.begin(), cheshireParams.end(), intrinsicBlock.begin());" + NL
+                            + "            else" + NL
+                            + "                intrinsicBlock = cheshireParams;" + NL
+                            + "        }" + NL), 1)
+        old = "                distortionBlock = distortion->getParameters();" + NL
+        if t.count(old) != 1:
+            sys.exit("distortion block assignment not found once (5r)")
+        t = t.replace(old, ("                {" + NL
+                            + "                    // cheshire (step 5r): in place, as above" + NL
+                            + "                    const std::vector<double>& cheshireParams = distortion->getParameters();" + NL
+                            + "                    if (distortionBlock.size() == cheshireParams.size())" + NL
+                            + "                        std::copy(cheshireParams.begin(), cheshireParams.end(), distortionBlock.begin());" + NL
+                            + "                    else" + NL
+                            + "                        distortionBlock = cheshireParams;" + NL
+                            + "                }" + NL), 1)
+        old = "    _intrinsicObjects[intrinsicId].reset(intrinsicPtr->clone());" + NL
+        if t.count(old) != 1:
+            sys.exit("intrinsic clone not found once in BundleAdjustmentCeres.cpp")
+        t = t.replace(old, ("    if (!_intrinsicObjects[intrinsicId])  // cheshire (step 5r): kept across solves; PrepareForEvaluation keeps its parameters at the blocks" + NL
+                            + "        _intrinsicObjects[intrinsicId].reset(intrinsicPtr->clone());" + NL), 1)
+        old = ("    const cheshireAdjustClock::time_point cheshireT0 = cheshireAdjustClock::now();" + NL
+               + "    ceres::Problem problem(problemOptions);" + NL
+               + "    createProblem(sfmData, refineOptions, problem, landmarksBlockIds, temporalConstraintBlockIds);" + NL)
+        if t.count(old) != 1:
+            sys.exit("adjust problem creation not found once (5r)")
+        t = t.replace(old, r"""    const cheshireAdjustClock::time_point cheshireT0 = cheshireAdjustClock::now();
+    // cheshire (step 5r): the persistent Problem when the scene allows it, else the rebuild
+    std::unique_ptr<ceres::Problem> cheshireLocalProblem;
+    ceres::Problem* cheshireProblemPtr = nullptr;
+    if (cheshirePersistAllowed(sfmData, refineOptions) && cheshirePersistentBuild(sfmData, refineOptions, landmarksBlockIds))
+        cheshireProblemPtr = _cheshireProblem.get();
+    else
+    {
+        cheshireDropPersistent();
+        cheshireLocalProblem = std::make_unique<ceres::Problem>(problemOptions);
+        createProblem(sfmData, refineOptions, *cheshireLocalProblem, landmarksBlockIds, temporalConstraintBlockIds);
+        cheshireProblemPtr = cheshireLocalProblem.get();
+    }
+    ceres::Problem& problem = *cheshireProblemPtr;
+""".replace("\n", NL), 1)
+        old = "            sfmData::Landmark& landmark = sfmData.getLandmarks().at(idLandmark);" + NL
+        if t.count(old) != 1:
+            sys.exit("landmark write-back lookup not found once (5r)")
+        t = t.replace(old, r"""            // cheshire (step 5r): the persistent slab keeps slots of landmarks the scene has dropped
+            const auto cheshireLandmarkIt = sfmData.getLandmarks().find(idLandmark);
+            if (cheshireLandmarkIt == sfmData.getLandmarks().end())
+                continue;
+            sfmData::Landmark& landmark = cheshireLandmarkIt->second;
+""".replace("\n", NL), 1)
+        t = t.rstrip() + NL + NL + '#include "aliceVision/sfm/bundle/persistent.inc"  // cheshire: step 5r' + NL
+        bac.write_text(t, encoding="utf-8", newline="")
+
+    eh = AV / "src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.hpp"
+    t = eh.read_text(encoding="utf-8")
+    if "_cheshireBA" not in t:
+        old = "    IndexT _resectionId;" + NL
+        if t.count(old) != 1:
+            sys.exit("_resectionId member not found once in ReconstructionEngine_sequentialSfM.hpp")
+        t = t.replace(old, old + "    // cheshire (step 5r): one bundle adjuster for the whole reconstruction; its Problem lives across solves" + NL
+                      + "    std::shared_ptr<BundleAdjustmentCeres> _cheshireBA;" + NL, 1)
+        old = "class ReconstructionEngine_sequentialSfM"
+        if t.count(old) < 1:
+            sys.exit("engine class declaration not found")
+        i = t.index(old)
+        t = t[:i] + "class BundleAdjustmentCeres;  // cheshire: step 5r" + NL + NL + t[i:]
+        eh.write_text(t, encoding="utf-8", newline="")
+
+    t = eng.read_text(encoding="utf-8")
+    if "_cheshireBA" not in t:
+        old = "    BundleAdjustmentCeres BA(options, _params.minNbCamerasToRefinePrincipalPoint);" + NL
+        if t.count(old) != 1:
+            sys.exit("BA construction not found once in ReconstructionEngine_sequentialSfM.cpp")
+        t = t.replace(old, r"""    // cheshire (step 5r): the same bundle adjuster every time, so its Problem can live across solves
+    if (!_cheshireBA)
+        _cheshireBA = std::make_shared<BundleAdjustmentCeres>(options, _params.minNbCamerasToRefinePrincipalPoint);
+    else
+        _cheshireBA->setOptions(options);
+    BundleAdjustmentCeres& BA = *_cheshireBA;
+""".replace("\n", NL), 1)
+        eng.write_text(t, encoding="utf-8", newline="")
 
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
