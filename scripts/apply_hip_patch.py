@@ -4034,13 +4034,13 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
         eng.write_text(t, encoding="utf-8", newline="")
 
     # 5s. The passes after every bundle-adjustment iteration - the pixel and angle outlier tests
-    #     over every observation and the per-pose observation recount - were 605 s of a 1908 s node
-    #     at 884 views, over a scene the local solve mostly did not touch. hip/port/sfm_ba/postAdjust.inc
-    #     restricts them, exactly, to the landmarks observed by a refined pose (found through the
-    #     tracks-per-view index) and the poses that lost observations; the upstream passes run
-    #     unchanged without the local strategy, when an intrinsic is being refined, and after a pose
-    #     is erased. CHESHIRE_SFM_LOCAL_PASSES=0 keeps upstream's passes; CHESHIRE_SFM_PROFILE=1
-    #     prints one line per iteration.
+    #     over every observation and the per-pose observation recount - walk the whole scene for a
+    #     solve the local strategy mostly did not touch. hip/port/sfm_ba/postAdjust.inc restricts
+    #     them, exactly, to the landmarks observed by a refined pose or through a refined intrinsic
+    #     (found through the tracks-per-view index) and the poses that lost observations; the
+    #     upstream passes run unchanged without the local strategy and after a pose is erased.
+    #     OPT-IN, CHESHIRE_SFM_LOCAL_PASSES=1: about 40 s either way at 884 views, the case is
+    #     thousands of views (docs/04). CHESHIRE_SFM_PROFILE=1 prints one line per iteration.
     shutil.copy2(ROOT / "hip" / "port" / "sfm_ba" / "postAdjust.inc", AV / "src/aliceVision/sfm/pipeline/sequential/postAdjust.inc")
     t = eng.read_text(encoding="utf-8")
     if "postAdjust.inc" not in t:

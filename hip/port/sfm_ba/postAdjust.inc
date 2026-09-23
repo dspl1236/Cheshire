@@ -6,8 +6,11 @@
 // Upstream follows each adjust() with removeOutliers() - the pixel-residual test over every
 // observation of every landmark, then the angle test over every landmark - and with
 // eraseUnstablePosesAndObservations(), which recounts every observation per pose. On the 884-view
-// False Door that is 945 passes over a scene of up to 1.35 million landmarks, 605 s of a 1908 s
-// node (docs/04), for a solve that under the local strategy moved a few dozen poses.
+// False Door that is 64 passes over a scene of up to 1.35 million landmarks, for solves that under
+// the local strategy moved about a hundred poses. Measured, those passes are about 40 s of the
+// whole run at that size and the restricted ones are no cheaper (the frontier is still 25-60 % of
+// the scene), so this is OPT-IN: CHESHIRE_SFM_LOCAL_PASSES=1. Its case is thousands of views,
+// where a full pass grows with the scene and a restricted one with the frontier (docs/04).
 //
 // The tests are functions of (pose, intrinsics, landmark position, observation) only, so an
 // observation whose inputs did not change since it was last tested keeps its verdict. What can
@@ -15,14 +18,14 @@
 // landmark, since a landmark is refined only when a refined camera sees it; every landmark and
 // observation triangulation added since the last pass, since they hang off the new, refined,
 // views; and the case the local strategy ignores but whose refined observer still moved), and
-// everything if an intrinsic was refined. The candidates are found from the refined poses' views
-// through the tracks-per-view index, never by walking the landmarks. A pose can only have become
+// the landmarks observed through a REFINED intrinsic, since its parameters apply to every view that
+// uses it, active or not. The candidates are found from those views through the tracks-per-view
+// index, never by walking the landmarks. A pose can only have become
 // unstable by losing observations, so only the poses of views that lost one here, and the poses
 // resected in this group, are recounted - through the same index. When a pose is erased the
 // upstream full pass runs for the rest of that iteration (rare, and the full pass is exact).
-// Without the local strategy every pose is refined and the upstream passes run unchanged;
-// CHESHIRE_SFM_LOCAL_PASSES=0 keeps them under the local strategy too. CHESHIRE_SFM_PROFILE=1
-// prints one line per iteration.
+// Without the local strategy every pose is refined and the upstream passes run unchanged.
+// CHESHIRE_SFM_PROFILE=1 prints one line per iteration.
 
 #include <aliceVision/sfm/sfmFilters.hpp>
 #include <aliceVision/track/Track.hpp>
@@ -42,7 +45,7 @@ inline bool localPassesEnabled()
 {
     static const bool on = [] {
         const char* v = std::getenv("CHESHIRE_SFM_LOCAL_PASSES");
-        return v == nullptr || std::string(v) != "0";
+        return v != nullptr && std::string(v) == "1";
     }();
     return on;
 }
@@ -53,33 +56,58 @@ inline bool sfmProfileEnabled()
     return on;
 }
 
-// Is any intrinsic that a posed view uses being refined by this solve?
-inline bool intrinsicsMoving(const sfmData::SfMData& sfmData, BundleAdjustment::ERefineOptions refineOptions)
+// The intrinsics the solve may have moved: refined by the local strategy, not locked, with options
+// that refine intrinsics at all. Under upstream's strategy an intrinsic stays refined until its focal
+// length has been stable over a window of 25 posed views, so an intrinsic with fewer views than that
+// is refined for the whole reconstruction (the False Door has four such, of 1 to 27 views, beside the
+// 820-view one that settles at 113 poses). A refined intrinsic changes every residual through its
+// views, active or not, so those views join the candidate sources - a full pass is not needed.
+inline void refinedIntrinsics(const sfmData::SfMData& sfmData, BundleAdjustment::ERefineOptions refineOptions, std::set<IndexT>& out)
 {
+    out.clear();
     const bool refineIntrinsics = (refineOptions & BundleAdjustment::REFINE_INTRINSICS_FOCAL) ||
                                   (refineOptions & BundleAdjustment::REFINE_INTRINSICS_OPTICALOFFSET_ALWAYS) ||
                                   (refineOptions & BundleAdjustment::REFINE_INTRINSICS_OPTICALOFFSET_IF_ENOUGH_DATA) ||
                                   (refineOptions & BundleAdjustment::REFINE_INTRINSICS_DISTORTION);
     if (!refineIntrinsics)
-        return false;
+        return;
     for (const auto& [intrinsicId, intrinsic] : sfmData.getIntrinsics())
         if (intrinsic->getState() == EEstimatorParameterState::REFINED && !intrinsic->isLocked())
-            return true;
-    return false;
+            out.insert(intrinsicId);
 }
 
-// The landmarks observed by a refined pose, from the tracks of the refined poses' views.
-inline void candidateLandmarks(const sfmData::SfMData& sfmData, const track::TracksPerView& tracksPerView, std::vector<IndexT>& out)
+struct CandidateSources
+{
+    std::size_t views = 0;
+    std::size_t refinedPoses = 0;
+    std::size_t refinedIntrinsics = 0;
+};
+
+// The landmarks observed by a refined pose or through a refined intrinsic, from the tracks of those
+// views.
+inline void candidateLandmarks(const sfmData::SfMData& sfmData,
+                               const track::TracksPerView& tracksPerView,
+                               BundleAdjustment::ERefineOptions refineOptions,
+                               std::vector<IndexT>& out,
+                               CandidateSources& sources)
 {
     std::set<IndexT> refinedPoses;
     for (const auto& [poseId, pose] : sfmData.getPoses().valueRange())
         if (pose.getState() == EEstimatorParameterState::REFINED)
             refinedPoses.insert(poseId);
+    std::set<IndexT> movingIntrinsics;
+    refinedIntrinsics(sfmData, refineOptions, movingIntrinsics);
+    sources = CandidateSources{};
+    sources.refinedPoses = refinedPoses.size();
+    sources.refinedIntrinsics = movingIntrinsics.size();
     out.clear();
     for (const auto& [viewId, view] : sfmData.getViews())
     {
-        if (!sfmData.isPoseAndIntrinsicDefined(*view) || refinedPoses.count(view->getPoseId()) == 0)
+        if (!sfmData.isPoseAndIntrinsicDefined(*view))
             continue;
+        if (refinedPoses.count(view->getPoseId()) == 0 && movingIntrinsics.count(view->getIntrinsicId()) == 0)
+            continue;
+        ++sources.views;
         const auto it = tracksPerView.find(viewId);
         if (it == tracksPerView.end())
             continue;
@@ -307,7 +335,7 @@ inline std::size_t removeOutliersAfterAdjust(sfmData::SfMData& sfmData,
                                              std::size_t& candidates,
                                              bool& full)
 {
-    full = !localStrategy || !localPassesEnabled() || intrinsicsMoving(sfmData, refineOptions);
+    full = !localStrategy || !localPassesEnabled();
     std::size_t nbResidual = 0, nbAngle = 0;
     if (full)
     {
@@ -318,8 +346,12 @@ inline std::size_t removeOutliersAfterAdjust(sfmData::SfMData& sfmData,
     else
     {
         std::vector<IndexT> ids;
-        candidateLandmarks(sfmData, tracksPerView, ids);
+        CandidateSources sources;
+        candidateLandmarks(sfmData, tracksPerView, refineOptions, ids, sources);
         candidates = ids.size();
+        if (sfmProfileEnabled())
+            ALICEVISION_LOG_INFO("cheshire: post-adjust sources: " << sources.views << " views (" << sources.refinedPoses << " refined poses, "
+                                                                   << sources.refinedIntrinsics << " refined intrinsics)");
         nbResidual = removeOutliersWithPixelResidualErrorOn(sfmData, featureConstraint, maxReprojectionError, 2, ids, viewsWithErasures);
         nbAngle = removeOutliersWithAngleErrorOn(sfmData, minAngleForLandmark, ids, viewsWithErasures);
     }
