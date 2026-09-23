@@ -76,7 +76,8 @@ L items can slide.
   passes (`sfm/bundle/costfunctions/projection.hpp:156`). Analytic and automatic derivatives round
   differently, so this cannot be byte-identical: ship it off by default with a check mode against
   autodiff, and turn it on in 0.3.5 once the quality gate exists. The Lanczos downscale it was
-  queued behind shipped in 0.3.3.
+  queued behind shipped in 0.3.3. It is also the prerequisite for bundle adjustment on the device
+  (0.3.5): the derivatives written by hand here are what goes on the GPU.
 - **CPU share on weak hosts** (S; M if FeatureMatching has to be rerun for the split). On the
   Rubble box (i3-4330, 2 cores) SfM took 4291 s and FeatureMatching 2265 s
   (`docs/04-validation.md:1034`), but the matcher vs AC-RANSAC split there is a guess. Measure it,
@@ -158,7 +159,8 @@ Parked items from this group are listed under Parked and exploratory.
 
 ## 0.3.5
 
-GPS image pairing and reconstruction quality. This was 0.3.4 in the earlier proposal.
+GPS image pairing, reconstruction quality, and the first SfM work on the GPU. This was 0.3.4 in
+the earlier proposal.
 
 - **Reconstruction-quality gate** (L). No gate measures quality today: `verify_end_to_end.py`
   checks outputs, provenance, port markers and self-check verdicts
@@ -180,6 +182,26 @@ GPS image pairing and reconstruction quality. This was 0.3.4 in the earlier prop
   "until the quality measurement exists" (`README.md:403-412`). That measurement was done, and the
   QR path it concerns is the one above. The over-determined branch and the spherical solver stay on
   the SVD (see Not planned).
+- **Bundle adjustment on the device** (L; the first SfM work on the GPU). StructureFromMotion is
+  the one heavy node that has never touched the GPU, and bundle adjustment is where its time goes:
+  63 % of SfM on the engine bay (50.9 s of 92 s: Jacobians 25.1 s, linear solver 13.1 s, per-solve
+  bookkeeping 11.0 s; `docs/04-validation.md:750-756`) and 733 s of the 1498 s False Door replay
+  (Jacobians 421 s, linear solver 304 s; `docs/04-validation.md:1052-1053`). Ceres' own GPU
+  solvers are CUDA-only, so this is our loop, not a Ceres option, and it serves AMD and NVIDIA
+  alike. In order:
+  1. Jacobians on the device, after the 0.3.4 analytic-Jacobian item, whose hand-written
+     derivatives are exactly what runs there: residuals and derivative blocks per observation on
+     the GPU, handed to the solver in Ceres' block structure, with a check mode against autodiff
+     on the host as for the CPU item. This is the 49 %, and it is embarrassingly parallel.
+  2. The Schur solve on the device, only if the profile after step 1 says it is the wall: a
+     preconditioned CG on the reduced camera system. At 884 views that system is a few hundred
+     poses, where Eigen's factorisation keeps up with CHOLMOD (`docs/04-validation.md:1055-1057`),
+     so this may never be needed below thousands of poses.
+
+  Not global SfM (it changes the geometry; every published pose comparison is against
+  incremental). It cannot be byte-identical to autodiff, so it ships off by default behind the
+  quality gate, like the CPU item. Incremental SfM stays sequential (resect, triangulate, BA); only
+  the inner loops move, so the ceiling is the BA share of the node, not the node.
 - **Env switches that `=0` turns on** (M). About 13 behaviour switches and about 15 check, log and
   profile flags test only whether the variable is set, and four parsing styles coexist (e.g.
   `scripts/apply_hip_patch.py:1017, :2799`). Route them all through one helper, then do a full
@@ -436,7 +458,8 @@ GPS image pairing and reconstruction quality. This was 0.3.4 in the earlier prop
 - Float-atomic votes and max-flow flow totals: the labelling is the verdict.
 - Bucketing visibility votes by owner: 17 % slower, reverted.
 - DepthMapFilter's second pass on the GPU: it is a cheap threshold pass.
-- SfM on the GPU (Ceres' GPU solvers are CUDA-only) and global SfM (it changes the geometry).
+- Global SfM: it changes the geometry. (SfM on the GPU is no longer here: see 0.3.5, "Bundle
+  adjustment on the device".)
 - ImageMatching and MeshFiltering speed: 37 s of a 16 h run.
 - Masking or a turntable-aware pipeline.
 - Vulkan compute and ZLUDA: HIP proved sufficient.
