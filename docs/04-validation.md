@@ -1568,3 +1568,47 @@ different times and shuffled by removals, so its scans miss cache more. Net abou
 does not shrink with the build. The False Door's build and preprocessor per residual block are
 not measured yet without the check (the check is O(observations) per solve and sat inside the
 build figure); the rebuild-against-persistent pair there is queued.
+
+### The persistent problem at 884 views, and where it is switched off (2026-09-23, later)
+
+The False Door pair without the check, persistent then rebuild, one run each (box slower during
+the persistent run: residual evaluation 58 against 49 ns per residual-block-iteration):
+
+| | main solves | active residual blocks, summed | build | Ceres preprocessor | destroy |
+|---|---|---|---|---|---|
+| persistent | 419 | 70.8 M | 177 s (2492 ns per active block) | 146 s (2066 ns) | 2 s |
+| rebuild | 418 | 78.9 M | 177 s (2249 ns) | 121 s (1536 ns) | 45 s |
+
+Box-corrected the build is a wash and the preprocessor 12 % worse; only the destroy is a clear
+win. The reason is the local strategy: the ignored region moves with the frontier every solve, so
+the sync added 23.6 million residual blocks and removed 18.4 million over those 419 solves
+against 70.8 million active in all - most of the active set is torn down and rebuilt anyway - and
+Ceres' preprocessor scans every residual block in the Problem per `Solve`, not the active ones.
+Both paths also pay about the same to walk every landmark each solve (1.35 million, mostly
+ignored, per solve), which is why the rebuild's build is 2.2 us per active block here against
+1.2 us at 41 views; that walk is a shared inefficiency, noted on the roadmap. So the engine sets
+`CeresOptions::cheshirePersist` to "local strategy off": the Problem lives across solves while
+every landmark is active (up to 100 poses, the 6 % above) and is dropped when the strategy
+switches on; the engine bay, 107 poses, crosses that line mid-run and its check run stayed
+consistent through the switch (168 of 168). The sync also keeps each landmark's block pointer in
+its record now - a `std::map` lookup per landmark per solve was most of its cost at this size.
+
+## 0.3.4: the inner projection fused (2026-09-23)
+
+`CostIntrinsicsProject` computed the projection and its three Jacobian blocks by four separate
+walks of the same chain - `project()`, then the derivative with respect to the intrinsics, the
+distortion and the point - each recomputing P = X/z and the distortion polynomial through virtual
+calls, and three of them returning dynamic Eigen matrices, i.e. heap allocations per residual
+block per Jacobian. `CheshireIntrinsicsProject` (in `hip/port/sfm_ba/projectionCheshire.hpp`)
+walks the chain once for a pinhole with no distortion or a radial K1 / K3 / Brown one - what
+incremental SfM sees - straight into Ceres' row-major blocks, with upstream's formulas in
+upstream's order of operations where it has one, and contraction off (`#pragma clang fp
+contract(off)`, as in every port): with contraction on, 20 % of the residuals differed from
+upstream by up to 3e-13; with it off, under 1 % differ, by up to 6e-13, a different association
+somewhere in Eigen's evaluation rather than a formula. Fisheye, 3DE and undistortion models keep
+`CostIntrinsicsProject`, as does `CHESHIRE_BA_FUSED_PROJECTION=0`.
+
+41 views, same box, same day: Jacobians 5.5 s to 3.2-3.5 s, bundle adjustment 24 s to 19-21 s,
+the node 59 s to 50-52 s. The check against upstream's autodiff over 3.18 million evaluations:
+Jacobians differ by at most 1.4e-12 absolute (4.5e-11 relative on the small sets), as before the
+fusion; the deterministic pair is byte-identical (`15618f943864c8ba`).

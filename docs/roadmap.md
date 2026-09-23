@@ -118,7 +118,18 @@ L items can slide.
   the way (the intrinsic block vector move-assigned under Ceres' pointer; kept observations of a
   view that lost its pose). Still open: the False Door rebuild-against-persistent pair without
   the check, and whether the preprocessor cost can be brought back down (it is Ceres' allocation
-  order, not ours).
+  order, not ours). **884-view pair measured (docs/04):** a wash under the local strategy (the
+  frontier moves: 23.6 M residual blocks added, 18.4 M removed, against 70.8 M active; Ceres
+  scans every block per Solve), so persistence is now an engine policy: on while every landmark
+  is active, off under the local strategy.
+- **The per-solve walk over every landmark** (M). Both the rebuild and the sync visit all 1.35 M
+  landmarks per solve at 884 views although the local strategy leaves most ignored (the rebuild's
+  build is 2.2 us per active block there against 1.2 us at 41 views). An active-landmark list
+  maintained by the local-BA graph, or a state change list, would make the build proportional to
+  the active set. Judge with the deterministic gate.
+- **Eigen temporaries in the inner projection derivatives** (M). **Done 2026-09-23 (docs/04
+  "the inner projection fused"):** one walk of the chain for pinhole + none / K1 / K3 / Brown,
+  contraction off; Jacobians 5.5 s to 3.2-3.5 s at 41 views, the node 59 s to 50 s.
 - **CPU share on weak hosts** (S; M if FeatureMatching has to be rerun for the split). On the
   Rubble box (i3-4330, 2 cores) SfM took 4291 s and FeatureMatching 2265 s
   (`docs/04-validation.md:1034`), but the matcher vs AC-RANSAC split there is a guess. Measure it,
