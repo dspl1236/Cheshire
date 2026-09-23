@@ -1744,6 +1744,22 @@ and the runtime environment of the node - were each refuted by a standalone read
 the node's own 16 files in 0.83 s with the same libraries, and by a benchmark that stayed fast
 with the HIP runtime and pinned memory in the process.)
 
+**5. The downscale itself, exact and 18x cheaper.** `ImageBufAlgo::resize` with the default
+filter is lanczos3 with a width of 6 destination pixels; for a 2x downscale that is a 13 x 13
+footprint per output pixel, evaluated tap by tap with the filter function called per tap, which
+is where the 7.3 s of CPU per 6000x3376 image went (single-threaded; the same total across
+threads). Step 5x (`hip/port/sgm_fused/cheshireResize.hpp.txt`) computes the same thing with
+the same arithmetic in the same order - OpenImageIO's coordinate mapping, its lanczos3 from
+`libutil/filter.cpp`, the per-column and per-row normalised weight tables, rows outer and
+columns inner, a multiply then an add per tap with contraction off, the same clamping at the
+borders - with each column's and row's clamped tap indices and non-zero weights computed once
+instead of per pixel, four output pixels' add chains interleaved, and the channels added with
+SSE. Checked against `ImageBufAlgo::resize` itself in `build/exrbench/exrresize.cpp`: 0 of
+20,256,000 values differ on a real image, 0 on odd-sized random images at 2x and 3x. On the RX
+9070 box: 7.32 s to 0.41 s on one thread, 0.096 s with the rows in parallel. It applies to float
+images of 1, 3 or 4 channels downscaled with the default filter; anything else keeps the
+OpenImageIO call, as does `CHESHIRE_RESIZE_EXACT=0`.
+
 **Measured on False Door chunk 0 (12 views) on the RX 9070 box:**
 
 | | loads | image loading | chunk wall |
@@ -1752,6 +1768,7 @@ with the HIP runtime and pinned memory in the process.)
 | tour order + once-per-batch loader (OpenImageIO reader) | 42 | 16, 8, 10 s per batch | 142 s |
 | + direct OpenEXR reader | 42 | 15, 8, 10 s per batch | 142 s |
 | + resize single-threaded inside the loop | 42 | 16, 8, 9 s per batch (unchanged: the resize is the cost, not its threading) | 146 s |
+| + the downscale computed directly (5x) | 42 | 4.7, 2.4, 2.8 s per batch | 94 s |
 
 **Exactness.** The 12 maps of the index-order chunk are byte-identical to the reference cache
 with the new loader; the tour-order chunk's 12 views, compared by view id, are byte-identical to
@@ -1763,5 +1780,5 @@ runs with the reader off differ in 556 texels by the same amount; the OBJ is ide
 What is left in the node after this is the chunk setup (19-27 s, mostly reading the SfM data
 with its 1.35 million landmarks, once per 12-view chunk - a larger block size in the Meshroom node
 would amortise it), the first batch of each chunk, which is cold by construction, and the
-downscale itself, which could be a 2x2 average on the device instead of a filtered resize on the
-host if the values were allowed to change (they are not, for now).
+downscale, now a fraction of the read: a 2x2 average on the device would remove it entirely, at
+the price of changed values and a new reference.

@@ -4234,6 +4234,40 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                       + "    oiio::ImageBufAlgo::resize(outBuf, inBuf, filter, filterSize, oiio::ROI::All(), omp_in_parallel() ? 1 : 0);" + NL, 1)
         iac.write_text(t, encoding="utf-8", newline="")
 
+    # 5x. The default downscale computed directly. imageAlgo::resizeImage with an empty filter is
+    #     ImageBufAlgo::resize with lanczos3, a 13 x 13 footprint per output pixel for a 2x
+    #     downscale, 7.3 s of CPU per 6000x3376 RGBA image - the depth-map node does it for every
+    #     image it loads, and it was the node's real cost (docs/04). hip/port/sgm_fused/
+    #     cheshireResize.hpp.txt is the same arithmetic in the same order with the taps computed
+    #     once per column and row: 0 of 20 million values differ against ImageBufAlgo::resize
+    #     itself (build/exrbench/exrresize.cpp), 0.4 s a thread. CHESHIRE_RESIZE_EXACT=0 disables.
+    shutil.copy2(ROOT / "hip" / "port" / "sgm_fused" / "cheshireResize.hpp.txt", AV / "src/aliceVision/image/cheshireResize.hpp")
+    icm = AV / "src/aliceVision/image/CMakeLists.txt"
+    t = icm.read_text(encoding="utf-8")
+    if "cheshireResize.hpp" not in t:
+        old = "    cheshireExr.hpp" + NL
+        if t.count(old) != 1:
+            sys.exit("cheshireExr.hpp header entry not found once in image/CMakeLists.txt")
+        t = t.replace(old, old + "    cheshireResize.hpp" + NL, 1)
+        icm.write_text(t, encoding="utf-8", newline="")
+    iac = AV / "src/aliceVision/image/imageAlgo.cpp"
+    t = iac.read_text(encoding="utf-8")
+    if "step 5x" not in t:
+        old = "#include <aliceVision/alicevision_omp.hpp>  // cheshire: step 5w" + NL
+        if t.count(old) != 1:
+            sys.exit("step 5w include not found once in imageAlgo.cpp")
+        t = t.replace(old, old + "#include <aliceVision/image/cheshireResize.hpp>  // cheshire: step 5x" + NL + "#include <cstdlib>" + NL
+                      + ("" if "#include <mutex>" in t else "#include <mutex>" + NL + "#include <string>" + NL), 1)
+        old = ("    const oiio::ImageBuf inBuf(oiio::ImageSpec(inWidth, inHeight, nchannels, typeDesc), const_cast<T*>(inBuffer));" + NL
+               + "    oiio::ImageBuf outBuf(oiio::ImageSpec(outWidth, outHeight, nchannels, typeDesc), outBuffer);" + NL)
+        head = "void resizeImage(oiio::TypeDesc typeDesc," + NL
+        h0 = t.find(head)
+        i0 = t.find(old, h0) if h0 >= 0 else -1
+        if h0 < 0 or i0 < 0:  # the same two lines occur in two other functions; take the one in this template
+            sys.exit("resizeImage(typeDesc) buffer lines not found in imageAlgo.cpp")
+        t = t[:i0] + (ROOT / "hip/port/sgm_fused/resize_call.cpp.txt").read_text(encoding="utf-8").replace("\n", NL) + t[i0 + len(old):]
+        iac.write_text(t, encoding="utf-8", newline="")
+
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
     #     when the cards in front of us are both compute 6.1. FORCE beats -D on the command line, so

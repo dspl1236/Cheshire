@@ -1,0 +1,193 @@
+// This file is part of the Cheshire project (MPL-2.0), a patch set over AliceVision.
+// Copied into src/aliceVision/image/ by scripts/apply_hip_patch.py (step 5x).
+//
+// OpenImageIO's default downscale, bit for bit, at a fraction of the cost. imageAlgo::resizeImage
+// with an empty filter name is ImageBufAlgo::resize with lanczos3 (width 6 in destination
+// pixels), which for a 2x downscale evaluates a 13 x 13 footprint per output pixel and took 7.3 s
+// of CPU per 6000x3376 RGBA image on the RX 9070 box - the depth-map node does it for every image
+// it loads (docs/04, 0.3.4 "the depth-map node was loading images"). This is the same arithmetic
+// in the same order: OpenImageIO's coordinate mapping, its lanczos3 (libutil/filter.cpp), its
+// per-column and per-row normalised weight tables, rows outer and columns inner, float
+// accumulation, a multiply then an add per tap with no fused multiply-add, and the same clamping
+// at the borders - with the taps' clamped indices and non-zero weights computed once per column
+// and per row instead of per pixel, and four output pixels' independent sums interleaved so the
+// add chains overlap. Verified against ImageBufAlgo::resize itself: 0 of 20 million values
+// differ on a real image, 0 on odd-sized random ones (build/exrbench/exrresize.cpp).
+#pragma once
+
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <vector>
+
+#if defined(__SSE__) || defined(_M_X64) || defined(_M_AMD64)
+    #include <xmmintrin.h>
+    #define CHESHIRE_RESIZE_SSE 1
+#endif
+#ifdef __clang__
+    #pragma clang fp contract(off)
+#endif
+
+namespace aliceVision {
+namespace image {
+namespace cheshire {
+
+// FilterLanczos3_1D of OpenImageIO 3.0 (libutil/filter.cpp), float throughout
+inline float lanczos3(float x)
+{
+    const float a = 3.0f;
+    const float ainv = 1.0f / a;
+    const float m_pi = 3.14159265358979323846f;
+    x = std::fabs(x);
+    if (x > 3.0f)
+        return 0.0f;
+    if (x < 0.0001f)
+        return 1.0f;
+    const float s1 = sinf(x * ainv * m_pi);
+    const float s3 = (-4.0f * s1 * s1 + 3.0f) * s1;
+    return a / (x * x * (m_pi * m_pi)) * s1 * s3;
+}
+
+struct ResizeTaps
+{
+    std::vector<int> begin;  // per output coordinate: first entry in idx / w
+    std::vector<int> idx;    // clamped source coordinate
+    std::vector<float> w;    // normalised weight, non-zero
+};
+
+// The weight table of ImageBufAlgo::resize's separable path for one axis: the output pixel
+// centre mapped into the source, ceil(filterrad / ratio) taps each side, lanczos3 of the source
+// offset times the ratio, normalised by the taps' sum; zero taps dropped (resize_ skips them).
+inline void resizeTaps(int srcN, int dstN, ResizeTaps& t)
+{
+    const float srcf = float(srcN), dstf = float(dstN);
+    const float ratio = dstf / srcf;
+    const float fw = 6.0f * std::max(1.0f, ratio);
+    const float scale = 6.0f / fw;
+    const float filterrad = fw / 2.0f;
+    const int rad = int(std::ceil(filterrad / ratio));
+    const int taps = 2 * rad + 1;
+    const float dstpixel = 1.0f / dstf;
+    t.begin.assign(static_cast<std::size_t>(dstN) + 1, 0);
+    t.idx.clear();
+    t.w.clear();
+    std::vector<float> wtmp(taps);
+    for (int x = 0; x < dstN; ++x)
+    {
+        const float s = (float(x) + 0.5f) * dstpixel;
+        const float src_f = s * srcf;
+        const int src_i = int(std::floor(src_f));
+        const float frac = src_f - float(src_i);
+        float total = 0.0f;
+        for (int i = 0; i < taps; ++i)
+        {
+            wtmp[i] = lanczos3(ratio * (float(i - rad) - (frac - 0.5f)) * scale);
+            total += wtmp[i];
+        }
+        t.begin[x] = int(t.idx.size());
+        for (int i = 0; i < taps; ++i)
+        {
+            const float wn = wtmp[i] / total;
+            if (wn == 0.0f)
+                continue;
+            int si = src_i - rad + i;
+            si = si < 0 ? 0 : (si >= srcN ? srcN - 1 : si);
+            t.idx.push_back(si);
+            t.w.push_back(wn);
+        }
+    }
+    t.begin[dstN] = int(t.idx.size());
+}
+
+// One output row. NCH channels interleaved, row-major, full-window images at the origin.
+template<int NCH>
+inline void resizeRow(const float* src, int sw, const ResizeTaps& tx, const ResizeTaps& ty, int y, int dw, float* orow)
+{
+    const int jb = ty.begin[y], je = ty.begin[y + 1];
+    int x = 0;
+#if defined(CHESHIRE_RESIZE_SSE)
+    if (NCH == 4)
+    {
+        // four output pixels at a time: four independent add chains, each in its own order
+        for (; x + 4 <= dw; x += 4)
+        {
+            __m128 p0 = _mm_setzero_ps(), p1 = p0, p2 = p0, p3 = p0;
+            const int b0 = tx.begin[x], e0 = tx.begin[x + 1];
+            const int b1 = tx.begin[x + 1], e1 = tx.begin[x + 2];
+            const int b2 = tx.begin[x + 2], e2 = tx.begin[x + 3];
+            const int b3 = tx.begin[x + 3], e3 = tx.begin[x + 4];
+            for (int j = jb; j < je; ++j)
+            {
+                const float wy = ty.w[j];
+                const float* row = src + static_cast<std::size_t>(ty.idx[j]) * sw * 4;
+                for (int i = b0; i < e0; ++i)
+                    p0 = _mm_add_ps(p0, _mm_mul_ps(_mm_set1_ps(wy * tx.w[i]), _mm_loadu_ps(row + static_cast<std::size_t>(tx.idx[i]) * 4)));
+                for (int i = b1; i < e1; ++i)
+                    p1 = _mm_add_ps(p1, _mm_mul_ps(_mm_set1_ps(wy * tx.w[i]), _mm_loadu_ps(row + static_cast<std::size_t>(tx.idx[i]) * 4)));
+                for (int i = b2; i < e2; ++i)
+                    p2 = _mm_add_ps(p2, _mm_mul_ps(_mm_set1_ps(wy * tx.w[i]), _mm_loadu_ps(row + static_cast<std::size_t>(tx.idx[i]) * 4)));
+                for (int i = b3; i < e3; ++i)
+                    p3 = _mm_add_ps(p3, _mm_mul_ps(_mm_set1_ps(wy * tx.w[i]), _mm_loadu_ps(row + static_cast<std::size_t>(tx.idx[i]) * 4)));
+            }
+            _mm_storeu_ps(orow + static_cast<std::size_t>(x) * 4, p0);
+            _mm_storeu_ps(orow + static_cast<std::size_t>(x + 1) * 4, p1);
+            _mm_storeu_ps(orow + static_cast<std::size_t>(x + 2) * 4, p2);
+            _mm_storeu_ps(orow + static_cast<std::size_t>(x + 3) * 4, p3);
+        }
+        for (; x < dw; ++x)
+        {
+            __m128 pel = _mm_setzero_ps();
+            const int ib = tx.begin[x], ie = tx.begin[x + 1];
+            for (int j = jb; j < je; ++j)
+            {
+                const float wy = ty.w[j];
+                const float* row = src + static_cast<std::size_t>(ty.idx[j]) * sw * 4;
+                for (int i = ib; i < ie; ++i)
+                    pel = _mm_add_ps(pel, _mm_mul_ps(_mm_set1_ps(wy * tx.w[i]), _mm_loadu_ps(row + static_cast<std::size_t>(tx.idx[i]) * 4)));
+            }
+            _mm_storeu_ps(orow + static_cast<std::size_t>(x) * 4, pel);
+        }
+        return;
+    }
+#endif
+    for (; x < dw; ++x)
+    {
+        float pel[NCH];
+        for (int c = 0; c < NCH; ++c)
+            pel[c] = 0.0f;
+        const int ib = tx.begin[x], ie = tx.begin[x + 1];
+        for (int j = jb; j < je; ++j)
+        {
+            const float wy = ty.w[j];
+            const float* row = src + static_cast<std::size_t>(ty.idx[j]) * sw * NCH;
+            for (int i = ib; i < ie; ++i)
+            {
+                const float w = wy * tx.w[i];
+                const float* p = row + static_cast<std::size_t>(tx.idx[i]) * NCH;
+                for (int c = 0; c < NCH; ++c)
+                    pel[c] += w * p[c];
+            }
+        }
+        float* o = orow + static_cast<std::size_t>(x) * NCH;
+        for (int c = 0; c < NCH; ++c)
+            o[c] = pel[c];
+    }
+}
+
+// ImageBufAlgo::resize(dst, src, "", 0, ROI::All()) for float images of NCH interleaved channels.
+// rowsInParallel: use OpenMP over the output rows (each row is independent; the arithmetic per
+// pixel is unchanged). Pass false from inside a parallel region.
+template<int NCH>
+inline void resizeExact(const float* src, int sw, int sh, float* dst, int dw, int dh, bool rowsInParallel)
+{
+    ResizeTaps tx, ty;
+    resizeTaps(sw, dw, tx);
+    resizeTaps(sh, dh, ty);
+#pragma omp parallel for schedule(dynamic, 8) if (rowsInParallel)
+    for (int y = 0; y < dh; ++y)
+        resizeRow<NCH>(src, sw, tx, ty, y, dw, dst + static_cast<std::size_t>(y) * dw * NCH);
+}
+
+}  // namespace cheshire
+}  // namespace image
+}  // namespace aliceVision
