@@ -46,8 +46,10 @@ L items can slide.
   last-ulp distance differences on every HIP build without `__FMA__`
   (`docs/04-validation.md:676` on Linux, `:1151` on the Windows hip6.2 payload). Add the pragma,
   rebuild the Linux bundle and the hip6.2 Windows family, rerun the check on the RX 6750 XT (Linux)
-  and the RX 5500 XT (Windows), then tighten `scripts/verify_end_to_end.py:93-96`. The cause is
-  strongly indicated but not yet confirmed by a run.
+  and the RX 5500 XT (Windows), then tighten `scripts/verify_end_to_end.py:93-96`. **Refuted
+  2026-09-22:** the rebuilt Linux bundle reports exactly the same counts on the RX 6750 XT (17,383,299
+  and 18,404,248 of 87,354,192; docs/04, "The Linux knn distances are not a contraction"). The pragma
+  stays (it is correct), the cause is unknown; next, dump differing pairs and recompute on the host.
 - **ImagesCache eviction under the parallel prefetch** (S). Cheshire's own `refreshData` keeps
   upstream's `// TODO: oldCamId should be protected if already used`
   (`hip/port/sgm_fused/imagescache_refresh.cpp.txt:15`), and the prefetch refreshes a whole batch

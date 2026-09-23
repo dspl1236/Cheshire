@@ -1279,3 +1279,18 @@ An 80 m radius (5.4x the shot spacing) finds every real pair with a tenth of the
 matching, about 4 minutes instead of 42 on this box; that is the target for the GPS pairing item in
 docs/roadmap.md (0.3.5). The first run's folder was deleted after the rerun completed; the rerun's
 photos are hard links and keep their data.
+
+## The Linux knn distances are not a contraction (2026-09-22)
+
+Step 1 of the fusion plan added `#pragma clang fp contract(off)` to `knnGPU.cu` (5d6045b) on the
+reading that HIP fused the "unfused" metric and the initial bounding-box distances, which would
+explain the ~20 % of last-bit distance differences the Linux knn check reports. Tested on house-pc
+(RX 6750 XT, Linux) on the 41-view job's own Meshing cache, the 0.3.3 bundle against a rebuild at
+72f9c14: the check reports **exactly the same counts** - 17,383,299 and 18,404,248 of 87,354,192
+queries with a different distance, 0 naming a different vertex - so the pragma changed nothing and
+the cause is elsewhere. The two bundles are otherwise identical on this box (votes 79,843,309 and
+73,069,905, tetrahedralisation input `4fab73b4bdbd49` in both), the bucketed votes check
+("identical to the ordered host reference") passes on Linux, and the Windows results were unchanged
+by the pragma (docs above). Next for the distances: dump a handful of differing (query, vertex)
+pairs from the check and recompute the metric on the host in both forms to see which arithmetic
+the device is actually doing.
