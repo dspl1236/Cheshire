@@ -4033,6 +4033,48 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
 """.replace("\n", NL), 1)
         eng.write_text(t, encoding="utf-8", newline="")
 
+    # 5s. The passes after every bundle-adjustment iteration - the pixel and angle outlier tests
+    #     over every observation and the per-pose observation recount - were 605 s of a 1908 s node
+    #     at 884 views, over a scene the local solve mostly did not touch. hip/port/sfm_ba/postAdjust.inc
+    #     restricts them, exactly, to the landmarks observed by a refined pose (found through the
+    #     tracks-per-view index) and the poses that lost observations; the upstream passes run
+    #     unchanged without the local strategy, when an intrinsic is being refined, and after a pose
+    #     is erased. CHESHIRE_SFM_LOCAL_PASSES=0 keeps upstream's passes; CHESHIRE_SFM_PROFILE=1
+    #     prints one line per iteration.
+    shutil.copy2(ROOT / "hip" / "port" / "sfm_ba" / "postAdjust.inc", AV / "src/aliceVision/sfm/pipeline/sequential/postAdjust.inc")
+    t = eng.read_text(encoding="utf-8")
+    if "postAdjust.inc" not in t:
+        old = "#include <aliceVision/utils/filesIO.hpp>" + NL
+        if t.count(old) != 1:
+            sys.exit("filesIO include not found once in ReconstructionEngine_sequentialSfM.cpp")
+        t = t.replace(old, old + '#include "aliceVision/sfm/pipeline/sequential/postAdjust.inc"  // cheshire: step 5s' + NL, 1)
+        old = ("        nbOutliers = removeOutliers();" + NL
+               + NL
+               + "        std::set<IndexT> removedViewsIdIteration;" + NL
+               + "        eraseUnstablePosesAndObservations(this->_sfmData, _params.minPointsPerPose, _params.minTrackLength, &removedViewsIdIteration);" + NL)
+        if t.count(old) != 1:
+            sys.exit("post-adjust block not found once in ReconstructionEngine_sequentialSfM.cpp")
+        t = t.replace(old, r"""        // cheshire (step 5s): the passes after the solve, proportional to what it touched (postAdjust.inc)
+        std::set<IndexT> cheshireViewsWithErasures;
+        std::size_t cheshireCandidates = 0, cheshirePosesChecked = 0;
+        bool cheshireFullPass = true;
+        const auto cheshirePostT0 = std::chrono::steady_clock::now();
+        const std::size_t cheshireLandmarksBefore = _sfmData.getLandmarks().size();
+        nbOutliers = cheshire::removeOutliersAfterAdjust(_sfmData, _map_tracksPerView, _params.featureConstraint, _params.maxReprojectionError,
+                                                         _params.minAngleForLandmark, enableLocalStrategy, refineOptions, cheshireViewsWithErasures,
+                                                         cheshireCandidates, cheshireFullPass);
+
+        std::set<IndexT> removedViewsIdIteration;
+        cheshire::eraseUnstableAfterAdjust(_sfmData, _map_tracksPerView, _params.minPointsPerPose, _params.minTrackLength,
+                                           enableLocalStrategy && !cheshireFullPass, cheshireViewsWithErasures, newReconstructedViews,
+                                           &removedViewsIdIteration, cheshirePosesChecked);
+        if (cheshire::sfmProfileEnabled())
+            ALICEVISION_LOG_INFO("cheshire: post-adjust: " << (cheshireFullPass ? "full" : "restricted") << ", candidates " << cheshireCandidates << " of "
+                                                           << cheshireLandmarksBefore << " landmarks, poses recounted " << cheshirePosesChecked << ", "
+                                                           << std::chrono::duration<double>(std::chrono::steady_clock::now() - cheshirePostT0).count() << " s");
+""".replace("\n", NL), 1)
+        eng.write_text(t, encoding="utf-8", newline="")
+
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
     #     when the cards in front of us are both compute 6.1. FORCE beats -D on the command line, so

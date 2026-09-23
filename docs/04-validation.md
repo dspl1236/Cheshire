@@ -1612,3 +1612,38 @@ somewhere in Eigen's evaluation rather than a formula. Fisheye, 3DE and undistor
 the node 59 s to 50-52 s. The check against upstream's autodiff over 3.18 million evaluations:
 Jacobians differ by at most 1.4e-12 absolute (4.5e-11 relative on the small sets), as before the
 fusion; the deterministic pair is byte-identical (`15618f943864c8ba`).
+
+## 0.3.4: the passes after every bundle adjustment, proportional to the solve (2026-09-23)
+
+Mining the 884-view SfM log for where the time outside Ceres went: 605 s of the 1908 s node sat
+between `adjust end` and the next log line - the code after every bundle-adjustment iteration.
+Upstream follows each `adjust()` with `removeOutliers()`, the pixel-residual test over every
+observation of every landmark and then the angle test over every landmark, and with
+`eraseUnstablePosesAndObservations()`, which recounts every observation per pose: 945 passes over
+a scene of up to 1.35 million landmarks, for solves that under the local strategy moved a few
+dozen poses. (The rest of the non-Ceres time: 61 s printing bundle-adjustment statistics, 46 s
+of local-graph updates before each solve, 45 s of "Update Reconstruction", 27 s of resection,
+27 s choosing the initial pair from 1929 candidates, 55 + 49 s loading features and building
+tracks at the start.)
+
+Step 5s (`hip/port/sfm_ba/postAdjust.inc`) restricts the passes, exactly. The tests depend only
+on (pose, intrinsics, landmark position, observation), so an observation whose inputs did not
+change since its last test keeps its verdict. After a solve the changed ones are the observations
+of landmarks seen by a REFINED pose - which covers every refined landmark (a landmark is refined
+only when a refined camera sees it), everything triangulation added since the last pass (it hangs
+off the new, refined, views), and the landmarks the local strategy ignores because a refined and
+an ignored camera both see them (their refined observer moved) - and everything, if an intrinsic
+is being refined. The candidates come from the refined poses' views through the tracks-per-view
+index, never from walking the landmarks. A pose can only have become unstable by losing
+observations, so only the poses of views that lost one, and the poses resected in the group, are
+recounted, through the same index; if a pose does go, upstream's full pass finishes the iteration.
+Without the local strategy every pose is refined and upstream's passes run unchanged;
+`CHESHIRE_SFM_LOCAL_PASSES=0` keeps them under the local strategy too.
+
+**Exactness, measured with the deterministic gate** (the same input, one Ceres thread, digests of
+`sfm.sfm` and `cameras.sfm`): the engine bay, 107 poses, crosses into the local strategy for its
+last three solves, and those ran restricted - 137,867, 29,238 and 28,013 candidates of about
+138,000 landmarks, 37, 6 and 10 poses recounted - and the run ended with **the same digests as
+the full passes** (`a76946037b3860e6` / `38450e663421b3e4`, 140,490 landmarks). The 41-view set
+never enters the local strategy and its digest is unchanged (`15618f943864c8ba`). The 884-view
+before-and-after pair is running as this is written and is appended below when it lands.

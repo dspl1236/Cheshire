@@ -3,7 +3,9 @@
 
   prepare <set> [--describer dspsift]   CameraInit, FeatureExtraction, ImageMatching, FeatureMatching once,
                                         into build/sfmbench/<set>/cache (steps whose output exists are skipped)
-  run <set> --tag <name> [KEY=VALUE ...] [--repeat N] [--json] [-- <extra incrementalSfM options>]
+  run <set> --tag <name> [KEY=VALUE ...] [--repeat N] [--json] [--runner <cmd>] [-- <extra incrementalSfM options>]
+                                        --runner: a launcher .cmd in build/ other than dev-run.cmd (e.g. a kept
+                                        copy of an earlier install, for before/after digests)
                                         --json writes sfm.sfm (JSON) instead of sfm.abc, whose Alembic
                                         header carries the date, so two runs can be compared byte for byte
                                         incrementalSfM from that cache with Meshroom 2023.3's default node
@@ -44,10 +46,13 @@ SETS = {
 # (CameraInit stays Meshroom's own node in a paired install), so the default set is used here.
 
 
+RUNNER = [DEVRUN]
+
+
 def sh(cmd: list[str], log: Path, env: dict | None = None) -> float:
-    """Run one aliceVision binary through dev-run.cmd, stdout+stderr to log; returns wall seconds."""
+    """Run one aliceVision binary through the launcher (dev-run.cmd by default), stdout+stderr to log."""
     log.parent.mkdir(parents=True, exist_ok=True)
-    full = ["cmd", "/c", str(DEVRUN)] + cmd
+    full = ["cmd", "/c", str(RUNNER[0])] + cmd
     e = dict(os.environ)
     if env:
         e.update(env)
@@ -240,6 +245,8 @@ def main(argv: list[str]) -> None:
         return
     tag = argv[argv.index("--tag") + 1] if "--tag" in argv else sys.exit("--tag <name> required")
     repeat = int(argv[argv.index("--repeat") + 1]) if "--repeat" in argv else 1
+    if "--runner" in argv:
+        RUNNER[0] = B / argv[argv.index("--runner") + 1]
     extra = argv[argv.index("--") + 1:] if "--" in argv else []
     own = argv[2:argv.index("--")] if "--" in argv else argv[2:]
     envs = {a.split("=", 1)[0]: a.split("=", 1)[1] for a in own if "=" in a and not a.startswith("--")}

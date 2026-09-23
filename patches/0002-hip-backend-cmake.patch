@@ -5283,7 +5283,7 @@ index 1f23958..5491985 100644
  
          if (N == 0)
 diff --git a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
-index 097f8c9..197d3ec 100644
+index 097f8c9..6b7c84c 100644
 --- a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 +++ b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 @@ -5,6 +5,9 @@
@@ -5296,7 +5296,15 @@ index 097f8c9..197d3ec 100644
  #include <aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.hpp>
  #include <aliceVision/sfm/pipeline/RelativePoseInfo.hpp>
  #include <aliceVision/sfm/utils/statistics.hpp>
-@@ -452,6 +455,15 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+@@ -32,6 +35,7 @@
+ #include <aliceVision/track/TracksBuilder.hpp>
+ #include <aliceVision/track/tracksUtils.hpp>
+ #include <aliceVision/utils/filesIO.hpp>
++#include "aliceVision/sfm/pipeline/sequential/postAdjust.inc"  // cheshire: step 5s
+ 
+ #include <dependencies/htmlDoc/htmlDoc.hpp>
+ 
+@@ -452,6 +456,15 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
      aliceVision::system::Timer timer;
      std::size_t nbValidPoses = 0;
      std::size_t globalIteration = 0;
@@ -5312,7 +5320,7 @@ index 097f8c9..197d3ec 100644
  
      do
      {
-@@ -544,6 +556,31 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+@@ -544,6 +557,31 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
              ++_resectionId;
          }
  
@@ -5344,7 +5352,7 @@ index 097f8c9..197d3ec 100644
          if (_params.rig.useRigConstraint && !_sfmData.getRigs().empty())
          {
              ALICEVISION_LOG_INFO("Rig(s) calibration start");
-@@ -740,7 +777,14 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+@@ -740,7 +778,14 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
          }
      }
  
@@ -5360,7 +5368,34 @@ index 097f8c9..197d3ec 100644
  
      // give the local strategy graph is local strategy is enable
      if (!enableLocalStrategy)
-@@ -1010,7 +1054,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
+@@ -771,10 +816,24 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+             statistics.show();
+         }
+ 
+-        nbOutliers = removeOutliers();
++        // cheshire (step 5s): the passes after the solve, proportional to what it touched (postAdjust.inc)
++        std::set<IndexT> cheshireViewsWithErasures;
++        std::size_t cheshireCandidates = 0, cheshirePosesChecked = 0;
++        bool cheshireFullPass = true;
++        const auto cheshirePostT0 = std::chrono::steady_clock::now();
++        const std::size_t cheshireLandmarksBefore = _sfmData.getLandmarks().size();
++        nbOutliers = cheshire::removeOutliersAfterAdjust(_sfmData, _map_tracksPerView, _params.featureConstraint, _params.maxReprojectionError,
++                                                         _params.minAngleForLandmark, enableLocalStrategy, refineOptions, cheshireViewsWithErasures,
++                                                         cheshireCandidates, cheshireFullPass);
+ 
+         std::set<IndexT> removedViewsIdIteration;
+-        eraseUnstablePosesAndObservations(this->_sfmData, _params.minPointsPerPose, _params.minTrackLength, &removedViewsIdIteration);
++        cheshire::eraseUnstableAfterAdjust(_sfmData, _map_tracksPerView, _params.minPointsPerPose, _params.minTrackLength,
++                                           enableLocalStrategy && !cheshireFullPass, cheshireViewsWithErasures, newReconstructedViews,
++                                           &removedViewsIdIteration, cheshirePosesChecked);
++        if (cheshire::sfmProfileEnabled())
++            ALICEVISION_LOG_INFO("cheshire: post-adjust: " << (cheshireFullPass ? "full" : "restricted") << ", candidates " << cheshireCandidates << " of "
++                                                           << cheshireLandmarksBefore << " landmarks, poses recounted " << cheshirePosesChecked << ", "
++                                                           << std::chrono::duration<double>(std::chrono::steady_clock::now() - cheshirePostT0).count() << " s");
+ 
+         for (IndexT v : removedViewsIdIteration)
+             newReconstructedViews.erase(v);
+@@ -1010,7 +1069,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
  
      // Sort by the image score
      std::sort(out_connectedViews.begin(), out_connectedViews.end(), [](const ViewConnectionScore& t1, const ViewConnectionScore& t2) {
@@ -5370,7 +5405,7 @@ index 097f8c9..197d3ec 100644
      });
      return !out_connectedViews.empty();
  }
-@@ -1545,9 +1590,12 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
+@@ -1545,9 +1605,12 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
      // C. Do the resectioning: compute the camera pose.
      ALICEVISION_LOG_INFO("[" << _sfmData.getValidViews().size() + 1 << "/" << _sfmData.getViews().size() << "] Robust Resection of view: " << viewId);
  
@@ -5384,7 +5419,7 @@ index 097f8c9..197d3ec 100644
                                                          resectionData,
                                                          resectionData.pose,
                                                          _params.localizerEstimator);
-@@ -1842,7 +1890,10 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+@@ -1842,7 +1905,10 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
              Vec4 X_homogeneous = Vec4::Zero();
              std::vector<std::size_t> inliersIndex;
  

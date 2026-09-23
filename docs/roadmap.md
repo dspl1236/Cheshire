@@ -126,7 +126,12 @@ L items can slide.
   landmarks per solve at 884 views although the local strategy leaves most ignored (the rebuild's
   build is 2.2 us per active block there against 1.2 us at 41 views). An active-landmark list
   maintained by the local-BA graph, or a state change list, would make the build proportional to
-  the active set. Judge with the deterministic gate.
+  the active set. Judge with the deterministic gate. **The bigger walk was after the solve, and
+  that one is done 2026-09-23 (step 5s, docs/04 "the passes after every bundle adjustment"):**
+  the outlier and unstable-pose passes were 605 s of the 1908 s node at 884 views; restricted to
+  the landmarks seen by a refined pose and the poses that lost observations, exactly (engine-bay
+  digest unchanged). The BA-build walk itself is still open, and the log mining lists the next
+  ones: statistics printing 61 s, local-graph updates 46 s, "Update Reconstruction" 45 s.
 - **Eigen temporaries in the inner projection derivatives** (M). **Done 2026-09-23 (docs/04
   "the inner projection fused"):** one walk of the chain for pinhole + none / K1 / K3 / Brown,
   contraction off; Jacobians 5.5 s to 3.2-3.5 s at 41 views, the node 59 s to 50 s.
