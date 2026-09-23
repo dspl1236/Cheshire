@@ -1294,3 +1294,80 @@ the cause is elsewhere. The two bundles are otherwise identical on this box (vot
 by the pragma (docs above). Next for the distances: dump a handful of differing (query, vertex)
 pairs from the check and recompute the metric on the host in both forms to see which arithmetic
 the device is actually doing.
+
+## 0.3.4: bundle adjustment's Jacobians without the autodiff passes (2026-09-23)
+
+The roadmap item was "analytic Jacobians for bundle adjustment", on the profile above (Jacobians
+49 % of BA on the engine bay, 421 s of 733 s on the False Door). Reading upstream's cost function
+changed the shape of the work. `ProjectionSimpleErrorFunctor` (`sfm/bundle/costfunctions/projection.hpp`)
+is a `ceres::DynamicAutoDiffCostFunction` whose functor moves the point into the camera frame with
+Jets and then calls `CostIntrinsicsProject` through `DynamicCostFunctionToFunctorTmp`.
+`CostIntrinsicsProject` is *already analytic*: it returns the projection and its derivatives with
+respect to the intrinsics, the distortion and the camera-frame point. The cost is in how Ceres
+drives it: a dynamic autodiff functor is evaluated in passes of `Stride` (4) derivative
+components, and every pass calls `CostIntrinsicsProject::Evaluate` with all three Jacobian blocks
+again. With the point (3), the pose (6) and the intrinsics (4 + distortion) free, that is three to
+five full analytic evaluations per residual block per Jacobian, each with the Eigen temporaries
+those derivative methods allocate, plus the Jet arithmetic and one heap allocation per pass
+(`dynamic_cost_function_to_functor.h:127-131`).
+
+Step 5m (`hip/port/sfm_ba/projectionCheshire.hpp`) gives `CHESHIRE_BA_JACOBIANS` three settings:
+
+* `autodiff`: upstream, unchanged.
+* `stride`: upstream's functor instantiated with `Stride` 32, so one pass. A derivative component
+  is computed by the same operations whatever the stride, so the numbers cannot change; only the
+  number of times the inner function runs does. **The default.**
+* `analytic`: one `CostIntrinsicsProject::Evaluate`, then the chain rule by hand through the pose
+  (angle-axis and centre) and, for rigs, the sub-pose. The rotation's derivative comes from Ceres'
+  `AngleAxisRotatePoint` on 3-component Jets, i.e. the arithmetic autodiff itself uses for it, so
+  the only difference from upstream is the order of the chain-rule sums. Opt-in until the quality
+  gate of 0.3.5 exists, as the roadmap item said.
+
+`CHESHIRE_BA_CHECK=1` evaluates a reference cost function next to the selected one on every call
+(upstream's autodiff, or the analytic one when autodiff is selected) and prints, after each solve,
+how many residual and Jacobian values differed and by how much. `scripts/sfmbench.py` runs
+`aliceVision_incrementalSfM` from a prepared feature-and-match cache with Meshroom 2023.3's
+default node options and `CHESHIRE_BA_PROFILE=1`, and records one JSON line per run.
+
+**41 views (monstree full, dspsift), RX 9070 box, 12 threads, idle.** Two runs per setting, one
+check run each; every run ended with 41 poses and 68 bundle-adjustment solves:
+
+| Jacobians | SfM wall | BA total | Jacobians | linear solver | residuals | landmarks | RMSE |
+|---|---|---|---|---|---|---|---|
+| autodiff (upstream) | 67.0 s, 66.5 s | 26.9 s, 26.4 s | 13.0 s, 12.8 s | 6.4 s, 6.2 s | 0.8 s, 0.7 s | 80,808; 80,795 | 1.2359; 1.2324 |
+| stride 32 | 60.6 s, 60.6 s | 20.6 s, 20.3 s | 6.9 s, 6.8 s | 6.2 s, 6.1 s | 0.7 s, 0.7 s | 80,811; 80,793 | 1.2334; 1.2322 |
+| analytic | 56.6 s, 57.0 s | 17.9 s, 18.0 s | 4.3 s, 4.4 s | 6.2 s, 6.2 s | 0.6 s, 0.6 s | 80,803; 80,802 | 1.2329; 1.2338 |
+
+The check runs (`build/sfmbench/41/runs/stride-check`, `analytic-check`), 3.54 million
+evaluations of which 2.12 million with Jacobians, over the same 68 solves:
+
+* stride against autodiff: **0 of 7,089,684 residual values and 0 of 67,949,760 Jacobian values
+  differ.** Bit-identical, as the argument says it must be.
+* analytic against autodiff: residuals 0 of 7,089,912 differ; Jacobians 12,700,913 of 67,952,448
+  (18.7 %) differ, by at most 9.09e-13 absolute and 4.38e-10 relative. Rounding of the chain-rule
+  order, nothing else.
+
+So the Jacobian phase is 1.9x faster at the same numbers, and 3.0x faster at rounding-level
+differences; bundle adjustment as a whole goes from 26.7 s to 20.5 s and 18.0 s, the node from
+66.8 s to 60.6 s and 56.8 s. The landmark counts (80,793 to 80,811) and RMSE (1.2322 to 1.2359)
+spread the same way within a setting as across them: that is incremental SfM's run-to-run
+variation (unseeded RANSAC across threads, docs/17), not the Jacobians. What is left in BA after
+the change is the linear solver (6.2 s) and the per-solve problem construction and trust-region
+bookkeeping ("other", 6.7 s in every setting); the 4.3 s of analytic Jacobians is one inner
+evaluation per block, with the Eigen dynamic-size temporaries `getDerivativeTransformProjectWrt*`
+return - the next slice, and the shape the device version of 0.3.5 will need anyway.
+
+**Engine bay (107 photos, dspsift), same box.** One run per setting and one check run; 107 poses
+in every run, 140 solves (141 in the analytic runs: the trajectory differs by rounding, so the
+solve count can too):
+
+| Jacobians | SfM wall | BA total | Jacobians | linear solver | residuals | landmarks | RMSE |
+|---|---|---|---|---|---|---|---|
+| autodiff (upstream) | 69.2 s | 34.7 s | 18.7 s | 8.1 s | 1.2 s | 140,636 | 1.6851 |
+| stride 32 | 60.0 s | 25.5 s | 9.9 s | 7.8 s | 1.2 s | 140,387 | 1.6890 |
+| analytic | 58.6 s | 24.2 s | 6.8 s | 8.7 s | 1.2 s | 140,647 | 1.6839 |
+
+The analytic check on this set (929,238 evaluations, 421,505 with Jacobians): residuals 0 of
+1,858,476 values differ; Jacobians 2,847,747 of 7,036,470 differ, by at most 4.55e-13 absolute and
+5.45e-11 relative. Jacobians 1.9x and 2.75x, BA 34.7 s to 25.5 s and 24.2 s, the node 69 s to
+60 s and 59 s; the landmark spread (140,387 to 140,647) is the run-to-run kind again.

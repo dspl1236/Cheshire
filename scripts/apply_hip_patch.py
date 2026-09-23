@@ -85,6 +85,7 @@ TRACKED = [
     "src/aliceVision/image/imageAlgo.cpp",
     "src/aliceVision/numeric/algebra.hpp",
     "src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp",
+    "src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp",
 ]
 
 
@@ -3438,6 +3439,39 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
         if n == 0:
             sys.exit(f"no port source list found in {cml}")
         cml.write_text(t2, encoding="utf-8", newline="")
+
+    # 5m. Bundle adjustment: the projection residual's Jacobians without the autodiff passes.
+    #     Upstream's projection cost is a DynamicAutoDiffCostFunction (Stride 4) around a functor
+    #     that rotates the point with Jets and then calls the already-analytic CostIntrinsicsProject
+    #     through DynamicCostFunctionToFunctorTmp; Ceres runs that functor once per 4 derivative
+    #     components, so CostIntrinsicsProject::Evaluate computes all its Jacobian blocks 3 to 5
+    #     times per residual block per Jacobian. hip/port/sfm_ba/projectionCheshire.hpp has the
+    #     reasoning; CHESHIRE_BA_JACOBIANS=autodiff (default) | stride (one pass) | analytic (the
+    #     chain rule by hand), CHESHIRE_BA_CHECK=1 evaluates a reference next to it and reports.
+    shutil.copy2(ROOT / "hip" / "port" / "sfm_ba" / "projectionCheshire.hpp",
+                 AV / "src/aliceVision/sfm/bundle/costfunctions/projectionCheshire.hpp")
+    t = bac.read_text(encoding="utf-8")
+    if "projectionCheshire.hpp" not in t:
+        old = "#include <aliceVision/sfm/bundle/costfunctions/projection.hpp>" + NL
+        if t.count(old) != 1:
+            sys.exit("projection.hpp include not found once in BundleAdjustmentCeres.cpp")
+        t = t.replace(old, old + "#include <aliceVision/sfm/bundle/costfunctions/projectionCheshire.hpp>  // cheshire: step 5m" + NL, 1)
+        old = "ceres::CostFunction* costFunction = ProjectionErrorFunctor::createCostFunction(intrinsic, observation);"
+        if t.count(old) != 1:
+            sys.exit("rig projection createCostFunction call not found once in BundleAdjustmentCeres.cpp")
+        t = t.replace(old, "ceres::CostFunction* costFunction = cheshire::createProjectionCost(true, intrinsic, observation);  // cheshire: step 5m", 1)
+        old = "ceres::CostFunction* costFunction = ProjectionSimpleErrorFunctor::createCostFunction(intrinsic, observation);"
+        if t.count(old) != 1:
+            sys.exit("simple projection createCostFunction call not found once in BundleAdjustmentCeres.cpp")
+        t = t.replace(old, "ceres::CostFunction* costFunction = cheshire::createProjectionCost(false, intrinsic, observation);  // cheshire: step 5m", 1)
+        old = "    ceres::Solve(options, &problem, &summary);" + NL
+        if t.count(old) != 1:
+            sys.exit("ceres::Solve call not found once in BundleAdjustmentCeres.cpp (5m)")
+        t = t.replace(old, old + r"""    // cheshire: the projection cost check, one line per solve (scripts/apply_hip_patch.py, step 5m)
+    if (cheshire::baCheckEnabled())
+        ALICEVISION_LOG_INFO("cheshire: BA check (" << cheshire::baJacobiansName(cheshire::baJacobiansMode()) << " against " << cheshire::baCheckReferenceName() << "): " << cheshire::baCheckReport());
+""".replace("\n", NL), 1)
+        bac.write_text(t, encoding="utf-8", newline="")
 
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu

@@ -78,6 +78,13 @@ L items can slide.
   autodiff, and turn it on in 0.3.5 once the quality gate exists. The Lanczos downscale it was
   queued behind shipped in 0.3.3. It is also the prerequisite for bundle adjustment on the device
   (0.3.5): the derivatives written by hand here are what goes on the GPU.
+  **Done 2026-09-23 (step 5m, `hip/port/sfm_ba/projectionCheshire.hpp`; docs/04 "0.3.4: bundle
+  adjustment's Jacobians").** Upstream's inner cost was already analytic; the waste was Ceres'
+  4-wide autodiff passes re-running it 3 to 5 times per block. `CHESHIRE_BA_JACOBIANS=stride` (one
+  pass, bit-identical: 0 of 67,949,760 values differed) is the default, 1.9x on the Jacobian phase;
+  `analytic` (the chain rule by hand) is opt-in at 3.0x with rounding-level differences (max
+  4.4e-10 relative), residuals identical. 41 views: SfM 67 s to 61 s and 57 s; engine bay: 69 s
+  to 60 s and 59 s (Jacobians 18.7 s to 9.9 s and 6.8 s).
 - **CPU share on weak hosts** (S; M if FeatureMatching has to be rerun for the split). On the
   Rubble box (i3-4330, 2 cores) SfM took 4291 s and FeatureMatching 2265 s
   (`docs/04-validation.md:1034`), but the matcher vs AC-RANSAC split there is a guess. Measure it,

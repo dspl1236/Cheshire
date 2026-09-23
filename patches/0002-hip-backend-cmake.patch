@@ -4687,7 +4687,7 @@ index 9500f70..b12c078 100644
          numAddedEdges += addIntrinsicEdgesToTheGraph(sfmData, addedViewsId);
      }
 diff --git a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
-index bd0bf27..c73e84a 100644
+index bd0bf27..ab319aa 100644
 --- a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
 +++ b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
 @@ -5,6 +5,7 @@
@@ -4698,10 +4698,39 @@ index bd0bf27..c73e84a 100644
  #include <aliceVision/config.hpp>
  #include <aliceVision/alicevision_omp.hpp>
  #include <aliceVision/system/Logger.hpp>
-@@ -1338,6 +1339,17 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -12,6 +13,7 @@
+ #include <aliceVision/sfm/bundle/costfunctions/constraint2d.hpp>
+ #include <aliceVision/sfm/bundle/costfunctions/constraintPoint.hpp>
+ #include <aliceVision/sfm/bundle/costfunctions/projection.hpp>
++#include <aliceVision/sfm/bundle/costfunctions/projectionCheshire.hpp>  // cheshire: step 5m
+ #include <aliceVision/sfm/bundle/costfunctions/projectionMesh.hpp>
+ #include <aliceVision/sfm/bundle/costfunctions/rotationPrior.hpp>
+ #include <aliceVision/sfm/bundle/costfunctions/temporalConstraint.hpp>
+@@ -636,7 +638,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+ 
+             if (view.isPartOfRig() && !view.isPoseIndependant())
+             {
+-                ceres::CostFunction* costFunction = ProjectionErrorFunctor::createCostFunction(intrinsic, observation);
++                ceres::CostFunction* costFunction = cheshire::createProjectionCost(true, intrinsic, observation);  // cheshire: step 5m
+ 
+                 double* rigBlockPtr = _rigBlocks.at(view.getRigId()).at(view.getSubPoseId()).data();
+                 _linearSolverOrdering.AddElementToGroup(rigBlockPtr, 1);
+@@ -677,7 +679,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+             }
+             else
+             {
+-                ceres::CostFunction* costFunction = ProjectionSimpleErrorFunctor::createCostFunction(intrinsic, observation);
++                ceres::CostFunction* costFunction = cheshire::createProjectionCost(false, intrinsic, observation);  // cheshire: step 5m
+ 
+                 std::vector<double*> params;
+                 params.push_back(intrinsicBlockPtr);
+@@ -1338,6 +1340,20 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      // solve BA
      ceres::Solver::Summary summary;
      ceres::Solve(options, &problem, &summary);
++    // cheshire: the projection cost check, one line per solve (scripts/apply_hip_patch.py, step 5m)
++    if (cheshire::baCheckEnabled())
++        ALICEVISION_LOG_INFO("cheshire: BA check (" << cheshire::baJacobiansName(cheshire::baJacobiansMode()) << " against " << cheshire::baCheckReferenceName() << "): " << cheshire::baCheckReport());
 +    // cheshire: Ceres' own time split, one line per solve (scripts/apply_hip_patch.py, step 5i)
 +    {
 +        static const bool cheshireBaProfile = std::getenv("CHESHIRE_BA_PROFILE") != nullptr;
