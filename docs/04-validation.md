@@ -1461,8 +1461,12 @@ on one Ceres thread, 72 s against 23 s here, so the node takes 1.8x as long (112
 64 s); fully single-threaded it is 163 s. The JSON export the comparison needs costs 17.5 s at
 this size against 0.2 s for Alembic (`cameras.sfm`, always written and small, plus the landmark
 count is the cheap first check). The per-task generators and the key-ordered blocks are on in
-every mode; their cost against the shared generator is within run-to-run noise (see the A/B rows
-in `build/sfmbench/bench.jsonl`).
+every mode, and cost nothing measurable: two default runs took 64.9 s and 66.1 s of SfM against
+69.8 s and 70.4 s for two runs with the shared generator restored (`CHESHIRE_SFM_TASK_SEED=0`),
+on a box that was getting busier as the four ran (residual evaluation, the same code in all of
+them, drifted from 55 to 61 ns per residual-block-iteration; the 57.9 s runs before step 5n were
+on the idle box at 49 ns). If anything the shared generator is the slower one - twelve threads
+writing the same 2.5 KB of generator state - but the drift is of the same size as the difference.
 
 `scripts/sfmbench.py run <set> --tag X --json CHESHIRE_SFM_DETERMINISTIC=1`, twice, and equal
 digests, is the gate for every later SfM change; it replaces the n=10 repeats docs/17 needed.
