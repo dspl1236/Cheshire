@@ -86,6 +86,9 @@ TRACKED = [
     "src/aliceVision/numeric/algebra.hpp",
     "src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp",
     "src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp",
+    "src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp",
+    "src/aliceVision/sfm/pipeline/ReconstructionEngine.hpp",
+    "src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp",
 ]
 
 
@@ -3471,6 +3474,158 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
     if (cheshire::baCheckEnabled())
         ALICEVISION_LOG_INFO("cheshire: BA check (" << cheshire::baJacobiansName(cheshire::baJacobiansMode()) << " against " << cheshire::baCheckReferenceName() << "): " << cheshire::baCheckReport());
 """.replace("\n", NL), 1)
+        bac.write_text(t, encoding="utf-8", newline="")
+
+    # 5n. Incremental SfM, reproducible. hip/port/sfm_ba/deterministic.hpp has the reasoning: a
+    #     generator per task instead of one std::mt19937 shared across OpenMP threads, landmark
+    #     blocks in one array and an ordering group per block so Ceres never orders by pointer, a
+    #     total order in the next-best-views sort, and CHESHIRE_SFM_DETERMINISTIC=1 for one Ceres
+    #     thread (CHESHIRE_BA_THREADS=n explicitly; CHESHIRE_SFM_TASK_SEED=0 restores upstream's
+    #     shared generator).
+    shutil.copy2(ROOT / "hip" / "port" / "sfm_ba" / "deterministic.hpp", AV / "src/aliceVision/sfm/deterministic.hpp")
+
+    re_hpp = AV / "src/aliceVision/sfm/pipeline/ReconstructionEngine.hpp"
+    t = re_hpp.read_text(encoding="utf-8")
+    if "_cheshireSeed" not in t:
+        old = "#include <random>" + NL
+        if t.count(old) != 1:
+            sys.exit("<random> include not found once in ReconstructionEngine.hpp")
+        t = t.replace(old, old + "#include <aliceVision/sfm/deterministic.hpp>  // cheshire: step 5n" + NL, 1)
+        old = "    void initRandomSeed(int seed) { _randomNumberGenerator.seed(seed == -1 ? std::random_device()() : seed); }"
+        if t.count(old) != 1:
+            sys.exit("initRandomSeed not found once in ReconstructionEngine.hpp")
+        t = t.replace(old, r"""    void initRandomSeed(int seed)
+    {
+        // cheshire (step 5n): the effective seed is kept, every task derives its generator from it
+        _cheshireSeed = (seed == -1) ? std::random_device()() : static_cast<unsigned>(seed);
+        _randomNumberGenerator.seed(_cheshireSeed);
+    }""".replace("\n", NL), 1)
+        old = "    std::mt19937 _randomNumberGenerator;" + NL
+        if t.count(old) != 1:
+            sys.exit("_randomNumberGenerator member not found once in ReconstructionEngine.hpp")
+        t = t.replace(old, old + "    // cheshire (step 5n): the seed the tasks derive their generators from" + NL
+                      + "    unsigned _cheshireSeed = std::mt19937::default_seed;" + NL, 1)
+        re_hpp.write_text(t, encoding="utf-8", newline="")
+
+    t = eng.read_text(encoding="utf-8")
+    if "cheshire::taskGenerator" not in t:
+        # resection: a generator per (view, pass)
+        anchor = "    const bool bResection = sfm::SfMLocalizer::localize("
+        if t.count(anchor) != 1:
+            sys.exit("localize call not found once in ReconstructionEngine_sequentialSfM.cpp")
+        i = t.index(anchor)
+        j = t.index("_randomNumberGenerator,", i)
+        t = (t[:i]
+             + "    // cheshire (step 5n): this view's own generator, the same on any thread" + NL
+             + "    std::mt19937 cheshireTaskGenerator = cheshire::taskGenerator(_cheshireSeed, 1, viewId, _resectionId);" + NL
+             + "    std::mt19937& cheshireGenerator = cheshire::taskSeedEnabled() ? cheshireTaskGenerator : _randomNumberGenerator;" + NL
+             + t[i:j] + "cheshireGenerator," + t[j + len("_randomNumberGenerator,"):])
+        # triangulation: a generator per (track, pass)
+        old = "            multiview::TriangulateNViewLORANSAC(features, Ps, _randomNumberGenerator, X_homogeneous, &inliersIndex, 8.0);"
+        if t.count(old) != 1:
+            sys.exit("TriangulateNViewLORANSAC call not found once in ReconstructionEngine_sequentialSfM.cpp")
+        t = t.replace(old, r"""            // cheshire (step 5n): this track's own generator, the same on any thread
+            std::mt19937 cheshireTaskGenerator = cheshire::taskGenerator(_cheshireSeed, 2, trackId, _resectionId);
+            std::mt19937& cheshireGenerator = cheshire::taskSeedEnabled() ? cheshireTaskGenerator : _randomNumberGenerator;
+            multiview::TriangulateNViewLORANSAC(features, Ps, cheshireGenerator, X_homogeneous, &inliersIndex, 8.0);""".replace("\n", NL), 1)
+        # next-best-views: a total order (score, then view id) instead of ties by arrival
+        old = "        return std::get<2>(t1) > std::get<2>(t2);"
+        if t.count(old) != 1:
+            sys.exit("findConnectedViews comparator not found once in ReconstructionEngine_sequentialSfM.cpp")
+        t = t.replace(old, "        // cheshire (step 5n): ties by view id, not by the order the threads finished in" + NL
+                      + "        return std::get<2>(t1) != std::get<2>(t2) ? std::get<2>(t1) > std::get<2>(t2) : std::get<0>(t1) < std::get<0>(t2);", 1)
+        eng.write_text(t, encoding="utf-8", newline="")
+
+    bah = AV / "src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp"
+    t = bah.read_text(encoding="utf-8")
+    if "OrderedBlocks" not in t:
+        old = "#include <aliceVision/sfm/bundle/BundleAdjustment.hpp>" + NL
+        if t.count(old) != 1:
+            sys.exit("BundleAdjustment.hpp include not found once in BundleAdjustmentCeres.hpp")
+        t = t.replace(old, old + "#include <aliceVision/sfm/deterministic.hpp>  // cheshire: step 5n" + NL, 1)
+        old = "    std::map<IndexT, std::array<double, 3>> _landmarksBlocks;" + NL
+        if t.count(old) != 1:
+            sys.exit("_landmarksBlocks member not found once in BundleAdjustmentCeres.hpp")
+        t = t.replace(old, "    cheshire::OrderedBlocks<std::array<double, 3>> _landmarksBlocks;  // cheshire (step 5n): one array, key order" + NL, 1)
+        old = "    ceres::ParameterBlockOrdering _linearSolverOrdering;" + NL
+        if t.count(old) != 1:
+            sys.exit("_linearSolverOrdering member not found once in BundleAdjustmentCeres.hpp")
+        t = t.replace(old, old + r"""
+    // cheshire (step 5n): one ordering group per parameter block, numbered by key, so the order
+    // Ceres eliminates in and lays the reduced camera system out in is the key order and not the
+    // address order of std::set<double*>. Poses from 1, rig sub-poses from 1e6, intrinsics from
+    // 2e6, distortions from 3e6, the shared fake distortion block at 4e6.
+    std::map<IndexT, int> _cheshirePoseGroup;
+    std::map<IndexT, int> _cheshireIntrinsicGroup;
+    std::map<std::pair<IndexT, IndexT>, int> _cheshireRigGroup;
+    int cheshirePoseGroup(IndexT poseId) const { return _cheshirePoseGroup.at(poseId); }
+    int cheshireIntrinsicGroup(IndexT intrinsicId) const { return _cheshireIntrinsicGroup.at(intrinsicId); }
+    int cheshireDistortionGroup(IndexT intrinsicId, bool fake) const { return fake ? 4000000 : 1000000 + _cheshireIntrinsicGroup.at(intrinsicId); }
+    int cheshireRigGroup(IndexT rigId, IndexT subPoseId)
+    {
+        int& g = _cheshireRigGroup[std::make_pair(rigId, subPoseId)];
+        if (g == 0)
+            g = 1000000 + static_cast<int>(_cheshireRigGroup.size());
+        return g;
+    }
+""".replace("\n", NL), 1)
+        bah.write_text(t, encoding="utf-8", newline="")
+
+    t = bac.read_text(encoding="utf-8")
+    if "_cheshirePoseGroup" not in t:
+        old = "    // clear previously computed data" + NL + "    resetProblem();" + NL
+        if t.count(old) != 1:
+            sys.exit("createProblem's resetProblem call not found once in BundleAdjustmentCeres.cpp")
+        t = t.replace(old, old + r"""
+    // cheshire (step 5n): landmark blocks in one array, and an ordering group per block by key
+    _landmarksBlocks.reserve(sfmData.getLandmarks().size());
+    {
+        int g = 1;
+        for (const auto& [poseId, pose] : sfmData.getPoses().valueRange())
+            _cheshirePoseGroup[poseId] = g++;
+        g = 2000000;
+        for (const auto& [intrinsicId, intrinsicPtr] : sfmData.getIntrinsics())
+            _cheshireIntrinsicGroup[intrinsicId] = g++;
+    }
+""".replace("\n", NL), 1)
+        old = "    _linearSolverOrdering.Clear();" + NL
+        if t.count(old) != 1:
+            sys.exit("_linearSolverOrdering.Clear not found once in BundleAdjustmentCeres.cpp")
+        t = t.replace(old, old + "    _cheshirePoseGroup.clear();  // cheshire: step 5n" + NL
+                      + "    _cheshireIntrinsicGroup.clear();" + NL + "    _cheshireRigGroup.clear();" + NL, 1)
+        for old, new, n in (
+            ("_linearSolverOrdering.AddElementToGroup(poseBlockPtr, 1);",
+             "_linearSolverOrdering.AddElementToGroup(poseBlockPtr, cheshirePoseGroup(view.getPoseId()));  // cheshire: step 5n", 2),
+            ("_linearSolverOrdering.AddElementToGroup(intrinsicBlockPtr, 2);",
+             "_linearSolverOrdering.AddElementToGroup(intrinsicBlockPtr, cheshireIntrinsicGroup(intrinsicId));  // cheshire: step 5n", 2),
+            ("_linearSolverOrdering.AddElementToGroup(distortionBlockPtr, 2);",
+             "_linearSolverOrdering.AddElementToGroup(distortionBlockPtr, cheshireDistortionGroup(intrinsicId, distortionBlockPtr == fakeDistortionBlockPtr));  // cheshire: step 5n", 2),
+            ("_linearSolverOrdering.AddElementToGroup(rigBlockPtr, 1);",
+             "_linearSolverOrdering.AddElementToGroup(rigBlockPtr, cheshireRigGroup(view.getRigId(), view.getSubPoseId()));  // cheshire: step 5n", 1),
+            ("_linearSolverOrdering.AddElementToGroup(poseBlockPtrs[frameIdx-firstViewWithPose], 1);",
+             "_linearSolverOrdering.AddElementToGroup(poseBlockPtrs[frameIdx-firstViewWithPose], cheshirePoseGroup(poseIdsVec.at(frameIdx)));  // cheshire: step 5n", 1),
+        ):
+            if t.count(old) != n:
+                sys.exit(f"expected {n} of: {old}")
+            t = t.replace(old, new)
+        # the reference pose's group needs its id where only the pointer was kept
+        old = "        double * referencePoseBlockPtr = nullptr;" + NL
+        if t.count(old) != 1:
+            sys.exit("referencePoseBlockPtr declaration not found once in BundleAdjustmentCeres.cpp")
+        t = t.replace(old, old + "        IndexT cheshireReferencePoseId = UndefinedIndexT;  // cheshire: step 5n" + NL, 1)
+        old = "            referencePoseBlockPtr = _posesBlocks.at(refview.getPoseId()).data();" + NL
+        if t.count(old) != 1:
+            sys.exit("referencePoseBlockPtr assignment not found once in BundleAdjustmentCeres.cpp")
+        t = t.replace(old, old + "            cheshireReferencePoseId = refview.getPoseId();  // cheshire: step 5n" + NL, 1)
+        old = "_linearSolverOrdering.AddElementToGroup(referencePoseBlockPtr, 1);"
+        if t.count(old) != 1:
+            sys.exit("reference pose AddElementToGroup not found once in BundleAdjustmentCeres.cpp")
+        t = t.replace(old, "_linearSolverOrdering.AddElementToGroup(referencePoseBlockPtr, cheshirePoseGroup(cheshireReferencePoseId));  // cheshire: step 5n", 1)
+        # the thread count Ceres gets
+        for old in ("    solverOptions.num_threads = _ceresOptions.nbThreads;", "    solverOptions.num_linear_solver_threads = _ceresOptions.nbThreads;"):
+            if t.count(old) != 1:
+                sys.exit(f"not found once: {old}")
+            t = t.replace(old, old.replace("_ceresOptions.nbThreads", "cheshire::baThreads(_ceresOptions.nbThreads)") + "  // cheshire: step 5n", 1)
         bac.write_text(t, encoding="utf-8", newline="")
 
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9

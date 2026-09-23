@@ -4687,7 +4687,7 @@ index 9500f70..b12c078 100644
          numAddedEdges += addIntrinsicEdgesToTheGraph(sfmData, addedViewsId);
      }
 diff --git a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
-index bd0bf27..ab319aa 100644
+index bd0bf27..96abea7 100644
 --- a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
 +++ b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
 @@ -5,6 +5,7 @@
@@ -4706,7 +4706,54 @@ index bd0bf27..ab319aa 100644
  #include <aliceVision/sfm/bundle/costfunctions/projectionMesh.hpp>
  #include <aliceVision/sfm/bundle/costfunctions/rotationPrior.hpp>
  #include <aliceVision/sfm/bundle/costfunctions/temporalConstraint.hpp>
-@@ -636,7 +638,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+@@ -207,7 +209,7 @@ void BundleAdjustmentCeres::setSolverOptions(ceres::Solver::Options& solverOptio
+     solverOptions.minimizer_progress_to_stdout = _ceresOptions.verbose;
+     solverOptions.logging_type = ceres::SILENT;
+     solverOptions.update_state_every_iteration = true;
+-    solverOptions.num_threads = _ceresOptions.nbThreads;
++    solverOptions.num_threads = cheshire::baThreads(_ceresOptions.nbThreads);  // cheshire: step 5n
+     solverOptions.max_num_iterations = _ceresOptions.maxNumIterations;
+     solverOptions.max_num_consecutive_invalid_steps = 10;
+     /*solverOptions.function_tolerance = 1e-12;
+@@ -215,7 +217,7 @@ void BundleAdjustmentCeres::setSolverOptions(ceres::Solver::Options& solverOptio
+     solverOptions.parameter_tolerance = 1e-12;*/
+ 
+ #if CERES_VERSION_MAJOR < 2
+-    solverOptions.num_linear_solver_threads = _ceresOptions.nbThreads;
++    solverOptions.num_linear_solver_threads = cheshire::baThreads(_ceresOptions.nbThreads);  // cheshire: step 5n
+ #endif
+ 
+     if (_ceresOptions.useParametersOrdering)
+@@ -551,6 +553,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+         //If the landmark has a referenceViewIndex set, then retrieve the reference pose
+         int sizeLandmark = 3;
+         double * referencePoseBlockPtr = nullptr;
++        IndexT cheshireReferencePoseId = UndefinedIndexT;  // cheshire: step 5n
+ 
+ 
+         if (landmark.getReferenceViewIndex() != UndefinedIndexT)
+@@ -576,6 +579,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+             landmarkBlock[2] = refX.z();
+ 
+             referencePoseBlockPtr = _posesBlocks.at(refview.getPoseId()).data();
++            cheshireReferencePoseId = refview.getPoseId();  // cheshire: step 5n
+         }
+ 
+         double* landmarkBlockPtr = landmarkBlock.data();
+@@ -623,9 +627,9 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+             if (_ceresOptions.useParametersOrdering)
+             {
+                 _linearSolverOrdering.AddElementToGroup(landmarkBlockPtr, 0);
+-                _linearSolverOrdering.AddElementToGroup(poseBlockPtr, 1);
+-                _linearSolverOrdering.AddElementToGroup(intrinsicBlockPtr, 2);
+-                _linearSolverOrdering.AddElementToGroup(distortionBlockPtr, 2);
++                _linearSolverOrdering.AddElementToGroup(poseBlockPtr, cheshirePoseGroup(view.getPoseId()));  // cheshire: step 5n
++                _linearSolverOrdering.AddElementToGroup(intrinsicBlockPtr, cheshireIntrinsicGroup(intrinsicId));  // cheshire: step 5n
++                _linearSolverOrdering.AddElementToGroup(distortionBlockPtr, cheshireDistortionGroup(intrinsicId, distortionBlockPtr == fakeDistortionBlockPtr));  // cheshire: step 5n
+             }
+ 
+             ceres::LossFunction* weightedLossFunction = lossFunction;
+@@ -636,10 +640,10 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
  
              if (view.isPartOfRig() && !view.isPoseIndependant())
              {
@@ -4714,8 +4761,21 @@ index bd0bf27..ab319aa 100644
 +                ceres::CostFunction* costFunction = cheshire::createProjectionCost(true, intrinsic, observation);  // cheshire: step 5m
  
                  double* rigBlockPtr = _rigBlocks.at(view.getRigId()).at(view.getSubPoseId()).data();
-                 _linearSolverOrdering.AddElementToGroup(rigBlockPtr, 1);
-@@ -677,7 +679,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+-                _linearSolverOrdering.AddElementToGroup(rigBlockPtr, 1);
++                _linearSolverOrdering.AddElementToGroup(rigBlockPtr, cheshireRigGroup(view.getRigId(), view.getSubPoseId()));  // cheshire: step 5n
+ 
+                 std::vector<double*> params;
+                 params.push_back(intrinsicBlockPtr);
+@@ -657,7 +661,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+ 
+                 if (_ceresOptions.useParametersOrdering && !samePose)
+                 {
+-                    _linearSolverOrdering.AddElementToGroup(referencePoseBlockPtr, 1);
++                    _linearSolverOrdering.AddElementToGroup(referencePoseBlockPtr, cheshirePoseGroup(cheshireReferencePoseId));  // cheshire: step 5n
+                 }
+ 
+                 ceres::CostFunction* costFunction = ProjectionMeshErrorFunctor::createCostFunction(intrinsic, observation, landmark.getPointFetcher(), samePose);
+@@ -677,7 +681,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
              }
              else
              {
@@ -4724,7 +4784,57 @@ index bd0bf27..ab319aa 100644
  
                  std::vector<double*> params;
                  params.push_back(intrinsicBlockPtr);
-@@ -1338,6 +1340,20 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -765,9 +769,9 @@ void BundleAdjustmentCeres::addSurveyPointsToProblem(const sfmData::SfMData& sfm
+         // apply a specific parameter ordering:
+         if (_ceresOptions.useParametersOrdering)
+         {
+-            _linearSolverOrdering.AddElementToGroup(poseBlockPtr, 1);
+-            _linearSolverOrdering.AddElementToGroup(intrinsicBlockPtr, 2);
+-            _linearSolverOrdering.AddElementToGroup(distortionBlockPtr, 2);
++            _linearSolverOrdering.AddElementToGroup(poseBlockPtr, cheshirePoseGroup(view.getPoseId()));  // cheshire: step 5n
++            _linearSolverOrdering.AddElementToGroup(intrinsicBlockPtr, cheshireIntrinsicGroup(intrinsicId));  // cheshire: step 5n
++            _linearSolverOrdering.AddElementToGroup(distortionBlockPtr, cheshireDistortionGroup(intrinsicId, distortionBlockPtr == fakeDistortionBlockPtr));  // cheshire: step 5n
+         }
+ 
+ 
+@@ -994,7 +998,7 @@ void BundleAdjustmentCeres::addTemporalSmoothnessToProblem(const sfmData::SfMDat
+         for (IndexT frameIdx = firstViewWithPose; frameIdx <= lastViewWithPose; frameIdx++)
+         {
+             poseBlockPtrs.push_back(_posesBlocks.at(poseIdsVec.at(frameIdx)).data());
+-            _linearSolverOrdering.AddElementToGroup(poseBlockPtrs[frameIdx-firstViewWithPose], 1);
++            _linearSolverOrdering.AddElementToGroup(poseBlockPtrs[frameIdx-firstViewWithPose], cheshirePoseGroup(poseIdsVec.at(frameIdx)));  // cheshire: step 5n
+         }
+ 
+         double trajectoryLength = cameraTrajectoryLength(poseBlockPtrs);
+@@ -1065,6 +1069,17 @@ void BundleAdjustmentCeres::createProblem(const sfmData::SfMData& sfmData, ERefi
+     // clear previously computed data
+     resetProblem();
+ 
++    // cheshire (step 5n): landmark blocks in one array, and an ordering group per block by key
++    _landmarksBlocks.reserve(sfmData.getLandmarks().size());
++    {
++        int g = 1;
++        for (const auto& [poseId, pose] : sfmData.getPoses().valueRange())
++            _cheshirePoseGroup[poseId] = g++;
++        g = 2000000;
++        for (const auto& [intrinsicId, intrinsicPtr] : sfmData.getIntrinsics())
++            _cheshireIntrinsicGroup[intrinsicId] = g++;
++    }
++
+     // ensure we are not using incompatible options
+     // REFINEINTRINSICS_OPTICALCENTER_ALWAYS and REFINEINTRINSICS_OPTICALCENTER_IF_ENOUGH_DATA cannot be used at the same time
+     assert(!((refineOptions & REFINE_INTRINSICS_OPTICALOFFSET_ALWAYS) && (refineOptions & REFINE_INTRINSICS_OPTICALOFFSET_IF_ENOUGH_DATA)));
+@@ -1106,6 +1121,9 @@ void BundleAdjustmentCeres::resetProblem()
+     _intrinsicObjects.clear();
+     _distortionsBlocks.clear();
+     _linearSolverOrdering.Clear();
++    _cheshirePoseGroup.clear();  // cheshire: step 5n
++    _cheshireIntrinsicGroup.clear();
++    _cheshireRigGroup.clear();
+ }
+ 
+ void BundleAdjustmentCeres::updateFromSolution(sfmData::SfMData& sfmData, ERefineOptions refineOptions) const
+@@ -1338,6 +1356,20 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      // solve BA
      ceres::Solver::Summary summary;
      ceres::Solve(options, &problem, &summary);
@@ -4745,6 +4855,87 @@ index bd0bf27..ab319aa 100644
  
      ALICEVISION_LOG_INFO("landmarksBlockIds : " << landmarksBlockIds.size());
      evaluateOptions.residual_blocks = landmarksBlockIds;
+diff --git a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp
+index ee14887..e24a5b7 100644
+--- a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp
++++ b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp
+@@ -10,6 +10,7 @@
+ #include <aliceVision/types.hpp>
+ #include <aliceVision/alicevision_omp.hpp>
+ #include <aliceVision/sfm/bundle/BundleAdjustment.hpp>
++#include <aliceVision/sfm/deterministic.hpp>  // cheshire: step 5n
+ #include <aliceVision/sfm/LocalBundleAdjustmentGraph.hpp>
+ #include <aliceVision/numeric/numeric.hpp>
+ #include <aliceVision/sfmData/CameraPose.hpp>
+@@ -284,7 +285,7 @@ class BundleAdjustmentCeres : public BundleAdjustment, ceres::EvaluationCallback
+     double _fakeDistortionBlock;
+     /// landmarks blocks wrapper
+     /// block: 3d position(3)
+-    std::map<IndexT, std::array<double, 3>> _landmarksBlocks;
++    cheshire::OrderedBlocks<std::array<double, 3>> _landmarksBlocks;  // cheshire (step 5n): one array, key order
+     /// rig sub-poses blocks wrapper
+     /// block: ceres angleAxis(3) + translation(3)
+     std::map<IndexT, std::map<IndexT, std::array<double, 6>>> _rigBlocks;
+@@ -292,6 +293,24 @@ class BundleAdjustmentCeres : public BundleAdjustment, ceres::EvaluationCallback
+     /// hinted order for ceres to eliminate blocks when solving.
+     /// note: this ceres parameter is built internally and must be reset on each call to the solver.
+     ceres::ParameterBlockOrdering _linearSolverOrdering;
++
++    // cheshire (step 5n): one ordering group per parameter block, numbered by key, so the order
++    // Ceres eliminates in and lays the reduced camera system out in is the key order and not the
++    // address order of std::set<double*>. Poses from 1, rig sub-poses from 1e6, intrinsics from
++    // 2e6, distortions from 3e6, the shared fake distortion block at 4e6.
++    std::map<IndexT, int> _cheshirePoseGroup;
++    std::map<IndexT, int> _cheshireIntrinsicGroup;
++    std::map<std::pair<IndexT, IndexT>, int> _cheshireRigGroup;
++    int cheshirePoseGroup(IndexT poseId) const { return _cheshirePoseGroup.at(poseId); }
++    int cheshireIntrinsicGroup(IndexT intrinsicId) const { return _cheshireIntrinsicGroup.at(intrinsicId); }
++    int cheshireDistortionGroup(IndexT intrinsicId, bool fake) const { return fake ? 4000000 : 1000000 + _cheshireIntrinsicGroup.at(intrinsicId); }
++    int cheshireRigGroup(IndexT rigId, IndexT subPoseId)
++    {
++        int& g = _cheshireRigGroup[std::make_pair(rigId, subPoseId)];
++        if (g == 0)
++            g = 1000000 + static_cast<int>(_cheshireRigGroup.size());
++        return g;
++    }
+ };
+ 
+ }  // namespace sfm
+diff --git a/src/aliceVision/sfm/pipeline/ReconstructionEngine.hpp b/src/aliceVision/sfm/pipeline/ReconstructionEngine.hpp
+index 77a9de7..91f4749 100644
+--- a/src/aliceVision/sfm/pipeline/ReconstructionEngine.hpp
++++ b/src/aliceVision/sfm/pipeline/ReconstructionEngine.hpp
+@@ -12,6 +12,7 @@
+ 
+ #include <string>
+ #include <random>
++#include <aliceVision/sfm/deterministic.hpp>  // cheshire: step 5n
+ 
+ namespace aliceVision {
+ namespace sfm {
+@@ -63,7 +64,12 @@ class ReconstructionEngine
+ 
+     void retrieveMarkersId() { aliceVision::sfm::retrieveMarkersId(_sfmData); }
+ 
+-    void initRandomSeed(int seed) { _randomNumberGenerator.seed(seed == -1 ? std::random_device()() : seed); }
++    void initRandomSeed(int seed)
++    {
++        // cheshire (step 5n): the effective seed is kept, every task derives its generator from it
++        _cheshireSeed = (seed == -1) ? std::random_device()() : static_cast<unsigned>(seed);
++        _randomNumberGenerator.seed(_cheshireSeed);
++    }
+ 
+   protected:
+     /// Output folder where outputs will be stored
+@@ -72,6 +78,8 @@ class ReconstructionEngine
+     sfmData::SfMData _sfmData;
+     // Random engine
+     std::mt19937 _randomNumberGenerator;
++    // cheshire (step 5n): the seed the tasks derive their generators from
++    unsigned _cheshireSeed = std::mt19937::default_seed;
+ };
+ 
+ }  // namespace sfm
 diff --git a/src/aliceVision/sfm/pipeline/expanding/DistanceWeighting.cpp b/src/aliceVision/sfm/pipeline/expanding/DistanceWeighting.cpp
 index 1f23958..5491985 100644
 --- a/src/aliceVision/sfm/pipeline/expanding/DistanceWeighting.cpp
@@ -4762,7 +4953,7 @@ index 1f23958..5491985 100644
  
          if (N == 0)
 diff --git a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
-index 097f8c9..27fa6f0 100644
+index 097f8c9..2bc3bac 100644
 --- a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 +++ b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 @@ -5,6 +5,9 @@
@@ -4823,6 +5014,42 @@ index 097f8c9..27fa6f0 100644
          if (_params.rig.useRigConstraint && !_sfmData.getRigs().empty())
          {
              ALICEVISION_LOG_INFO("Rig(s) calibration start");
+@@ -1010,7 +1047,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
+ 
+     // Sort by the image score
+     std::sort(out_connectedViews.begin(), out_connectedViews.end(), [](const ViewConnectionScore& t1, const ViewConnectionScore& t2) {
+-        return std::get<2>(t1) > std::get<2>(t2);
++        // cheshire (step 5n): ties by view id, not by the order the threads finished in
++        return std::get<2>(t1) != std::get<2>(t2) ? std::get<2>(t1) > std::get<2>(t2) : std::get<0>(t1) < std::get<0>(t2);
+     });
+     return !out_connectedViews.empty();
+ }
+@@ -1545,9 +1583,12 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
+     // C. Do the resectioning: compute the camera pose.
+     ALICEVISION_LOG_INFO("[" << _sfmData.getValidViews().size() + 1 << "/" << _sfmData.getViews().size() << "] Robust Resection of view: " << viewId);
+ 
++    // cheshire (step 5n): this view's own generator, the same on any thread
++    std::mt19937 cheshireTaskGenerator = cheshire::taskGenerator(_cheshireSeed, 1, viewId, _resectionId);
++    std::mt19937& cheshireGenerator = cheshire::taskSeedEnabled() ? cheshireTaskGenerator : _randomNumberGenerator;
+     const bool bResection = sfm::SfMLocalizer::localize(Pair(view_I->getImage().getWidth(), view_I->getImage().getHeight()),
+                                                         intrinsics.get(),
+-                                                        _randomNumberGenerator,
++                                                        cheshireGenerator,
+                                                         resectionData,
+                                                         resectionData.pose,
+                                                         _params.localizerEstimator);
+@@ -1842,7 +1883,10 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+             Vec4 X_homogeneous = Vec4::Zero();
+             std::vector<std::size_t> inliersIndex;
+ 
+-            multiview::TriangulateNViewLORANSAC(features, Ps, _randomNumberGenerator, X_homogeneous, &inliersIndex, 8.0);
++            // cheshire (step 5n): this track's own generator, the same on any thread
++            std::mt19937 cheshireTaskGenerator = cheshire::taskGenerator(_cheshireSeed, 2, trackId, _resectionId);
++            std::mt19937& cheshireGenerator = cheshire::taskSeedEnabled() ? cheshireTaskGenerator : _randomNumberGenerator;
++            multiview::TriangulateNViewLORANSAC(features, Ps, cheshireGenerator, X_homogeneous, &inliersIndex, 8.0);
+ 
+             homogeneousToEuclidean(X_homogeneous, X_euclidean);
+ 
 diff --git a/src/cmake/config.hpp.in b/src/cmake/config.hpp.in
 index 27e3ec0..027ba01 100644
 --- a/src/cmake/config.hpp.in

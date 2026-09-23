@@ -1398,3 +1398,71 @@ seeded per task (the 0.3.4 determinism item), and the per-work numbers are what
 against 1.9x on the small sets is the intrinsics: at 884 views one intrinsic block is shared by
 every camera and locked most of the time, so the active parameter count is 9 and upstream needs
 three passes, not five.
+
+## 0.3.4: incremental SfM, reproducible (2026-09-23)
+
+The roadmap item said: seed SfM per task instead of per process, start with a one-thread rerun.
+The one-thread rerun was the surprise. Two runs of `aliceVision_incrementalSfM` on the 6-view set
+with `--maxCoresAvailable 1` (one OpenMP thread, one Ceres thread, the default seed 5489) ended
+with the same 9290 landmarks and the same RMSE to six digits, and poses that differed in the last
+bits (`0.075924026963859248` against `...373`), so threads were not the whole story. The rest is
+Ceres: `ParameterBlockOrdering` is `std::map<int, std::set<double*>>`, so within an elimination
+group the parameter blocks are ordered by *address*; upstream keeps them in `std::map` nodes, and
+the Windows heap hands out node addresses in an order that changes from run to run. A different
+elimination order changes the rounding of the reduced camera system, and the trajectory drifts
+from there. Step 5n (`hip/port/sfm_ba/deterministic.hpp`) does three things, always on:
+
+* **A generator per task.** Resection and LO-RANSAC triangulation drew from the engine's one
+  `std::mt19937` inside OpenMP loops (a data race as well as a scheduling dependence). Each view's
+  resection and each track's triangulation now derive their own generator from (seed, task kind,
+  task id, resection pass), so a task draws the same samples on any thread at any time
+  (`CHESHIRE_SFM_TASK_SEED=0` restores the shared generator).
+* **Key order, not address order, in Ceres.** Landmark blocks live in one contiguous array in key
+  order (`OrderedBlocks`), and every pose, rig sub-pose, intrinsic and distortion block gets its own
+  ordering group numbered by key (poses from 1, rig sub-poses from 1e6, intrinsics from 2e6,
+  distortions from 3e6); the Schur solvers only need the first group to be the points, so the
+  groups above it are pure order.
+* **A total order** in the next-best-views ranking, where `std::sort` on the score alone broke
+  ties by the order threads finished in.
+
+What that leaves is Ceres' own multi-threading: with `num_threads > 1` the Schur eliminator adds
+each chunk's contribution to the reduced matrix in arrival order. `CHESHIRE_SFM_DETERMINISTIC=1`
+therefore runs bundle adjustment on one Ceres thread (`CHESHIRE_BA_THREADS=n` sets it
+explicitly) while SfM's own OpenMP loops keep every core, because the three points above make them
+order-independent.
+
+**The ladder, 6 views, `--json` output (the Alembic file carries the date it was written, the JSON
+does not), SHA-256 of `sfm.sfm` and `cameras.sfm`:**
+
+| runs | sfm.sfm | cameras.sfm | landmarks |
+|---|---|---|---|
+| all single-threaded, twice | `c468440e1cf81fc3`, `c468440e1cf81fc3` | `2dc4f6b3b9ed671d`, same | 9294, 9294 |
+| `CHESHIRE_SFM_DETERMINISTIC=1`, 12 OpenMP threads, twice | `c468440e1cf81fc3`, `c468440e1cf81fc3` | `2dc4f6b3b9ed671d`, same | 9294, 9294 |
+| default (12 threads everywhere), twice | `760d02d78b7a64e5`, `0ea1f5a1f1af676a` | differ | 9294, 9294 |
+| shared generator (`CHESHIRE_SFM_TASK_SEED=0`), Ceres 1 thread, 12 OpenMP threads, twice | `0cf9f2c162b6ab89`, `6404929cef7fb28e` | differ | 9298, 9292 |
+
+Byte-identical across the two single-threaded runs (the address-order fix), byte-identical across
+the two deterministic multithreaded runs, and identical *between* the two rows - the parallel loops
+now produce exactly the single-thread result. The default differs only by Ceres' threads, and the
+shared generator is the row that changes the landmark count, so it was the larger of the two.
+
+**41 views:**
+
+| runs | sfm.sfm | cameras.sfm | landmarks / RMSE | SfM (the node's own "took") | BA total |
+|---|---|---|---|---|---|
+| `CHESHIRE_SFM_DETERMINISTIC=1`, 12 OpenMP threads, twice | `1321c85863ce62fe`, `1321c85863ce62fe` | `b45f6f46859ae678`, same | 80,808 / 1.23415 | 115.3 s, 111.9 s | 73.6 s, 71.2 s |
+| all single-threaded (`--maxCoresAvailable 1`) | `1321c85863ce62fe` | `b45f6f46859ae678` | 80,808 / 1.23415 | 163.0 s | 70.2 s |
+| default (12 threads everywhere) | `a55815d5fc24375f` | `d0952dddaef546ad` | 80,808 / 1.23415 | 64.3 s | 23.2 s |
+
+Identical again, and again identical to the single-threaded result. The default run reached the
+same landmark count and RMSE to six digits - Ceres' thread order moves the last bits, nothing a
+user would see - and it is the reference for the cost: the deterministic mode is bundle adjustment
+on one Ceres thread, 72 s against 23 s here, so the node takes 1.8x as long (112-115 s against
+64 s); fully single-threaded it is 163 s. The JSON export the comparison needs costs 17.5 s at
+this size against 0.2 s for Alembic (`cameras.sfm`, always written and small, plus the landmark
+count is the cheap first check). The per-task generators and the key-ordered blocks are on in
+every mode; their cost against the shared generator is within run-to-run noise (see the A/B rows
+in `build/sfmbench/bench.jsonl`).
+
+`scripts/sfmbench.py run <set> --tag X --json CHESHIRE_SFM_DETERMINISTIC=1`, twice, and equal
+digests, is the gate for every later SfM change; it replaces the n=10 repeats docs/17 needed.

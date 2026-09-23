@@ -3,7 +3,9 @@
 
   prepare <set> [--describer dspsift]   CameraInit, FeatureExtraction, ImageMatching, FeatureMatching once,
                                         into build/sfmbench/<set>/cache (steps whose output exists are skipped)
-  run <set> --tag <name> [KEY=VALUE ...] [--repeat N]
+  run <set> --tag <name> [KEY=VALUE ...] [--repeat N] [--json] [-- <extra incrementalSfM options>]
+                                        --json writes sfm.sfm (JSON) instead of sfm.abc, whose Alembic
+                                        header carries the date, so two runs can be compared byte for byte
                                         incrementalSfM from that cache with Meshroom 2023.3's default node
                                         options, CHESHIRE_BA_PROFILE=1 and the given environment, into
                                         build/sfmbench/<set>/runs/<tag>[-N]; one JSON line per run is
@@ -145,7 +147,7 @@ def parse_log(log: Path) -> dict:
     return out
 
 
-def run(s: str, tag: str, envs: dict[str, str], repeat: int) -> None:
+def run(s: str, tag: str, envs: dict[str, str], repeat: int, extra: list[str], as_json: bool = False) -> None:
     d = cache_dirs(s)
     ci = d["ci"] / "cameraInit.sfm"
     if not ci.is_file() or not any(d["fm"].glob("*.matches.txt")):
@@ -173,21 +175,40 @@ def run(s: str, tag: str, envs: dict[str, str], repeat: int) -> None:
                "--lockAllIntrinsics", "False", "--minNbCamerasToRefinePrincipalPoint", "3", "--filterTrackForks", "False",
                "--computeStructureColor", "True", "--useAutoTransform", "True", "--initialPairA", "", "--initialPairB", "",
                "--interFileExtension", ".abc", "--logIntermediateSteps", "False", "--verboseLevel", "info",
-               "--output", str(out / "sfm.abc"), "--outputViewsAndPoses", str(out / "cameras.sfm"), "--extraInfoFolder", str(out)]
-        print(f"[{name}] incrementalSfM on {s} with {env}")
+               "--output", str(out / ("sfm.sfm" if as_json else "sfm.abc")), "--outputViewsAndPoses", str(out / "cameras.sfm"),
+               "--extraInfoFolder", str(out)] + extra
+        print(f"[{name}] incrementalSfM on {s} with {env}" + (f" and {' '.join(extra)}" if extra else ""))
         dt = sh(cmd, out / "sfm.log", env)
-        rec = {"set": s, "tag": name, "env": envs, "wall_s": round(dt, 1), "when": time.strftime("%Y-%m-%d %H:%M:%S")}
+        rec = {"set": s, "tag": name, "env": envs, "extra": extra, "wall_s": round(dt, 1), "when": time.strftime("%Y-%m-%d %H:%M:%S")}
         rec.update(parse_log(out / "sfm.log"))
+        rec.update(digests(out))
         with open(BENCH / "bench.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
         print("  " + row(rec))
+
+
+def digests(out: Path) -> dict:
+    """SHA-256 of the outputs, so two runs can be compared for byte identity."""
+    import hashlib
+    d = {}
+    for name in ("sfm.abc", "sfm.sfm", "cameras.sfm"):
+        f = out / name
+        if f.is_file():
+            h = hashlib.sha256()
+            with open(f, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            d[name.replace(".", "_") + "_sha256"] = h.hexdigest()[:16]
+    return d
 
 
 def row(r: dict) -> str:
     return (f"{r['set']:>5} {r['tag']:<22} wall {r['wall_s']:>7.1f} s | BA {r.get('ba_total_s', 0):>7.1f} s = jac {r.get('ba_jacobians_s', 0):>6.1f}"
             f" + lin {r.get('ba_linear_s', 0):>6.1f} + res {r.get('ba_residuals_s', 0):>5.1f} ({r.get('ba_solves', 0)} solves)"
             f" | {r.get('poses', '?')} poses, {r.get('landmarks', '?')} landmarks, RMSE {r.get('rmse', '?')}"
-            + (f" | {r['ba_check_last'].replace('cheshire: ', '')}" if r.get("ba_check_last") else ""))
+            + (f" | {r['ba_check_last'].replace('cheshire: ', '')}" if r.get("ba_check_last") else "")
+            + (f" | abc {r['sfm_abc_sha256']} cams {r.get('cameras_sfm_sha256', '?')}" if r.get("sfm_abc_sha256") else "")
+            + (f" | sfm {r['sfm_sfm_sha256']} cams {r.get('cameras_sfm_sha256', '?')}" if r.get("sfm_sfm_sha256") else ""))
 
 
 def main(argv: list[str]) -> None:
@@ -206,8 +227,10 @@ def main(argv: list[str]) -> None:
         return
     tag = argv[argv.index("--tag") + 1] if "--tag" in argv else sys.exit("--tag <name> required")
     repeat = int(argv[argv.index("--repeat") + 1]) if "--repeat" in argv else 1
-    envs = {a.split("=", 1)[0]: a.split("=", 1)[1] for a in argv[2:] if "=" in a and not a.startswith("--")}
-    run(s, tag, envs, repeat)
+    extra = argv[argv.index("--") + 1:] if "--" in argv else []
+    own = argv[2:argv.index("--")] if "--" in argv else argv[2:]
+    envs = {a.split("=", 1)[0]: a.split("=", 1)[1] for a in own if "=" in a and not a.startswith("--")}
+    run(s, tag, envs, repeat, extra, as_json="--json" in own)
 
 
 if __name__ == "__main__":

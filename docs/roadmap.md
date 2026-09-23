@@ -39,6 +39,13 @@ L items can slide.
   three replays of the False Door SfM cache did 0.57 to 1.54 billion residual-block-iterations of
   bundle adjustment and took 1302 s to 2368 s, so no BA change can be judged by wall clock at that
   size until this lands; per-work costs from `CHESHIRE_BA_PROFILE` are the workaround.
+  **Done 2026-09-23 (step 5n, `hip/port/sfm_ba/deterministic.hpp`; docs/04 "0.3.4: incremental
+  SfM, reproducible").** The one-thread rerun still differed: Ceres orders parameter blocks within
+  a group by address. Now: a generator per (view or track, pass), landmark blocks in one array and
+  an ordering group per block by key, a total order in the next-best-views sort - always on - and
+  `CHESHIRE_SFM_DETERMINISTIC=1` for one Ceres thread, the only source left. Two deterministic runs
+  are byte-identical to each other and to the single-threaded result on 6 and 41 views. The gate
+  is `scripts/sfmbench.py run ... --json CHESHIRE_SFM_DETERMINISTIC=1` twice with equal digests.
 - **GPU SIFT: one descriptor file differs at 884 views** (M). Across two False Door runs, 1,767 of
   1,768 feature files matched (`docs/04-validation.md:953-955`). Rerun view 216823232 on one package
   to separate run-to-run noise from a build difference. The float atomics in the orientation
