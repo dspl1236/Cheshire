@@ -1,0 +1,25 @@
+// This file is part of the Cheshire project (MPL-2.0), a patch set over AliceVision.
+// Copied into src/aliceVision/image/ by scripts/apply_hip_patch.py (step 5v).
+#pragma once
+
+#include <functional>
+#include <string>
+
+namespace aliceVision {
+namespace image {
+
+/**
+ * @brief cheshire: read an EXR straight through OpenEXR into a float RGB or RGBA buffer.
+ *
+ * Applies to a scanline or tiled single-part .exr with channels R, G, B and optionally A, half or
+ * float, sampling 1, data window equal to the display window at the origin; when
+ * requireLinearMetadata is set the file's "AliceVision:ColorSpace" attribute must be absent or
+ * "linear" (what the OpenImageIO path would otherwise convert from). Anything else returns false
+ * and the caller takes the OpenImageIO path. allocate(width, height) must size the destination and
+ * return its first float; pixels are written row-major, nchannels floats each, alpha last.
+ * The values equal OpenImageIO's (half to float is exact). CHESHIRE_EXR_DIRECT=0 disables it.
+ */
+bool cheshireReadExr(const std::string& path, int nchannels, bool requireLinearMetadata, const std::function<float*(int, int)>& allocate);
+
+}  // namespace image
+}  // namespace aliceVision

@@ -1,0 +1,45 @@
+// cheshire: the cameras in a nearest-neighbour tour over their centres. The camera index order
+// is the SfM view-id order, which is hash-like, so a 12-view chunk of the 884-view set held 12
+// unrelated cameras and its batches needed 114 distinct images - each decoded from a 73 MB EXR -
+// with nothing shared between consecutive R cameras or consecutive batches. In tour order a
+// chunk's views share their T cameras, so each batch of the estimator finds most of its images
+// already decoded and on the device. Outputs are per view id and independent of the grouping;
+// the maps are checked bit-identical (docs/04). CHESHIRE_DEPTHMAP_ORDER=0 restores the index order.
+std::vector<int> cheshireCameraOrder(const mvsUtils::MultiViewParams& mp)
+{
+    std::vector<int> order(mp.ncams);
+    std::iota(order.begin(), order.end(), 0);
+    const char* env = std::getenv("CHESHIRE_DEPTHMAP_ORDER");
+    if ((env != nullptr && std::string(env) == "0") || mp.ncams < 3)
+        return order;
+    std::vector<char> visited(mp.ncams, 0);
+    order.clear();
+    int current = 0;
+    visited[0] = 1;
+    order.push_back(0);
+    while (static_cast<int>(order.size()) < mp.ncams)
+    {
+        int best = -1;
+        double bestD = 0.0;
+        for (int c = 0; c < mp.ncams; ++c)
+        {
+            if (visited[c])
+                continue;
+            const double dx = mp.CArr[c].x - mp.CArr[current].x;
+            const double dy = mp.CArr[c].y - mp.CArr[current].y;
+            const double dz = mp.CArr[c].z - mp.CArr[current].z;
+            const double d = dx * dx + dy * dy + dz * dz;
+            if (best < 0 || d < bestD)  // ties: the lowest index, so the tour is the same everywhere
+            {
+                best = c;
+                bestD = d;
+            }
+        }
+        visited[best] = 1;
+        order.push_back(best);
+        current = best;
+    }
+    ALICEVISION_LOG_INFO("cheshire: depth map cameras in a nearest-neighbour tour order (CHESHIRE_DEPTHMAP_ORDER=0 for the index order)");
+    return order;
+}
+

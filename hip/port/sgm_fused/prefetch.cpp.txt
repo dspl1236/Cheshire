@@ -1,21 +1,63 @@
-        // cheshire: prefetch this batch's images in parallel. Camera switches were dominated by
-        // sequential EXR reads (up to 3 s per R camera on 12 MP inputs); the image cache is
-        // thread-safe per camera and, with the slot lock, for concurrent different cameras.
+        // cheshire: load this batch's images once each. Upstream decoded every camera of the batch
+        // into the host image cache - 16 slots at 6000x3376 (5000 MB / 309 MB), against ~30 cameras
+        // per batch of 3 R - then re-decoded the evicted ones while uploading, and did all of it
+        // for cameras the device cache already held from the previous batch. On an i3 that was
+        // 64 s of a 78 s batch with the GPU idle (docs/04). Now the cameras already on the device
+        // are touched first, so the LRU keeps them; the rest are decoded in parallel in groups no
+        // larger than the host cache and uploaded group by group. Each image is decoded once per
+        // batch and the device receives only what it lacks. The results do not depend on any of
+        // this (caches only), and the maps are checked bit-identical.
         {
-            std::vector<int> batchCams;
-            for (int i = firstTileIndex; i < lastTileIndex; ++i)
+            std::vector<int> batchCams;  // device-insertion order: R, then its SGM and Refine T cameras, per tile
             {
-                const Tile& tile = tiles.at(i);
-                batchCams.push_back(tile.rc);
-                for (const int tc : tile.sgmTCams) batchCams.push_back(tc);
-                if (_depthMapParams.useRefine)
-                    for (const int tc : tile.refineTCams) batchCams.push_back(tc);
+                std::vector<char> seen(_mp.ncams, 0);
+                auto add = [&](int cam) {
+                    if (!seen[cam])
+                    {
+                        seen[cam] = 1;
+                        batchCams.push_back(cam);
+                    }
+                };
+                for (int i = firstTileIndex; i < lastTileIndex; ++i)
+                {
+                    const Tile& tile = tiles.at(i);
+                    add(tile.rc);
+                    for (const int tc : tile.sgmTCams)
+                        add(tc);
+                    if (_depthMapParams.useRefine)
+                        for (const int tc : tile.refineTCams)
+                            add(tc);
+                }
             }
-            std::sort(batchCams.begin(), batchCams.end());
-            batchCams.erase(std::unique(batchCams.begin(), batchCams.end()), batchCams.end());
-            const int nbPrefetch = static_cast<int>(batchCams.size());
+            std::vector<int> newCams;
+            int nbResident = 0;
+            for (const int cam : batchCams)
+            {
+                if (deviceCache.hasMipmapImage(cam))
+                {
+                    deviceCache.addMipmapImage(cam, minMipmapDownscale, maxMipmapDownscale, ic, _mp);  // a touch: keeps it in the LRU
+                    ++nbResident;
+                }
+                else
+                    newCams.push_back(cam);
+            }
+            const int hostSlots = std::max(1, ic.getCacheSize());
+            const auto tLoad0 = std::chrono::steady_clock::now();
+            double decodeSeconds = 0.0;
+            for (std::size_t g = 0; g < newCams.size(); g += static_cast<std::size_t>(hostSlots))
+            {
+                const int nbGroup = static_cast<int>(std::min<std::size_t>(static_cast<std::size_t>(hostSlots), newCams.size() - g));
+                const auto tDecode0 = std::chrono::steady_clock::now();
 #pragma omp parallel for schedule(dynamic)
-            for (int k = 0; k < nbPrefetch; ++k)
-                ic.refreshImage_sync(batchCams[k]);
+                for (int k = 0; k < nbGroup; ++k)
+                    ic.refreshImage_sync(newCams[g + k]);
+                decodeSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - tDecode0).count();
+                for (int k = 0; k < nbGroup; ++k)
+                    deviceCache.addMipmapImage(newCams[g + k], minMipmapDownscale, maxMipmapDownscale, ic, _mp);
+            }
+            ALICEVISION_LOG_INFO("cheshire: depth map batch " << (b + 1) << "/" << nbBatches << ": " << batchCams.size() << " cameras, " << newCams.size()
+                                                              << " decoded and uploaded (" << nbResident << " already on the device), decode " << decodeSeconds
+                                                              << " s, load " << std::chrono::duration<double>(std::chrono::steady_clock::now() - tLoad0).count()
+                                                              << " s");
         }
 

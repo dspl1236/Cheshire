@@ -1,0 +1,36 @@
+            const int batchCamIndex = tile.rc % nbRcPerBatch;
+=====
+            // cheshire: the slot by position in the batch. Upstream used tile.rc % nbRcPerBatch, which
+            // needs the batch's cameras to be consecutive indices; in tour order (5u) they are not,
+            // and two cameras of a batch could share a slot.
+            const int batchCamIndex = (i / nbTilesPerCamera) % nbRcPerBatch;
+=====
+        // find first and last tile R camera
+        const int firstRc = tiles.at(firstTileIndex).rc;
+        int lastRc = tiles.at(lastTileIndex - 1).rc;
+
+        // check if last tile depth map is finished
+        if (lastTileIndex < tiles.size() && (tiles.at(lastTileIndex).rc == lastRc))
+            --lastRc;
+
+        // write depth/sim map result
+        for (int c = firstRc; c <= lastRc; ++c)
+        {
+            const int batchCamIndex = c % nbRcPerBatch;
+=====
+        // find first and last R camera of the batch, by position in the tile list
+        // cheshire: upstream walked the camera INDEX range firstRc..lastRc, which with the tour
+        // order (5u) spans hundreds of cameras that are not in the batch (a first run wrote 514
+        // maps for a 12-view chunk); the batch's cameras are the positions firstCamPos..lastCamPos
+        const int firstCamPos = firstTileIndex / nbTilesPerCamera;
+        int lastCamPos = (lastTileIndex - 1) / nbTilesPerCamera;
+
+        // check if last tile depth map is finished
+        if (lastTileIndex < tiles.size() && (tiles.at(lastTileIndex).rc == tiles.at(lastTileIndex - 1).rc))
+            --lastCamPos;
+
+        // write depth/sim map result
+        for (int camPos = firstCamPos; camPos <= lastCamPos; ++camPos)
+        {
+            const int c = tiles.at(camPos * nbTilesPerCamera).rc;
+            const int batchCamIndex = camPos % nbRcPerBatch;

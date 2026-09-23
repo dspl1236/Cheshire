@@ -1,0 +1,11 @@
+    // cheshire (step 5v): an EXR read as float RGB/RGBA in the colour space it is stored in goes
+    // straight through OpenEXR (image/cheshireExr.cpp); anything else is OpenImageIO's job below
+    if (format == oiio::TypeDesc::FLOAT && (nchannels == 3 || nchannels == 4) && sizeof(T) == static_cast<std::size_t>(nchannels) * sizeof(float) &&
+        imageReadOptions.inputColorSpace == EImageColorSpace::AUTO &&
+        (imageReadOptions.workingColorSpace == EImageColorSpace::LINEAR || imageReadOptions.workingColorSpace == EImageColorSpace::NO_CONVERSION) &&
+        cheshireReadExr(path, nchannels, imageReadOptions.workingColorSpace == EImageColorSpace::LINEAR, [&image](int width, int height) {
+            image.resize(width, height, false);
+            return reinterpret_cast<float*>(image.data());
+        }))
+        return;
+

@@ -1,0 +1,189 @@
+// This file is part of the Cheshire project (MPL-2.0), a patch set over AliceVision.
+// Copied into src/aliceVision/image/ by scripts/apply_hip_patch.py (step 5v).
+//
+// EXR files straight through OpenEXR. OpenImageIO's ImageBuf::read of a 6000x3376 half RGBA
+// scanline EXR (ZIPS, 73 MB, what PrepareDenseScene writes) took 1.8-2.0 s on the RX 9070 box
+// whatever its thread count, while the same file through Imf::InputFile with the OpenEXR thread
+// pool takes 0.3 s - and the depth-map node decodes about ten such files per view, the texturing
+// node every one of them per atlas sheet. The values are identical (half to float is exact;
+// checked bit-identical on the depth maps and textures, docs/04).
+
+#include <aliceVision/image/cheshireExr.hpp>
+#include <aliceVision/system/Logger.hpp>
+#include <aliceVision/alicevision_omp.hpp>
+#if !ALICEVISION_IS_DEFINED(ALICEVISION_HAVE_OPENMP)
+inline int omp_in_parallel() { return 0; }
+#endif
+
+#include <OpenEXR/ImfInputFile.h>
+#include <OpenEXR/ImfChannelList.h>
+#include <OpenEXR/ImfFrameBuffer.h>
+#include <OpenEXR/ImfHeader.h>
+#include <OpenEXR/ImfStringAttribute.h>
+#include <OpenEXR/ImfThreading.h>
+#include <Imath/ImathBox.h>
+
+#include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <cstdlib>
+#include <exception>
+#include <mutex>
+#include <thread>
+#if defined(_WIN32)
+    #define WIN32_LEAN_AND_MEAN
+    #define NOMINMAX
+    #include <windows.h>
+#else
+    #include <ctime>
+#endif
+
+namespace aliceVision {
+namespace image {
+
+namespace {
+
+bool cheshireExrDirectEnabled()
+{
+    static const bool on = [] {
+        const char* v = std::getenv("CHESHIRE_EXR_DIRECT");
+        return v == nullptr || std::string(v) != "0";
+    }();
+    return on;
+}
+
+bool cheshireExrProfile()
+{
+    static const bool on = [] {
+        const char* v = std::getenv("CHESHIRE_EXR_PROFILE");
+        return v != nullptr && std::string(v) == "1";
+    }();
+    return on;
+}
+
+// CPU time of the calling thread, seconds (for the profile line)
+double threadCpuSeconds()
+{
+#if defined(_WIN32)
+    FILETIME c, e, k, u;
+    if (!GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u))
+        return 0.0;
+    auto toSec = [](const FILETIME& f) { return double((static_cast<unsigned long long>(f.dwHighDateTime) << 32) | f.dwLowDateTime) * 1e-7; };
+    return toSec(k) + toSec(u);
+#else
+    timespec ts;
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0)
+        return 0.0;
+    return double(ts.tv_sec) + double(ts.tv_nsec) * 1e-9;
+#endif
+}
+
+bool hasExrExtension(const std::string& path)
+{
+    const std::size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos)
+        return false;
+    std::string ext = path.substr(dot);
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext == ".exr";
+}
+
+}  // namespace
+
+bool cheshireReadExr(const std::string& path, int nchannels, bool requireLinearMetadata, const std::function<float*(int, int)>& allocate)
+{
+    if (!cheshireExrDirectEnabled() || (nchannels != 3 && nchannels != 4) || !hasExrExtension(path))
+        return false;
+    try
+    {
+        static std::once_flag once;
+        std::call_once(once, [] {
+            int threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+            if (const char* v = std::getenv("CHESHIRE_EXR_THREADS"))
+                threads = std::max(0, std::atoi(v));
+            Imf::setGlobalThreadCount(threads);
+            ALICEVISION_LOG_INFO("cheshire: EXR files read through OpenEXR directly (RGB/RGBA half or float, linear; " << threads
+                                 << " pool threads for a lone read, inline inside a parallel loop; CHESHIRE_EXR_DIRECT=0 for OpenImageIO)");
+        });
+        // A lone read (texturing, one image at a time) spreads its scanlines over the pool. Inside a
+        // parallel loop (the depth-map prefetch, a dozen files at once) every file decodes in its own
+        // calling thread instead: with all of them queueing 3376 single-scanline tasks into one pool,
+        // twenty files took as long as twenty sequential reads.
+        const int fileThreads = omp_in_parallel() ? 0 : Imf::globalThreadCount();
+        const bool profile = cheshireExrProfile();
+        const auto tOpen0 = std::chrono::steady_clock::now();
+        const double cpu0 = profile ? threadCpuSeconds() : 0.0;
+        Imf::InputFile file(path.c_str(), fileThreads);
+        const auto tOpen1 = std::chrono::steady_clock::now();
+        const Imf::Header& header = file.header();
+        if (requireLinearMetadata)
+        {
+            const Imf::StringAttribute* cs = header.findTypedAttribute<Imf::StringAttribute>("AliceVision:ColorSpace");
+            if (cs != nullptr && cs->value() != "linear")
+                return false;
+        }
+        const Imath::Box2i dw = header.dataWindow();
+        if (dw != header.displayWindow() || dw.min.x != 0 || dw.min.y != 0)
+            return false;
+        const int width = dw.max.x + 1;
+        const int height = dw.max.y + 1;
+        const Imf::ChannelList& channels = header.channels();
+        static const char* const names[4] = {"R", "G", "B", "A"};
+        int present = 0;
+        for (int c = 0; c < 4; ++c)
+        {
+            const Imf::Channel* channel = channels.findChannel(names[c]);
+            if (channel == nullptr)
+                continue;
+            if ((channel->type != Imf::HALF && channel->type != Imf::FLOAT) || channel->xSampling != 1 || channel->ySampling != 1)
+                return false;
+            present |= 1 << c;
+        }
+        int nbFileChannels = 0;
+        for (Imf::ChannelList::ConstIterator it = channels.begin(); it != channels.end(); ++it)
+            ++nbFileChannels;
+        if ((present & 7) != 7 || nbFileChannels != ((present & 8) ? 4 : 3) || (nchannels == 4 && !(present & 8)))
+            return false;  // only R, G, B and optionally A; an alpha requested must exist
+
+        float* base = allocate(width, height);
+        const std::size_t xStride = sizeof(float) * static_cast<std::size_t>(nchannels);
+        const std::size_t yStride = xStride * static_cast<std::size_t>(width);
+        Imf::FrameBuffer frameBuffer;
+        for (int c = 0; c < nchannels; ++c)
+            frameBuffer.insert(names[c], Imf::Slice(Imf::FLOAT, reinterpret_cast<char*>(base + c), xStride, yStride));
+        file.setFrameBuffer(frameBuffer);
+        if (header.hasTileDescription())
+        {
+            file.readPixels(dw.min.y, dw.max.y);
+        }
+        else
+        {
+            // In blocks of scanlines. readPixels allocates its packed and unpacked chunk buffers
+            // for the whole requested range up front - 235 MB for one of these files, freed after -
+            // and a dozen threads page-faulting fresh temporaries at once serialise in the kernel:
+            // one batch of 16 files took 100 s of CPU for 11 s of wall, no less wall than a single
+            // thread. Small ranges reuse the same freed blocks and the threads decode in parallel.
+            constexpr int kLinesPerCall = 64;
+            for (int y = dw.min.y; y <= dw.max.y; y += kLinesPerCall)
+                file.readPixels(y, std::min(y + kLinesPerCall - 1, dw.max.y));
+        }
+        if (profile)
+        {
+            const auto tEnd = std::chrono::steady_clock::now();
+            ALICEVISION_LOG_INFO("cheshire: EXR profile: " << path.substr(path.find_last_of("/\\\\") + 1) << " open "
+                                                             << std::chrono::duration<double>(tOpen1 - tOpen0).count() << " s, read "
+                                                             << std::chrono::duration<double>(tEnd - tOpen1).count() << " s, thread cpu "
+                                                             << (threadCpuSeconds() - cpu0) << " s, file threads " << fileThreads << ", in parallel "
+                                                             << (omp_in_parallel() ? 1 : 0));
+        }
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        ALICEVISION_LOG_DEBUG("[IO] cheshire: direct EXR read of '" << path << "' not taken (" << e.what() << "), OpenImageIO path");
+        return false;
+    }
+}
+
+}  // namespace image
+}  // namespace aliceVision

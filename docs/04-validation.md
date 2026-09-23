@@ -1670,3 +1670,98 @@ on a quiet box, is where the time outside Ceres goes at 884 views: nowhere in pa
 largest silences are the solves themselves; the per-solve walk over every landmark inside the
 bundle adjustment's build - 177 s over the run, the roadmap item this step was mistaken for -
 remains the open one.
+
+## 0.3.4: the depth-map node was loading images, not computing (2026-09-23)
+
+The 884-view job on house-pc (i3-4330, RX 6750 XT) spent 6.5 h in DepthMap at 28 s per view, and a
+minute of the card's busy counter read 0 for 55 of its 60 seconds. Splitting a 12-view chunk by its
+log timestamps and the output files' write times:
+
+| per 12-view chunk | house-pc | RX 9070 box |
+|---|---|---|
+| chunk setup | 19 s | 27 s |
+| image loading, first batch | 48 s | 30 s |
+| image loading, each later batch of 3 views | 64 s | 34 s |
+| GPU tiles (SGM + refine), per view | 4.3 s | 4.6 s |
+| writing the depth and sim maps, per batch | 2 s | 1 s |
+| whole chunk | 325 s | 185 s |
+
+The kernels take about 4.5 s per view on both cards. Everything else is the CPU getting the
+6000x3376 half-float EXRs that PrepareDenseScene wrote, 73 MB each, into the host image cache -
+and the disks are not the limit (both are SATA SSDs at 250-385 MB/s; a batch's 2.2 GB reads in
+under 10 s). It took four wrong explanations to find the right one; they are kept here because
+each was plausible from the outside, and the method that settled it was not inference but a
+per-file profile inside the node.
+
+**1. A chunk's cameras were unrelated.** The camera index order is the SfM view-id order, which
+is hash-like, so a 12-view chunk held 12 cameras from all over the scene: the debug run loaded
+117 images for 12 views, 114 of them distinct. Nothing was shared between consecutive R cameras
+or consecutive batches, and the device cache, sized for one batch, never had a hit. Step 5u orders
+the cameras as a nearest-neighbour tour over their centres (greedy, ties by index, so the tour is
+the same on every machine) and a chunk is a slice of the tour; the estimator's batch slots and
+its write loop now go by position in the tile list, since upstream assumed a batch's cameras are
+consecutive indices (the first tour run wrote 514 maps for a 12-view chunk through that
+assumption, and two cameras of a batch could share a slot). Outputs are per view id and do not
+depend on the grouping. `CHESHIRE_DEPTHMAP_ORDER=0` restores the index order.
+
+**2. Every camera of a batch was loaded, whether or not the device had it.** The prefetch loaded
+the R and all T cameras of the batch, including the ones the device cache still held from the
+previous batch. Step 5t touches the resident cameras first, so the device LRU keeps them, then
+loads only the missing ones in parallel, in groups no larger than the host cache (61 images at
+the working resolution: 5000 MB over 81 MB each), uploading group by group. One line per batch
+says what happened: `cheshire: depth map batch 2/3: 23 cameras, 10 decoded and uploaded (13
+already on the device)`. On the same chunk in tour order: 42 loads instead of 117. (An earlier
+draft of this section said the host cache held 16 images and thrashed; that used the full
+resolution, and it was wrong - the cache is sized after the downscale below.)
+
+**3. The reader.** OpenImageIO's `ImageBuf::read` of one of these files takes 1.8-2.0 s on the RX
+9070 box whatever its thread setting; the same file through `Imf::InputFile` with the OpenEXR
+thread pool takes 0.3 s, and the pixels are identical (half to float is exact; a full-image
+check: max difference 0). Step 5v reads an EXR straight through OpenEXR when it is what these
+nodes read - R, G, B and optionally A, half or float, full data window, requested as float RGB or
+RGBA in the colour space it is stored in - and leaves everything else to OpenImageIO. The reader
+is its own translation unit of the image library because `main_cameraInit.cpp` includes `io.cpp`
+directly and cannot see OpenEXR's headers; inside a parallel loop it decodes each file in its own
+thread, in blocks of 64 scanlines, and a lone read keeps the pool. `CHESHIRE_EXR_DIRECT=0`
+restores the OpenImageIO path; `CHESHIRE_EXR_PROFILE=1` prints one line per file with the open
+time, the read time and the thread's CPU time. That profile is what found the real cost:
+
+**4. The host downscale after every read.** With the node's `downscale 2`, `loadImage` resizes
+each image on the host from 6000x3376 to 3000x1688 through OpenImageIO's `resize` right after
+reading it, inside the prefetch's parallel loop. The reader took 0.7 s per file and ran twelve
+wide; the resize took the rest of the 10-12 s per batch, because each of the twelve threads
+handed OpenImageIO its own twelve workers and 144 threads thrashed - 100 s of CPU for 11 s of
+wall, no less wall than a single thread. Step 5w gives `resize` one thread when the caller is
+already inside a parallel region; the result does not depend on the thread count - and it
+changed nothing, which says the resize is expensive by itself, not through its threading: OpenImageIO
+evaluates a 25 x 25-tap footprint per output pixel for a 2x lanczos3 downscale (169 non-zero taps),
+about 7-9 s of CPU per 20-megapixel image. Twelve images at a time or twelve threads on one image,
+the CPU is the same. The next step is an exact port of that resize for the integer-downscale case,
+same weights and summation order, with the footprint's weights computed once instead of per pixel;
+until then the depth-map node's loading is bounded by it. (Three explanations tried before the
+profile - a serialised page-fault path, the shared OpenEXR pool,
+and the runtime environment of the node - were each refuted by a standalone reader that decoded
+the node's own 16 files in 0.83 s with the same libraries, and by a benchmark that stayed fast
+with the HIP runtime and pinned memory in the process.)
+
+**Measured on False Door chunk 0 (12 views) on the RX 9070 box:**
+
+| | loads | image loading | chunk wall |
+|---|---|---|---|
+| before (index order, old loader, OpenImageIO) | 117 | 25-34 s per batch | 214 s |
+| tour order + once-per-batch loader (OpenImageIO reader) | 42 | 16, 8, 10 s per batch | 142 s |
+| + direct OpenEXR reader | 42 | 15, 8, 10 s per batch | 142 s |
+| + resize single-threaded inside the loop | 42 | 16, 8, 9 s per batch (unchanged: the resize is the cost, not its threading) | 146 s |
+
+**Exactness.** The 12 maps of the index-order chunk are byte-identical to the reference cache
+with the new loader; the tour-order chunk's 12 views, compared by view id, are byte-identical to
+the reference (24 of 24 files) with the direct reader; the mini6 depth maps with the reader off
+and on are byte-identical (12 of 12); the mini6 texturing output with the reader off and on
+differs in 522 texels by at most 0.000977, which is the node's own run-to-run variation (two
+runs with the reader off differ in 556 texels by the same amount; the OBJ is identical).
+
+What is left in the node after this is the chunk setup (19-27 s, mostly reading the SfM data
+with its 1.35 million landmarks, once per 12-view chunk - a larger block size in the Meshroom node
+would amortise it), the first batch of each chunk, which is cold by construction, and the
+downscale itself, which could be a 2x2 average on the device instead of a filtered resize on the
+host if the values were allowed to change (they are not, for now).

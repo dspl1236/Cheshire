@@ -122,6 +122,13 @@ L items can slide.
   frontier moves: 23.6 M residual blocks added, 18.4 M removed, against 70.8 M active; Ceres
   scans every block per Solve), so persistence is now an engine policy: on while every landmark
   is active, off under the local strategy.
+- **DepthMap loading, done 2026-09-23** (docs/04 "the depth-map node was decoding"): the node
+  was 70-85 % CPU-side image loading around 4.5 s/view of kernels. Tour order for a chunk's
+  cameras (5u), load once per batch and only what the device lacks (5t), EXR straight through
+  OpenEXR (5v), and the host downscale after each read no longer twelve-times-twelve threads
+  wide (5w) - the last one was most of it. Left: the per-chunk SfM load (a larger Meshroom block
+  size), the downscale as a 2x2 average on the device (changes values, so a new reference), and
+  the same reader for the texturing node's sRGB reads (a conversion after a direct read).
 - **The per-solve walk over every landmark** (M). Both the rebuild and the sync visit all 1.35 M
   landmarks per solve at 884 views although the local strategy leaves most ignored (the rebuild's
   build is 2.2 us per active block there against 1.2 us at 41 views). An active-landmark list

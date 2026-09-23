@@ -57,6 +57,11 @@ TRACKED = [
     "src/aliceVision/mvsUtils/ImagesCache.hpp",
     "src/aliceVision/mvsUtils/ImagesCache.cpp",
     "src/aliceVision/depthMap/DepthMapEstimator.cpp",
+    "src/aliceVision/depthMap/cuda/host/DeviceCache.hpp",
+    "src/aliceVision/depthMap/cuda/host/DeviceCache.cpp",
+    "src/software/pipeline/main_depthMapEstimation.cpp",
+    "src/aliceVision/image/io.cpp",
+    "src/aliceVision/image/CMakeLists.txt",
     "src/aliceVision/matching/RegionsMatcher.cpp",
     "src/aliceVision/matching/CMakeLists.txt",
     "src/software/pipeline/main_featureMatching.cpp",
@@ -206,7 +211,9 @@ def main() -> None:
                         r'\1CHESHIRE_STAGE_SYNC(_stream);\n\1\2', t, flags=_re.M)
             fp.write_text(t, encoding="utf-8", newline="\n")
 
-    # 1h. parallel image prefetch per batch (image cache slot lock + omp prefetch loop)
+    # 1h. parallel image prefetch per batch (image cache slot lock + omp prefetch loop); the
+    #     prefetch block itself is hip/port/sgm_fused/prefetch.cpp.txt, since step 5t the
+    #     once-per-batch loader (needs the accessors 5t adds)
     ich = AV / "src/aliceVision/mvsUtils/ImagesCache.hpp"
     t = ich.read_text(encoding="utf-8")
     if "_slotMutex" not in t:
@@ -4074,6 +4081,158 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                                                            << std::chrono::duration<double>(std::chrono::steady_clock::now() - cheshirePostT0).count() << " s");
 """.replace("\n", NL), 1)
         eng.write_text(t, encoding="utf-8", newline="")
+
+    # 5t. DepthMap: each image decoded once per batch, and only if the device lacks it. The 12-view
+    #     chunks of the 884-view set spent 64 of every 78 s per batch decoding EXRs on house-pc
+    #     (GPU busy 10 % of the wall): the host image cache holds 16 full-resolution images, a
+    #     batch needs ~30, and the prefetch loaded them all - including the ones the device cache
+    #     already held from the previous batch - then the upload re-decoded the evicted ones.
+    #     hip/port/sgm_fused/prefetch.cpp.txt is the loader; this step adds the two accessors it
+    #     needs and upgrades a tree that carries the old block. Results are cache-independent
+    #     (maps bit-identical, docs/04).
+    ich = AV / "src/aliceVision/mvsUtils/ImagesCache.hpp"
+    t = ich.read_text(encoding="utf-8")
+    if "getCacheSize" not in t:
+        old = "    void setCacheSize(int nbPreload);" + NL
+        if t.count(old) != 1:
+            sys.exit("setCacheSize declaration not found once in ImagesCache.hpp")
+        t = t.replace(old, old + "    int getCacheSize() const { return _N_PRELOADED_IMAGES; }  // cheshire: the loader decodes in groups of this size" + NL, 1)
+        ich.write_text(t, encoding="utf-8", newline="")
+    dch = AV / "src/aliceVision/depthMap/cuda/host/DeviceCache.hpp"
+    t = dch.read_text(encoding="utf-8")
+    if "hasMipmapImage" not in t:
+        old = "    void addCameraParams(int camId, int downscale, const mvsUtils::MultiViewParams& mp);" + NL
+        if t.count(old) != 1:
+            sys.exit("addCameraParams declaration not found once in DeviceCache.hpp")
+        t = t.replace(old, "    /**" + NL
+                           + "     * @brief cheshire: does the current device's mipmap cache hold this camera? No LRU update." + NL
+                           + "     */" + NL
+                           + "    bool hasMipmapImage(int camId);" + NL + NL + old, 1)
+        dch.write_text(t, encoding="utf-8", newline="")
+    dcc = AV / "src/aliceVision/depthMap/cuda/host/DeviceCache.cpp"
+    t = dcc.read_text(encoding="utf-8")
+    if "hasMipmapImage" not in t:
+        old = "void DeviceCache::addCameraParams(int camId, int downscale, const mvsUtils::MultiViewParams& mp)" + NL
+        if t.count(old) != 1:
+            sys.exit("addCameraParams definition not found once in DeviceCache.cpp")
+        t = t.replace(old, "bool DeviceCache::hasMipmapImage(int camId)" + NL + "{" + NL
+                           + "    // cheshire: a lookup only; LRUCache::getIndex does not touch the recency list" + NL
+                           + "    return getCurrentDeviceCache().mipmapCache.getIndex(camId) >= 0;" + NL + "}" + NL + NL + old, 1)
+        dcc.write_text(t, encoding="utf-8", newline="")
+    dme = AV / "src/aliceVision/depthMap/DepthMapEstimator.cpp"
+    t = dme.read_text(encoding="utf-8")
+    if "cheshire: depth map batch" not in t:
+        i0 = t.find("        // cheshire: prefetch this batch's images in parallel.")
+        anchor = "        // load tile R and corresponding T cameras in device cache" + NL
+        i1 = t.find(anchor, i0)
+        if i0 < 0 or i1 < i0:
+            sys.exit("old prefetch block not found in DepthMapEstimator.cpp")
+        t = t[:i0] + (ROOT / "hip/port/sgm_fused/prefetch.cpp.txt").read_text(encoding="utf-8").replace("\n", NL) + t[i1:]
+    if "#include <chrono>" not in t:
+        old = "#include <algorithm>" + NL
+        if t.count(old) != 1:
+            sys.exit("algorithm include not found once in DepthMapEstimator.cpp")
+        t = t.replace(old, old + "#include <chrono>" + NL, 1)
+    dme.write_text(t, encoding="utf-8", newline="")
+
+    # 5u. DepthMap: the chunk's cameras in a nearest-neighbour tour over their centres. A 12-view
+    #     chunk in index (view-id hash) order was 12 unrelated cameras needing 114 distinct images;
+    #     in tour order consecutive R cameras share their T cameras, so the once-per-batch loader
+    #     (5t) has something to reuse. Outputs are per view id and unchanged (bit-identical maps).
+    #     CHESHIRE_DEPTHMAP_ORDER=0 restores the index order.
+    mde = AV / "src/software/pipeline/main_depthMapEstimation.cpp"
+    t = mde.read_text(encoding="utf-8")
+    if "cheshireCameraOrder" not in t:
+        func = (ROOT / "hip/port/sgm_fused/camera_order.cpp.txt").read_text(encoding="utf-8").replace("\n", NL)
+        inc = "#include <boost/program_options.hpp>" + NL
+        if t.count(inc) != 1:
+            sys.exit("program_options include not found once in main_depthMapEstimation.cpp")
+        t = t.replace(inc, inc + "#include <cstdlib>" + NL + "#include <numeric>" + NL + "#include <string>" + NL, 1)
+        anchor = "int aliceVision_main(int argc, char* argv[])" + NL
+        if t.count(anchor) != 1:
+            sys.exit("aliceVision_main not found once in main_depthMapEstimation.cpp")
+        t = t.replace(anchor, func + anchor, 1)
+        old = "    // camera list" + NL + "    std::vector<int> cams;" + NL
+        if t.count(old) != 1:
+            sys.exit("camera list block not found once in main_depthMapEstimation.cpp")
+        t = t.replace(old, "    const std::vector<int> cheshireOrder = cheshireCameraOrder(mp);  // cheshire: tour order" + NL + old, 1)
+        old = "        for (int rc = 0; rc < mp.ncams; ++rc)  // process all cameras" + NL + "            cams.push_back(rc);" + NL
+        if t.count(old) != 1:
+            sys.exit("all-cameras loop not found once in main_depthMapEstimation.cpp")
+        t = t.replace(old, "        for (int rc = 0; rc < mp.ncams; ++rc)  // process all cameras" + NL + "            cams.push_back(cheshireOrder[rc]);" + NL, 1)
+        old = "        for (int rc = rangeStart; rc < std::min(rangeStart + rangeSize, mp.ncams); ++rc)" + NL + "            cams.push_back(rc);" + NL
+        if t.count(old) != 1:
+            sys.exit("range loop not found once in main_depthMapEstimation.cpp")
+        t = t.replace(old, "        for (int rc = rangeStart; rc < std::min(rangeStart + rangeSize, mp.ncams); ++rc)" + NL + "            cams.push_back(cheshireOrder[rc]);" + NL, 1)
+        mde.write_text(t, encoding="utf-8", newline="")
+
+    # 5u (continued). The estimator assumed a batch's cameras are consecutive indices: the batch
+    #     slot was tile.rc % nbRcPerBatch and the write loop walked the index range firstRc..lastRc.
+    #     Both go by position in the tile list now (hip/port/sgm_fused/batch_by_position.py.txt
+    #     holds the two replacements).
+    t = dme.read_text(encoding="utf-8")
+    if "by position in the batch" not in t:
+        rep = (ROOT / "hip/port/sgm_fused/batch_by_position.py.txt").read_text(encoding="utf-8")
+        oldSlot, newSlot, oldWrite, newWrite = [x.replace("\n", NL) for x in rep.split("=====\n")]
+        if t.count(oldSlot) != 1 or t.count(oldWrite) != 1:
+            sys.exit("batch slot / write block not found once in DepthMapEstimator.cpp")
+        t = t.replace(oldSlot, newSlot, 1).replace(oldWrite, newWrite, 1)
+        dme.write_text(t, encoding="utf-8", newline="")
+
+    # 5v. EXR files read through OpenEXR directly. OpenImageIO's ImageBuf::read of the 73 MB half
+    #     RGBA EXRs PrepareDenseScene writes takes 1.8-2.0 s each on the RX 9070 box regardless of
+    #     threads; Imf::InputFile with the OpenEXR pool takes 0.3 s, identical values. The depth-map
+    #     node decodes ~10 per view, texturing every one per sheet. The reader is its own
+    #     translation unit of the image library (main_cameraInit.cpp includes io.cpp directly, so
+    #     OpenEXR headers cannot live there); io.cpp calls it for float RGB/RGBA reads in the stored
+    #     colour space and keeps OpenImageIO for everything else. CHESHIRE_EXR_DIRECT=0 disables it.
+    shutil.copy2(ROOT / "hip" / "port" / "sgm_fused" / "cheshireExr.hpp.txt", AV / "src/aliceVision/image/cheshireExr.hpp")
+    shutil.copy2(ROOT / "hip" / "port" / "sgm_fused" / "cheshireExr.cpp.txt", AV / "src/aliceVision/image/cheshireExr.cpp")
+    icm = AV / "src/aliceVision/image/CMakeLists.txt"
+    t = icm.read_text(encoding="utf-8")
+    if "cheshireExr" not in t:
+        for old, new in (("    io.hpp" + NL, "    io.hpp" + NL + "    cheshireExr.hpp" + NL), ("    io.cpp" + NL, "    io.cpp" + NL + "    cheshireExr.cpp" + NL)):
+            if t.count(old) != 1:
+                sys.exit("image/CMakeLists.txt source list anchor not found once")
+            t = t.replace(old, new, 1)
+        icm.write_text(t, encoding="utf-8", newline="")
+    iop = AV / "src/aliceVision/image/io.cpp"
+    t = iop.read_text(encoding="utf-8")
+    if "cheshireReadExr" not in t:
+        inc = "#include <aliceVision/image/io.hpp>" + NL
+        if t.count(inc) != 1:
+            sys.exit("io.hpp include not found once in image/io.cpp")
+        t = t.replace(inc, inc + "#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 5v" + NL, 1)
+        two = "        ALICEVISION_THROW_ERROR(\"Load of 2 channels is not supported. Image file: '\" + path + \"'.\")"
+        anchor = two + NL + NL + "    oiio::ImageSpec configSpec;" + NL
+        if t.count(anchor) != 1:
+            sys.exit("readImage configSpec anchor not found once in image/io.cpp")
+        call = (ROOT / "hip/port/sgm_fused/exr_call.cpp.txt").read_text(encoding="utf-8").replace("\n", NL)
+        t = t.replace(anchor, two + NL + NL + call + "    oiio::ImageSpec configSpec;" + NL, 1)
+        iop.write_text(t, encoding="utf-8", newline="")
+
+    # 5w. OpenImageIO's resize with one thread when called from inside a parallel region. The
+    #     depth-map node downscales every image on the host right after reading it (mp process
+    #     downscale), inside the prefetch loop: twelve resizes at once, each with OpenImageIO's
+    #     twelve workers, took 10 s per batch of 16 images against 0.7 s of decoding; the result
+    #     does not depend on the thread count (docs/04, 0.3.4 "the depth-map node was decoding").
+    iac = AV / "src/aliceVision/image/imageAlgo.cpp"
+    t = iac.read_text(encoding="utf-8")
+    if "step 5w" not in t:
+        old = "#include <OpenImageIO/imagebufalgo.h>" + NL
+        if t.count(old) != 1:
+            sys.exit("imagebufalgo include not found once in imageAlgo.cpp")
+        t = t.replace(old, old + "#include <aliceVision/alicevision_omp.hpp>  // cheshire: step 5w" + NL
+                      + "#if !ALICEVISION_IS_DEFINED(ALICEVISION_HAVE_OPENMP)" + NL + "inline int omp_in_parallel() { return 0; }" + NL + "#endif" + NL, 1)
+        old = "    oiio::ImageBufAlgo::resize(outBuf, inBuf, filter, filterSize, oiio::ROI::All());" + NL
+        if t.count(old) != 1:
+            sys.exit("resize call not found once in imageAlgo.cpp")
+        t = t.replace(old, "    // cheshire (step 5w): one thread per call when the caller is already parallel. The depth-map" + NL
+                      + "    // node downscales every image it reads, inside its prefetch loop: twelve of these at once," + NL
+                      + "    // each handing OpenImageIO twelve workers, took 10 s per batch of 16 images for 0.7 s of" + NL
+                      + "    // decoding. The result does not depend on the thread count." + NL
+                      + "    oiio::ImageBufAlgo::resize(outBuf, inBuf, filter, filterSize, oiio::ROI::All(), omp_in_parallel() ? 1 : 0);" + NL, 1)
+        iac.write_text(t, encoding="utf-8", newline="")
 
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
