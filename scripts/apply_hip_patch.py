@@ -62,6 +62,7 @@ TRACKED = [
     "src/software/pipeline/main_depthMapEstimation.cpp",
     "src/aliceVision/image/io.cpp",
     "src/aliceVision/image/CMakeLists.txt",
+    "meshroom/aliceVision/DepthMap.py",
     "src/aliceVision/matching/RegionsMatcher.cpp",
     "src/aliceVision/matching/CMakeLists.txt",
     "src/software/pipeline/main_featureMatching.cpp",
@@ -4290,6 +4291,36 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                 sys.exit("program_options include not found once in main_prepareDenseScene.cpp")
             t = t.replace(inc, inc + "#include <cstdlib>" + NL + "#include <string>" + NL, 1)
         pds.write_text(t, encoding="utf-8", newline="")
+
+    # 5z. Meshroom's DepthMap node in blocks of 48 views instead of 12 (the AliceVision-provided
+    #     node for Meshroom 2025 pairings; meshroom-overrides/DepthMap.py does the same for 2023.3).
+    #     Each chunk is a process that loads the SfM data, probes the device and starts with a cold
+    #     image cache - 19-27 s before its first tile at 884 views, 74 times. Same command line,
+    #     same UID, so caches stay valid.
+    dmn = AV / "meshroom/aliceVision/DepthMap.py"
+    t = dmn.read_text(encoding="utf-8")
+    if "cheshire" not in t:
+        old = "    parallelization = desc.Parallelization(blockSize=12)" + NL
+        if t.count(old) != 1:
+            sys.exit("DepthMap.py parallelization line not found once")
+        t = t.replace(old, "    parallelization = desc.Parallelization(blockSize=48)  # cheshire: 12 upstream; a chunk is a process with a cold cache" + NL, 1)
+        dmn.write_text(t, encoding="utf-8", newline="")
+
+    # 5z (continued). The Meshroom 2023.3 override (meshroom-overrides/DepthMap.py) ships in every
+    #     package under share/cheshire/meshroom-overrides/, from where the pairing scripts install it.
+    (AV / "meshroom-overrides").mkdir(exist_ok=True)
+    shutil.copy2(ROOT / "meshroom-overrides" / "DepthMap.py", AV / "meshroom-overrides" / "DepthMap.py")
+    top = AV / "CMakeLists.txt"
+    t = top.read_text(encoding="utf-8")
+    if "meshroom-overrides" not in t:
+        anchor = ("if (ALICEVISION_INSTALL_MESHROOM_PLUGIN)" + NL + "    install(" + NL + "        DIRECTORY meshroom" + NL
+                  + "        DESTINATION ${CMAKE_INSTALL_DATADIR}" + NL + "    )" + NL + "endif()" + NL)
+        if t.count(anchor) != 1:
+            sys.exit("meshroom install rule not found once in the top-level CMakeLists.txt")
+        rule = (NL + "# cheshire (step 5z): the Meshroom 2023.3 node override the pairing scripts install (docs/04)" + NL
+                + "install(" + NL + "    DIRECTORY meshroom-overrides" + NL + "    DESTINATION ${CMAKE_INSTALL_DATADIR}/cheshire" + NL + ")" + NL)
+        t = t.replace(anchor, anchor + rule, 1)
+        top.write_text(t, encoding="utf-8", newline="")
 
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu

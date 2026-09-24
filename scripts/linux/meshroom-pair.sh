@@ -41,6 +41,8 @@ if [ "${2:-}" = "--unpair" ]; then
   for name in aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_featureExtraction aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene aliceVision_incrementalSfM; do
     if [ -x "$BIN/$name.cuda" ]; then mv -f "$BIN/$name.cuda" "$BIN/$name"; echo "restored $name"; else echo "$name: not paired"; fi
   done
+  NODE="$MESHROOM/lib/meshroom/nodes/aliceVision/DepthMap.py"
+  if [ -f "$NODE" ] && grep -q "Cheshire" "$NODE"; then rm -f "$NODE"; echo "removed the DepthMap node override (block of 48)"; fi
   exit 0
 fi
 BUNDLE="${2:-$HOME/apps/cheshire/bundle}"
@@ -162,4 +164,18 @@ if grep -q 'CHESHIRE_PDS_THREADS' <<<"$pd_help"; then
   pair aliceVision_prepareDenseScene
 else
   echo "bundle's aliceVision_prepareDenseScene is upstream's (pre-v0.2.9): not paired"
+fi
+# The DepthMap node in blocks of 48 views instead of 12 (docs/04, 0.3.4 "the depth-map node was
+# loading images"): each chunk is a process that loads the SfM data, probes the device and starts
+# cold, 74 times at 884 views. The bundle carries meshroom-overrides/DepthMap.py, which loads
+# Meshroom's compiled node and re-declares it with the larger block - same attributes, same UID,
+# caches stay valid. Python prefers the .py beside the .pyc, so copying it in is the whole install.
+NODES="$MESHROOM/lib/meshroom/nodes/aliceVision"
+OVERRIDE="$BUNDLE/share/cheshire/meshroom-overrides/DepthMap.py"
+if [ -f "$OVERRIDE" ] && [ -f "$NODES/DepthMap.pyc" ]; then
+  cp -f "$OVERRIDE" "$NODES/DepthMap.py" && echo "installed the DepthMap node override: blocks of 48 views (CHESHIRE_DEPTHMAP_BLOCK=0 for Meshroom's 12)"
+elif [ -f "$OVERRIDE" ]; then
+  echo "no compiled DepthMap node at $NODES: node override not installed"
+else
+  echo "bundle carries no meshroom-overrides (pre-0.3.4): DepthMap keeps Meshroom's block of 12"
 fi

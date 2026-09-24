@@ -1,8 +1,21 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 4926de8..d7fc43a 100644
+index 4926de8..0e9cf79 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -154,12 +154,13 @@ if(CMAKE_PREFIX_PATH)
+@@ -120,6 +120,12 @@ if (ALICEVISION_INSTALL_MESHROOM_PLUGIN)
+     )
+ endif()
+ 
++# cheshire (step 5z): the Meshroom 2023.3 node override the pairing scripts install (docs/04)
++install(
++    DIRECTORY meshroom-overrides
++    DESTINATION ${CMAKE_INSTALL_DATADIR}/cheshire
++)
++
+ # Bundle target (see src/cmake/MakeBundle.cmake)
+ # Note: require that the install rule has been executed
+ # Include VCPKG installed dir for runtime dependencies lookup
+@@ -154,12 +160,13 @@ if(CMAKE_PREFIX_PATH)
  endif()
  
  add_custom_target(bundle
@@ -18,6 +31,19 @@ index 4926de8..d7fc43a 100644
  )
  
  set_target_properties(bundle PROPERTIES FOLDER Packaging)
+diff --git a/meshroom/aliceVision/DepthMap.py b/meshroom/aliceVision/DepthMap.py
+index 5d97aa1..4cccd95 100644
+--- a/meshroom/aliceVision/DepthMap.py
++++ b/meshroom/aliceVision/DepthMap.py
+@@ -20,7 +20,7 @@ Use a downscale factor of one (full-resolution) only if the quality of the input
+     commandLine = "aliceVision_depthMapEstimation {allParams}"
+     gpu = desc.Level.INTENSIVE
+     size = avpar.DynamicReconstructedViewsSize("input")
+-    parallelization = desc.Parallelization(blockSize=12)
++    parallelization = desc.Parallelization(blockSize=48)  # cheshire: 12 upstream; a chunk is a process with a cold cache
+     commandLineRange = "--rangeStart {rangeStart} --rangeSize {rangeBlockSize}"
+ 
+     category = "Dense Reconstruction"
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
 index 8e3e862..456b000 100644
 --- a/src/CMakeLists.txt

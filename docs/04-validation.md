@@ -1789,8 +1789,19 @@ experiments only). Uncompressed was considered and rejected: 162 MB per image in
 143 GB cache for the 884-view job on a SATA SSD, and the depth-map node's reads would be bound by
 the disk instead of scaling across the threads that inflate.
 
-What is left in the node after this is the chunk setup (19-27 s, mostly reading the SfM data
-with its 1.35 million landmarks, once per 12-view chunk - a larger block size in the Meshroom node
-would amortise it), the first batch of each chunk, which is cold by construction, and the
-downscale, now a fraction of the read: a 2x2 average on the device would remove it entirely, at
-the price of changed values and a new reference.
+**7. Fewer chunks.** Each Meshroom chunk is a separate process: it loads the SfM data with its
+1.35 million landmarks, probes the device and starts with a cold image cache - 19-27 s before
+its first tile at 884 views, plus a cold first batch - and Meshroom's block of 12 views makes 74
+of them. Step 5z makes it 48, so 19. For Meshroom 2025 pairings that is the block size in the
+AliceVision-provided node; for Meshroom 2023.3, whose nodes are compiled `.pyc` files, the
+package carries `share/cheshire/meshroom-overrides/DepthMap.py`, a module that loads the
+compiled node and re-declares it with the larger block, and the pairing scripts copy it beside
+the `.pyc` (Python prefers the `.py`); `--unpair` removes it. Same attributes, same command line,
+same UID, so an existing cache stays valid. `CHESHIRE_DEPTHMAP_BLOCK` sets another size for the
+2023.3 override, 0 for Meshroom's 12.
+
+What is left in the node after this is the first batch of each chunk, which is cold by
+construction, and the downscale, now a fraction of the read: the level stored in the EXR at
+PrepareDenseScene time would remove it from the node entirely with the values unchanged, and a
+2x2 average on the device would remove the read bytes too, at the price of changed values and a
+new reference.

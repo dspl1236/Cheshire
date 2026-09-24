@@ -30,6 +30,7 @@ if "%PKG%"=="" ( echo usage: %~nx0 ^<Meshroom dir^> ^<Cheshire package dir^> ^| 
 set BIN=%MR%\aliceVision\bin
 if not exist "%BIN%\" ( echo %BIN% not found: is %MR% a Meshroom 2023.x Windows install? & exit /b 1 )
 if /i "%PKG%"=="--unpair" (
+  if exist "%MR%\lib\meshroom\nodes\aliceVision\DepthMap.py" ( findstr /c:"Cheshire" "%MR%\lib\meshroom\nodes\aliceVision\DepthMap.py" >nul && del /q "%MR%\lib\meshroom\nodes\aliceVision\DepthMap.py" && echo removed the DepthMap node override )
   for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_featureExtraction aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene aliceVision_incrementalSfM) do call :unpair %%N
   exit /b 0
 )
@@ -89,6 +90,17 @@ if defined HAVE (
   for /d %%F in ("%PKG%\gpu\*") do for /d %%T in ("%%~fF\*") do if exist "%%~fT\popsift.dll" set FEOK=1
 )
 if defined FEOK ( call :pair aliceVision_featureExtraction ) else ( echo package has no GPU SIFT ^(no popsift.dll^): featureExtraction not paired )
+rem The DepthMap node in blocks of 48 views instead of 12 (docs/04, 0.3.4 "the depth-map node was loading
+rem images"): each chunk is a process that loads the SfM data, probes the device and starts cold. The
+rem package carries share\cheshire\meshroom-overrides\DepthMap.py, which loads Meshroom's compiled node
+rem and re-declares it with the larger block; Python prefers the .py beside the .pyc. Removed by --unpair.
+set NODES=%MR%\lib\meshroom\nodes\aliceVision
+set OVERRIDE=
+if exist "%PKG%\share\cheshire\meshroom-overrides\DepthMap.py" set OVERRIDE=%PKG%\share\cheshire\meshroom-overrides\DepthMap.py
+if exist "%PKG%\common\share\cheshire\meshroom-overrides\DepthMap.py" set OVERRIDE=%PKG%\common\share\cheshire\meshroom-overrides\DepthMap.py
+if defined OVERRIDE (
+  if exist "%NODES%\DepthMap.pyc" ( copy /y "%OVERRIDE%" "%NODES%\DepthMap.py" >nul & echo installed the DepthMap node override: blocks of 48 views ^(CHESHIRE_DEPTHMAP_BLOCK=0 for Meshroom's 12^) ) else ( echo no compiled DepthMap node at %NODES%: node override not installed )
+) else ( echo package carries no meshroom-overrides ^(pre-0.3.4^): DepthMap keeps Meshroom's block of 12 )
 exit /b 0
 
 :have

@@ -127,8 +127,8 @@ L items can slide.
   cameras (5u), load once per batch and only what the device lacks (5t), EXR straight through
   OpenEXR (5v), the host downscale after each read no longer twelve-times-twelve threads wide
   (5w), and that downscale - lanczos3, most of the node's CPU - computed directly with identical
-  values at 18x less CPU (5x), and PrepareDenseScene writing ZIP instead of ZIPS (5y). Left: the
-  per-chunk SfM load (a larger Meshroom block size), the downscaled level stored in the EXR at
+  values at 18x less CPU (5x), PrepareDenseScene writing ZIP instead of ZIPS (5y), and chunks of
+  48 views instead of 12 (5z, a node override for Meshroom 2023.3). Left: the downscaled level stored in the EXR at
   PrepareDenseScene time so the depth-map node never resizes (the exact resize, once per image
   instead of 3.5 times), the downscale as a 2x2 average on the device (changes values, so a new
   reference), the sRGB-to-linear conversion in PrepareDenseScene's read phase done directly, and
