@@ -1,7 +1,10 @@
 // CheshireJPG: the decode and encode sequences, written once over a backend.
 //
-// A backend provides alloc/release, upload/download, zero, and forEach(n, functor). The GPU
-// backend (jpegGPU.cu) launches one thread per index; the CPU backend (jpegCpuBackend.hpp) loops.
+// A backend provides begin (called at the start of every decode and encode), alloc/release,
+// upload/download, zero, and forEach(n, functor). upload may return before the copy has run but
+// must let the caller reuse its buffer at once; download returns with the data there. The GPU
+// backend (jpegAsyncBackend.hpp over jpegGPU.cu's runtime) queues everything on the Codec's
+// stream and launches one thread per index; the CPU backend (jpegCpuBackend.hpp) loops.
 // Both run the functors of jpegStages.hpp in exactly this order, which is what lets the host check
 // in hip/tests/cheshirejpg vouch for the device path's arithmetic and control flow without a GPU.
 #pragma once
@@ -36,6 +39,8 @@ class Pipeline
 
     Status decode(const uint8_t* data, size_t size, Image& out, DecodeStats* stats)
     {
+        if (!b_.begin())
+            return Status::DeviceError;
         ParsedJpeg p;
         Status st = parseJpeg(data, size, p);
         if (st != Status::Ok)
@@ -202,6 +207,8 @@ class Pipeline
     {
         if (!pixels)
             return Status::InvalidArgument;
+        if (!b_.begin())
+            return Status::DeviceError;
         EncodeGeom g;
         Status st = makeEncodeGeom(width, height, channels, rowBytes, o, g);
         if (st != Status::Ok)

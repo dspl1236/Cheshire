@@ -1,12 +1,14 @@
 // CheshireJPG: the codec on the device, against libjpeg-turbo, with timings.
 //
-//   cheshirejpg_gpu_check [--reps N] [--no-synthetic] [photo.jpg ...]
+//   cheshirejpg_gpu_check [--reps N] [--no-synthetic] [--threads 1,2,4,8,12] [photo.jpg ...]
 //
 // Synthetic cases: every sampling layout the encoder writes, at edge-case sizes, qualities and
 // restart intervals; the encoded file must equal libjpeg's byte for byte and the decode of it must
 // equal libjpeg's pixel for pixel. Photos: the decode must equal libjpeg's, then decode and a
 // re-encode (q90, 4:2:0) are timed against libjpeg-turbo, median of N repetitions, end to end -
 // parsing, uploads, kernels and the download of the result all count.
+// --threads: decode throughput with one Codec per thread (and libjpeg-turbo on as many threads),
+// each thread decoding every photo --reps times; images per second of wall time.
 #include "checkCommon.hpp"
 #include "jpegCodec.hpp"
 
@@ -14,6 +16,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace cheshire::jpeg;
@@ -47,6 +50,7 @@ int main(int argc, char** argv)
 {
     int reps = 5;
     bool synthetic = true;
+    std::vector<int> threadCounts;
     std::vector<std::string> files;
     for (int i = 1; i < argc; ++i)
     {
@@ -55,6 +59,17 @@ int main(int argc, char** argv)
             reps = std::max(1, std::atoi(argv[++i]));
         else if (a == "--no-synthetic")
             synthetic = false;
+        else if (a == "--threads" && i + 1 < argc)
+        {
+            for (const char* p = argv[++i]; *p;)
+            {
+                threadCounts.push_back(std::max(1, std::atoi(p)));
+                while (*p && *p != ',')
+                    ++p;
+                if (*p == ',')
+                    ++p;
+            }
+        }
         else
             files.push_back(a);
     }
@@ -165,6 +180,40 @@ int main(int argc, char** argv)
         std::snprintf(size, sizeof(size), "%dx%d", img.width, img.height);
         std::printf("%-40s %11s %7u %6u | %7.1fms %7.1fms | %7.1fms %7.1fms\n", label.c_str(), size, st.subsequences,
                     st.syncRounds, gpuDec, cpuDec, gpuEnc, cpuEnc);
+    }
+    if (!threadCounts.empty() && !files.empty() && !fails)
+    {
+        std::vector<std::vector<uint8_t>> data;
+        for (const std::string& path : files)
+            data.push_back(check::readFile(path));
+        std::printf("\nthroughput, %zu photos x %d reps per thread, images/s\n%8s %12s %14s\n", data.size(), reps,
+                    "threads", "CheshireJPG", "libjpeg-turbo");
+        for (int t : threadCounts)
+        {
+            auto run = [&](bool gpu) {
+                const auto t0 = Clock::now();
+                std::vector<std::thread> pool;
+                for (int k = 0; k < t; ++k)
+                    pool.emplace_back([&, gpu] {
+                        Codec local;  // one Codec per thread, as the API requires
+                        Image img;
+                        for (int r = 0; r < reps; ++r)
+                            for (const auto& f : data)
+                            {
+                                if (gpu)
+                                    local.decode(f.data(), f.size(), img);
+                                else
+                                    check::refDecode(f, false);
+                            }
+                    });
+                for (auto& th : pool)
+                    th.join();
+                return (double)t * reps * data.size() / std::chrono::duration<double>(Clock::now() - t0).count();
+            };
+            const double g = run(true);
+            const double c = run(false);
+            std::printf("%8d %12.1f %14.1f\n", t, g, c);
+        }
     }
     std::printf("%d cases, %d failed\n%s\n", cases, fails, fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;

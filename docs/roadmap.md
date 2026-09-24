@@ -269,7 +269,9 @@ L items can slide.
   `cheshirejpg_gpu_check` 201/201 identical (41 photographs at 4032x3024), decode 31.5 ms against
   libjpeg-turbo's 57.8, encode 9.0 against 36.5. But throughput stops at 48 images/s from two
   threads, because every Codec shares the default stream; libjpeg-turbo reaches 109 at 12 threads.
-  Order: a stream per Codec with pinned async copies; identity on the RX 6750 XT and RX 5500 XT;
+  A stream per Codec with pinned async copies is written (docs/19), and checked on the host
+  through a deferred runtime with negative controls. Order: measure it with `--threads`; identity
+  on the RX 6750 XT and RX 5500 XT;
   profile; then PrepareDenseScene's read behind a switch, held to 107/107 byte-identical EXRs; then
   FeatureExtraction's loads.
 - **DepthMap host image loads** (M). About 30 % of the 41-view run is host time, and twelve

@@ -12,6 +12,7 @@ namespace jpeg {
 
 struct CpuBackend
 {
+    bool begin() { return true; }
     void* alloc(size_t bytes) { return std::malloc(bytes); }
     void release(void* p) { std::free(p); }
     void upload(void* d, const void* h, size_t n) { std::memcpy(d, h, n); }

@@ -17,6 +17,7 @@ target_link_libraries(cheshirejpg_cpu_check PRIVATE JPEG::JPEG)
 
 if(NOT CHESHIREJPG_GPU STREQUAL "OFF")
   add_subdirectory(${JPEG_SRC} cheshirejpg)
+  find_package(Threads REQUIRED)
   add_executable(cheshirejpg_gpu_check cheshirejpg_gpu_check.cpp)
-  target_link_libraries(cheshirejpg_gpu_check PRIVATE CheshireJPG JPEG::JPEG)
+  target_link_libraries(cheshirejpg_gpu_check PRIVATE CheshireJPG JPEG::JPEG Threads::Threads)
 endif()

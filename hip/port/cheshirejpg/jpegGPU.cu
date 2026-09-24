@@ -2,8 +2,18 @@
 // force-includes cheshire/cuda_to_hip.h, so device allocations go through the memory bridge like
 // every other Cheshire port (a very large image spills to host RAM instead of failing).
 //
-// Everything runs on the legacy default stream: uploads and downloads are synchronous copies and
-// kernels queue behind them, which keeps the ordering obvious. CHESHIRE_JPG=0 disables.
+// Each Codec has its own non-blocking stream and its own pinned staging area
+// (jpegAsyncBackend.hpp). Every copy, memset and kernel of a decode or encode goes on that stream,
+// and the waits inside a call - the flag read back after each synchronisation round, the final
+// download - wait on that stream only. Codecs on different threads therefore queue their work
+// independently. Before this, everything ran on the legacy default stream with synchronous copies,
+// and on the RX 9070 box throughput stopped at 48 images/s from two threads on (docs/19).
+//
+// The staging area grows to the largest single transfer, typically the decoded image: about 36 MB
+// of pinned memory per Codec for 4032x3024 RGB.
+//
+// CHESHIRE_JPG=0 disables.
+#include "jpegAsyncBackend.hpp"
 #include "jpegCodec.hpp"
 #include "jpegPipeline.hpp"
 
@@ -26,56 +36,49 @@ __global__ void forEachKernel(F f, size_t n)
         f(i);
 }
 
-struct GpuBackend
+// The runtime AsyncBackend drives: one non-blocking stream, CUDA names (HIP through the compat
+// header, whose copy and memset wrappers also order transfers of spilled buffers).
+class CudaRuntime
 {
-    bool failed = false;
-
-    void check(cudaError_t e, const char* what)
+  public:
+    bool streamCreate() { return ok(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking)); }
+    void streamDestroy() { (void)cudaStreamDestroy(stream_); }
+    bool streamSync() { return ok(cudaStreamSynchronize(stream_)); }
+    bool deviceAlloc(void** p, size_t n) { return ok(cudaMalloc(p, n)); }
+    void deviceFree(void* p) { (void)cudaFree(p); }
+    bool hostAlloc(void** p, size_t n) { return ok(cudaHostAlloc(p, n, cudaHostAllocDefault)); }
+    void hostFree(void* p) { (void)cudaFreeHost(p); }
+    bool copyToDevice(void* d, const void* h, size_t n)
     {
-        if (e != cudaSuccess && !failed)
-        {
-            std::fprintf(stderr, "[cheshire] CheshireJPG: %s failed: %s\n", what, cudaGetErrorString(e));
-            failed = true;
-        }
+        return ok(cudaMemcpyAsync(d, h, n, cudaMemcpyHostToDevice, stream_));
     }
-    void* alloc(size_t bytes)
+    bool copyToHost(void* h, const void* d, size_t n)
     {
-        void* p = nullptr;
-        check(cudaMalloc(&p, bytes), "cudaMalloc");
-        return failed ? nullptr : p;
+        return ok(cudaMemcpyAsync(h, d, n, cudaMemcpyDeviceToHost, stream_));
     }
-    void release(void* p)
-    {
-        if (p)
-            (void)cudaFree(p);
-    }
-    void upload(void* d, const void* h, size_t n)
-    {
-        if (!failed)
-            check(cudaMemcpy(d, h, n, cudaMemcpyHostToDevice), "upload");
-    }
-    void download(void* h, const void* d, size_t n)
-    {
-        if (!failed)
-            check(cudaMemcpy(h, d, n, cudaMemcpyDeviceToHost), "download");
-    }
-    void zero(void* d, size_t n)
-    {
-        if (!failed)
-            check(cudaMemset(d, 0, n), "memset");
-    }
+    bool zero(void* d, size_t n) { return ok(cudaMemsetAsync(d, 0, n, stream_)); }
     template <class F>
-    void forEach(size_t n, const F& f)
+    bool launch(size_t n, const F& f)
     {
-        if (failed || n == 0)
-            return;
         const unsigned block = 256;
         const size_t grid = (n + block - 1) / block;
-        forEachKernel<F><<<(unsigned)grid, block>>>(f, n);
-        check(cudaGetLastError(), "kernel launch");
+        forEachKernel<F><<<(unsigned)grid, block, 0, stream_>>>(f, n);
+        return ok(cudaGetLastError());
     }
-    bool ok() const { return !failed; }
+    const char* error() const { return cudaGetErrorString(last_); }
+
+  private:
+    bool ok(cudaError_t e)
+    {
+        if (e != cudaSuccess)
+            last_ = e;
+        return e == cudaSuccess;
+    }
+    cudaStream_t stream_ = nullptr;
+    cudaError_t last_ = cudaSuccess;
 };
+
+using GpuBackend = AsyncBackend<CudaRuntime>;
 
 std::once_flag g_once;
 bool g_available = false;
@@ -123,7 +126,6 @@ Status Codec::decode(const uint8_t* jpeg, size_t size, Image& out, DecodeStats* 
         return Status::InvalidArgument;
     if (!deviceAvailable())
         return Status::NoDevice;
-    impl_->backend.failed = false;
     return impl_->pipeline.decode(jpeg, size, out, stats);
 }
 
@@ -137,7 +139,6 @@ Status Codec::encode(const uint8_t* pixels,
 {
     if (!deviceAvailable())
         return Status::NoDevice;
-    impl_->backend.failed = false;
     return impl_->pipeline.encode(pixels, width, height, channels, rowBytes, options, out);
 }
 

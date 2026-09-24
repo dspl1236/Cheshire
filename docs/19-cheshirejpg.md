@@ -41,7 +41,8 @@ no restart markers, which is most camera JPEGs (80 of the 88 camera files below 
 | `jpegStages.hpp` | every pipeline stage as a functor `f(i)` |
 | `jpegPipeline.hpp` | the decode and encode sequences, written once over a backend |
 | `jpegHost.cpp` | marker parsing, unstuffing, table building, header writing |
-| `jpegGPU.cu` | the device backend (one thread per index) and `Codec` |
+| `jpegAsyncBackend.hpp` | the device backend's logic: a stream per `Codec`, pinned staging, asynchronous copies |
+| `jpegGPU.cu` | the CUDA/HIP runtime under it (one thread per index) and `Codec` |
 | `jpegCpuBackend.hpp` | the host backend (a loop), for verification |
 | `cheshirejpgTool.cpp` | `cheshirejpg decode / encode / bench` |
 | `CMakeLists.txt` | `CheshireJPG` static library + the tool; `CHESHIREJPG_GPU=HIP` or `CUDA` |
@@ -51,6 +52,34 @@ The backend split is what makes the claims below checkable without a GPU. A stag
 No stage uses warp or workgroup primitives - scans are a chunk pass, a serial pass over the chunk
 totals and a chunk rewrite - so every line a kernel executes is also executed by
 `hip/tests/cheshirejpg/cheshirejpg_cpu_check`, in the same order, against libjpeg-turbo.
+
+The device backend itself is checked the same way. `AsyncBackend` is a template over its runtime:
+`jpegGPU.cu` supplies the CUDA/HIP one, and the host check supplies a deferred runtime that queues
+every copy, memset and kernel and runs them only when the stream is waited on - the latest a real
+stream may run them - with fresh allocations filled with garbage. `cheshirejpg_cpu_check` runs its
+whole suite through both the plain host backend and `AsyncBackend` on the deferred runtime.
+
+### A stream per Codec
+
+Each `Codec` owns a non-blocking stream and a pinned staging area. Every copy, memset and kernel of
+a call goes on that stream. The only waits are the flag read back after each synchronisation round
+and the final download, and they wait on that stream only, so `Codec`s on different threads no
+longer queue behind one another. The pipeline's contract is unchanged: `upload` may return before
+the copy runs and the caller may reuse its buffer at once, and `download` returns with the data
+there.
+
+The staging area is what makes that work:
+
+- `upload` copies into a fresh slice of the area and queues the transfer.
+- `download` queues the transfer into a slice, waits for the stream and copies out.
+- A slice is handed out again only after a wait on the stream: when the area is full, and after
+  every download.
+
+The area grows to the largest single transfer, usually the decoded image: about 36 MB of pinned
+memory per `Codec` at 4032x3024. So 12 decoding threads hold about 450 MB of pinned memory.
+
+Two negative controls show the deferred check would catch a mistake here. Handing every upload the
+same slice, and reading a download before the wait, each fail 526 of the host check's cases.
 
 ## Decoding
 
@@ -185,10 +214,11 @@ written but not compiled here.
 | CheshireJPG, images/s | 24 | 48 | 48 | 46 | 41 |
 | libjpeg-turbo, images/s | 18 | 34 | 63 | 97 | 109 |
 
-  CheshireJPG stops scaling at two threads because every `Codec` shares the legacy default
-  stream: synchronous copies and the per-round flag readbacks serialise all threads on one queue.
-  From four threads up, libjpeg-turbo on six cores is ahead. A node that decodes on 12 threads
-  would be slower with CheshireJPG as it stands, so it is not wired into one yet.
+  At that commit CheshireJPG stopped scaling at two threads because every `Codec` shared the
+  legacy default stream: synchronous copies and the per-round flag readbacks serialised all
+  threads on one queue. From four threads up, libjpeg-turbo on six cores was ahead. A node that
+  decodes on 12 threads would have been slower with CheshireJPG, so it was not wired into one.
+  "A stream per Codec" above is the change for this. It has not been measured on a card yet.
 
 **The CMake fix that run needed.** As pushed in `e7b9574`, `CheshireJPG` linked
 `PRIVATE hip::device`. That adds HIP compile options to every source of the target, so
@@ -207,11 +237,14 @@ cmake --build build/jpeg && build/jpeg/cheshirejpg_cpu_check --testimages <libjp
 cmake -S hip/tests/cheshirejpg -B build/jpeg-gpu -DCMAKE_HIP_ARCHITECTURES="gfx1201;gfx1030;gfx1010"
 cmake --build build/jpeg-gpu
 build/jpeg-gpu/cheshirejpg_gpu_check --reps 10 photos/*.jpg     # identity, then GPU vs libjpeg-turbo times
+build/jpeg-gpu/cheshirejpg_gpu_check --no-synthetic --reps 3 --threads 1,2,4,8,12 photos/*.jpg
 build/jpeg-gpu/cheshirejpg/cheshirejpg bench photo.jpg 20
 ```
 
 `cheshirejpg_gpu_check` prints per file the subsequence and round counts and the median end-to-end decode
-and q90 re-encode time against libjpeg-turbo's, after checking both are identical.
+and q90 re-encode time against libjpeg-turbo's, after checking both are identical. With `--threads`
+it then measures decode throughput, one `Codec` per thread against libjpeg-turbo on as many
+threads, each thread decoding every photo `--reps` times, in images per second of wall time.
 
 ## API
 
@@ -249,9 +282,10 @@ with its original file, copyright notice and the changes made; the IJG License s
 
 ## Next
 
-1. **A stream per `Codec`, with pinned staging and asynchronous copies.** This is the throughput
-   ceiling measured above: 48 images/s from two threads on, against libjpeg-turbo's 109 at 12.
-   It comes before any integration.
+1. **Measure the stream per `Codec` on the RX 9070**: `--threads 1,2,4,8,12`, against the 48
+   images/s ceiling above and libjpeg-turbo's 109 at 12. If the waits after each synchronisation
+   round (9 to 14 per photograph) are what remains, the next change is a round loop that stays on
+   the device. This all comes before any integration.
 2. **Identity on the RX 6750 XT and RX 5500 XT**, Windows and Linux. The RX 9070 on Windows has
    passed.
 3. **Profile what is left.** The host unstuffing (sequential, about memcpy speed), the round-trip

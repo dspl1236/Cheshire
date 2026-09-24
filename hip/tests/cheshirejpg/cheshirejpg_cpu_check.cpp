@@ -12,6 +12,8 @@
 // a decode that reports Ok must equal libjpeg's output. Run it again with JSIMD_FORCENONE=1 to
 // check against libjpeg-turbo's C paths as well as its SIMD ones.
 #include "checkCommon.hpp"
+#include "deferredRuntime.hpp"
+#include "jpegAsyncBackend.hpp"
 #include "jpegCpuBackend.hpp"
 #include "jpegPipeline.hpp"
 
@@ -48,7 +50,8 @@ uint32_t decBlockToUnit(const DecodeGeom& g, int c, int bx, int by)
 }
 
 // expect: Ok (must match), or the status that must come back.
-bool checkDecode(Pipeline<CpuBackend>& pipe, const std::vector<uint8_t>& file, const std::string& name, Tally& t, Status expect = Status::Ok)
+template <class Pipe>
+bool checkDecode(Pipe& pipe, const std::vector<uint8_t>& file, const std::string& name, Tally& t, Status expect = Status::Ok)
 {
     ++t.run;
     Image img;
@@ -135,7 +138,8 @@ bool checkDecode(Pipeline<CpuBackend>& pipe, const std::vector<uint8_t>& file, c
     return true;
 }
 
-bool checkEncode(Pipeline<CpuBackend>& pipe,
+template <class Pipe>
+bool checkEncode(Pipe& pipe,
                  const std::vector<uint8_t>& px,
                  int w,
                  int h,
@@ -179,28 +183,12 @@ bool checkEncode(Pipeline<CpuBackend>& pipe,
 
 const Subsampling kSubs[] = {Subsampling::S444, Subsampling::S422, Subsampling::S420, Subsampling::S440, Subsampling::Gray};
 
-}  // namespace
-
-int main(int argc, char** argv)
+template <class Backend>
+int runChecks(const char* label, const std::string& testimages, bool large, const std::vector<std::string>& extra)
 {
-    std::string testimages;
-    bool large = false;
-    std::vector<std::string> extra;
-    for (int i = 1; i < argc; ++i)
-    {
-        const std::string a = argv[i];
-        if (a == "--testimages" && i + 1 < argc)
-            testimages = argv[++i];
-        else if (a == "--large")
-            large = true;
-        else
-            extra.push_back(a);
-    }
-    std::printf("libjpeg-turbo JPEG_LIB_VERSION %d, JSIMD_FORCENONE=%s\n", JPEG_LIB_VERSION,
-                std::getenv("JSIMD_FORCENONE") ? std::getenv("JSIMD_FORCENONE") : "(unset)");
-
-    CpuBackend backend;
-    Pipeline<CpuBackend> pipe(backend);
+    std::printf("== backend: %s\n", label);
+    Backend backend;
+    Pipeline<Backend> pipe(backend);
     Tally dec, enc, fuzz;
 
     const int sizes[][2] = {{1, 1},   {2, 2},   {3, 7},    {7, 5},   {8, 8},    {9, 9},     {16, 16},
@@ -445,6 +433,40 @@ int main(int argc, char** argv)
                 dec.decodes ? (double)dec.rounds / dec.decodes : 0.0, dec.maxRounds);
     std::printf("mutated: %d cases, %d failed\n", fuzz.run, fuzz.fail);
     const bool ok = enc.fail == 0 && dec.fail == 0 && fuzz.fail == 0;
-    std::printf("%s\n", ok ? "PASS" : "FAIL");
+    std::printf("%s: %s\n", label, ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
+}
+
+}  // namespace
+
+int main(int argc, char** argv)
+{
+    std::string testimages;
+    bool large = false;
+    std::string which = "both";
+    std::vector<std::string> extra;
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string a = argv[i];
+        if (a == "--testimages" && i + 1 < argc)
+            testimages = argv[++i];
+        else if (a == "--large")
+            large = true;
+        else if (a == "--backend" && i + 1 < argc)
+            which = argv[++i];
+        else
+            extra.push_back(a);
+    }
+    std::printf("libjpeg-turbo JPEG_LIB_VERSION %d, JSIMD_FORCENONE=%s\n", JPEG_LIB_VERSION,
+                std::getenv("JSIMD_FORCENONE") ? std::getenv("JSIMD_FORCENONE") : "(unset)");
+
+    // host: every stage as a plain loop, in order. async: the GPU backend's own code
+    // (jpegAsyncBackend.hpp) over a runtime that runs queued work only when the stream is waited on.
+    int rc = 0;
+    if (which == "both" || which == "host")
+        rc |= runChecks<CpuBackend>("host", testimages, large, extra);
+    if (which == "both" || which == "async")
+        rc |= runChecks<AsyncBackend<check::DeferredRuntime>>("async (deferred)", testimages, large, extra);
+    std::printf("%s\n", rc ? "FAIL" : "PASS");
+    return rc;
 }
