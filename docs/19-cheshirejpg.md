@@ -162,9 +162,39 @@ VGPRs (10-11 waves/SIMD on RDNA1/2, 16 on RDNA3), every other kernel runs at 16 
 (gfx1201) needs a newer compiler than that container had. The CUDA configuration of the CMake is
 written but not compiled here.
 
-**Not done: running on a GPU.** Everything above says the device code computes the right thing
-and compiles; `cheshirejpg_gpu_check` is what says the device runtime executes it as written, and it has
-not run yet. Timings do not exist.
+**Run on a GPU: RX 9070 (RDNA4), Windows, clang-cl, ROCm 7.2 wheel, Ryzen 5 5600X, commit
+`e7b9574` plus the CMake fix below.** Measured by the user; reported here as given.
+
+- `cheshirejpg_cpu_check` passes there too, with SIMD and with `JSIMD_FORCENONE=1`: encode 300 / 0
+  failed, decode 527 / 0, mutated 900 / 0.
+- `cheshirejpg_gpu_check` passes: **201 cases, 0 failed**. That is 160 synthetic encode+decode cases
+  and 41 photographs at 4032x3024, all byte-identical to libjpeg-turbo. The photographs took 9 to
+  14 synchronisation rounds.
+- Medians over the 41 photographs, end to end (parse, copies and kernels included), one call at a
+  time:
+
+| | CheshireJPG on the RX 9070 | libjpeg-turbo on the 5600X | |
+|---|---|---|---|
+| decode | 31.5 ms | 57.8 ms | 1.8x |
+| encode (q90, 4:2:0) | 9.0 ms | 36.5 ms | 4.1x |
+
+- Throughput with one `Codec` per thread is where it stops:
+
+| threads | 1 | 2 | 4 | 8 | 12 |
+|---|---|---|---|---|---|
+| CheshireJPG, images/s | 24 | 48 | 48 | 46 | 41 |
+| libjpeg-turbo, images/s | 18 | 34 | 63 | 97 | 109 |
+
+  CheshireJPG stops scaling at two threads because every `Codec` shares the legacy default
+  stream: synchronous copies and the per-round flag readbacks serialise all threads on one queue.
+  From four threads up, libjpeg-turbo on six cores is ahead. A node that decodes on 12 threads
+  would be slower with CheshireJPG as it stands, so it is not wired into one yet.
+
+**The CMake fix that run needed.** As pushed in `e7b9574`, `CheshireJPG` linked
+`PRIVATE hip::device`. That adds HIP compile options to every source of the target, so
+`jpegHost.cpp` was compiled as HIP for the default gfx906 without the compat header, and failed
+(`'atomicOr'` and `'__clz'` undeclared). The library now links `hip::host` only. The container
+build had used hipcc directly and so never saw this.
 
 ## Build and run
 
@@ -219,12 +249,15 @@ with its original file, copyright notice and the changes made; the IJG License s
 
 ## Next
 
-1. **Run `cheshirejpg_gpu_check` on the RX 9070, RX 6750 XT and RX 5500 XT**, Windows and Linux. Identity
-   first, then the timings - end to end, since that is what a node sees.
-2. **Profile before optimising.** Likely costs, in the order I expect them: the host unstuffing
-   (sequential, about memcpy speed), the pageable-memory copies, the round-trip per synchronisation
-   round, the per-thread scans. Each has a known fix (a device unstuffing pass, pinned staging, a
-   persistent-kernel round loop, workgroup scans); none is worth doing before the numbers.
-3. **Wire it into PrepareDenseScene's read**, behind a switch, and hold it to the node's existing
+1. **A stream per `Codec`, with pinned staging and asynchronous copies.** This is the throughput
+   ceiling measured above: 48 images/s from two threads on, against libjpeg-turbo's 109 at 12.
+   It comes before any integration.
+2. **Identity on the RX 6750 XT and RX 5500 XT**, Windows and Linux. The RX 9070 on Windows has
+   passed.
+3. **Profile what is left.** The host unstuffing (sequential, about memcpy speed), the round-trip
+   per synchronisation round (9 to 14 of them on these photographs) and the per-thread scans. Each
+   has a known fix: a device unstuffing pass, a round loop that stays on the device, workgroup
+   scans.
+4. **Wire it into PrepareDenseScene's read**, behind a switch, and hold it to the node's existing
    bar: 107 of 107 EXRs byte-identical. Then FeatureExtraction's loads.
-4. Batch decode (several files per launch) if per-file latency dominates at 4032x2268.
+5. Batch decode (several files per launch) if per-file latency still dominates at 4032x2268.

@@ -265,9 +265,13 @@ L items can slide.
 - **CheshireJPG for the reads** (L). The GPU JPEG codec exists (docs/19): a baseline decoder and
   encoder in HIP compute kernels, not VCN, so Windows and RDNA1 are covered, identical to
   libjpeg-turbo on 88 of 89 camera files (the 89th is damaged and handed back) and on 833
-  synthetic encode/decode cases, checked on the host backend. Not yet run on a card. Order: run
-  `cheshirejpg_gpu_check` on the three test cards; profile; then wire it into PrepareDenseScene's read
-  behind a switch, held to 107/107 byte-identical EXRs; then FeatureExtraction's loads.
+  synthetic encode/decode cases, checked on the host backend. **RX 9070, Windows (2026-09-24):**
+  `cheshirejpg_gpu_check` 201/201 identical (41 photographs at 4032x3024), decode 31.5 ms against
+  libjpeg-turbo's 57.8, encode 9.0 against 36.5. But throughput stops at 48 images/s from two
+  threads, because every Codec shares the default stream; libjpeg-turbo reaches 109 at 12 threads.
+  Order: a stream per Codec with pinned async copies; identity on the RX 6750 XT and RX 5500 XT;
+  profile; then PrepareDenseScene's read behind a switch, held to 107/107 byte-identical EXRs; then
+  FeatureExtraction's loads.
 - **DepthMap host image loads** (M). About 30 % of the 41-view run is host time, and twelve
   parallel loads finish at roughly one per 0.5 s (`docs/05-performance.md:27-31`). Add a per-phase
   split in the style of `CHESHIRE_PDS_PROFILE` to tell a serial section from 6-core saturation.

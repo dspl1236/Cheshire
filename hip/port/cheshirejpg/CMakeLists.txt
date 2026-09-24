@@ -34,7 +34,11 @@ else()
   else()
     target_compile_options(CheshireJPG PRIVATE "$<$<COMPILE_LANGUAGE:HIP>:-include${CHESHIREJPG_COMPAT}/cheshire/cuda_to_hip.h>")
   endif()
-  target_link_libraries(CheshireJPG PUBLIC hip::host PRIVATE hip::device)
+  # hip::host only. hip::device would add HIP compile options to every source of the target, so
+  # jpegHost.cpp would be compiled as HIP for the default gfx906 without the compat header
+  # ('atomicOr' / '__clz' undeclared, RX 9070 box, Windows clang-cl, ROCm 7.2). jpegGPU.cu is
+  # LANGUAGE HIP and gets its device compilation from that.
+  target_link_libraries(CheshireJPG PUBLIC hip::host)
 endif()
 target_include_directories(CheshireJPG PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
