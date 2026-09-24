@@ -208,6 +208,15 @@ as `Corrupt`: anything the synchronised decode cannot account for exactly, and b
 IDCT limits. In every non-`Ok` case the caller keeps its CPU path, so no file decodes differently
 from libjpeg because of this codec.
 
+## Credits
+
+The codec is new code, but its arithmetic is libjpeg-turbo's on purpose, because that is what makes
+the output identical. This software is based in part on the work of the Independent JPEG Group.
+[`hip/port/gpu_jpeg/ATTRIBUTION.md`](../hip/port/gpu_jpeg/ATTRIBUTION.md) lists every derived part
+with its original file, copyright notice and the changes made; the IJG License ships unaltered as
+`hip/port/gpu_jpeg/README.ijg`. The parallel Huffman decode follows Weissenberger & Schmidt (ICPP
+2018).
+
 ## Next
 
 1. **Run `jpeg_gpu_check` on the RX 9070, RX 6750 XT and RX 5500 XT**, Windows and Linux. Identity

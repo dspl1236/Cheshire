@@ -8,10 +8,23 @@ Copyright (c) AliceVision contributors, licensed under the Mozilla Public Licens
 AliceVision is included unmodified as the git submodule third_party/aliceVision.
 The files under hip/port/ (fused SGM aggregation, mip-level builder, image prefetch and the
 generated patch set in patches/) are modifications of AliceVision source files and remain
-subject to the MPL-2.0 as required by that license.
+subject to the MPL-2.0 as required by that license. hip/port/gpu_jpeg is not AliceVision code;
+see below.
+
+The GPU JPEG codec (hip/port/gpu_jpeg) is original work licensed under the MPL-2.0, and
+it is based in part on the work of the Independent JPEG Group. To produce output identical to
+libjpeg-turbo (https://libjpeg-turbo.org), it reproduces the integer DCTs, quantiser, colour
+conversion, resampling, Huffman and marker details of IJG / libjpeg-turbo source files.
+Those files are Copyright (C) 1991-1998 Thomas G. Lane, with modifications by Guido Vollbeding,
+D. R. Commander and other contributors, and they are covered by the IJG License. hip/port/gpu_jpeg/ATTRIBUTION.md
+lists each derived part with its original copyright notice and the changes made. The IJG License
+is included unaltered as hip/port/gpu_jpeg/README.ijg, and libjpeg-turbo's license summary as
+hip/port/gpu_jpeg/LICENSE.libjpeg-turbo.md. The test programs under hip/tests/jpeg link
+libjpeg-turbo as their reference.
 
 The compatibility layer, memory bridge, mipmap emulation, probes, scripts and documentation
 (hip/compat, hip/tests, scripts, docs) are original work licensed under the MPL-2.0.
 
-Not affiliated with or endorsed by AliceVision, Meshroom, AMD or NVIDIA. CUDA, HIP, ROCm,
-Radeon and GeForce are trademarks of their respective owners.
+Not affiliated with or endorsed by AliceVision, Meshroom, AMD, NVIDIA, the Independent JPEG Group
+or the libjpeg-turbo Project. CUDA, HIP, ROCm, Radeon and GeForce are trademarks of their
+respective owners.

@@ -14,6 +14,10 @@
 //
 // No device-only intrinsics: every function here compiles as plain C++ so the CPU backend runs the
 // same code the kernels do.
+//
+// This software is based in part on the work of the Independent JPEG Group. Parts of this file
+// reproduce the arithmetic of IJG / libjpeg-turbo source files; ATTRIBUTION.md lists which, with
+// their copyright notices and what was changed, and README.ijg carries the IJG License.
 #pragma once
 
 #include <cstddef>

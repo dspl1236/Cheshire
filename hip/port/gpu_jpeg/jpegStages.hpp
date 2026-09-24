@@ -22,6 +22,10 @@
 // subsequence records how many blocks it started and its DC differences per block slot, and a
 // segmented scan over those gives every subsequence its block index and DC predictors before the
 // writing pass. docs/19-gpu-jpeg.md has the measurements.
+//
+// This software is based in part on the work of the Independent JPEG Group. Parts of this file
+// reproduce the arithmetic of IJG / libjpeg-turbo source files; ATTRIBUTION.md lists which, with
+// their copyright notices and what was changed, and README.ijg carries the IJG License.
 #pragma once
 
 #include "jpegTypes.hpp"
