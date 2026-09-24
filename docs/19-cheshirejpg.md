@@ -41,9 +41,9 @@ no restart markers, which is most camera JPEGs (80 of the 88 camera files below 
 | `jpegStages.hpp` | every pipeline stage as a functor `f(i)` |
 | `jpegPipeline.hpp` | the decode and encode sequences, written once over a backend |
 | `jpegHost.cpp` | marker parsing, unstuffing, table building, header writing |
-| `jpegAsyncBackend.hpp` | the device backend's logic: a stream per `Codec`, pinned staging, asynchronous copies |
-| `jpegGPU.cu` | the CUDA/HIP runtime under it (one thread per index) and `Codec` |
-| `jpegCpuBackend.hpp` | the host backend (a loop), for verification |
+| `../cheshiregpu/asyncBackend.hpp` | the device backend's logic, shared with CheshireEXR: a stream per `Codec`, pinned staging, asynchronous copies |
+| `jpegGPU.cu` | `Codec` over that backend and `../cheshiregpu/cudaRuntime.cuh` (one thread per index) |
+| `../cheshiregpu/cpuBackend.hpp` | the host backend (a loop), for verification |
 | `cheshirejpgTool.cpp` | `cheshirejpg decode / encode / bench` |
 | `CMakeLists.txt` | `CheshireJPG` static library + the tool; `CHESHIREJPG_GPU=HIP` or `CUDA` |
 

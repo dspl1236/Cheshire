@@ -40,7 +40,7 @@ else()
   # LANGUAGE HIP and gets its device compilation from that.
   target_link_libraries(CheshireJPG PUBLIC hip::host)
 endif()
-target_include_directories(CheshireJPG PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(CheshireJPG PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../cheshiregpu)
 
 add_executable(cheshirejpg_cli cheshirejpgTool.cpp)
 set_target_properties(cheshirejpg_cli PROPERTIES OUTPUT_NAME cheshirejpg)

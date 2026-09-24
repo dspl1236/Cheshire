@@ -2,7 +2,7 @@
 //
 // Every stage is "for i in [0, n): f(i)" over plain structs of pointers, so the same code is a
 // kernel on the device (jpegGPU.cu launches forEachKernel<F>) and a loop on the host (the CPU
-// backend in jpegCpuBackend.hpp). Scans are written the same way - a chunk pass, one serial pass
+// backend in cheshiregpu/cpuBackend.hpp). Scans are written the same way - a chunk pass, one serial pass
 // over the chunk totals, and a chunk rewrite - so no stage depends on warp or workgroup primitives
 // and every line a kernel runs is also run by the host check (hip/tests/cheshirejpg).
 //
