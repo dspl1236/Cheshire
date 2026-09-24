@@ -62,8 +62,10 @@ L items can slide.
   stays (it is correct), the cause is unknown; next, dump differing pairs and recompute on the host.
   **Likely found 2026-09-24 (step 6k, docs/04):** the pragma reaches only code after it, and HIP's
   `__dadd_rn`/`__dmul_rn` are defined in a header included before the file, so they fused anyway.
-  The knn kernel now uses helpers defined under the pragma. Confirm on the next Linux bundle: the
-  RX 6750 XT's distance differences should be 0, then tighten `verify_end_to_end.py`.
+  The knn kernel now uses helpers defined under the pragma. **Confirmed the same day** on the RX 6750
+  XT with the s9 bundle: 0 distance differences in both passes of the 41-view set (was 17.4 M and
+  18.4 M), and `verify_end_to_end.py` now requires identical distances. The Windows hip6.2 (RDNA2)
+  payload shares the cause and gets the fix at its next rebuild.
 - **ImagesCache eviction under the parallel prefetch** (S). Cheshire's own `refreshData` keeps
   upstream's `// TODO: oldCamId should be protected if already used`
   (`hip/port/sgm_fused/imagescache_refresh.cpp.txt:15`), and the prefetch refreshes a whole batch
