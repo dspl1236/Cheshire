@@ -9,8 +9,7 @@
 #include "cheshireDownscale.hpp"
 
 #include <aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp>
-#include <aliceVision/image/Image.hpp>
-#include <aliceVision/image/io.hpp>
+#include <aliceVision/image/cheshireExr.hpp>
 #include <aliceVision/system/Logger.hpp>
 
 #include <algorithm>
@@ -213,15 +212,29 @@ std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> CheshireDeviceExrLoader::l
         release(codec);
         codec = nullptr;
 
-        // CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1: the host path for the same file (OpenEXR on the CPU, then
-        // step 6d's downscale), texel for texel
+        // CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1: the host path for the same file (OpenEXR on the CPU through
+        // the direct reader, which is what readImage uses for every file this loader takes, then step
+        // 6d's downscale), texel for texel. The floats go into a std::vector, never an image::Image:
+        // this translation unit is compiled without the image library's /arch:AVX2, so Eigen's
+        // aligned allocator differs between the two, and an image allocated there and freed here
+        // corrupted the heap (RX 9070, Windows, dspl1236/Cheshire#2).
         static const bool check = envOn("CHESHIRE_DEPTHMAP_GPU_EXR_CHECK");
-        if (check)
+        std::vector<float> hostFloats;
+        int hostWidth = 0, hostHeight = 0;
+        if (check && !image::cheshireReadExr(path, 4, true, [&](int w, int h) {
+                hostWidth = w;
+                hostHeight = h;
+                hostFloats.resize(std::size_t(w) * std::size_t(h) * 4);
+                return hostFloats.data();
+            }))
         {
-            image::Image<image::RGBAfColor> full;
-            image::readImage(path, full, image::ImageReadOptions(image::EImageColorSpace::LINEAR));
+            ++_checkMismatches;
+            ALICEVISION_LOG_WARNING("cheshire: CHESHIRE_DEPTHMAP_GPU_EXR_CHECK: " << path << ": the direct reader did not read it");
+        }
+        else if (check)
+        {
             CudaDeviceMemoryPitched<CudaRGBA, 2> ref(out->getSize());
-            cuda_cheshireDownscaleToCudaRGBA(reinterpret_cast<const float*>(full.data()), full.width(), full.height(), ref);
+            cuda_cheshireDownscaleToCudaRGBA(hostFloats.data(), hostWidth, hostHeight, ref);
             const std::size_t w = out->getSize().x(), h = out->getSize().y(), rowBytes = w * sizeof(CudaRGBA);
             std::vector<unsigned char> a(rowBytes * h), r(rowBytes * h);
             CHECK_CUDA_RETURN_ERROR(cudaMemcpy2D(a.data(), rowBytes, out->getBuffer(), out->getPitch(), rowBytes, h, cudaMemcpyDeviceToHost));

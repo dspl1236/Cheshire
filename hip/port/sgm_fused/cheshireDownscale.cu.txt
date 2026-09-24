@@ -236,9 +236,21 @@ void cuda_cheshireDownscaleToCudaRGBA(const float* in_hostRGBA, int inWidth, int
         const std::size_t n = std::size_t(outWidth) * outHeight * 4;
         std::vector<float> here(n);
         image::cheshire::resizeExact<4>(in_hostRGBA, inWidth, inHeight, here.data(), outWidth, outHeight, false);
-        image::Image<image::RGBAfColor> full(inWidth, inHeight, false), lib;
+        // Both images are allocated here, at their final sizes: this translation unit is compiled
+        // without the image library's /arch:AVX2, so Eigen's aligned allocator differs between the
+        // two, and a block the library allocated and this unit freed corrupted the heap on Windows
+        // (dspl1236/Cheshire#2). resizeImage resizes lib to the size it already has, which Eigen does
+        // without reallocating; if it ever did reallocate, the block is left alone rather than freed.
+        image::Image<image::RGBAfColor> full(inWidth, inHeight, false), lib(outWidth, outHeight, false);
         std::memcpy(full.data(), in_hostRGBA, std::size_t(inWidth) * inHeight * 4 * sizeof(float));
+        const void* libBlock = lib.data();
         imageAlgo::resizeImage(inWidth / outWidth, full, lib);
+        if (lib.data() != libBlock)
+        {
+            std::fprintf(stderr, "[cheshire] CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK: resizeImage reallocated; that block is leaked\n");
+            (new image::Image<image::RGBAfColor>())->swap(lib);  // never freed in this unit
+            return;
+        }
         std::size_t floatDiff = 0;
         const float* libf = reinterpret_cast<const float*>(lib.data());
         for (std::size_t i = 0; i < n; ++i)

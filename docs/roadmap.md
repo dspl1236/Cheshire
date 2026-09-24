@@ -280,9 +280,13 @@ L items can slide.
   `CHESHIRE_DEPTHMAP_GPU_EXR=1`, off by default: CheshireEXR's output feeds 6d's downscale kernel on
   the decoder's stream and the mipmap is filled from there, so the CPU inflate, the host copy and the
   324 MB upload per image go. Files outside the direct reader's scope and a VRAM budget too small
-  for a decoder fall back to the host path. Built with hipcc, not run on a card. Gate:
-  `CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1` (every image against the host path, texel for texel), then
-  depth maps byte-identical on mini6 and one 884-view chunk, and the chunk's load time.
+  for a decoder fall back to the host path. **RX 9070:** exact everywhere (101 of 101 files in
+  `cheshireexr_gpu_check`; depth maps byte-identical, 12 of 12 on mini6 and 96 of 96 on a 48-view
+  False Door chunk). Speed follows the chunk count: on ZIPS (3376 chunks) that chunk's loads dropped
+  from 30.5 to 9.4 s, but on ZIP level 1, what PrepareDenseScene writes now, it is about 5x slower
+  than the host. The open question is ZIP: a layout with more chunks, inflate spread within a
+  chunk, or ZIP left to the host. The check mode's heap corruption on Windows (Eigen images crossing
+  the unity TU) is fixed, as is the same crossing in 6d's check. Still to run: house-pc.
 - **CheshireJPG for the reads** (L). The GPU JPEG codec exists (docs/19): a baseline decoder and
   encoder in HIP compute kernels, not VCN, so Windows and RDNA1 are covered, identical to
   libjpeg-turbo on 88 of 89 camera files (the 89th is damaged and handed back) and on 833

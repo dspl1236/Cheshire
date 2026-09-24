@@ -141,9 +141,35 @@ the expected shape for one thread per chunk, but its speed on a card is unknown.
 (CheshireEXR, the loader and 6d's kernels) and `DepthMapEstimator.cpp` compile with hipcc 5.7 for
 gfx1030 against the pinned AliceVision, and `apply_hip_patch.py` applies and re-applies cleanly.
 
-**Not done: running on a GPU.** No timings exist yet, and step 6m has not run: its gate is
-`CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1` (every image identical to the host path), then byte-identical
-depth maps on mini6 and on one 884-view chunk, with the chunk's load time against the host path.
+**RX 9070 (gfx1201), Windows 11, ROCm 7.2, 2026-09-24** (dspl1236/Cheshire#2):
+
+- **Identity:** `cheshireexr_gpu_check` 85 of 85 synthetic cases identical to OpenEXR, and 16 of 16
+  PrepareDenseScene files: 8 from the engine bay set (4032x2268, ZIP level 1) and 8 from False Door
+  (6000x3376, ZIPS).
+- **Depth maps:** with `CHESHIRE_DEPTHMAP_GPU_EXR=1`, byte-identical to the host path: 12 of 12 on
+  mini6 (ZIP level 1) and 96 of 96 on a 48-view False Door chunk (ZIPS).
+- **Speed follows the chunk count.** One inflating thread per chunk is fast only when there are
+  thousands of chunks:
+
+| file | chunks | CheshireEXR to device | OpenEXR, 1 thread | OpenEXR, pool | images/s at 12 threads, CheshireEXR / OpenEXR |
+|---|---|---|---|---|---|
+| generated 6000x3376 ZIP | 211 | 2214 ms | 309 ms | 100 ms | |
+| engine bay, ZIP level 1 | 142 | 850-1010 ms | 153-160 ms | 46-50 ms | 5.2 / 27.4 |
+| False Door, ZIPS | 3376 | 163-243 ms | 337-359 ms | 113-123 ms | 14.5 / 12.8 |
+
+  On ZIPS the 48-view chunk's image loads dropped from 30.5 to 9.4 s and the node from 326.9 to
+  305.6 s. On ZIP, which PrepareDenseScene writes since steps 5y and 6f, it is slower than the host:
+  the mini6 decode went from 0.3 s to 4.4 s and the node from 13.6 to 17.4 s. Each thread
+  inflates about 0.5 MB serially.
+- **A bug the run found:** `CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1` corrupted the heap
+  (`0xC0000374`). The check read the host image with `image::readImage` (image library, built with
+  `/arch:AVX2`, so Eigen uses its own aligned allocator) and freed it in the HIP unity TU (no
+  `/arch:AVX2`, so Eigen calls plain `free`). The check now reads through `cheshireReadExr` into a
+  `std::vector<float>`. Step 6d's `CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK` had the same crossing
+  (the library allocated the resized image, the unity TU freed it). Its images are now allocated in
+  the TU at their final sizes, with a guard in case the library ever reallocates. With the image
+  leaked instead of freed, the RX 9070 run gave 6 of 6 images identical and 12 of 12 maps
+  byte-identical, so the check itself was right.
 
 ## Build and run
 
@@ -167,14 +193,12 @@ per thread.
 
 ## Next
 
-1. **Measure on house-pc first**: the Texturing and DepthMap load profiles above. They decide
-   whether this is the lever at all.
-2. **`cheshireexr_gpu_check` on the RX 9070 and house-pc's RX 6750 XT**: identity, then single-file
-   latency and threaded throughput against OpenEXR, on real PrepareDenseScene output.
-3. **DepthMap with step 6m on a card**: `CHESHIRE_DEPTHMAP_GPU_EXR=1` with
-   `CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1` on mini6, then the depth-map gate above. The texturing node
-   uploads its images too and could take the same route.
+1. **Decide what to do about ZIP** (the RX 9070 numbers above). Either PrepareDenseScene writes a
+   layout with more chunks (ZIPS, at the write-time cost step 5y measured), or the inflate of one
+   chunk is spread over many threads, or the loader leaves ZIP files to the host.
+2. **`cheshireexr_gpu_check` on house-pc's RX 6750 XT**, and the house-pc load profiles
+   (`CHESHIRE_LOAD_PROFILE=1`, `CHESHIRE_EXR_PROFILE=1`).
+3. **Re-run the step 6m check on a card** with the fixed `CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1`.
 4. **Then** put it in front of `cheshireReadExr` behind a switch, and hold the result to the
    existing gates: DepthMap's chunks byte-identical, Texturing's output within its run-to-run band.
-5. If a single image is too slow with one thread per ZIP chunk, compare ZIPS output from
-   PrepareDenseScene, or decode one chunk per workgroup.
+   The texturing node uploads its images too and could take the step 6m route.
