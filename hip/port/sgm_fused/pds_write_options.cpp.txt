@@ -1,0 +1,22 @@
+// cheshire (step 5y): the EXR compression of the undistorted images. Upstream leaves the writer on
+// its default, ZIPS - one zlib stream per scanline, 3376 of them for a 6000x3376 image - and every
+// later node pays to inflate them: the depth-map node loads each image about 3.5 times over a job,
+// texturing once per atlas sheet. ZIP compresses 16 scanlines per block: fewer streams, a slightly
+// better ratio, and a cheaper read and write, with the same pixels. CHESHIRE_PDS_EXR_COMPRESSION
+// names another method (none, rle, zip, zips, piz, pxr24, b44, b44a, dwaa, dwab) - the lossy ones
+// change the values and are for experiments only.
+static image::ImageWriteOptions cheshirePdsWriteOptions()
+{
+    static const image::ImageWriteOptions options = [] {
+        std::string method = "zip";
+        if (const char* v = std::getenv("CHESHIRE_PDS_EXR_COMPRESSION"))
+            method = v;
+        image::ImageWriteOptions o;
+        o.exrCompressionMethod(image::EImageExrCompression_stringToEnum(method));
+        ALICEVISION_LOG_INFO("cheshire: undistorted images written with EXR compression '" << method
+                             << "' (CHESHIRE_PDS_EXR_COMPRESSION to change; upstream's default is zips)");
+        return o;
+    }();
+    return options;
+}
+

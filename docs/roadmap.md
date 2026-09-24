@@ -127,9 +127,12 @@ L items can slide.
   cameras (5u), load once per batch and only what the device lacks (5t), EXR straight through
   OpenEXR (5v), the host downscale after each read no longer twelve-times-twelve threads wide
   (5w), and that downscale - lanczos3, most of the node's CPU - computed directly with identical
-  values at 18x less CPU (5x). Left: the per-chunk SfM load (a larger Meshroom block size), the
-  downscale as a 2x2 average on the device (changes values, so a new reference), and the same
-  reader for the texturing node's sRGB reads (a conversion after a direct read).
+  values at 18x less CPU (5x), and PrepareDenseScene writing ZIP instead of ZIPS (5y). Left: the
+  per-chunk SfM load (a larger Meshroom block size), the downscaled level stored in the EXR at
+  PrepareDenseScene time so the depth-map node never resizes (the exact resize, once per image
+  instead of 3.5 times), the downscale as a 2x2 average on the device (changes values, so a new
+  reference), the sRGB-to-linear conversion in PrepareDenseScene's read phase done directly, and
+  the same reader for the texturing node's sRGB reads (a conversion after a direct read).
 - **The per-solve walk over every landmark** (M). Both the rebuild and the sync visit all 1.35 M
   landmarks per solve at 884 views although the local strategy leaves most ignored (the rebuild's
   build is 2.2 us per active block there against 1.2 us at 41 views). An active-landmark list

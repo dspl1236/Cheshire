@@ -1777,6 +1777,18 @@ and on are byte-identical (12 of 12); the mini6 texturing output with the reader
 differs in 522 texels by at most 0.000977, which is the node's own run-to-run variation (two
 runs with the reader off differ in 556 texels by the same amount; the OBJ is identical).
 
+**6. What PrepareDenseScene writes.** The writer's default for the undistorted images is ZIPS,
+one zlib stream per scanline - 3,376 of them per 6000x3376 image - and every later read inflates
+them: the depth-map node loads each image about 3.5 times over a job, texturing once per atlas
+sheet. Step 5y has PrepareDenseScene write ZIP, sixteen scanlines per block: the same pixels, a
+slightly smaller file, and a cheaper write and read. On the local mini6 job (6 images, 4032x3024):
+283,096,208 bytes with ZIPS, 278,680,274 (1.6 % smaller) with ZIP; PrepareDenseScene 1.4 s against 1.3 s (the node is not where the time goes at six images); the decoded
+pixels are identical in all 6 files (channels compared value by value); the depth maps computed from each set are byte-identical (12 of 12 depth and sim maps); the direct reader spends 16 % less CPU on the ZIP files (1.22 against 1.45 s for the six).
+`CHESHIRE_PDS_EXR_COMPRESSION` names another method (the lossy ones change the values and are for
+experiments only). Uncompressed was considered and rejected: 162 MB per image instead of 73, a
+143 GB cache for the 884-view job on a SATA SSD, and the depth-map node's reads would be bound by
+the disk instead of scaling across the threads that inflate.
+
 What is left in the node after this is the chunk setup (19-27 s, mostly reading the SfM data
 with its 1.35 million landmarks, once per 12-view chunk - a larger block size in the Meshroom node
 would amortise it), the first batch of each chunk, which is cold by construction, and the

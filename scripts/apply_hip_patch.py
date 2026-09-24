@@ -4268,6 +4268,29 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
         t = t[:i0] + (ROOT / "hip/port/sgm_fused/resize_call.cpp.txt").read_text(encoding="utf-8").replace("\n", NL) + t[i0 + len(old):]
         iac.write_text(t, encoding="utf-8", newline="")
 
+    # 5y. PrepareDenseScene writes ZIP (16 scanlines per block) instead of the writer's default
+    #     ZIPS (one per scanline): the same pixels, fewer zlib streams, a cheaper write and a cheaper
+    #     read in every later node (the depth-map node loads each image ~3.5 times over a job).
+    #     CHESHIRE_PDS_EXR_COMPRESSION overrides. hip/port/sgm_fused/pds_write_options.cpp.txt is
+    #     the helper.
+    pds = AV / "src/software/pipeline/main_prepareDenseScene.cpp"
+    t = pds.read_text(encoding="utf-8")
+    if "cheshirePdsWriteOptions" not in t:
+        anchor = "template<class ImageT, class MaskFuncT>" + NL  # the process() template that writes the images
+        if t.count(anchor) != 1:
+            sys.exit("process template not found once in main_prepareDenseScene.cpp")
+        t = t.replace(anchor, (ROOT / "hip/port/sgm_fused/pds_write_options.cpp.txt").read_text(encoding="utf-8").replace("\n", NL) + anchor, 1)
+        old = "image::ImageWriteOptions(), metadata);"
+        if t.count(old) != 2:
+            sys.exit("two writeImage calls expected in main_prepareDenseScene.cpp")
+        t = t.replace(old, "cheshirePdsWriteOptions(), metadata);")
+        if "#include <cstdlib>" not in t:
+            inc = "#include <boost/program_options.hpp>" + NL
+            if t.count(inc) != 1:
+                sys.exit("program_options include not found once in main_prepareDenseScene.cpp")
+            t = t.replace(inc, inc + "#include <cstdlib>" + NL + "#include <string>" + NL, 1)
+        pds.write_text(t, encoding="utf-8", newline="")
+
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
     #     when the cards in front of us are both compute 6.1. FORCE beats -D on the command line, so

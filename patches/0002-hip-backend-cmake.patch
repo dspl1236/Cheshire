@@ -5907,7 +5907,7 @@ index 4fe193b..a271a2f 100644
                      fuseCut::Mesher mesher(mp, pc, tetrahedralization, gfiller.getCellsStatus());
                      mesher.graphCutPostProcessing(&hexah[0]);
 diff --git a/src/software/pipeline/main_prepareDenseScene.cpp b/src/software/pipeline/main_prepareDenseScene.cpp
-index a37cb29..0ba0d51 100644
+index a37cb29..53ee3be 100644
 --- a/src/software/pipeline/main_prepareDenseScene.cpp
 +++ b/src/software/pipeline/main_prepareDenseScene.cpp
 @@ -4,6 +4,8 @@
@@ -5948,7 +5948,36 @@ index a37cb29..0ba0d51 100644
  
  #include <boost/program_options.hpp>
  
-@@ -55,7 +79,9 @@ void process(const std::string& dstColorImage,
+@@ -45,6 +69,28 @@ using namespace aliceVision::sfmDataIO;
+ namespace po = boost::program_options;
+ namespace fs = std::filesystem;
+ 
++// cheshire (step 5y): the EXR compression of the undistorted images. Upstream leaves the writer on
++// its default, ZIPS - one zlib stream per scanline, 3376 of them for a 6000x3376 image - and every
++// later node pays to inflate them: the depth-map node loads each image about 3.5 times over a job,
++// texturing once per atlas sheet. ZIP compresses 16 scanlines per block: fewer streams, a slightly
++// better ratio, and a cheaper read and write, with the same pixels. CHESHIRE_PDS_EXR_COMPRESSION
++// names another method (none, rle, zip, zips, piz, pxr24, b44, b44a, dwaa, dwab) - the lossy ones
++// change the values and are for experiments only.
++static image::ImageWriteOptions cheshirePdsWriteOptions()
++{
++    static const image::ImageWriteOptions options = [] {
++        std::string method = "zip";
++        if (const char* v = std::getenv("CHESHIRE_PDS_EXR_COMPRESSION"))
++            method = v;
++        image::ImageWriteOptions o;
++        o.exrCompressionMethod(image::EImageExrCompression_stringToEnum(method));
++        ALICEVISION_LOG_INFO("cheshire: undistorted images written with EXR compression '" << method
++                             << "' (CHESHIRE_PDS_EXR_COMPRESSION to change; upstream's default is zips)");
++        return o;
++    }();
++    return options;
++}
++
+ template<class ImageT, class MaskFuncT>
+ void process(const std::string& dstColorImage,
+              const IntrinsicBase* cam,
+@@ -55,7 +101,9 @@ void process(const std::string& dstColorImage,
               MaskFuncT&& maskFunc)
  {
      ImageT image, image_ud;
@@ -5958,7 +5987,7 @@ index a37cb29..0ba0d51 100644
  
      // exposure correction
      if (evCorrection)
-@@ -70,6 +96,7 @@ void process(const std::string& dstColorImage,
+@@ -70,6 +118,7 @@ void process(const std::string& dstColorImage,
  
      // mask
      maskFunc(image);
@@ -5966,22 +5995,24 @@ index a37cb29..0ba0d51 100644
  
      // undistort
      if (cam->isValid() && cam->hasDistortion())
-@@ -78,11 +105,14 @@ void process(const std::string& dstColorImage,
+@@ -78,11 +127,14 @@ void process(const std::string& dstColorImage,
          using Pix = typename ImageT::Tpixel;
          Pix pixZero(Pix::Zero());
          UndistortImage(image, cam, image_ud, pixZero);
+-        writeImage(dstColorImage, image_ud, image::ImageWriteOptions(), metadata);
 +        cheshirePdsProfile.undistortUs += cheshireUsSince(cheshireT); cheshireT = std::chrono::steady_clock::now();
-         writeImage(dstColorImage, image_ud, image::ImageWriteOptions(), metadata);
++        writeImage(dstColorImage, image_ud, cheshirePdsWriteOptions(), metadata);
 +        cheshirePdsProfile.writeUs += cheshireUsSince(cheshireT); ++cheshirePdsProfile.views;
      }
      else
      {
-         writeImage(dstColorImage, image, image::ImageWriteOptions(), metadata);
+-        writeImage(dstColorImage, image, image::ImageWriteOptions(), metadata);
++        writeImage(dstColorImage, image, cheshirePdsWriteOptions(), metadata);
 +        cheshirePdsProfile.writeUs += cheshireUsSince(cheshireT); ++cheshirePdsProfile.views;
      }
  }
  
-@@ -132,7 +162,10 @@ bool prepareDenseScene(const SfMData& sfmData,
+@@ -132,7 +184,10 @@ bool prepareDenseScene(const SfMData& sfmData,
      const double medianCameraExposure = sfmData.getMedianCameraExposureSetting().getExposure();
      ALICEVISION_LOG_INFO("Median Camera Exposure: " << medianCameraExposure << ", Median EV: " << std::log2(1.0 / medianCameraExposure));
  
@@ -5993,7 +6024,7 @@ index a37cb29..0ba0d51 100644
      for (int i = 0; i < viewIds.size(); ++i)
      {
          auto itView = viewIds.begin();
-@@ -335,7 +368,7 @@ int aliceVision_main(int argc, char* argv[])
+@@ -335,7 +390,7 @@ int aliceVision_main(int argc, char* argv[])
           "Correct exposure value.");
      // clang-format on
  
