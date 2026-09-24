@@ -1,9 +1,9 @@
-// Cheshire GPU JPEG: the decode and encode sequences, written once over a backend.
+// CheshireJPG: the decode and encode sequences, written once over a backend.
 //
 // A backend provides alloc/release, upload/download, zero, and forEach(n, functor). The GPU
 // backend (jpegGPU.cu) launches one thread per index; the CPU backend (jpegCpuBackend.hpp) loops.
 // Both run the functors of jpegStages.hpp in exactly this order, which is what lets the host check
-// in hip/tests/jpeg vouch for the device path's arithmetic and control flow without a GPU.
+// in hip/tests/cheshirejpg vouch for the device path's arithmetic and control flow without a GPU.
 #pragma once
 
 #include "jpegCodec.hpp"

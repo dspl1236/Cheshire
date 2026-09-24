@@ -1,4 +1,4 @@
-// Cheshire GPU JPEG: a baseline JPEG decoder and encoder that run on any GPU HIP (or CUDA) runs
+// CheshireJPG: a baseline JPEG decoder and encoder that run on any GPU HIP (or CUDA) runs
 // on, with output identical to libjpeg-turbo's.
 //
 // rocJPEG, AMD's JPEG library, hands the bitstream to the VCN block's fixed-function JPEG engine
@@ -17,7 +17,7 @@
 // "Identical" means: decode gives the bytes libjpeg-turbo's jpeg_read_scanlines gives with its
 // defaults (JDCT_ISLOW, fancy upsampling, RGB or grayscale out), and encode gives the file
 // jpeg_write_scanlines writes with jpeg_set_defaults + jpeg_set_quality(q, TRUE) and the chosen
-// sampling factors and restart interval. hip/tests/jpeg checks both.
+// sampling factors and restart interval. hip/tests/cheshirejpg checks both.
 #pragma once
 
 #include <cstddef>
@@ -34,7 +34,7 @@ enum class Status
     NotJpeg,      // no SOI, or truncated before the first scan
     Unsupported,  // valid JPEG this codec does not handle (see above)
     Corrupt,      // damaged stream; libjpeg would decode it with warnings
-    NoDevice,     // no GPU, or disabled by CHESHIRE_GPU_JPEG=0
+    NoDevice,     // no GPU, or disabled by CHESHIRE_JPG=0
     DeviceError,  // a runtime call failed
     InvalidArgument,
 };
@@ -84,7 +84,7 @@ class Codec
     Codec(const Codec&) = delete;
     Codec& operator=(const Codec&) = delete;
 
-    // True if a device is present and CHESHIRE_GPU_JPEG is not 0. Checked once per process.
+    // True if a device is present and CHESHIRE_JPG is not 0. Checked once per process.
     static bool deviceAvailable();
 
     Status decode(const uint8_t* jpeg, size_t size, Image& out, DecodeStats* stats = nullptr);

@@ -1,11 +1,11 @@
-// Cheshire GPU JPEG: the device pipeline, run on the CPU backend, against libjpeg-turbo.
+// CheshireJPG: the device pipeline, run on the CPU backend, against libjpeg-turbo.
 //
 // Every stage functor the kernels run is run here in the same order, so this checks the codec's
 // arithmetic and its parallel decomposition (the Huffman synchronisation, the scans, the
 // byte-stuffing scatter) without a GPU. What it cannot check is the device compiler and runtime;
-// jpeg_gpu_check does that on hardware.
+// cheshirejpg_gpu_check does that on hardware.
 //
-//   jpeg_cpu_check [--testimages DIR] [--large] [extra.jpg ...]
+//   cheshirejpg_cpu_check [--testimages DIR] [--large] [extra.jpg ...]
 //
 // Decode: pixels must equal jpeg_read_scanlines' and every real block's coefficients must equal
 // jpeg_read_coefficients'. Encode: the file must equal libjpeg's byte for byte. Mutated streams:

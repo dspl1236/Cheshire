@@ -1,8 +1,8 @@
-// cheshire_jpeg: the GPU JPEG codec from the command line.
+// cheshirejpg: CheshireJPG, the GPU JPEG codec, from the command line.
 //
-//   cheshire_jpeg decode in.jpg out.ppm|out.pgm
-//   cheshire_jpeg encode in.ppm|in.pgm out.jpg [-q quality] [-s 444|422|420|440|gray] [-r restart]
-//   cheshire_jpeg bench  in.jpg [repetitions]
+//   cheshirejpg decode in.jpg out.ppm|out.pgm
+//   cheshirejpg encode in.ppm|in.pgm out.jpg [-q quality] [-s 444|422|420|440|gray] [-r restart]
+//   cheshirejpg bench  in.jpg [repetitions]
 //
 // Exit status 0 on success, 1 on a codec error, 2 on usage or I/O errors, 3 when the file is one
 // the codec hands back (progressive, arithmetic, CMYK, damaged): libjpeg decodes those.
@@ -84,15 +84,15 @@ bool readPnm(const char* path, Image& img)
 int usage()
 {
     std::fprintf(stderr,
-                 "usage: cheshire_jpeg decode in.jpg out.ppm|out.pgm\n"
-                 "       cheshire_jpeg encode in.ppm|in.pgm out.jpg [-q quality] [-s 444|422|420|440|gray] [-r restart]\n"
-                 "       cheshire_jpeg bench  in.jpg [repetitions]\n");
+                 "usage: cheshirejpg decode in.jpg out.ppm|out.pgm\n"
+                 "       cheshirejpg encode in.ppm|in.pgm out.jpg [-q quality] [-s 444|422|420|440|gray] [-r restart]\n"
+                 "       cheshirejpg bench  in.jpg [repetitions]\n");
     return 2;
 }
 
 int fail(Status s)
 {
-    std::fprintf(stderr, "cheshire_jpeg: %s\n", statusName(s));
+    std::fprintf(stderr, "cheshirejpg: %s\n", statusName(s));
     return s == Status::Unsupported || s == Status::Corrupt ? 3 : 1;
 }
 
@@ -105,7 +105,7 @@ int main(int argc, char** argv)
     const std::string cmd = argv[1];
     if (!Codec::deviceAvailable())
     {
-        std::fprintf(stderr, "cheshire_jpeg: no GPU device (or CHESHIRE_GPU_JPEG=0)\n");
+        std::fprintf(stderr, "cheshirejpg: no GPU device (or CHESHIRE_JPG=0)\n");
         return 1;
     }
     Codec codec;

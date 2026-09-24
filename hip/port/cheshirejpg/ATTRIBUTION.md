@@ -2,7 +2,7 @@
 
 **This software is based in part on the work of the Independent JPEG Group.**
 
-The GPU JPEG codec in this directory is new code, written for Cheshire and not a fork of any JPEG
+CheshireJPG, the GPU JPEG codec in this directory, is new code, written for Cheshire and not a fork of any JPEG
 library. Its purpose is to produce output identical to libjpeg-turbo's, so the integer arithmetic,
 tables and edge rules of several libjpeg-turbo source files are reproduced in it. Those files are
 covered by the IJG License (libjpeg-turbo's modifications to IJG code are also under the IJG

@@ -1,6 +1,6 @@
-// Cheshire GPU JPEG: a host backend for jpegPipeline.hpp. It runs every stage functor as a plain
+// CheshireJPG: a host backend for jpegPipeline.hpp. It runs every stage functor as a plain
 // loop, in the order the device runs them, so the arithmetic and the control flow of the GPU path
-// can be checked against libjpeg-turbo on a machine without a GPU (hip/tests/jpeg). It is a
+// can be checked against libjpeg-turbo on a machine without a GPU (hip/tests/cheshirejpg). It is a
 // verification tool, not a fast CPU codec - libjpeg-turbo is that.
 #pragma once
 

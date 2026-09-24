@@ -1,5 +1,5 @@
 """Worst-case intermediates of libjpeg's accurate integer IDCT (jidctint.c), for the limits in
-hip/port/gpu_jpeg/jpegTypes.hpp (kMaxDequantized, kMaxColumnPass).
+hip/port/cheshirejpg/jpegTypes.hpp (kMaxDequantized, kMaxColumnPass).
 
 The GPU decoder computes the IDCT in 32-bit integers where libjpeg's C path uses 64-bit JLONG and
 its SIMD paths dequantise in 16 bits and pack the column pass to 16 bits with saturation. The three

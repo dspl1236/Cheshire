@@ -1,9 +1,9 @@
-// Cheshire GPU JPEG: the device backend and the public Codec. CUDA dialect; the HIP build
+// CheshireJPG: the device backend and the public Codec. CUDA dialect; the HIP build
 // force-includes cheshire/cuda_to_hip.h, so device allocations go through the memory bridge like
 // every other Cheshire port (a very large image spills to host RAM instead of failing).
 //
 // Everything runs on the legacy default stream: uploads and downloads are synchronous copies and
-// kernels queue behind them, which keeps the ordering obvious. CHESHIRE_GPU_JPEG=0 disables.
+// kernels queue behind them, which keeps the ordering obvious. CHESHIRE_JPG=0 disables.
 #include "jpegCodec.hpp"
 #include "jpegPipeline.hpp"
 
@@ -34,7 +34,7 @@ struct GpuBackend
     {
         if (e != cudaSuccess && !failed)
         {
-            std::fprintf(stderr, "[cheshire] gpu jpeg: %s failed: %s\n", what, cudaGetErrorString(e));
+            std::fprintf(stderr, "[cheshire] CheshireJPG: %s failed: %s\n", what, cudaGetErrorString(e));
             failed = true;
         }
     }
@@ -82,16 +82,16 @@ bool g_available = false;
 
 void probe()
 {
-    if (const char* e = std::getenv("CHESHIRE_GPU_JPEG"))
+    if (const char* e = std::getenv("CHESHIRE_JPG"))
         if (e[0] == '0')
         {
-            std::fprintf(stderr, "[cheshire] gpu jpeg: disabled by CHESHIRE_GPU_JPEG=0\n");
+            std::fprintf(stderr, "[cheshire] CheshireJPG: disabled by CHESHIRE_JPG=0\n");
             return;
         }
     int n = 0;
     if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1)
     {
-        std::fprintf(stderr, "[cheshire] gpu jpeg: no GPU device\n");
+        std::fprintf(stderr, "[cheshire] CheshireJPG: no GPU device\n");
         return;
     }
     g_available = true;

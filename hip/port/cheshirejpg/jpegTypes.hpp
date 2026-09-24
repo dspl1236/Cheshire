@@ -1,4 +1,4 @@
-// Cheshire GPU JPEG: the per-element arithmetic, shared by the device kernels and the CPU check.
+// CheshireJPG: the per-element arithmetic, shared by the device kernels and the CPU check.
 //
 // Everything here is libjpeg-turbo 2.1's integer path transcribed, not approximated: the
 // accurate-integer IDCT (jidctint.c), its post-IDCT range-limit table (jdmaster.c), fancy
@@ -6,7 +6,7 @@
 // (jfdctint.c), the reciprocal quantiser (jcdctmgr.c) and the sample-plane edge rules of the
 // compressor (jcsample.c, jcprepct.c, jccoefct.c). Those are the paths OpenImageIO's JPEG reader
 // and writer take with libjpeg's defaults, so "identical to libjpeg-turbo" is the claim, and
-// hip/tests/jpeg checks it byte for byte.
+// hip/tests/cheshirejpg checks it byte for byte.
 //
 // Arithmetic is 32-bit where libjpeg's C path uses JLONG (64-bit long on LP64). For coefficients
 // a conforming 8-bit encoder can produce no intermediate exceeds 31 bits; idctIslow() checks the

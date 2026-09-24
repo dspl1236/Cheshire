@@ -1,4 +1,4 @@
-// Cheshire GPU JPEG: see jpegHost.hpp.
+// CheshireJPG: see jpegHost.hpp.
 //
 // This software is based in part on the work of the Independent JPEG Group. Parts of this file
 // reproduce the arithmetic of IJG / libjpeg-turbo source files; ATTRIBUTION.md lists which, with

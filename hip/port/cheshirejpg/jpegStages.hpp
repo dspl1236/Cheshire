@@ -1,10 +1,10 @@
-// Cheshire GPU JPEG: the pipeline stages as functors.
+// CheshireJPG: the pipeline stages as functors.
 //
 // Every stage is "for i in [0, n): f(i)" over plain structs of pointers, so the same code is a
 // kernel on the device (jpegGPU.cu launches forEachKernel<F>) and a loop on the host (the CPU
 // backend in jpegCpuBackend.hpp). Scans are written the same way - a chunk pass, one serial pass
 // over the chunk totals, and a chunk rewrite - so no stage depends on warp or workgroup primitives
-// and every line a kernel runs is also run by the host check (hip/tests/jpeg).
+// and every line a kernel runs is also run by the host check (hip/tests/cheshirejpg).
 //
 // Decoding the entropy-coded segment in parallel (the part rocJPEG leaves to fixed-function VCN
 // hardware) follows Weissenberger & Schmidt, "Massively Parallel Huffman Decoding on GPUs"
@@ -21,7 +21,7 @@
 // (DecodeGeom::uniformTables). DC prediction and the output block index are not part of it: each
 // subsequence records how many blocks it started and its DC differences per block slot, and a
 // segmented scan over those gives every subsequence its block index and DC predictors before the
-// writing pass. docs/19-gpu-jpeg.md has the measurements.
+// writing pass. docs/19-cheshirejpg.md has the measurements.
 //
 // This software is based in part on the work of the Independent JPEG Group. Parts of this file
 // reproduce the arithmetic of IJG / libjpeg-turbo source files; ATTRIBUTION.md lists which, with

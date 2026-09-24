@@ -1,4 +1,4 @@
-# A JPEG codec on the GPU, for any Radeon
+# CheshireJPG: a JPEG codec on the GPU, for any Radeon
 
 Cheshire's pipeline starts from JPEGs and keeps decoding them: PrepareDenseScene's read phase is JPEG
 decode plus the OCIO conversion, 47 % of that node's thread time on the RX 9070 box and 50.6
@@ -31,7 +31,7 @@ no restart markers, which is most camera JPEGs (80 of the 88 camera files below 
 
 ## Layout
 
-`hip/port/gpu_jpeg/`, CUDA dialect like every other port; the HIP build force-includes
+`hip/port/cheshirejpg/`, CUDA dialect like every other port; the HIP build force-includes
 `cheshire/cuda_to_hip.h`, so device buffers go through the memory bridge.
 
 | file | what |
@@ -43,14 +43,14 @@ no restart markers, which is most camera JPEGs (80 of the 88 camera files below 
 | `jpegHost.cpp` | marker parsing, unstuffing, table building, header writing |
 | `jpegGPU.cu` | the device backend (one thread per index) and `Codec` |
 | `jpegCpuBackend.hpp` | the host backend (a loop), for verification |
-| `jpegTool.cpp` | `cheshire_jpeg decode / encode / bench` |
-| `CMakeLists.txt` | `cheshire_gpu_jpeg` static library + the tool; `CHESHIRE_JPEG_GPU=HIP` or `CUDA` |
+| `cheshirejpgTool.cpp` | `cheshirejpg decode / encode / bench` |
+| `CMakeLists.txt` | `CheshireJPG` static library + the tool; `CHESHIREJPG_GPU=HIP` or `CUDA` |
 
 The backend split is what makes the claims below checkable without a GPU. A stage is
 `forEach(n, functor)`: the device backend launches `forEachKernel<F>`, the host backend runs the loop.
 No stage uses warp or workgroup primitives - scans are a chunk pass, a serial pass over the chunk
 totals and a chunk rewrite - so every line a kernel executes is also executed by
-`hip/tests/jpeg/jpeg_cpu_check`, in the same order, against libjpeg-turbo.
+`hip/tests/cheshirejpg/cheshirejpg_cpu_check`, in the same order, against libjpeg-turbo.
 
 ## Decoding
 
@@ -144,7 +144,7 @@ is off; the decoder handles files that use them).
 
 **Done here, without a GPU** (container with no device; libjpeg-turbo 2.1.5 as the reference):
 
-`jpeg_cpu_check` - the device pipeline on the host backend - run against libjpeg-turbo's SIMD
+`cheshirejpg_cpu_check` - the device pipeline on the host backend - run against libjpeg-turbo's SIMD
 paths and again with `JSIMD_FORCENONE=1` against its C paths. Both runs:
 
 | check | cases | result |
@@ -163,24 +163,24 @@ VGPRs (10-11 waves/SIMD on RDNA1/2, 16 on RDNA3), every other kernel runs at 16 
 written but not compiled here.
 
 **Not done: running on a GPU.** Everything above says the device code computes the right thing
-and compiles; `jpeg_gpu_check` is what says the device runtime executes it as written, and it has
+and compiles; `cheshirejpg_gpu_check` is what says the device runtime executes it as written, and it has
 not run yet. Timings do not exist.
 
 ## Build and run
 
 ```
 # the host check (any machine with libjpeg-turbo)
-cmake -S hip/tests/jpeg -B build/jpeg -DCHESHIRE_JPEG_GPU=OFF
-cmake --build build/jpeg && build/jpeg/jpeg_cpu_check --testimages <libjpeg-turbo>/testimages photos/*.jpg
+cmake -S hip/tests/cheshirejpg -B build/jpeg -DCHESHIREJPG_GPU=OFF
+cmake --build build/jpeg && build/jpeg/cheshirejpg_cpu_check --testimages <libjpeg-turbo>/testimages photos/*.jpg
 
-# the device check and the tool (HIP SDK / ROCm; CHESHIRE_JPEG_GPU=CUDA for NVIDIA)
-cmake -S hip/tests/jpeg -B build/jpeg-gpu -DCMAKE_HIP_ARCHITECTURES="gfx1201;gfx1030;gfx1010"
+# the device check and the tool (HIP SDK / ROCm; CHESHIREJPG_GPU=CUDA for NVIDIA)
+cmake -S hip/tests/cheshirejpg -B build/jpeg-gpu -DCMAKE_HIP_ARCHITECTURES="gfx1201;gfx1030;gfx1010"
 cmake --build build/jpeg-gpu
-build/jpeg-gpu/jpeg_gpu_check --reps 10 photos/*.jpg     # identity, then GPU vs libjpeg-turbo times
-build/jpeg-gpu/gpu_jpeg/cheshire_jpeg bench photo.jpg 20
+build/jpeg-gpu/cheshirejpg_gpu_check --reps 10 photos/*.jpg     # identity, then GPU vs libjpeg-turbo times
+build/jpeg-gpu/cheshirejpg/cheshirejpg bench photo.jpg 20
 ```
 
-`jpeg_gpu_check` prints per file the subsequence and round counts and the median end-to-end decode
+`cheshirejpg_gpu_check` prints per file the subsequence and round counts and the median end-to-end decode
 and q90 re-encode time against libjpeg-turbo's, after checking both are identical.
 
 ## API
@@ -196,7 +196,7 @@ codec.encode(img.pixels.data(), img.width, img.height, img.channels, img.width *
              {90, cheshire::jpeg::Subsampling::S420, 0}, jpeg);
 ```
 
-`CHESHIRE_GPU_JPEG=0` disables the device path (`Status::NoDevice`).
+`CHESHIRE_JPG=0` disables the device path (`Status::NoDevice`).
 
 ## Scope
 
@@ -212,14 +212,14 @@ from libjpeg because of this codec.
 
 The codec is new code, but its arithmetic is libjpeg-turbo's on purpose, because that is what makes
 the output identical. This software is based in part on the work of the Independent JPEG Group.
-[`hip/port/gpu_jpeg/ATTRIBUTION.md`](../hip/port/gpu_jpeg/ATTRIBUTION.md) lists every derived part
+[`hip/port/cheshirejpg/ATTRIBUTION.md`](../hip/port/cheshirejpg/ATTRIBUTION.md) lists every derived part
 with its original file, copyright notice and the changes made; the IJG License ships unaltered as
-`hip/port/gpu_jpeg/README.ijg`. The parallel Huffman decode follows Weissenberger & Schmidt (ICPP
+`hip/port/cheshirejpg/README.ijg`. The parallel Huffman decode follows Weissenberger & Schmidt (ICPP
 2018).
 
 ## Next
 
-1. **Run `jpeg_gpu_check` on the RX 9070, RX 6750 XT and RX 5500 XT**, Windows and Linux. Identity
+1. **Run `cheshirejpg_gpu_check` on the RX 9070, RX 6750 XT and RX 5500 XT**, Windows and Linux. Identity
    first, then the timings - end to end, since that is what a node sees.
 2. **Profile before optimising.** Likely costs, in the order I expect them: the host unstuffing
    (sequential, about memcpy speed), the pageable-memory copies, the round-trip per synchronisation

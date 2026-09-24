@@ -1,6 +1,6 @@
-// Cheshire GPU JPEG: the codec on the device, against libjpeg-turbo, with timings.
+// CheshireJPG: the codec on the device, against libjpeg-turbo, with timings.
 //
-//   jpeg_gpu_check [--reps N] [--no-synthetic] [photo.jpg ...]
+//   cheshirejpg_gpu_check [--reps N] [--no-synthetic] [photo.jpg ...]
 //
 // Synthetic cases: every sampling layout the encoder writes, at edge-case sizes, qualities and
 // restart intervals; the encoded file must equal libjpeg's byte for byte and the decode of it must
@@ -60,7 +60,7 @@ int main(int argc, char** argv)
     }
     if (!Codec::deviceAvailable())
     {
-        std::printf("no GPU device (or CHESHIRE_GPU_JPEG=0)\n");
+        std::printf("no GPU device (or CHESHIRE_JPG=0)\n");
         return 2;
     }
     Codec codec;

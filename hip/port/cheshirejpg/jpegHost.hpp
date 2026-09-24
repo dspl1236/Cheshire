@@ -1,4 +1,4 @@
-// Cheshire GPU JPEG: host-side work - marker parsing, unstuffing the entropy-coded data, building
+// CheshireJPG: host-side work - marker parsing, unstuffing the entropy-coded data, building
 // the tables the kernels read, and writing the headers of an encoded file. Plain C++.
 #pragma once
 

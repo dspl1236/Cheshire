@@ -1,5 +1,5 @@
-// Cheshire GPU JPEG checks: libjpeg-turbo as the reference, plus synthetic test images.
-// Shared by jpeg_cpu_check (the pipeline on the CPU backend) and jpeg_gpu_check (the device).
+// CheshireJPG checks: libjpeg-turbo as the reference, plus synthetic test images.
+// Shared by cheshirejpg_cpu_check (the pipeline on the CPU backend) and cheshirejpg_gpu_check (the device).
 #pragma once
 
 #include <cstdint>
