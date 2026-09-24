@@ -218,13 +218,33 @@ written but not compiled here.
   legacy default stream: synchronous copies and the per-round flag readbacks serialised all
   threads on one queue. From four threads up, libjpeg-turbo on six cores was ahead. A node that
   decodes on 12 threads would have been slower with CheshireJPG, so it was not wired into one.
-  "A stream per Codec" above is the change for this. It has not been measured on a card yet.
+  "A stream per Codec" above is the change for this.
+
+**The stream per Codec, measured: RX 9070, same machine, commit `99159e9` plus the Windows build fix
+below.** Identity is unchanged: `cheshirejpg_cpu_check` passes, including the new deferred-runtime
+check of the asynchronous ordering, with SIMD and with `JSIMD_FORCENONE=1`; `cheshirejpg_gpu_check`
+passes 201 cases, 0 failed. One call at a time the medians are 30.3 ms to decode and 9.4 ms to
+encode. Throughput, 24 photographs, 2 repetitions per thread:
+
+| threads | 1 | 2 | 4 | 6 | 8 | 12 | 16 |
+|---|---|---|---|---|---|---|---|
+| CheshireJPG, images/s | 35 | 80 | 124 | 126 | 152 | 148 | 149 |
+| libjpeg-turbo, images/s | 18 | 31 | 58 | 82 | 103 | 116 | 118 |
+
+  CheshireJPG now scales to about 150 images/s from eight threads, where it levels off, and is
+  ahead of libjpeg-turbo at every thread count: 2.1x at four threads (house-pc's CPU has four),
+  1.3x at twelve.
 
 **The CMake fix that run needed.** As pushed in `e7b9574`, `CheshireJPG` linked
 `PRIVATE hip::device`. That adds HIP compile options to every source of the target, so
 `jpegHost.cpp` was compiled as HIP for the default gfx906 without the compat header, and failed
 (`'atomicOr'` and `'__clz'` undeclared). The library now links `hip::host` only. The container
 build had used hipcc directly and so never saw this.
+
+**The Windows build fix for `99159e9`.** On Windows the HIP runtime headers include `windows.h`,
+whose `max` macro rewrote `std::max(need, ...)` in `jpegAsyncBackend.hpp` into a syntax error.
+The call is written `(std::max)(...)`, which no macro can expand; it was the only `std::max` or
+`std::min` in the device translation unit.
 
 ## Build and run
 
@@ -282,10 +302,8 @@ with its original file, copyright notice and the changes made; the IJG License s
 
 ## Next
 
-1. **Measure the stream per `Codec` on the RX 9070**: `--threads 1,2,4,8,12`, against the 48
-   images/s ceiling above and libjpeg-turbo's 109 at 12. If the waits after each synchronisation
-   round (9 to 14 per photograph) are what remains, the next change is a round loop that stays on
-   the device. This all comes before any integration.
+1. **Done: the stream per `Codec` on the RX 9070**, about 150 images/s from eight threads against
+   libjpeg-turbo's 118 (above). The ceiling there is the next thing to explain.
 2. **Identity on the RX 6750 XT and RX 5500 XT**, Windows and Linux. The RX 9070 on Windows has
    passed.
 3. **Profile what is left.** The host unstuffing (sequential, about memcpy speed), the round-trip

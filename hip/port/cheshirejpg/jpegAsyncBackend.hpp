@@ -149,7 +149,7 @@ class AsyncBackend
                     rt_.hostFree(stage_);
                 stage_ = nullptr;
                 cap_ = 0;
-                const size_t want = std::max(need, (size_t)8 << 20);
+                const size_t want = (std::max)(need, (size_t)8 << 20);
                 void* p = nullptr;
                 check(rt_.hostAlloc(&p, want), "pinned host alloc");
                 if (failed_)
