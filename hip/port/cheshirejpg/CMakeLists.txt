@@ -41,6 +41,10 @@ else()
   target_link_libraries(CheshireJPG PUBLIC hip::host)
 endif()
 target_include_directories(CheshireJPG PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# Position-independent: the library links into PIE executables (Ubuntu's gcc default) and later into
+# AliceVision's shared libraries. Without it the device-compiled object failed to link on Linux
+# (R_X86_64_32S against .text, "recompile with -fPIE").
+set_target_properties(CheshireJPG PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_executable(cheshirejpg_cli cheshirejpgTool.cpp)
 set_target_properties(cheshirejpg_cli PROPERTIES OUTPUT_NAME cheshirejpg)
