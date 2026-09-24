@@ -262,6 +262,14 @@ L items can slide.
   this is Cheshire's work at all. If it is, output must stay at 107/107 byte-identical EXRs.
   **2026-09-24, step 6f:** the EXR write at ZIP level 1 (30 % less write CPU than level 4, 1.4 %
   larger, same pixels; `CHESHIRE_PDS_EXR_COMPRESSION=method[:level]`).
+- **CheshireEXR for the reads** (L). A GPU decoder for PrepareDenseScene's EXRs, output identical to
+  OpenEXR's (docs/20): ZIP/ZIPS/RLE/NONE scanline files, one thread per chunk inflating with zlib's
+  checks, bit-identical floats on 261 generated files (every half bit pattern, 6000x3376 RGBA) and
+  no mutated file decoded differently, checked on the host. Not yet run on a card. First decide
+  whether it is the lever: profile a house-pc Texturing pass and DepthMap chunk
+  (`CHESHIRE_LOAD_PROFILE=1`, `CHESHIRE_EXR_PROFILE=1`); on the RX 9070 box Texturing is disk-bound
+  and a decoder cannot help there. Then `cheshireexr_gpu_check`, a decode into device memory for
+  DepthMap, and a switch in front of `cheshireReadExr`.
 - **CheshireJPG for the reads** (L). The GPU JPEG codec exists (docs/19): a baseline decoder and
   encoder in HIP compute kernels, not VCN, so Windows and RDNA1 are covered, identical to
   libjpeg-turbo on 88 of 89 camera files (the 89th is damaged and handed back) and on 833

@@ -22,9 +22,18 @@ and the changes made. The IJG License is included unaltered as hip/port/cheshire
 and libjpeg-turbo's license summary as hip/port/cheshirejpg/LICENSE.libjpeg-turbo.md. The test
 programs under hip/tests/cheshirejpg link libjpeg-turbo as their reference.
 
+CheshireEXR, the GPU EXR decoder in hip/port/cheshireexr, is original work licensed under the
+MPL-2.0. To decode exactly as OpenEXR does, it reproduces OpenEXR's predictor, byte reordering and
+run-length format and Imath's half-to-float conversion (both BSD-3-Clause, Copyright Contributors to
+the OpenEXR Project), and the canonical Huffman decoding loop of Mark Adler's puff.c (zlib licence).
+hip/port/cheshireexr/ATTRIBUTION.md lists each part, and the licences are included there. Its test
+programs under hip/tests/cheshireexr link OpenEXR as their reference.
+
+The shared GPU backends in hip/port/cheshiregpu are original work licensed under the MPL-2.0.
+
 The compatibility layer, memory bridge, mipmap emulation, probes, scripts and documentation
 (hip/compat, hip/tests, scripts, docs) are original work licensed under the MPL-2.0.
 
-Not affiliated with or endorsed by AliceVision, Meshroom, AMD, NVIDIA, the Independent JPEG Group
-or the libjpeg-turbo Project. CUDA, HIP, ROCm, Radeon and GeForce are trademarks of their
-respective owners.
+Not affiliated with or endorsed by AliceVision, Meshroom, AMD, NVIDIA, the Independent JPEG Group,
+the libjpeg-turbo Project or the OpenEXR Project. CUDA, HIP, ROCm, Radeon and GeForce are trademarks
+of their respective owners.
