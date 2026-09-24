@@ -264,6 +264,11 @@ L items can slide.
   this is Cheshire's work at all. If it is, output must stay at 107/107 byte-identical EXRs.
   **2026-09-24, step 6f:** the EXR write at ZIP level 1 (30 % less write CPU than level 4, 1.4 %
   larger, same pixels; `CHESHIRE_PDS_EXR_COMPRESSION=method[:level]`).
+  **2026-09-24, step 6n:** the JPEG read measured first: decode 11 %, the colour conversion 48 % and
+  the alpha-channel pass 27 %, both OpenImageIO copying full float images. The direct read fills
+  colorconvert's own per-row scratch lines from the 8-bit pixels and applies the same processor:
+  107/107 EXRs byte-identical, read 139 to 67 thread-seconds, the node 28.1 to 19.1 s on the RX 9070
+  box (`CHESHIRE_READ_DIRECT=0` restores upstream). House-pc numbers with the next Linux bundle.
 - **CheshireEXR for the reads** (L). A GPU decoder for PrepareDenseScene's EXRs, output identical to
   OpenEXR's (docs/20): ZIP/ZIPS/RLE/NONE scanline files, one thread per chunk inflating with zlib's
   checks, bit-identical floats on 261 generated files (every half bit pattern, 6000x3376 RGBA) and
@@ -290,7 +295,8 @@ L items can slide.
   images/s from eight threads, ahead of libjpeg-turbo at every count (124 against 58 at four
   threads, 148 against 116 at twelve), still 201/201 identical. Order: identity on the RX 6750 XT
   and RX 5500 XT; profile the ceiling; then PrepareDenseScene's read behind a switch, held to
-  107/107 byte-identical EXRs; then FeatureExtraction's loads.
+  107/107 byte-identical EXRs; then FeatureExtraction's loads. After 6n the decode is about 60 of
+  the read's ~180 ms per 12 MP photo, so this is the second lever there, not the first.
 - **DepthMap host image loads** (M). About 30 % of the 41-view run is host time, and twelve
   parallel loads finish at roughly one per 0.5 s (`docs/05-performance.md:27-31`). Add a per-phase
   split in the style of `CHESHIRE_PDS_PROFILE` to tell a serial section from 6-core saturation.

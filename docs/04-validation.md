@@ -2051,3 +2051,59 @@ not a contraction"). It was the HIP intrinsics fusing despite the pragma, as 6k 
 backprojection, votes and MeshClean verdicts per pass. On the 107-photo engine bay the s9 bundle's
 Meshing is 126 s against s8's 159 s on house-pc (visibility passes 24.3 to 18.1 s, max angle 4.5 to
 1.1 s, facet weights and graph 23.7 to 12.8 s, cleaning 15.8 to 3.2 s), the job 21.1 to 20.5 minutes.
+
+## 0.3.4: the JPEG read without OpenImageIO's full-image passes (2026-09-24)
+
+The plan was CheshireJPG (docs/19) for PrepareDenseScene's reads, so first the read was split.
+`hip/tests/pdsread/pdsreadbench.cpp` times each step `image::readImage` takes for a JPEG read as
+linear RGBA float, one thread per step as the node's image threads run it (8 monstree iPhone photos,
+4032x3024, RX 9070 box):
+
+| step | ms per image | share |
+|---|---|---|
+| JPEG decode to 8-bit | 60 | 11 % |
+| 8-bit to float (the rest of `ImageBuf::read(FLOAT)`) | 16 | 3 % |
+| `ColorConfig` built for the call | 14 | 2.5 % |
+| `colorconvert` sRGB to linear | 267 | 48 % |
+| `ImageBufAlgo::channels` to RGBA | 152 | 27 % |
+| `get_pixels` into the caller's buffer | 44 | 8 % |
+| total | 556 | |
+
+The decode is the smallest part; the time is OpenImageIO copying full float images around the
+colour transform, whose OCIO processor itself takes 102 ms of the conversion's 267 (creating it is
+0.1 ms). A 256-entry table per channel cannot replace the conversion: AliceVision's `sRGB` to
+`linear` is the sRGB curve and then two 3x3 matrices that nearly cancel (Rec.709 to ACES2065-1 and
+back), so every channel depends on all three; 98 % of the converted values are not a function of
+their own 8-bit value.
+
+**6n.** `colorconvert` works per row: a scratch line of RGBA floats (the three channels, alpha 0),
+the processor applied to that line, the three channels stored back (OpenImageIO 3.0
+`colorconvert_impl`). The direct path builds the same line straight from the 8-bit pixels through
+OpenImageIO's own uint8-to-float values (`convert_pixel_values`), applies the same processor to it
+with the same call, and stores the line in the caller's buffer with alpha 1, which is what the
+channels pass would have added. The processor comes from a `ColorConfig` kept for the process
+(upstream builds one per read, 14 ms), resolved as `colorconvert` resolves it. The path takes only
+what it reproduces - three-channel 8-bit JPEG or PNG, read as float RGB or RGBA, no DCP profile,
+converted through the AliceVision config or not converted - after the same colour-space decisions
+as upstream; anything else, including grayscale reads, takes upstream's path. Rows run on
+OpenImageIO's pool unless the caller is already parallel (5w's rule). In the bench: 17 ms to fill and
+102 to apply, byte-identical to the node's buffer on 8 of 8 photos, so the read is about 180 ms
+with the decode instead of 556.
+
+Gate, engine bay (107 Pixel photos, 4032x2268), `aliceVision_prepareDenseScene` from the same
+sfm.abc with `CHESHIRE_READ_DIRECT=0` and with the default: **107 of 107 EXRs byte-identical**.
+`CHESHIRE_READ_DIRECT_CHECK=1`, which reads every image both ways and keeps upstream's result: 107 of
+107 identical on the engine bay, 6 of 6 on mini6 (iPhone). On the RX 9070 box, 12 threads:
+
+| | upstream read | direct read |
+|---|---|---|
+| wall | 28.1 s | 19.1 s |
+| read (thread-seconds) | 139.3 | 67.4 |
+| undistort | 67.9 | 60.8 |
+| write | 71.6 | 56.4 |
+
+The undistort and write phases got cheaper too: 0.3.3 item 2 found this node memory-bound on this
+box, and the direct read moves four fewer full-size float images per view. On house-pc's four
+threads PrepareDenseScene was 133 s on the engine bay and 2,425 s at 884 views; the next Linux
+bundle measures it. What remains of the read is the decode and the transform itself, which is where
+CheshireJPG comes in. `CHESHIRE_READ_DIRECT=0` restores upstream's read.
