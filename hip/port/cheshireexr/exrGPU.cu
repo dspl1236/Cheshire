@@ -73,5 +73,21 @@ Status Codec::decode(const uint8_t* file,
     return impl_->pipeline.decode(file, size, nchannels, allocate, stats);
 }
 
+Status Codec::decodeToDevice(const uint8_t* file, size_t size, int nchannels, DeviceImage& out, DecodeStats* stats)
+{
+    out = DeviceImage{};
+    if (!file)
+        return Status::InvalidArgument;
+    if (!deviceAvailable())
+        return Status::NoDevice;
+    return impl_->pipeline.decodeToDevice(file, size, nchannels, out, stats);
+}
+
+Status Codec::download(const DeviceImage& img, float* dst) { return impl_->pipeline.download(img, dst); }
+
+void* Codec::stream() const { return impl_->backend.runtime().stream(); }
+
+void Codec::trim() { impl_->pipeline.trim(); }
+
 }  // namespace exr
 }  // namespace cheshire

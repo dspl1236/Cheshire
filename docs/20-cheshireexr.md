@@ -51,6 +51,50 @@ OpenEXR. That covers tiled, multi-part, deep, PIZ, PXR24, B44, DWA, UINT, subsam
 data window not at the origin. `readHeader()` parses the header alone, so a caller can check
 `AliceVision:ColorSpace` first.
 
+`decodeToDevice(file, size, nchannels, out)` is the same decode with the last step left out: the
+floats stay in the `Codec`'s device buffer, and `out` gives their pointer, size and row pitch. They are
+complete when the call returns (it waits for the stream) and stay valid until the `Codec`'s next
+decode, `trim()` or destruction. `stream()` is the `Codec`'s stream, for work that reads them in order
+with its own; `download()` copies them to host memory; `trim()` frees the device buffers, which are
+otherwise kept for the next decode (about 0.6 GB for a 6000x3376 RGBA file).
+
+## DepthMap: decoding into device memory (step 6m)
+
+The depth-map node uploads every image it reads. Since step 6d a load is: OpenEXR inflates the file
+on the CPU, the image cache keeps 324 MB of full-resolution floats, `DeviceCache::addMipmapImage`
+uploads them and 6d's kernel downscales them on the device. With `CHESHIRE_DEPTHMAP_GPU_EXR=1` the
+batch loader (`DepthMapEstimator.cpp`, the prefetch of step 5t) hands each new camera to
+`imageProcessing/cheshireDeviceExr.cu` instead:
+
+1. read the file's bytes (73 MB, compressed) and parse its header on the host;
+2. take it only if the host path would have read it through the direct reader: a `.exr`,
+   `AliceVision:ColorSpace` absent or `linear`, the size the SfM data expects, `CHESHIRE_EXR_DIRECT`
+   not 0, and within CheshireEXR's scope (RGBA requested, so the file must have alpha);
+3. `decodeToDevice` on one of the loader's `Codec`s;
+4. 6d's downscale kernel, unchanged, reading that buffer, queued on the `Codec`'s stream, into the
+   `CudaRGBA` image `addMipmapImage` would have built;
+5. `DeviceCache::addMipmapImageFromDevice` fills the mipmap from it (6d's `fillFromDevice`).
+
+The texels are the host path's by construction: the same floats (CheshireEXR is bit-identical to
+OpenEXR), the same kernel on them. Anything the loader does not take, or a decode that fails, goes
+through the image cache as before, and the host path then reports whatever is wrong with the file.
+
+The loader is made per batch on the thread that owns the device and destroyed when the batch's loads
+are done, so none of its memory is held while the tiles run. It sizes itself from the memory
+bridge's budget: VRAM minus what is in use, minus the image reserve the planner holds for camera
+mipmaps (`Budget::imageReserveLeft`, new), minus 256 MB. Each decoder needs about 32 bytes per pixel
+and each image waiting for the device cache its downscaled texels; if not even one decoder and one
+image fit, the batch uses the host path, so a decoder buffer never spills to host memory.
+
+| switch | default | |
+|---|---|---|
+| `CHESHIRE_DEPTHMAP_GPU_EXR` | 0 | 1 decodes on the device (needs 6d's device downscale, i.e. a process downscale above 1) |
+| `CHESHIRE_DEPTHMAP_GPU_EXR_CODECS` | 2 | decoders at most, each with its own stream |
+| `CHESHIRE_DEPTHMAP_GPU_EXR_GROUP` | 8 | images decoded before they are handed to the device cache (at most the image cache's slots) |
+| `CHESHIRE_DEPTHMAP_GPU_EXR_CHECK` | 0 | 1 also runs the host path for every image and compares the texels, logging any difference |
+
+Each batch logs how many images were decoded on the device and how many went through the host path.
+
 **One design choice to measure.** An EXR ZIP chunk is 16 scanlines, so a 3376-line image is 211
 independent jobs; a ZIPS file (one scanline per chunk) is 3376. PrepareDenseScene switched from ZIPS
 to ZIP in step 5y because fewer zlib streams made the CPU write cheaper. For a GPU decoder with one
@@ -73,12 +117,18 @@ slices. Both backends:
 | 6000x3376 half RGBA ZIP, PrepareDenseScene's format (`--large`) | 1 | identical |
 | PIZ, alpha requested from an RGB file, one channel requested from RGB, not an EXR | 4 | `Unsupported` x 3, `NotExr` |
 | 1-3 bit flips inside the chunks of ZIP, ZIPS and RLE files | 600 | 157 identical to OpenEXR, 443 refused, **0 decoded differently** |
+| `decodeToDevice` on every file and mutation above, read in place and through `download()` | 861 | same status and floats as `decode` |
 
 Of the mutated files, every ZIP and ZIPS one is refused by both CheshireEXR and OpenEXR (adler32
 catches them). Of the RLE ones, 157 decode identically in both, 33 are refused by both, and 10 are
 decoded by OpenEXR but refused here, where OpenEXR's classic RLE decoder tolerates an output length
 this one checks. A refusal only means the caller's OpenEXR decodes the file, so those 10 come out
 as OpenEXR's.
+
+The `decodeToDevice` comparison starts each file from freed buffers, so on the deferred runtime its
+output is garbage until the stream runs. With the stream wait at the end of `decodeToDevice` removed
+it fails 256 of 260 files; a first version of the check reused the buffer `decode` had just filled
+and passed without the wait, and was changed for that reason.
 
 One bug was found by this check and fixed: the fixed-Huffman distance code was built with 30
 codes instead of zlib's 32, so the completeness check rejected valid streams with fixed blocks.
@@ -87,9 +137,13 @@ codes instead of zlib's 32, so the completeness check rejected valid streams wit
 `ConvertPixels` uses 13 VGPRs with no scratch and runs at 16 waves per SIMD. `InflateChunks`
 uses 128 VGPRs and 5.5 KB of scratch per lane (its Huffman tables) and runs at 8 waves. That is
 the expected shape for one thread per chunk, but its speed on a card is unknown.
-`cheshireexr_gpu_check` builds and links.
+`cheshireexr_gpu_check` builds and links. For step 6m, the patched DepthMap unity translation unit
+(CheshireEXR, the loader and 6d's kernels) and `DepthMapEstimator.cpp` compile with hipcc 5.7 for
+gfx1030 against the pinned AliceVision, and `apply_hip_patch.py` applies and re-applies cleanly.
 
-**Not done: running on a GPU.** No timings exist yet.
+**Not done: running on a GPU.** No timings exist yet, and step 6m has not run: its gate is
+`CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1` (every image identical to the host path), then byte-identical
+depth maps on mini6 and on one 884-view chunk, with the chunk's load time against the host path.
 
 ## Build and run
 
@@ -106,7 +160,8 @@ build/exr-gpu/cheshireexr_gpu_check --reps 3 --threads 1,2,4,8,12 <PrepareDenseS
 ```
 
 Per file it prints the chunk count and the median end-to-end time for CheshireEXR (read the file,
-decode, floats in host memory) against OpenEXR on the calling thread (how the read-ahead threads
+decode, floats in host memory), for CheshireEXR to device (the same, floats left on the device, as
+DepthMap uses it; checked against the host result first), against OpenEXR on the calling thread (how the read-ahead threads
 read) and with its thread pool (a lone read). `--threads` gives images per second with one `Codec`
 per thread.
 
@@ -116,9 +171,9 @@ per thread.
    whether this is the lever at all.
 2. **`cheshireexr_gpu_check` on the RX 9070 and house-pc's RX 6750 XT**: identity, then single-file
    latency and threaded throughput against OpenEXR, on real PrepareDenseScene output.
-3. **Decode into device memory.** DepthMap uploads every image it reads, so for that node a decode
-   that leaves the result on the device skips a 324 MB download and the re-upload. The texturing
-   node uploads too.
+3. **DepthMap with step 6m on a card**: `CHESHIRE_DEPTHMAP_GPU_EXR=1` with
+   `CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1` on mini6, then the depth-map gate above. The texturing node
+   uploads its images too and could take the same route.
 4. **Then** put it in front of `cheshireReadExr` behind a switch, and hold the result to the
    existing gates: DepthMap's chunks byte-identical, Texturing's output within its run-to-run band.
 5. If a single image is too slow with one thread per ZIP chunk, compare ZIPS output from

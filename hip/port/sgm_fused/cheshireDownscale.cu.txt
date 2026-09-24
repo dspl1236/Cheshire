@@ -150,6 +150,37 @@ __global__ void cheshireDownscale_kernel(const float4* in_d,
 #endif
 }
 
+void cuda_cheshireDownscaleDeviceToCudaRGBA(const float4* in_d,
+                                            std::size_t inPitch,
+                                            int inWidth,
+                                            int inHeight,
+                                            CudaDeviceMemoryPitched<CudaRGBA, 2>& out_dmp,
+                                            cudaStream_t stream)
+{
+    // cheshire (step 6m): the same kernel on an image that is already on the device (CheshireEXR's
+    // output), queued on the decoder's stream
+    const int outWidth = int(out_dmp.getSize().x());
+    const int outHeight = int(out_dmp.getSize().y());
+    const auto taps = tapsFor(inWidth, inHeight, outWidth, outHeight);
+    const dim3 block(32, 4, 1);
+    const dim3 grid(divUp(outWidth, block.x), divUp(outHeight, block.y), 1);
+    cheshireDownscale_kernel<<<grid, block, 0, stream>>>(in_d,
+                                                         (unsigned int)inPitch,
+                                                         taps.first.begin,
+                                                         taps.first.idx,
+                                                         taps.first.w,
+                                                         taps.second.begin,
+                                                         taps.second.idx,
+                                                         taps.second.w,
+                                                         out_dmp.getBuffer(),
+                                                         (unsigned int)out_dmp.getPitch(),
+                                                         (unsigned int)outWidth,
+                                                         (unsigned int)outHeight,
+                                                         nullptr);
+    CHECK_CUDA_ERROR();
+    CHECK_CUDA_RETURN_ERROR(cudaStreamSynchronize(stream));
+}
+
 void cuda_cheshireDownscaleToCudaRGBA(const float* in_hostRGBA, int inWidth, int inHeight, CudaDeviceMemoryPitched<CudaRGBA, 2>& out_dmp)
 {
     const int outWidth = int(out_dmp.getSize().x());

@@ -49,6 +49,7 @@ class CudaRuntime
         return ok(cudaGetLastError());
     }
     const char* error() const { return cudaGetErrorString(last_); }
+    cudaStream_t stream() const { return stream_; }
 
   private:
     bool ok(cudaError_t e)

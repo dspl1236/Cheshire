@@ -268,8 +268,14 @@ L items can slide.
   no mutated file decoded differently, checked on the host. Not yet run on a card. First decide
   whether it is the lever: profile a house-pc Texturing pass and DepthMap chunk
   (`CHESHIRE_LOAD_PROFILE=1`, `CHESHIRE_EXR_PROFILE=1`); on the RX 9070 box Texturing is disk-bound
-  and a decoder cannot help there. Then `cheshireexr_gpu_check`, a decode into device memory for
-  DepthMap, and a switch in front of `cheshireReadExr`.
+  and a decoder cannot help there. Then `cheshireexr_gpu_check`, and a switch in front of
+  `cheshireReadExr`. **Step 6m (2026-09-24):** DepthMap's loads decoded into device memory,
+  `CHESHIRE_DEPTHMAP_GPU_EXR=1`, off by default: CheshireEXR's output feeds 6d's downscale kernel on
+  the decoder's stream and the mipmap is filled from there, so the CPU inflate, the host copy and the
+  324 MB upload per image go. Files outside the direct reader's scope and a VRAM budget too small
+  for a decoder fall back to the host path. Built with hipcc, not run on a card. Gate:
+  `CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1` (every image against the host path, texel for texel), then
+  depth maps byte-identical on mini6 and one 884-view chunk, and the chunk's load time.
 - **CheshireJPG for the reads** (L). The GPU JPEG codec exists (docs/19): a baseline decoder and
   encoder in HIP compute kernels, not VCN, so Windows and RDNA1 are covered, identical to
   libjpeg-turbo on 88 of 89 camera files (the 89th is damaged and handed back) and on 833

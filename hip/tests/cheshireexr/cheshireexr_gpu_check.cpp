@@ -5,7 +5,8 @@
 // Without files it writes a test set with OpenEXR (every supported compression and layout, edge
 // sizes, every half bit pattern, and a 6000x3376 half RGBA ZIP file as PrepareDenseScene writes).
 // Every file must decode to OpenEXR's floats bit for bit. Then, per file, median end-to-end times:
-// CheshireEXR (read the file, decode, floats in host memory) against OpenEXR's Imf::InputFile on
+// CheshireEXR (read the file, decode, floats in host memory), CheshireEXR to device (the same with the
+// floats left on the device, what the depth-map node uses; checked against decode first) against OpenEXR's Imf::InputFile on
 // the calling thread (how the depth-map and texturing read-ahead threads read) and with its thread
 // pool (a lone read). --threads: images per second with one Codec per thread against OpenEXR on as
 // many threads, each thread decoding every file --reps times.
@@ -60,6 +61,18 @@ Status gpuDecode(Codec& codec, const std::string& path, int nch, std::vector<flo
                             return out.data();
                         },
                         st);
+}
+
+// decodeToDevice, then Codec::download: must give decode's floats
+Status gpuDecodeToDevice(Codec& codec, const std::string& path, int nch, std::vector<float>& out)
+{
+    const std::vector<uint8_t> f = exrcheck::readFile(path);
+    DeviceImage di;
+    const Status s = codec.decodeToDevice(f.data(), f.size(), nch, di);
+    if (s != Status::Ok)
+        return s;
+    out.assign(di.rowBytes / sizeof(float) * (size_t)di.height, 0.0f);
+    return codec.download(di, out.data());
 }
 
 }  // namespace
@@ -144,7 +157,7 @@ int main(int argc, char** argv)
 
     const int hw = (int)std::max(1u, std::thread::hardware_concurrency());
     Imf::setGlobalThreadCount(hw);
-    std::printf("%-44s %10s %7s | %10s %12s %12s\n", "file", "size", "chunks", "GPU", "OpenEXR 1t", "OpenEXR pool");
+    std::printf("%-44s %10s %7s | %10s %10s %12s %12s\n", "file", "size", "chunks", "GPU", "to device", "OpenEXR 1t", "OpenEXR pool");
     for (const std::string& path : files)
     {
         const int nch = channelsFor(path);
@@ -167,12 +180,26 @@ int main(int argc, char** argv)
             ++fails;
             continue;
         }
+        std::vector<float> viaDevice;
+        if (gpuDecodeToDevice(codec, path, nch, viaDevice) != Status::Ok || viaDevice.size() != ours.size() ||
+            std::memcmp(viaDevice.data(), ours.data(), ours.size() * 4) != 0)
+        {
+            std::printf("%-44s FAIL: decodeToDevice differs from decode\n", label.c_str());
+            ++fails;
+            continue;
+        }
         const double g = medianMs(reps, [&] { gpuDecode(codec, path, nch, ours); });
+        // what the depth-map node pays: read the file, decode, floats left on the device
+        const double gd = medianMs(reps, [&] {
+            const std::vector<uint8_t> f = exrcheck::readFile(path);
+            DeviceImage di;
+            codec.decodeToDevice(f.data(), f.size(), nch, di);
+        });
         const double c1 = medianMs(reps, [&] { exrcheck::refRead(path, nch, 0); });
         const double cp = medianMs(reps, [&] { exrcheck::refRead(path, nch, hw); });
         char size[32];
         std::snprintf(size, sizeof(size), "%dx%d", ref.width, ref.height);
-        std::printf("%-44s %10s %7u | %8.1fms %10.1fms %10.1fms\n", label.c_str(), size, st.chunks, g, c1, cp);
+        std::printf("%-44s %10s %7u | %8.1fms %8.1fms %10.1fms %10.1fms\n", label.c_str(), size, st.chunks, g, gd, c1, cp);
     }
 
     if (!threadCounts.empty() && !fails)

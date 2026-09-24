@@ -58,6 +58,7 @@ class AsyncBackend
     }
 
     Runtime& runtime() { return rt_; }
+    const Runtime& runtime() const { return rt_; }
 
     // Start of a decode or encode: clear an earlier failure, create the stream on first use, and
     // make sure nothing from an earlier call (which may have stopped early) is still in flight.
@@ -138,13 +139,21 @@ class AsyncBackend
             check(rt_.launch(n, f), "kernel launch");
     }
     bool ok() const { return !failed_; }
+    // Wait for everything queued so far; true if it all succeeded. For results that stay on the
+    // device: once this returns they are complete, whatever stream reads them next.
+    bool finish()
+    {
+        sync();
+        used_ = 0;
+        return !failed_;
+    }
 
   private:
     void check(bool good, const char* what)
     {
         if (!good && !failed_)
         {
-            std::fprintf(stderr, "[cheshire] CheshireJPG: %s failed: %s\n", what, rt_.error());
+            std::fprintf(stderr, "[cheshire] GPU codec: %s failed: %s\n", what, rt_.error());
             failed_ = true;
         }
     }

@@ -4502,6 +4502,36 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
             sys.exit("step 6l: MeshClean::init not found once in mesh/MeshClean.cpp")
         mcf.write_text(t.replace(old, new, 1), encoding="utf-8", newline="")
 
+    # 6m. The depth-map node's EXRs decoded on the device (HIP builds, CHESHIRE_DEPTHMAP_GPU_EXR=1).
+    #     After 6d a load is: OpenEXR inflates the file on the CPU, the image cache holds 324 MB of
+    #     floats, DeviceCache uploads them, the device downscales. CheshireEXR (hip/port/cheshireexr,
+    #     bit-identical to OpenEXR) takes the file's bytes to the device instead, inflates and converts
+    #     there, and 6d's kernel downscales its output on the decoder's stream
+    #     (imageProcessing/cheshireDeviceExr.cu); DeviceCache::addMipmapImageFromDevice fills the
+    #     mipmap from that. Same texels; files outside the direct reader's scope, a VRAM budget too
+    #     small for a decoder, and decode errors all fall back to the host path. The decoder is copied
+    #     under depthMap/cuda/hip/cheshireexr/ and compiled in the unity TU. Off by default until its
+    #     gate passes on a card. Edits: hip/port/sgm_fused/device_exr.json, as for 6d.
+    exr_dst = AV / "src/aliceVision/depthMap/cuda/hip/cheshireexr"
+    exr_dst.mkdir(parents=True, exist_ok=True)
+    for src in sorted((ROOT / "hip/port/cheshireexr").iterdir()):
+        if src.suffix in (".hpp", ".cpp", ".cu", ".md"):
+            shutil.copy2(src, exr_dst / src.name)
+    for f in ["asyncBackend.hpp", "cudaRuntime.cuh"]:
+        shutil.copy2(ROOT / "hip/port/cheshiregpu" / f, exr_dst / f)
+    shutil.copy2(ROOT / "hip/port/sgm_fused/cheshireDeviceExr.cu.txt", cu_dir / "cheshireDeviceExr.cu")
+    shutil.copy2(ROOT / "hip/port/sgm_fused/cheshireDeviceExr.hpp.txt", cu_dir / "cheshireDeviceExr.hpp")
+    for rel, old, new in _json.loads((ROOT / "hip/port/sgm_fused/device_exr.json").read_text(encoding="utf-8")):
+        f = AV / rel
+        t = f.read_text(encoding="utf-8")
+        o, n = old.replace("\n", NL), new.replace("\n", NL)
+        if n in t:
+            continue
+        if t.count(o) != 1:
+            sys.exit("step 6m anchor not found once in " + rel + ": " + old[:60])
+        t = t.replace(o, n, 1)
+        f.write_text(t, encoding="utf-8", newline="")
+
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
     #     when the cards in front of us are both compute 6.1. FORCE beats -D on the command line, so

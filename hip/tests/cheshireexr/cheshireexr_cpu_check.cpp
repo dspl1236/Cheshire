@@ -6,7 +6,8 @@
 // half, float and mixed channels, RGB, RGBA and one-channel, edge-case sizes, noise, gradients,
 // constant runs and every half bit pattern - then decoded two ways: by the pipeline on a backend,
 // and by OpenEXR's Imf::InputFile into FLOAT slices, as Cheshire's direct reader does. The floats
-// must be identical bit for bit. Mutated files (bytes flipped inside chunks): a decode that
+// must be identical bit for bit, and decodeToDevice (downloaded) must give the same status and
+// floats as decode. Mutated files (bytes flipped inside chunks): a decode that
 // reports Ok must equal OpenEXR's, and OpenEXR must have succeeded too. The "async" backend is
 // the device backend's own code on the deferred runtime (hip/tests/cheshiregpu).
 #include "asyncBackend.hpp"
@@ -28,7 +29,7 @@ namespace {
 
 struct Tally
 {
-    int run = 0, fail = 0, ok = 0, handedBack = 0;
+    int run = 0, fail = 0, ok = 0, handedBack = 0, device = 0;
 };
 
 template <class Pipe>
@@ -44,6 +45,32 @@ Status ours(Pipe& pipe, const std::vector<uint8_t>& file, int nch, std::vector<f
                        st);
 }
 
+// The same file through decodeToDevice, then Pipeline::download: the status must be the one decode
+// returned and, on Ok, the floats and the layout the ones decode wrote.
+template <class Pipe>
+bool deviceAgrees(Pipe& pipe, const std::vector<uint8_t>& file, int nch, Status expect, const std::vector<float>& px, int w, int h)
+{
+    // fresh buffers (garbage-filled on the deferred runtime): the output buffer decode just filled
+    // holds the expected floats already, and would hide a result read before the stream ran it
+    pipe.trim();
+    DeviceImage di;
+    const Status s = pipe.decodeToDevice(file.data(), file.size(), nch, di, nullptr);
+    if (s != expect)
+        return false;
+    if (s != Status::Ok)
+        return di.data == nullptr;
+    if (di.width != w || di.height != h || di.channels != nch || di.rowBytes != (size_t)w * nch * sizeof(float))
+        return false;
+    // both check backends keep "device" memory on the host: read it directly first, so a result
+    // still queued on the deferred stream when decodeToDevice returns shows up as garbage
+    if (std::memcmp(di.data, px.data(), px.size() * sizeof(float)) != 0)
+        return false;
+    std::vector<float> out(px.size(), -1.0f);
+    if (pipe.download(di, out.data()) != Status::Ok)
+        return false;
+    return std::memcmp(out.data(), px.data(), px.size() * sizeof(float)) == 0;
+}
+
 // expect Ok: must match OpenEXR bit for bit. Otherwise the status that must come back.
 template <class Pipe>
 bool checkFile(Pipe& pipe, const std::string& path, int nch, const std::string& name, Tally& t, Status expect = Status::Ok)
@@ -53,6 +80,13 @@ bool checkFile(Pipe& pipe, const std::string& path, int nch, const std::string& 
     std::vector<float> px;
     int w = 0, h = 0;
     const Status s = ours(pipe, file, nch, px, w, h);
+    if (!deviceAgrees(pipe, file, nch, s, px, w, h))
+    {
+        std::printf("FAIL %s nch%d: decodeToDevice differs from decode\n", name.c_str(), nch);
+        ++t.fail;
+        return false;
+    }
+    ++t.device;
     if (expect != Status::Ok)
     {
         if (s != expect)
@@ -135,6 +169,8 @@ int runChecks(const char* label, const std::string& dir, bool large, const std::
                 ++n;
             }
 
+    pipe.trim();  // the buffers are allocated again on the next decode
+
     // every half bit pattern through every compression, in all four channels
     for (Imf::Compression comp : comps)
     {
@@ -188,6 +224,12 @@ int runChecks(const char* label, const std::string& dir, bool large, const std::
                 std::vector<float> px;
                 int w, h;
                 const Status st = ours(pipe, f, 4, px, w, h);
+                if (!deviceAgrees(pipe, f, 4, st, px, w, h))
+                {
+                    std::printf("FAIL mutated %s #%d: decodeToDevice differs from decode\n", exrcheck::compName(comp), m);
+                    ++fuzz.fail;
+                    continue;
+                }
                 if (st != Status::Ok)
                 {
                     ++back;
@@ -232,8 +274,8 @@ int runChecks(const char* label, const std::string& dir, bool large, const std::
         checkFile(pipe, path, nch, path, t, ps);
     }
 
-    std::printf("files: %d decodes, %d identical to OpenEXR, %d handed back as expected, %d failed\n", t.run, t.ok,
-                t.handedBack, t.fail);
+    std::printf("files: %d decodes, %d identical to OpenEXR, %d handed back as expected, %d failed; decodeToDevice agreed on %d\n",
+                t.run, t.ok, t.handedBack, t.fail, t.device);
     std::printf("mutated: %d cases, %d failed\n", fuzz.run, fuzz.fail);
     const bool ok = t.fail == 0 && fuzz.fail == 0;
     std::printf("%s: %s\n", label, ok ? "PASS" : "FAIL");

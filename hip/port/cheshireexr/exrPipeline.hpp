@@ -34,9 +34,71 @@ class Pipeline
                   const std::function<float*(int, int)>& allocate,
                   DecodeStats* stats)
     {
+        Plan p;
+        const float* dOut = nullptr;
+        Status st = run(file, size, nchannels, p, dOut);
+        if (st != Status::Ok)
+            return st;
+        const ExrGeom& g = p.geom;
+        float* dst = allocate(g.width, g.height);
+        if (!dst)
+            return Status::InvalidArgument;
+        downloadPieces(dst, dOut, (size_t)g.width * g.height * (size_t)g.nOut * sizeof(float));
+        if (!b_.ok())
+            return Status::DeviceError;
+        if (stats)
+            *stats = p.stats;
+        return Status::Ok;
+    }
+
+    // The same decode, with the floats left in device memory: out describes this pipeline's output
+    // buffer, complete when this returns, and valid until the next decode or trim().
+    Status decodeToDevice(const uint8_t* file, size_t size, int nchannels, DeviceImage& out, DecodeStats* stats)
+    {
+        out = DeviceImage{};
+        Plan p;
+        const float* dOut = nullptr;
+        Status st = run(file, size, nchannels, p, dOut);
+        if (st != Status::Ok)
+            return st;
+        if (!b_.finish())
+            return Status::DeviceError;
+        const ExrGeom& g = p.geom;
+        out.data = dOut;
+        out.width = g.width;
+        out.height = g.height;
+        out.channels = g.nOut;
+        out.rowBytes = (size_t)g.width * (size_t)g.nOut * sizeof(float);
+        if (stats)
+            *stats = p.stats;
+        return Status::Ok;
+    }
+
+    // A decodeToDevice result copied to host memory (rowBytes * height bytes).
+    Status download(const DeviceImage& img, float* dst)
+    {
+        if (!img.data || !dst)
+            return Status::InvalidArgument;
+        downloadPieces(dst, img.data, img.rowBytes * (size_t)img.height);
+        return b_.ok() ? Status::Ok : Status::DeviceError;
+    }
+
+    // Frees the device buffers (they are kept between decodes and only grow otherwise).
+    void trim()
+    {
+        for (Slot& s : slots_)
+        {
+            b_.release(s.p);
+            s = Slot{};
+        }
+    }
+
+  private:
+    // Everything up to and including ConvertPixels: on Ok, the floats are queued into dOut.
+    Status run(const uint8_t* file, size_t size, int nchannels, Plan& p, const float*& dOutResult)
+    {
         if (!b_.begin())
             return Status::DeviceError;
-        Plan p;
         Status st = makePlan(file, size, nchannels, p);
         if (st != Status::Ok)
             return st;
@@ -47,7 +109,6 @@ class Pipeline
         uint8_t* dScratch = get<uint8_t>(kScratch, p.scratchBytes);
         uint32_t* dFlag = get<uint32_t>(kFlag, 1);
         const size_t pixels = (size_t)g.width * g.height;
-        const size_t outBytes = pixels * (size_t)g.nOut * sizeof(float);
         float* dOut = get<float>(kOut, pixels * (size_t)g.nOut);
         if (!b_.ok())
             return Status::DeviceError;
@@ -63,19 +124,12 @@ class Pipeline
         if (bad)
             return Status::Corrupt;
         b_.forEach(pixels, ConvertPixels{g, dFile, dChunks, dScratch, dOut});
-
-        float* dst = allocate(g.width, g.height);
-        if (!dst)
-            return Status::InvalidArgument;
-        downloadPieces(dst, dOut, outBytes);
         if (!b_.ok())
             return Status::DeviceError;
-        if (stats)
-            *stats = p.stats;
+        dOutResult = dOut;
         return Status::Ok;
     }
 
-  private:
     // Large transfers go in pieces, so the pinned staging area stays at one piece (16 MB) per
     // Codec rather than the size of a decoded image (324 MB for 6000x3376 RGBA floats); a
     // dozen decoding threads would otherwise pin gigabytes.

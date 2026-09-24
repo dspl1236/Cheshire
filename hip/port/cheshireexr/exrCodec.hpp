@@ -98,6 +98,15 @@ struct DecodeStats
     uint64_t unpackedBytes = 0;
 };
 
+// A decode left in device memory (Codec::decodeToDevice): row-major, channels floats per pixel
+// (alpha last), rowBytes = width * channels * 4. The memory belongs to the Codec.
+struct DeviceImage
+{
+    const float* data = nullptr;
+    int width = 0, height = 0, channels = 0;
+    size_t rowBytes = 0;
+};
+
 // One codec instance owns its stream and device buffers and reuses them. Not thread-safe; use one
 // per thread.
 class Codec
@@ -120,6 +129,22 @@ class Codec
                   int nchannels,
                   const std::function<float*(int, int)>& allocate,
                   DecodeStats* stats = nullptr);
+
+    // The same decode with the floats left on the device, for a caller that uses them there (the
+    // depth-map node uploads every image it reads). On Ok the pixels are complete, in memory owned by
+    // this Codec that stays valid until its next decode, trim() or destruction.
+    Status decodeToDevice(const uint8_t* file, size_t size, int nchannels, DeviceImage& out, DecodeStats* stats = nullptr);
+
+    // Copies a decodeToDevice result to host memory: img.rowBytes * img.height bytes.
+    Status download(const DeviceImage& img, float* dst);
+
+    // This Codec's stream (a cudaStream_t / hipStream_t), for work that reads a DeviceImage in order
+    // with the Codec's own. Null before the first decode.
+    void* stream() const;
+
+    // Frees the device buffers, which are otherwise kept for the next decode (a 6000x3376 RGBA file
+    // holds about 0.6 GB: the file, the inflated chunks and the floats).
+    void trim();
 
   private:
     struct Impl;

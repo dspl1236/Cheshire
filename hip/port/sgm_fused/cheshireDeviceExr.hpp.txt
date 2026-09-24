@@ -1,0 +1,86 @@
+// This file is part of the Cheshire project (MPL-2.0), a patch set over AliceVision.
+// Copied into src/aliceVision/depthMap/cuda/imageProcessing/ by scripts/apply_hip_patch.py (step 6m).
+#pragma once
+
+#include <aliceVision/depthMap/cuda/host/memory.hpp>
+
+#include <atomic>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+
+namespace cheshire {
+namespace exr {
+class Codec;
+}
+}  // namespace cheshire
+
+namespace aliceVision {
+namespace depthMap {
+
+/// cheshire (step 6m): CHESHIRE_DEPTHMAP_GPU_EXR=1 decodes the depth-map node's EXRs on the device.
+/// Off by default until its gate (byte-identical depth maps) has passed on a card.
+bool cheshireDeviceExrEnabled();
+
+/**
+ * @brief cheshire (step 6m): loads a batch's camera images straight into device memory.
+ *
+ * The host path for a depth-map image is: read and inflate the EXR on the CPU (OpenEXR, step 5v),
+ * keep the full-resolution floats in the image cache, upload them, downscale on the device (step
+ * 6d). Here the file's bytes are uploaded as they are, CheshireEXR inflates and converts them on the
+ * device (hip/port/cheshireexr, bit-identical to OpenEXR), and the same downscale kernel reads its
+ * output: the same texels, without the CPU decode, the host copy or the 324 MB upload of each image.
+ *
+ * Only files the host path would read through the direct EXR reader are taken, with the same checks
+ * (a .exr, AliceVision:ColorSpace absent or "linear", the size the SfM data expects, CHESHIRE_EXR_DIRECT
+ * not 0), plus CheshireEXR's own scope (scanline RGBA, NONE/RLE/ZIPS/ZIP). For anything else load()
+ * returns null and the caller takes the host path, which then reports what is wrong with the file.
+ *
+ * One loader per batch, made on the thread that owns the device. It sizes its decoders from the
+ * memory bridge's VRAM budget and frees their buffers when destroyed, so none of this memory is held
+ * while the batch's tiles run. load() may be called from several threads at once.
+ *
+ * CHESHIRE_DEPTHMAP_GPU_EXR_CODECS (default 2) decoders at most; CHESHIRE_DEPTHMAP_GPU_EXR_GROUP
+ * (default 8) images decoded before they are handed to the device cache;
+ * CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1 compares every image with the host path, texel for texel.
+ */
+class CheshireDeviceExrLoader
+{
+  public:
+    CheshireDeviceExrLoader(int maxWidth, int maxHeight, int downscale);
+    ~CheshireDeviceExrLoader();
+    CheshireDeviceExrLoader(const CheshireDeviceExrLoader&) = delete;
+    CheshireDeviceExrLoader& operator=(const CheshireDeviceExrLoader&) = delete;
+
+    /// false: not enough VRAM for one decoder and a group of images, or no device; use the host path
+    bool active() const { return _nbCodecs > 0; }
+    /// images to decode before handing them to the device cache (each holds its downscaled texels)
+    int groupSize() const { return _groupSize; }
+
+    /// the image at path, downscaled and converted as DeviceCache::addMipmapImage would; null if this
+    /// loader does not take it (see above)
+    std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> load(const std::string& path, int width, int height);
+
+    int decoded() const { return _decoded.load(); }
+    int handedBack() const { return _handedBack.load(); }
+    int checkMismatches() const { return _checkMismatches.load(); }
+
+  private:
+    cheshire::exr::Codec* acquire();
+    void release(cheshire::exr::Codec* codec);
+
+    int _device = 0;
+    int _downscale = 1;
+    int _nbCodecs = 0;
+    int _groupSize = 1;
+    std::mutex _mutex;
+    std::condition_variable _idleChanged;
+    std::vector<std::unique_ptr<cheshire::exr::Codec>> _codecs;
+    std::vector<cheshire::exr::Codec*> _idle;
+    std::atomic<int> _decoded{0}, _handedBack{0}, _checkMismatches{0};
+};
+
+}  // namespace depthMap
+}  // namespace aliceVision

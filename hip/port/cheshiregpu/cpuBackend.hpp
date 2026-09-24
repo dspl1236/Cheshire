@@ -34,6 +34,7 @@ struct CpuBackend
             f(i);
     }
     bool ok() const { return true; }
+    bool finish() { return true; }
 };
 
 }  // namespace gpu

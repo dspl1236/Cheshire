@@ -1,0 +1,257 @@
+// This file is part of the Cheshire project (MPL-2.0), a patch set over AliceVision.
+// Copied into src/aliceVision/depthMap/cuda/imageProcessing/ by scripts/apply_hip_patch.py (step 6m)
+// and compiled in the HIP device unity translation unit (hip/port/unity/depthmap_device_unity.hip),
+// with CheshireEXR itself (src/aliceVision/depthMap/cuda/hip/cheshireexr/).
+//
+// The depth-map node's images decoded on the device. See cheshireDeviceExr.hpp.
+
+#include "cheshireDeviceExr.hpp"
+#include "cheshireDownscale.hpp"
+
+#include <aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp>
+#include <aliceVision/image/Image.hpp>
+#include <aliceVision/image/io.hpp>
+#include <aliceVision/system/Logger.hpp>
+
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
+#include <string>
+#include <vector>
+
+namespace aliceVision {
+namespace depthMap {
+
+namespace {
+
+int envInt(const char* name, int fallback, int minimum)
+{
+    const char* v = std::getenv(name);
+    return v ? std::max(minimum, std::atoi(v)) : fallback;
+}
+
+bool envOn(const char* name)
+{
+    const char* v = std::getenv(name);
+    return v != nullptr && std::string(v) != "0";
+}
+
+// the direct EXR reader's own conditions (image/cheshireExr.cpp): the host path this replaces only
+// exists for these files
+bool directExrPath(const std::string& path)
+{
+    const char* direct = std::getenv("CHESHIRE_EXR_DIRECT");
+    if (direct != nullptr && std::string(direct) == "0")
+        return false;
+    const std::size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos)
+        return false;
+    std::string ext = path.substr(dot);
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext == ".exr";
+}
+
+bool readWholeFile(const std::string& path, std::vector<uint8_t>& out)
+{
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (f == nullptr)
+        return false;
+    bool ok = std::fseek(f, 0, SEEK_END) == 0;
+    const long size = ok ? std::ftell(f) : -1;
+    ok = ok && size > 0 && std::fseek(f, 0, SEEK_SET) == 0;
+    if (ok)
+    {
+        out.resize(static_cast<std::size_t>(size));
+        ok = std::fread(out.data(), 1, out.size(), f) == out.size();
+    }
+    std::fclose(f);
+    return ok;
+}
+
+// the first time each kind of reason comes up, say so; after that the batch log counts them
+void noteOnce(const std::string& kind, const std::string& what)
+{
+    static std::mutex m;
+    static std::vector<std::string> seen;
+    std::lock_guard<std::mutex> lock(m);
+    if (std::find(seen.begin(), seen.end(), kind) != seen.end())
+        return;
+    seen.push_back(kind);
+    ALICEVISION_LOG_INFO("cheshire: depth map GPU EXR decode: " << what << "; the host path reads these images");
+}
+
+}  // namespace
+
+bool cheshireDeviceExrEnabled()
+{
+    static const bool on = envOn("CHESHIRE_DEPTHMAP_GPU_EXR") && cheshire::exr::Codec::deviceAvailable();
+    return on;
+}
+
+CheshireDeviceExrLoader::CheshireDeviceExrLoader(int maxWidth, int maxHeight, int downscale)
+  : _downscale(std::max(1, downscale))
+{
+    if (cudaGetDevice(&_device) != cudaSuccess || maxWidth <= 0 || maxHeight <= 0)
+        return;
+
+    // VRAM per decoder: the file (at most its unpacked size, half RGBA), the inflated chunks (the
+    // same), and the float RGBA output. Per image waiting for the device cache: its downscaled
+    // texels. All of it must fit in what the memory bridge would place in VRAM for classes other
+    // than camera images, with a margin, or a decoder buffer would spill to host memory and every
+    // kernel would read it across PCIe.
+    const std::size_t pixels = std::size_t(maxWidth) * std::size_t(maxHeight);
+    const std::size_t perCodec = pixels * (8 + 8 + 16);
+    const std::size_t perImage = std::size_t(maxWidth / _downscale + 64) * std::size_t(maxHeight / _downscale) * sizeof(CudaRGBA);
+    const std::size_t margin = std::size_t(256) << 20;
+    const cheshire::bridge::Budget b = cheshire::bridge::budget();
+    const std::size_t used = b.vramUsed + b.imageReserveLeft + margin;
+    const std::size_t avail = b.vramCap > used ? b.vramCap - used : 0;
+
+    int group = envInt("CHESHIRE_DEPTHMAP_GPU_EXR_GROUP", 8, 1);
+    int codecs = envInt("CHESHIRE_DEPTHMAP_GPU_EXR_CODECS", 2, 1);
+    while (codecs > 0 && std::size_t(codecs) * perCodec + std::size_t(group) * perImage > avail)
+    {
+        if (group > codecs)
+            --group;
+        else
+            --codecs;
+    }
+    _nbCodecs = codecs;
+    _groupSize = std::max(1, group);
+    if (_nbCodecs == 0)
+    {
+        noteOnce("vram", "not enough VRAM for a decoder (" + std::to_string(avail >> 20) + " MB available, " +
+                 std::to_string((perCodec + perImage) >> 20) + " MB needed)");
+        return;
+    }
+    static std::once_flag once;
+    std::call_once(once, [&] {
+        ALICEVISION_LOG_INFO("cheshire: depth map EXRs decoded on the device (CheshireEXR, exact): "
+                             << _nbCodecs << " decoders, groups of " << _groupSize << " images, " << (avail >> 20)
+                             << " MB of VRAM available at the first batch; CHESHIRE_DEPTHMAP_GPU_EXR=0 for the host path");
+    });
+}
+
+CheshireDeviceExrLoader::~CheshireDeviceExrLoader()
+{
+    // the decoders' streams and buffers go with them: nothing of this is held while the tiles run
+    _idle.clear();
+    _codecs.clear();
+}
+
+cheshire::exr::Codec* CheshireDeviceExrLoader::acquire()
+{
+    std::unique_lock<std::mutex> lock(_mutex);
+    _idleChanged.wait(lock, [&] { return !_idle.empty() || int(_codecs.size()) < _nbCodecs; });
+    if (!_idle.empty())
+    {
+        cheshire::exr::Codec* c = _idle.back();
+        _idle.pop_back();
+        return c;
+    }
+    _codecs.emplace_back(new cheshire::exr::Codec());
+    return _codecs.back().get();
+}
+
+void CheshireDeviceExrLoader::release(cheshire::exr::Codec* codec)
+{
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _idle.push_back(codec);
+    }
+    _idleChanged.notify_one();
+}
+
+std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> CheshireDeviceExrLoader::load(const std::string& path, int width, int height)
+{
+    using namespace cheshire::exr;
+    if (!active() || !directExrPath(path))
+    {
+        ++_handedBack;
+        return nullptr;
+    }
+    Codec* codec = nullptr;
+    try
+    {
+        CHECK_CUDA_RETURN_ERROR(cudaSetDevice(_device));  // an OpenMP worker, not the thread that owns the device
+
+        std::vector<uint8_t> file;
+        Header header;
+        if (!readWholeFile(path, file) || readHeader(file.data(), file.size(), header) != Status::Ok)
+        {
+            ++_handedBack;
+            return nullptr;
+        }
+        const std::string* colorSpace = header.findString("AliceVision:ColorSpace");
+        if ((colorSpace != nullptr && *colorSpace != "linear") || header.width != width || header.height != height)
+        {
+            // a conversion OpenImageIO would do, or a size the host path reports as an error
+            ++_handedBack;
+            return nullptr;
+        }
+
+        codec = acquire();
+        DeviceImage img;
+        const Status st = codec->decodeToDevice(file.data(), file.size(), 4, img);
+        if (st != Status::Ok)
+        {
+            release(codec);
+            codec = nullptr;
+            noteOnce(statusName(st), std::string("CheshireEXR returned ") + statusName(st) + " for " + path + " (the first of its kind)");
+            ++_handedBack;
+            return nullptr;
+        }
+
+        // the host path's CudaRGBA image: DeviceCache::addMipmapImage after step 6d's downscale
+        auto out = std::make_shared<CudaDeviceMemoryPitched<CudaRGBA, 2>>(CudaSize<2>(width / _downscale, height / _downscale));
+        cuda_cheshireDownscaleDeviceToCudaRGBA(reinterpret_cast<const float4*>(img.data), img.rowBytes, width, height, *out,
+                                               static_cast<cudaStream_t>(codec->stream()));
+        release(codec);
+        codec = nullptr;
+
+        // CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1: the host path for the same file (OpenEXR on the CPU, then
+        // step 6d's downscale), texel for texel
+        static const bool check = envOn("CHESHIRE_DEPTHMAP_GPU_EXR_CHECK");
+        if (check)
+        {
+            image::Image<image::RGBAfColor> full;
+            image::readImage(path, full, image::ImageReadOptions(image::EImageColorSpace::LINEAR));
+            CudaDeviceMemoryPitched<CudaRGBA, 2> ref(out->getSize());
+            cuda_cheshireDownscaleToCudaRGBA(reinterpret_cast<const float*>(full.data()), full.width(), full.height(), ref);
+            const std::size_t w = out->getSize().x(), h = out->getSize().y(), rowBytes = w * sizeof(CudaRGBA);
+            std::vector<unsigned char> a(rowBytes * h), r(rowBytes * h);
+            CHECK_CUDA_RETURN_ERROR(cudaMemcpy2D(a.data(), rowBytes, out->getBuffer(), out->getPitch(), rowBytes, h, cudaMemcpyDeviceToHost));
+            CHECK_CUDA_RETURN_ERROR(cudaMemcpy2D(r.data(), rowBytes, ref.getBuffer(), ref.getPitch(), rowBytes, h, cudaMemcpyDeviceToHost));
+            std::size_t diff = 0;
+            for (std::size_t p = 0; p < w * h; ++p)
+                if (std::memcmp(&a[p * sizeof(CudaRGBA)], &r[p * sizeof(CudaRGBA)], sizeof(CudaRGBA)) != 0)
+                    ++diff;
+            if (diff != 0)
+            {
+                ++_checkMismatches;
+                ALICEVISION_LOG_WARNING("cheshire: CHESHIRE_DEPTHMAP_GPU_EXR_CHECK: " << path << ": " << diff << " of " << w * h
+                                                                                       << " texels differ from the host path");
+            }
+            else
+                ALICEVISION_LOG_INFO("cheshire: CHESHIRE_DEPTHMAP_GPU_EXR_CHECK: " << path << ": identical to the host path");
+        }
+
+        ++_decoded;
+        return out;
+    }
+    catch (const std::exception& e)
+    {
+        if (codec != nullptr)
+            release(codec);
+        noteOnce("error", std::string("error on ") + path + " (" + e.what() + "; the first of its kind)");
+        ++_handedBack;
+        return nullptr;
+    }
+}
+
+}  // namespace depthMap
+}  // namespace aliceVision
