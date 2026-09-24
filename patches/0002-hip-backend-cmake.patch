@@ -4208,7 +4208,7 @@ index 235a4ce..bfb1f1e 100644
      // create scene and root node
      aiScene scene;
 diff --git a/src/aliceVision/mesh/MeshClean.cpp b/src/aliceVision/mesh/MeshClean.cpp
-index b0b5910..8c6351f 100644
+index b0b5910..9d5bb13 100644
 --- a/src/aliceVision/mesh/MeshClean.cpp
 +++ b/src/aliceVision/mesh/MeshClean.cpp
 @@ -4,12 +4,32 @@
@@ -4300,7 +4300,285 @@ index b0b5910..8c6351f 100644
          meshClean->ptsNeighPtsOrdered.push_back({});
          clearPointNeighbors(newPtId);
          ptNeighTrisSortedAscToProcess.resize(0);
-@@ -868,17 +888,275 @@ int MeshClean::cleanMesh()
+@@ -633,82 +653,220 @@ void MeshClean::init()
+ {
+     deallocateCleaningAttributes();
+ 
+-    getPtsNeighborTriangles(ptsNeighTrisSortedAsc);
+-    for (int i = 0; i < pts.size(); i++)
+-    {
+-        StaticVector<int>& ptNeigTris = ptsNeighTrisSortedAsc[i];
+-        if (sizeOfStaticVector<int>(ptNeigTris) > 1)
+-        {
+-            qsort(&ptNeigTris[0], ptNeigTris.size(), sizeof(int), qSortCompareIntAsc);
+-        }
+-    }
++    // cheshire (step 6l): the per-point triangle lists and the edge index built by counting. Upstream
++    // sorts 3 entries per triangle by point with qsort, sorts every list, then sorts the (x = larger
++    // point, y = smaller point, z = triangle) edge entries by x, each x group by y and each (x, y)
++    // group by z: the result is the entries in lexicographic order, and the lists ascending. Counting
++    // by point and by x, then sorting each x bucket by (y, z), gives the same arrays (entries with the
++    // same x, y and z are the same value), with the same capacities, without two qsorts over 3 entries
++    // per triangle. CHESHIRE_MESHCLEAN_SETUP=0 runs upstream's; CHESHIRE_MESHCLEAN_CHECK=1 runs both and
++    // compares.
++    auto upstreamSetup = [&]() {
++            getPtsNeighborTriangles(ptsNeighTrisSortedAsc);
++            for (int i = 0; i < pts.size(); i++)
++            {
++                StaticVector<int>& ptNeigTris = ptsNeighTrisSortedAsc[i];
++                if (sizeOfStaticVector<int>(ptNeigTris) > 1)
++                {
++                    qsort(&ptNeigTris[0], ptNeigTris.size(), sizeof(int), qSortCompareIntAsc);
++                }
++            }
+ 
+-    ptsNeighPtsOrdered.reserve(pts.size());
+-    ptsNeighPtsOrdered.resize(pts.size());
++            ptsNeighPtsOrdered.reserve(pts.size());
++            ptsNeighPtsOrdered.resize(pts.size());
+ 
+-    ptsBoundary.reserve(pts.size());
+-    ptsBoundary.resize_with(pts.size(), true);
++            ptsBoundary.reserve(pts.size());
++            ptsBoundary.resize_with(pts.size(), true);
+ 
+-    newPtsOldPtId.reserve(pts.size());
+-    nPtsInit = pts.size();
++            newPtsOldPtId.reserve(pts.size());
++            nPtsInit = pts.size();
+ 
+-    edgesNeigTrisAlive.reserve(tris.size() * 3);
+-    edgesNeigTris.reserve(tris.size() * 3);
+-    edgesXStat.reserve(pts.size());
+-    edgesXYStat.reserve(tris.size() * 3);
++            edgesNeigTrisAlive.reserve(tris.size() * 3);
++            edgesNeigTris.reserve(tris.size() * 3);
++            edgesXStat.reserve(pts.size());
++            edgesXYStat.reserve(tris.size() * 3);
+ 
+-    for (int i = 0; i < tris.size(); i++)
+-    {
+-        int a = tris[i].v[0];
+-        int b = tris[i].v[1];
+-        int c = tris[i].v[2];
+-        edgesNeigTris.push_back(Voxel(std::max(a, b), std::min(a, b), i));
+-        edgesNeigTris.push_back(Voxel(std::max(b, c), std::min(b, c), i));
+-        edgesNeigTris.push_back(Voxel(std::max(c, a), std::min(c, a), i));
++            for (int i = 0; i < tris.size(); i++)
++            {
++                int a = tris[i].v[0];
++                int b = tris[i].v[1];
++                int c = tris[i].v[2];
++                edgesNeigTris.push_back(Voxel(std::max(a, b), std::min(a, b), i));
++                edgesNeigTris.push_back(Voxel(std::max(b, c), std::min(b, c), i));
++                edgesNeigTris.push_back(Voxel(std::max(c, a), std::min(c, a), i));
++
++                edgesNeigTrisAlive.push_back(true);
++                edgesNeigTrisAlive.push_back(true);
++                edgesNeigTrisAlive.push_back(true);
++            }
+ 
+-        edgesNeigTrisAlive.push_back(true);
+-        edgesNeigTrisAlive.push_back(true);
+-        edgesNeigTrisAlive.push_back(true);
+-    }
++            qsort(&edgesNeigTris[0], edgesNeigTris.size(), sizeof(Voxel), qSortCompareVoxelByXAsc);
+ 
+-    qsort(&edgesNeigTris[0], edgesNeigTris.size(), sizeof(Voxel), qSortCompareVoxelByXAsc);
++            // sort
++            int i0 = 0;
++            long t1 = mvsUtils::initEstimate();
++            for (int i = 0; i < edgesNeigTris.size(); i++)
++            {
++                if ((i == edgesNeigTris.size() - 1) || (edgesNeigTris[i].x != edgesNeigTris[i + 1].x))
++                {
++                    if (i - i0 + 1 > 1)
++                        qsort(&edgesNeigTris[i0], i - i0 + 1, sizeof(Voxel), qSortCompareVoxelByYAsc);
+ 
+-    // sort
+-    int i0 = 0;
+-    long t1 = mvsUtils::initEstimate();
+-    for (int i = 0; i < edgesNeigTris.size(); i++)
+-    {
+-        if ((i == edgesNeigTris.size() - 1) || (edgesNeigTris[i].x != edgesNeigTris[i + 1].x))
+-        {
+-            if (i - i0 + 1 > 1)
+-                qsort(&edgesNeigTris[i0], i - i0 + 1, sizeof(Voxel), qSortCompareVoxelByYAsc);
++                    int xyI0 = edgesXYStat.size();
+ 
+-            int xyI0 = edgesXYStat.size();
++                    int j0 = i0;
++                    for (int j = i0; j <= i; j++)
++                    {
++                        if ((j == i) || (edgesNeigTris[j].y != edgesNeigTris[j + 1].y))
++                        {
++                            if (j - j0 + 1 > 1)
++                                qsort(&edgesNeigTris[j0], j - j0 + 1, sizeof(Voxel), qSortCompareVoxelByZAsc);
++
++                            edgesXYStat.push_back(Voxel(edgesNeigTris[j].y, j0, j));
++                            j0 = j + 1;
++                        }
++                    }
+ 
+-            int j0 = i0;
+-            for (int j = i0; j <= i; j++)
+-            {
+-                if ((j == i) || (edgesNeigTris[j].y != edgesNeigTris[j + 1].y))
+-                {
+-                    if (j - j0 + 1 > 1)
+-                        qsort(&edgesNeigTris[j0], j - j0 + 1, sizeof(Voxel), qSortCompareVoxelByZAsc);
++                    int xyI = edgesXYStat.size() - 1;
++
++                    // printf("%i of %i\n",edgesXStat->size(),edgesXStat->reserved());
++                    edgesXStat.push_back(Voxel(edgesNeigTris[i].x, xyI0, xyI));
+ 
+-                    edgesXYStat.push_back(Voxel(edgesNeigTris[j].y, j0, j));
+-                    j0 = j + 1;
++                    i0 = i + 1;
+                 }
++
++                mvsUtils::printfEstimate(i, edgesNeigTris.size(), t1);
+             }
++            mvsUtils::finishEstimate();
++    };
++    auto countingSetup = [&]() {
++        const int nPts = pts.size();
++        const int nTris = tris.size();
++        {
++            std::vector<int> count(nPts, 0);
++            for (int i = 0; i < nTris; ++i)
++                for (int k = 0; k < 3; ++k)
++                    ++count[tris[i].v[k]];
++            ptsNeighTrisSortedAsc.reserve(nPts);
++            ptsNeighTrisSortedAsc.resize(nPts);
++#pragma omp parallel for schedule(dynamic, 65536)
++            for (int p = 0; p < nPts; ++p)
++                if (count[p] > 0)
++                    ptsNeighTrisSortedAsc[p].reserve(count[p]);
++            for (int i = 0; i < nTris; ++i)
++                for (int k = 0; k < 3; ++k)
++                    ptsNeighTrisSortedAsc[tris[i].v[k]].push_back(i);
++        }
++
++        ptsNeighPtsOrdered.reserve(nPts);
++        ptsNeighPtsOrdered.resize(nPts);
++
++        ptsBoundary.reserve(nPts);
++        ptsBoundary.resize_with(nPts, true);
+ 
+-            int xyI = edgesXYStat.size() - 1;
++        newPtsOldPtId.reserve(nPts);
++        nPtsInit = nPts;
+ 
+-            // printf("%i of %i\n",edgesXStat->size(),edgesXStat->reserved());
+-            edgesXStat.push_back(Voxel(edgesNeigTris[i].x, xyI0, xyI));
++        const int nEdges = nTris * 3;
++        edgesNeigTrisAlive.reserve(nEdges);
++        edgesNeigTris.reserve(nEdges);
++        edgesXStat.reserve(nPts);
++        edgesXYStat.reserve(nEdges);
++        if (nEdges == 0)
++            return;
+ 
+-            i0 = i + 1;
++        std::vector<int> start(nPts + 1, 0);
++        for (int i = 0; i < nTris; ++i)
++        {
++            const int a = tris[i].v[0], b = tris[i].v[1], c = tris[i].v[2];
++            ++start[std::max(a, b) + 1];
++            ++start[std::max(b, c) + 1];
++            ++start[std::max(c, a) + 1];
++        }
++        for (int p = 0; p < nPts; ++p)
++            start[p + 1] += start[p];
++        edgesNeigTris.resize(nEdges);
++        edgesNeigTrisAlive.resize_with(nEdges, true);
++        {
++            std::vector<int> cursor(start.begin(), start.end() - 1);
++            for (int i = 0; i < nTris; ++i)
++            {
++                const int a = tris[i].v[0], b = tris[i].v[1], c = tris[i].v[2];
++                const int x0 = std::max(a, b), x1 = std::max(b, c), x2 = std::max(c, a);
++                edgesNeigTris[cursor[x0]++] = Voxel(x0, std::min(a, b), i);
++                edgesNeigTris[cursor[x1]++] = Voxel(x1, std::min(b, c), i);
++                edgesNeigTris[cursor[x2]++] = Voxel(x2, std::min(c, a), i);
++            }
+         }
++#pragma omp parallel for schedule(dynamic, 65536)
++        for (int p = 0; p < nPts; ++p)
++            if (start[p + 1] - start[p] > 1)
++                std::sort(&edgesNeigTris[start[p]], &edgesNeigTris[start[p]] + (start[p + 1] - start[p]),
++                          [](const Voxel& u, const Voxel& v) { return u.y < v.y || (u.y == v.y && u.z < v.z); });
++
++        // the stats as upstream builds them from the sorted entries
++        int i0 = 0;
++        for (int i = 0; i < nEdges; ++i)
++        {
++            if ((i == nEdges - 1) || (edgesNeigTris[i].x != edgesNeigTris[i + 1].x))
++            {
++                const int xyI0 = edgesXYStat.size();
++                int j0 = i0;
++                for (int j = i0; j <= i; j++)
++                {
++                    if ((j == i) || (edgesNeigTris[j].y != edgesNeigTris[j + 1].y))
++                    {
++                        edgesXYStat.push_back(Voxel(edgesNeigTris[j].y, j0, j));
++                        j0 = j + 1;
++                    }
++                }
++                const int xyI = edgesXYStat.size() - 1;
++                edgesXStat.push_back(Voxel(edgesNeigTris[i].x, xyI0, xyI));
++                i0 = i + 1;
++            }
++        }
++    };
+ 
+-        mvsUtils::printfEstimate(i, edgesNeigTris.size(), t1);
++    const char* cheshireSetupEnv = std::getenv("CHESHIRE_MESHCLEAN_SETUP");
++    const bool cheshireCounting = !(cheshireSetupEnv != nullptr && *cheshireSetupEnv == '0');
++    const auto cheshireT0 = std::chrono::steady_clock::now();
++    if (cheshireCounting)
++        countingSetup();
++    else
++        upstreamSetup();
++    const double cheshireSetupMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cheshireT0).count();
++    ALICEVISION_LOG_INFO("cheshire: MeshClean setup" << (cheshireCounting ? " (counting)" : "") << ": " << cheshireSetupMs << " ms");
++    if (cheshireCounting && std::getenv("CHESHIRE_MESHCLEAN_CHECK") != nullptr)
++    {
++        const StaticVector<StaticVector<int>> fastTris = ptsNeighTrisSortedAsc;
++        const StaticVector<Voxel> fastEdges = edgesNeigTris, fastX = edgesXStat, fastXY = edgesXYStat;
++        const StaticVectorBool fastAlive = edgesNeigTrisAlive, fastBoundary = ptsBoundary;
++        const int fastOrdered = ptsNeighPtsOrdered.size();
++        const int fastInit = nPtsInit;
++        deallocateCleaningAttributes();
++        upstreamSetup();
++        auto sameVoxels = [](const StaticVector<Voxel>& u, const StaticVector<Voxel>& v) {
++            if (u.size() != v.size())
++                return false;
++            for (int i = 0; i < u.size(); ++i)
++                if (u[i].x != v[i].x || u[i].y != v[i].y || u[i].z != v[i].z)
++                    return false;
++            return true;
++        };
++        std::size_t listDiff = (std::size_t)std::abs(fastTris.size() - ptsNeighTrisSortedAsc.size());
++        for (int p = 0; p < std::min(fastTris.size(), ptsNeighTrisSortedAsc.size()); ++p)
++            listDiff += (fastTris[p].getData() == ptsNeighTrisSortedAsc[p].getData()) ? 0 : 1;
++        const bool same = listDiff == 0 && sameVoxels(fastEdges, edgesNeigTris) && sameVoxels(fastX, edgesXStat) &&
++                          sameVoxels(fastXY, edgesXYStat) && fastAlive.getData() == edgesNeigTrisAlive.getData() &&
++                          fastBoundary.getData() == ptsBoundary.getData() && fastOrdered == ptsNeighPtsOrdered.size() && fastInit == nPtsInit;
++        if (same)
++            ALICEVISION_LOG_INFO("cheshire: MeshClean setup check: identical to upstream's (" << ptsNeighTrisSortedAsc.size() << " point lists, "
++                                 << edgesNeigTris.size() << " edge entries, " << edgesXStat.size() << " x entries, " << edgesXYStat.size() << " xy entries)");
++        else
++            ALICEVISION_LOG_WARNING("cheshire: MeshClean setup check: DIFFERENT from upstream's (" << listDiff << " point lists differ; edges "
++                                    << sameVoxels(fastEdges, edgesNeigTris) << ", x " << sameVoxels(fastX, edgesXStat) << ", xy "
++                                    << sameVoxels(fastXY, edgesXYStat) << ")");
+     }
+-    mvsUtils::finishEstimate();
+ }
+ 
+ void MeshClean::testPtsNeighTrisSortedAsc()
+@@ -868,17 +1026,275 @@ int MeshClean::cleanMesh()
      return pts.size() - nv;
  }
  

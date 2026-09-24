@@ -14,6 +14,15 @@
 // votes of the previous. The similarity map is not read: upstream reads it, blurs it and computes
 // a score per pixel that nothing uses.
 //
+// Step 6k: the device also builds the queries. The host counts each row's valid pixels and stages
+// the depth map; the device backprojects every valid pixel with MultiViewParams' arithmetic
+// operation by operation (gpu/knnGPU.cu, the fused forms following this build like the metric's),
+// answers the queries and returns them with their pixel sizes, and the host applies the votes as
+// before. That leaves the host the staging and the votes per camera, where it backprojected 3.76 M
+// pixels before (the whole of a 4-thread host's time). CHESHIRE_GPU_VIS_BACKPROJECT=0 keeps the
+// host's backprojection; under CHECK the host backprojects every camera again, compares every query
+// and pixel size bit for bit, and its reference votes use its own queries.
+//
 // CHESHIRE_GPU_VIS=0 keeps upstream's code. CHESHIRE_GPU_VIS_CHECK=1 also answers every query on
 // the host from the same snapshot tree and counts differences (there are none unless the host
 // compiler contracts the metric differently; the form follows __FMA__, CHESHIRE_GPU_KNN_FMA=0|1
@@ -117,48 +126,108 @@ struct CheshireQuerySlot
     double* q = nullptr;           // 3 doubles per query
     std::uint32_t* nn = nullptr;   // nearest vertex
     double* nnDist = nullptr;      // its squared distance
-    std::vector<double> pixSize;
+    double* ps = nullptr;          // the queries' pixel sizes (pinned: the device writes them, step 6k)
+    float* depth = nullptr;        // the depth map, uploaded for the device backprojection (step 6k)
+    std::uint64_t* rows = nullptr; // valid pixels before each row, then the total
     std::size_t capacity = 0;
+    std::size_t rowCapacity = 0;
     std::size_t nq = 0;
     int cam = -1;
+    int w = 0;
+    int h = 0;
     bool empty = true;
     bool onHost = false;     // this camera's buffers are the host vectors below (map larger than mp said)
     bool queued = false;     // a device query for this camera is in flight or answered
+    bool bpDevice = false;   // the device builds this camera's queries with its answers (step 6k)
+    image::Image<float> depthMap;  // kept for the host backprojection (fallback, and CHECK's reference)
     std::vector<double> qHost;
     std::vector<std::uint32_t> nnHost;
     std::vector<double> nnDistHost;
+    std::vector<double> psHost;
+    std::vector<std::uint64_t> rowsHost;
     double* qp = nullptr;
     std::uint32_t* nnp = nullptr;
     double* nnDistp = nullptr;
+    double* psp = nullptr;
+    std::uint64_t* rowsp = nullptr;
 
     void free()
     {
         cheshire::knn::hostFree(q);
         cheshire::knn::hostFree(nn);
         cheshire::knn::hostFree(nnDist);
+        cheshire::knn::hostFree(ps);
+        cheshire::knn::hostFree(depth);
+        cheshire::knn::hostFree(rows);
         q = nullptr;
         nn = nullptr;
         nnDist = nullptr;
+        ps = nullptr;
+        depth = nullptr;
+        rows = nullptr;
         capacity = 0;
+        rowCapacity = 0;
     }
-    bool reserve(std::size_t n)
+    bool reserve(std::size_t n, std::size_t nRows)
     {
-        if (n <= capacity) return true;
+        if (n <= capacity && nRows + 1 <= rowCapacity) return true;
         free();
         q = (double*)cheshire::knn::hostAlloc(n * 3 * sizeof(double));
         nn = (std::uint32_t*)cheshire::knn::hostAlloc(n * sizeof(std::uint32_t));
         nnDist = (double*)cheshire::knn::hostAlloc(n * sizeof(double));
-        pixSize.resize(n);
-        if (q == nullptr || nn == nullptr || nnDist == nullptr)
+        ps = (double*)cheshire::knn::hostAlloc(n * sizeof(double));
+        depth = (float*)cheshire::knn::hostAlloc(n * sizeof(float));
+        rows = (std::uint64_t*)cheshire::knn::hostAlloc((nRows + 1) * sizeof(std::uint64_t));
+        if (q == nullptr || nn == nullptr || nnDist == nullptr || ps == nullptr || depth == nullptr || rows == nullptr)
         {
             free();
             return false;
         }
         capacity = n;
+        rowCapacity = nRows + 1;
         return true;
     }
     ~CheshireQuerySlot() { free(); }
 };
+
+// step 6k: the device builds the queries (CHESHIRE_GPU_VIS_BACKPROJECT=0 keeps the host's), announced once
+bool cheshireGpuVisBackprojectEnabled()
+{
+    static int v = -1;
+    if (v < 0)
+    {
+        const char* e = std::getenv("CHESHIRE_GPU_VIS_BACKPROJECT");
+        v = (e != nullptr && *e == '0') ? 0 : 1;
+        if (v == 1)
+            ALICEVISION_LOG_INFO("cheshire: visibility backprojection on the GPU (CHESHIRE_GPU_VIS_BACKPROJECT=0 for the host)");
+        else
+            ALICEVISION_LOG_INFO("cheshire: visibility backprojection: disabled by CHESHIRE_GPU_VIS_BACKPROJECT=0, host");
+    }
+    return v == 1;
+}
+
+// camera c as MultiViewParams holds it, for the device backprojection
+cheshire::knn::Camera cheshireKnnCamera(const mvsUtils::MultiViewParams& mp, int c)
+{
+    cheshire::knn::Camera k;
+    const Point3d& C = mp.CArr[c];
+    const Matrix3x3& iK = mp.iCamArr[c];
+    const Matrix3x4& P = mp.camArr[c];
+    const double iKv[9] = {iK.m11, iK.m12, iK.m13, iK.m21, iK.m22, iK.m23, iK.m31, iK.m32, iK.m33};
+    const double Pv[12] = {P.m11, P.m12, P.m13, P.m14, P.m21, P.m22, P.m23, P.m24, P.m31, P.m32, P.m33, P.m34};
+    k.C[0] = C.x;
+    k.C[1] = C.y;
+    k.C[2] = C.z;
+    for (int i = 0; i < 9; ++i) k.iK[i] = iKv[i];
+    for (int i = 0; i < 12; ++i) k.P[i] = Pv[i];
+    return k;
+}
+
+// the same double, or both NaN (a NaN query's payload is not part of the result: it names no vertex)
+inline bool cheshireSameDouble(double a, double b)
+{
+    return std::memcmp(&a, &b, sizeof(double)) == 0 || (std::isnan(a) && std::isnan(b));
+}
 
 }  // namespace
 
@@ -188,6 +257,10 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
 #endif
     const char* fmaEnv = std::getenv("CHESHIRE_GPU_KNN_FMA");
     const bool fma = (fmaEnv != nullptr && *fmaEnv != '\0') ? (*fmaEnv != '0') : fmaDefault;
+    // step 6k: the backprojection's fused forms follow the same build rule (mvsUtils and mvsData are
+    // compiled with the same flags); CHESHIRE_GPU_VIS_BP_FMA=0|1 overrides, e.g. as CHECK's negative control
+    const char* bpFmaEnv = std::getenv("CHESHIRE_GPU_VIS_BP_FMA");
+    const bool bpFma = (bpFmaEnv != nullptr && *bpFmaEnv != '\0') ? (*bpFmaEnv != '0') : fmaDefault;
 
     static_assert(sizeof(Point3d) == 3 * sizeof(double), "Point3d is three contiguous doubles");
     const int pass = g_cheshireVisPass;
@@ -278,15 +351,25 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
     }
 
     // the largest map decides the buffer sizes (grown later if a map is larger than mp says)
-    std::size_t maxPix = 1;
+    std::size_t maxPix = 1, maxRows = 1;
     for (int c = 0; c < cams.size(); ++c)
+    {
         maxPix = std::max(maxPix, (std::size_t)mp.getWidth(c) * (std::size_t)mp.getHeight(c));
+        maxRows = std::max(maxRows, (std::size_t)mp.getHeight(c));
+    }
 
     cheshire::knn::Index index;
     CheshireQuerySlot slots[2];
     bool ready = !snapshot.empty()
                  && index.build(reinterpret_cast<const double*>(snapshot.data()), snapshot.size(), nodes.data(), nodes.size(), perm.data(), lo, hi, maxPix)
-                 && slots[0].reserve(maxPix) && slots[1].reserve(maxPix);
+                 && slots[0].reserve(maxPix, maxRows) && slots[1].reserve(maxPix, maxRows);
+    // step 6k: the device builds each camera's queries from its depth map
+    bool deviceBp = ready && cheshireGpuVisBackprojectEnabled();
+    if (deviceBp && !index.reserveBackproject(maxPix, maxRows))
+    {
+        ALICEVISION_LOG_WARNING("cheshire: GPU backprojection buffers not allocated, the queries of this pass built on the host");
+        deviceBp = false;
+    }
     if (!ready)
     {
         ALICEVISION_LOG_WARNING("cheshire: GPU knn index not built, visibilities on the CPU");
@@ -321,72 +404,21 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
     double msLoad = 0, msPrep = 0, msWait = 0, msVotes = 0, msCheck = 0;
     std::size_t nbQueries = 0, nbIdxDiff = 0, nbDistDiff = 0, nbHost = 0, nbVotes = 0, nbContrib = 0, nbNaN = 0;
     std::size_t refVotes = 0, refContrib = 0;  // CHECK: the reference's totals
-    std::vector<std::size_t> rowStart;
+    std::size_t nbBpChecked = 0, nbBpQDiff = 0, nbBpPsDiff = 0, nbBpDevice = 0, nbBpDumped = 0;  // step 6k
+    bool deviceDead = false;  // after a device error the rest of the pass runs on the host
 
-    // the valid pixels of camera c, in pixel order, backprojected on the host into a slot
-    auto prepare = [&](int c, CheshireQuerySlot& s) {
-        s.cam = c;
-        s.nq = 0;
-        s.empty = true;
-        s.queued = false;
-        auto t1 = Clock::now();
-        CheshireCamMaps maps = pending[c].get();
-        launch(c + ahead);
-        msLoad += cheshireVisMs(t1);
-        if (!maps.ok)
-        {
-            ALICEVISION_LOG_WARNING("Empty depth map (cam id: " << c << ")");
-            return;
-        }
-        const image::Image<float>& depthMap = maps.depthMap;
-        const int w = depthMap.width();
-        const int h = depthMap.height();
-        const std::size_t pixels = (std::size_t)w * (std::size_t)h;
-        s.onHost = pixels > s.capacity;
-        if (s.onHost)
-        {
-            // a map larger than mp announced: this camera is answered on the host
-            s.qHost.resize(3 * pixels);
-            s.nnHost.resize(pixels);
-            s.nnDistHost.resize(pixels);
-            s.pixSize.resize(pixels);
-            s.qp = s.qHost.data();
-            s.nnp = s.nnHost.data();
-            s.nnDistp = s.nnDistHost.data();
-        }
-        else
-        {
-            s.qp = s.q;
-            s.nnp = s.nn;
-            s.nnDistp = s.nnDist;
-        }
-        t1 = Clock::now();
-        rowStart.assign(h + 1, 0);
-        long long nanHere = 0;
-#pragma omp parallel for reduction(+ : nanHere)
-        for (int y = 0; y < h; ++y)
-        {
-            std::size_t n = 0;
-            for (int x = 0; x < w; ++x)
-            {
-                const float d = depthMap(y * w + x);
-                // the fill below keeps what `depth <= 0.0f` does not reject, NaN included (as
-                // upstream does); counting with `> 0.0f` would drop NaN here and overrun the row
-                if (!(d <= 0.0f))
-                    ++n;
-                if (std::isnan(d))
-                    ++nanHere;
-            }
-            rowStart[y + 1] = n;
-        }
-        nbNaN += (std::size_t)nanHere;
-        for (int y = 0; y < h; ++y)
-            rowStart[y + 1] += rowStart[y];
-        double* q = s.qp;
+    // the valid pixels of a prepared camera, in pixel order, backprojected on the host (upstream's
+    // arithmetic) into q and ps: the path when the device does not build the queries, and CHECK's reference
+    auto hostBackproject = [&](const CheshireQuerySlot& s, double* q, double* ps) {
+        const image::Image<float>& depthMap = s.depthMap;
+        const int w = s.w;
+        const int h = s.h;
+        const int c = s.cam;
+        const std::uint64_t* rows = s.rowsp;
 #pragma omp parallel for
         for (int y = 0; y < h; ++y)
         {
-            std::size_t k = rowStart[y];
+            std::size_t k = (std::size_t)rows[y];
             for (int x = 0; x < w; ++x)
             {
                 const std::size_t pix = y * w + x;
@@ -397,11 +429,91 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
                 q[3 * k] = p.m[0];
                 q[3 * k + 1] = p.m[1];
                 q[3 * k + 2] = p.m[2];
-                s.pixSize[k] = mp.getCamPixelSize(p, c);
+                ps[k] = mp.getCamPixelSize(p, c);
                 ++k;
             }
         }
-        s.nq = rowStart[h];
+    };
+
+    // camera c's map into a slot: the valid pixels counted per row, and either the map staged for the
+    // device, which builds the queries (step 6k), or the queries backprojected here
+    auto prepare = [&](int c, CheshireQuerySlot& s) {
+        s.cam = c;
+        s.nq = 0;
+        s.empty = true;
+        s.queued = false;
+        s.bpDevice = false;
+        auto t1 = Clock::now();
+        CheshireCamMaps maps = pending[c].get();
+        launch(c + ahead);
+        msLoad += cheshireVisMs(t1);
+        if (!maps.ok)
+        {
+            ALICEVISION_LOG_WARNING("Empty depth map (cam id: " << c << ")");
+            return;
+        }
+        s.depthMap = std::move(maps.depthMap);
+        const image::Image<float>& depthMap = s.depthMap;
+        const int w = depthMap.width();
+        const int h = depthMap.height();
+        s.w = w;
+        s.h = h;
+        const std::size_t pixels = (std::size_t)w * (std::size_t)h;
+        s.onHost = pixels > s.capacity || (std::size_t)h + 1 > s.rowCapacity;
+        if (s.onHost)
+        {
+            // a map larger than mp announced: this camera is answered on the host
+            s.qHost.resize(3 * pixels);
+            s.nnHost.resize(pixels);
+            s.nnDistHost.resize(pixels);
+            s.psHost.resize(pixels);
+            s.rowsHost.resize((std::size_t)h + 1);
+            s.qp = s.qHost.data();
+            s.nnp = s.nnHost.data();
+            s.nnDistp = s.nnDistHost.data();
+            s.psp = s.psHost.data();
+            s.rowsp = s.rowsHost.data();
+        }
+        else
+        {
+            s.qp = s.q;
+            s.nnp = s.nn;
+            s.nnDistp = s.nnDist;
+            s.psp = s.ps;
+            s.rowsp = s.rows;
+        }
+        s.bpDevice = deviceBp && !s.onHost && !deviceDead;
+        t1 = Clock::now();
+        std::uint64_t* rows = s.rowsp;
+        rows[0] = 0;
+        const float* src = depthMap.data();
+        float* staged = s.bpDevice ? s.depth : nullptr;
+        long long nanHere = 0;
+#pragma omp parallel for reduction(+ : nanHere)
+        for (int y = 0; y < h; ++y)
+        {
+            const float* row = src + (std::size_t)y * (std::size_t)w;
+            std::uint64_t n = 0;
+            for (int x = 0; x < w; ++x)
+            {
+                const float d = row[x];
+                // the fill keeps what `depth <= 0.0f` does not reject, NaN included (as upstream
+                // does); counting with `> 0.0f` would drop NaN here and overrun the row
+                if (!(d <= 0.0f))
+                    ++n;
+                if (std::isnan(d))
+                    ++nanHere;
+            }
+            rows[y + 1] = n;
+            if (staged != nullptr)
+                std::memcpy(staged + (std::size_t)y * (std::size_t)w, row, (std::size_t)w * sizeof(float));
+        }
+        nbNaN += (std::size_t)nanHere;
+        for (int y = 0; y < h; ++y)
+            rows[y + 1] += rows[y];
+        s.nq = (std::size_t)rows[h];
+        if (!s.bpDevice)
+            hostBackproject(s, s.qp, s.psp);
         s.empty = false;
         msPrep += cheshireVisMs(t1);
     };
@@ -558,13 +670,21 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
     };
     std::vector<std::uint32_t> refNn;  // CHECK: the host's answers for the current camera
     std::vector<double> refDist;
+    std::vector<double> refQ, refPs;   // CHECK: the host's own queries when the device built them (step 6k)
 
     // the device answers camera c while the host prepares c + 1, then votes c while it answers c + 1;
     // after a device error the remaining cameras are answered on the host from the same tree
-    bool deviceDead = false;
     auto enqueue = [&](CheshireQuerySlot& s) {
         if (s.empty || s.onHost || deviceDead) return;
-        if (index.queryAsync(s.qp, s.nq, s.nnp, s.nnDistp, fma))
+        bool queued = false;
+        if (s.bpDevice)
+        {
+            const cheshire::knn::Camera camera = cheshireKnnCamera(mp, s.cam);
+            queued = index.backprojectQueryAsync(s.depth, s.w, s.h, s.rowsp, s.nq, camera, bpFma, s.qp, s.psp, s.nnp, s.nnDistp, fma);
+        }
+        else
+            queued = index.queryAsync(s.qp, s.nq, s.nnp, s.nnDistp, fma);
+        if (queued)
             s.queued = true;
         else
         {
@@ -602,7 +722,15 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
         if (cur.empty)
             continue;
         if (!answered)
+        {
+            if (cur.bpDevice)
+            {
+                // the device was to build these queries: build them here
+                hostBackproject(cur, cur.qp, cur.psp);
+                cur.bpDevice = false;
+            }
             answerOnHost(cur);
+        }
         else if (index.overflowed() > 0)
         {
             for (std::size_t k = 0; k < cur.nq; ++k)
@@ -612,9 +740,88 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
                     ++nbHost;
                 }
         }
+        if (cur.bpDevice)
+            nbBpDevice += cur.nq;
         if (check)
         {
             t1 = Clock::now();
+            // the reference's queries are the host's own: when the device built them (step 6k), the
+            // host backprojects the same map and every query and pixel size is compared bit for bit
+            const double* refQp = cur.qp;
+            const double* refPsp = cur.psp;
+            if (cur.bpDevice)
+            {
+                refQ.resize(3 * cur.nq);
+                refPs.resize(cur.nq);
+                hostBackproject(cur, refQ.data(), refPs.data());
+                long long qDiff = 0, psDiff = 0;
+#pragma omp parallel for reduction(+ : qDiff, psDiff)
+                for (long long k = 0; k < (long long)cur.nq; ++k)
+                {
+                    if (!cheshireSameDouble(cur.qp[3 * k], refQ[3 * k]) || !cheshireSameDouble(cur.qp[3 * k + 1], refQ[3 * k + 1]) ||
+                        !cheshireSameDouble(cur.qp[3 * k + 2], refQ[3 * k + 2]))
+                        ++qDiff;
+                    if (!cheshireSameDouble(cur.psp[k], refPs[k]))
+                        ++psDiff;
+                }
+                // the first mismatches of a pass, bit for bit, with their pixel and the camera, so the
+                // host's arithmetic can be reconstructed offline
+                if ((qDiff + psDiff) > 0 && nbBpDumped < 6)
+                {
+                    auto bits = [](double v) {
+                        std::uint64_t u;
+                        std::memcpy(&u, &v, sizeof(u));
+                        char b[20];
+                        std::snprintf(b, sizeof(b), "%016llx", (unsigned long long)u);
+                        return std::string(b);
+                    };
+                    if (nbBpDumped == 0)
+                    {
+                        const cheshire::knn::Camera cm = cheshireKnnCamera(mp, cur.cam);
+                        std::string line = "cheshire: bp camera " + std::to_string(cur.cam) + " C";
+                        for (double v : cm.C) line += " " + bits(v);
+                        line += " iK";
+                        for (double v : cm.iK) line += " " + bits(v);
+                        line += " P";
+                        for (double v : cm.P) line += " " + bits(v);
+                        ALICEVISION_LOG_INFO(line);
+                    }
+                    for (std::size_t k = 0; k < cur.nq && nbBpDumped < 6; ++k)
+                    {
+                        const bool dq = !cheshireSameDouble(cur.qp[3 * k], refQ[3 * k]) || !cheshireSameDouble(cur.qp[3 * k + 1], refQ[3 * k + 1]) ||
+                                        !cheshireSameDouble(cur.qp[3 * k + 2], refQ[3 * k + 2]);
+                        const bool dp = !cheshireSameDouble(cur.psp[k], refPs[k]);
+                        if (!dq && !dp)
+                            continue;
+                        // the pixel: the row whose range holds k, then the valid pixels of that row
+                        int y = 0;
+                        while (y + 1 < cur.h && cur.rowsp[y + 1] <= k)
+                            ++y;
+                        std::size_t kk = (std::size_t)cur.rowsp[y];
+                        int x = 0;
+                        for (; x < cur.w; ++x)
+                        {
+                            const float d = cur.depthMap((std::size_t)y * cur.w + x);
+                            if (d <= 0.0f)
+                                continue;
+                            if (kk == k)
+                                break;
+                            ++kk;
+                        }
+                        const float dep = cur.depthMap((std::size_t)y * cur.w + x);
+                        ALICEVISION_LOG_INFO("cheshire: bp diff cam " << cur.cam << " k " << k << " x " << x << " y " << y << " depth " << bits((double)dep)
+                                             << " host " << bits(refQ[3 * k]) << " " << bits(refQ[3 * k + 1]) << " " << bits(refQ[3 * k + 2]) << " " << bits(refPs[k])
+                                             << " device " << bits(cur.qp[3 * k]) << " " << bits(cur.qp[3 * k + 1]) << " " << bits(cur.qp[3 * k + 2]) << " "
+                                             << bits(cur.psp[k]));
+                        ++nbBpDumped;
+                    }
+                }
+                nbBpChecked += cur.nq;
+                nbBpQDiff += (std::size_t)qDiff;
+                nbBpPsDiff += (std::size_t)psDiff;
+                refQp = refQ.data();
+                refPsp = refPs.data();
+            }
             refNn.resize(cur.nq);
             refDist.resize(cur.nq);
             long long idxDiff = 0, distDiff = 0;
@@ -623,7 +830,7 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
             {
                 std::uint32_t i;
                 double d;
-                hostSearch(&cur.qp[3 * k], i, d);
+                hostSearch(&refQp[3 * k], i, d);
                 refNn[k] = i;
                 refDist[k] = d;
                 if (i != cur.nnp[k])
@@ -634,22 +841,22 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
             nbIdxDiff += idxDiff;
             nbDistDiff += distDiff;
             // the reference: the same ordered votes, on the shadows, from the host's answers only
-            cheshireVotesOrdered(cur.cam, cur.nq, refNn.data(), refDist.data(), cur.qp, cur.pixSize.data(), shadowCoords, shadowAttrs,
+            cheshireVotesOrdered(cur.cam, cur.nq, refNn.data(), refDist.data(), refQp, refPsp, shadowCoords, shadowAttrs,
                                  refVotes, refContrib);
             msCheck += cheshireVisMs(t1);
         }
         t1 = Clock::now();
         if (bucketedVotes)
-            cheshireVotesBucketed(cur.cam, cur.nq, cur.nnp, cur.nnDistp, cur.qp, cur.pixSize.data(), verticesCoordsPrepare, verticesAttrPrepare,
+            cheshireVotesBucketed(cur.cam, cur.nq, cur.nnp, cur.nnDistp, cur.qp, cur.psp, verticesCoordsPrepare, verticesAttrPrepare,
                                   nbVotes, nbContrib);
         else
-            cheshireVotesOrdered(cur.cam, cur.nq, cur.nnp, cur.nnDistp, cur.qp, cur.pixSize.data(), verticesCoordsPrepare, verticesAttrPrepare,
+            cheshireVotesOrdered(cur.cam, cur.nq, cur.nnp, cur.nnDistp, cur.qp, cur.psp, verticesCoordsPrepare, verticesAttrPrepare,
                                  nbVotes, nbContrib);
         msVotes += cheshireVisMs(t1);
         nbQueries += cur.nq;
     }
     index.wait();
-    const double msDevUp = index.msUpload(), msDevKernel = index.msKernel(), msDevDown = index.msDownload();
+    const double msDevUp = index.msUpload(), msDevBp = index.msBackproject(), msDevKernel = index.msKernel(), msDevDown = index.msDownload();
     index.release();
 
 // compute pixSize
@@ -662,10 +869,19 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
 
     if (logIt)
         ALICEVISION_LOG_INFO("cheshire: visibilities on the GPU: " << nbQueries << " queries, " << nbVotes << " votes, " << nbContrib
-                             << " contributions, " << nbHost << " answered on the host, " << nbNaN << " NaN depths; index " << msIndex
-                             << " ms, maps " << msLoad << " ms, backproject " << msPrep << " ms, device wait " << msWait
-                             << " ms (device: upload " << msDevUp << ", kernel " << msDevKernel << ", download " << msDevDown
-                             << " ms), votes " << msVotes << " ms, check " << msCheck << " ms, total " << cheshireVisMs(tStart) << " ms");
+                             << " contributions, " << nbHost << " answered on the host, " << nbBpDevice << " built on the device, " << nbNaN
+                             << " NaN depths; index " << msIndex << " ms, maps " << msLoad << " ms, " << (deviceBp ? "count and stage " : "backproject ")
+                             << msPrep << " ms, device wait " << msWait << " ms (device: upload " << msDevUp << ", backproject " << msDevBp
+                             << ", kernel " << msDevKernel << ", download " << msDevDown << " ms), votes " << msVotes << " ms, check " << msCheck
+                             << " ms, total " << cheshireVisMs(tStart) << " ms");
+    if (check && nbBpChecked > 0)
+    {
+        if (nbBpQDiff + nbBpPsDiff == 0)
+            ALICEVISION_LOG_INFO("cheshire: GPU backprojection check (pass " << pass << "): identical to MultiViewParams on all " << nbBpChecked << " queries");
+        else
+            ALICEVISION_LOG_WARNING("cheshire: GPU backprojection check (pass " << pass << "): " << std::max(nbBpQDiff, nbBpPsDiff) << " of " << nbBpChecked
+                                    << " queries differ (q " << nbBpQDiff << ", pixSize " << nbBpPsDiff << ")");
+    }
     if (check)
     {
         if (nbIdxDiff + nbDistDiff == 0)
@@ -716,6 +932,8 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
                                     << nbContrib << " vs " << refContrib << (sizes ? "" : "; vertex counts differ"));
     }
     ALICEVISION_LOG_INFO("Visibilities created.");
+    if (nbBpDevice > 0)
+        return bucketedVotes ? "GPU backprojection and knn, bucketed host votes" : "GPU backprojection and knn, host votes";
     return bucketedVotes ? "GPU knn, bucketed host votes" : "GPU knn, host votes";
 }
 #endif

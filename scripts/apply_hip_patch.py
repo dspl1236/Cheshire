@@ -4490,6 +4490,18 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
             sys.exit("step 6i: expected 9 growth calls in mesh/MeshClean.cpp, found %d" % n)
         mcf.write_text(t, encoding="utf-8", newline="")
 
+    # 6l. MeshClean::init's per-point triangle lists and edge index built by counting
+    #     (hip/port/meshing_cpu/meshclean_setup.txt): upstream's two qsorts over 3 entries per
+    #     triangle produce lexicographic order, which counting by point and sorting each small bucket
+    #     reproduces exactly (10.5 s of the 884-view cleaning locally). CHESHIRE_MESHCLEAN_CHECK=1
+    #     runs upstream's setup too and compares.
+    t = mcf.read_text(encoding="utf-8")
+    if "cheshire (step 6l)" not in t:
+        old, new = [x.replace("\n", NL) for x in (ROOT / "hip/port/meshing_cpu/meshclean_setup.txt").read_text(encoding="utf-8").split("=====\n")]
+        if t.count(old) != 1:
+            sys.exit("step 6l: MeshClean::init not found once in mesh/MeshClean.cpp")
+        mcf.write_text(t.replace(old, new, 1), encoding="utf-8", newline="")
+
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
     #     when the cards in front of us are both compute 6.1. FORCE beats -D on the command line, so

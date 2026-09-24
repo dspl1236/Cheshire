@@ -1971,3 +1971,63 @@ per Meshing; it now moves them. Same contents; the checksum is unchanged.
 the s7 job's first DepthMap chunk with `CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK=1` on the RX 6750 XT:
 every image 0 of 20,256,000 floats and 0 texels different from the host path, and the 8 maps
 byte-identical to the s7 job's (73 s for the 4 views with the check).
+
+## 0.3.4: the visibility passes' queries built on the device, and MeshClean's setup by counting (2026-09-24)
+
+**6k. The backprojection on the device.** On house-pc the two visibility passes are 296 of the
+884-view Meshing's 716 s: per camera the i3 backprojects 3.76 million pixels and applies the votes
+on four threads, and only the knn search overlaps them. Now the host counts each row's valid pixels
+and stages the depth map, and the device builds the queries: `backprojectKernel` in `knnGPU.cu`, one
+block per row, the valid pixels numbered by a block scan so query k is the host's k, and
+MultiViewParams::backproject and getCamPixelSize replayed operation by operation. The host build's
+fused forms follow the same rule as the knn metric: clang-cl under /arch:AVX2 contracts within an
+expression (fma(m11, x, m12*y) + m13, fma(z, z, fma(x, x, y*y)), fma(a.y, b.z, -(a.z*b.y)), the
+4-term rows likewise), a generic x86-64 build (the Linux bundle) fuses nothing. The device answers the
+queries in place and returns them with their pixel sizes, and the host votes as before.
+
+The first build did not match: 63 % of the queries differed from the host's in the last bit, by the
+same count whether the device computed the fused or the plain forms, so the device was fusing on
+its own. HIP's `__dadd_rn`, `__dsub_rn` and `__dmul_rn` are plain operators defined in its math
+header, which the compiler includes before a source file's first line; they are compiled with device
+code's default contraction, not under the file's `#pragma clang fp contract(off)`, so a product
+feeding a sum fuses into an FMA once inlined. The arithmetic now goes through three helpers defined
+in the file under the pragma (division, sqrt and explicit `__fma_rn` cannot be contracted and stay).
+The knn kernel used the same intrinsics for its plain metric and the bounding-box sums, which is the
+likely cause of the Linux knn distance differences of 2026-09-22 that the pragma alone did not change
+(docs above); the next Linux bundle will show. No other port uses them.
+
+Gate (`CHESHIRE_GPU_VIS_CHECK=1`: the host backprojects every camera again and compares every query
+and pixel size bit for bit, and its reference votes use its own queries): identical to
+MultiViewParams on all 8,808,856 queries of each mini6 pass and all 88,267,121 of each 41-view pass;
+knn and votes checks identical; the pass digests equal step 3's on all three sets (mini6
+`806ef990.../51779edd...`, 41 `4d536979.../db94ece3...`, 884 views `c572bc16.../f0ff15ea...`), as do the
+tetrahedralization inputs (`7d875321...`, `cdd23710...`, `64b36ee4...`). Negative control:
+`CHESHIRE_GPU_VIS_BP_FMA=0` on this build reports 8,792,017 of 8,808,856 queries different. Under CHECK
+the first mismatches of a pass are printed bit for bit with their pixel and the camera, which is how
+the fusion was found.
+
+On the RX 9070 box, back to back at 884 views, idle:
+
+| | host backprojection | device backprojection |
+|---|---|---|
+| pass 1 | 57.4 s (backproject 24.0, votes 19.2) | 49.3 s (count and stage 2.8, device wait 17.5, votes 17.9) |
+| pass 2 | 48.1 s | 39.9 s |
+| Meshing node | 290.9 s | 278.9 s |
+
+Here the passes were already near device-bound (62 ms per camera after step 3); the step is for
+four-thread hosts, where the backprojection was more than half of the host's 187 ms per camera. The
+device's own event split (upload, backprojection, kernel, download) is not reliable on HIP - copies
+run on the DMA engine and the markers can land out of order, down to negative uploads - so the pass
+totals are the measure. `CHESHIRE_GPU_VIS_BACKPROJECT=0` keeps the host's backprojection;
+`CHESHIRE_GPU_VIS_BP_FMA=0|1` overrides the form.
+
+**6l. MeshClean's setup by counting.** After 6i the cleaning step was mostly its setup: two qsorts
+over three entries per triangle (the per-point triangle lists and the edge index) and a sort of every
+list, about 10 s at 884 views. Their result is fixed: the lists ascending and the edge entries in
+lexicographic (larger point, smaller point, triangle) order, whatever qsort does with equal keys
+(its comparator never returns 0). Counting by point and by larger point, then sorting each small
+bucket, gives the same arrays with the same capacities: 0.86-0.91 s at 884 views, 0.24 s at 41,
+51 ms on mini6. `CHESHIRE_MESHCLEAN_CHECK=1` now also runs upstream's setup and compares: identical
+on mini6, at 41 views (1,157,308 lists, 7,034,610 edge entries) and at 884 (4,053,812 lists,
+24,409,083 edge entries), and the cleaning passes after it identical as before.
+`CHESHIRE_MESHCLEAN_SETUP=0` restores upstream's.

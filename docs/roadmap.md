@@ -60,6 +60,10 @@ L items can slide.
   2026-09-22:** the rebuilt Linux bundle reports exactly the same counts on the RX 6750 XT (17,383,299
   and 18,404,248 of 87,354,192; docs/04, "The Linux knn distances are not a contraction"). The pragma
   stays (it is correct), the cause is unknown; next, dump differing pairs and recompute on the host.
+  **Likely found 2026-09-24 (step 6k, docs/04):** the pragma reaches only code after it, and HIP's
+  `__dadd_rn`/`__dmul_rn` are defined in a header included before the file, so they fused anyway.
+  The knn kernel now uses helpers defined under the pragma. Confirm on the next Linux bundle: the
+  RX 6750 XT's distance differences should be 0, then tighten `verify_end_to_end.py`.
 - **ImagesCache eviction under the parallel prefetch** (S). Cheshire's own `refreshData` keeps
   upstream's `// TODO: oldCamId should be protected if already used`
   (`hip/port/sgm_fused/imagescache_refresh.cpp.txt:15`), and the prefetch refreshes a whole batch
@@ -188,6 +192,11 @@ L items can slide.
   views, pass 1 now at the device's 62 ms per camera. Next: measure the kernel time on an idle box
   (it rose once the host stopped holding it up), the Linux rerun for step 1, then steps 4-7, the
   device votes behind CHESHIRE_GPU_VIS_VOTES with guards and recovery. The 133 s pass 2 was load.
+  **2026-09-24, step 6k (docs/04):** the backprojection on the device ahead of the knn, with host
+  votes: exact at 6, 41 and 884 views, passes 105.5 -> 89.2 s here; the target is house-pc, where the
+  passes are 296 of 716 s and host-bound. The plan is now docs/notes/fusion-visibility-plan.md. Found
+  on the way: HIP's __dadd_rn/__dmul_rn fuse despite the file's pragma (they live in a header included
+  before it), the likely cause of the Linux knn distance differences; check on the next Linux bundle.
 - **Fusion: the rest** (M). filterByPixSize's CPU kd-tree is about 16 s at 833 views (the GPU
   radius filter that was briefed was never built), removeInvalidPoints plus margin setup about 9 s,
   and the depth-map load 43 s warm or 111 s cold, which is disk and EXR decode, not a GPU job.
@@ -202,7 +211,8 @@ L items can slide.
   **Done 2026-09-24, step 6i (docs/04):** the pre-screen and index-order pass as planned, later passes
   restricted to the points a split touched, and geometric growth of the split arrays (the first pass
   copied the edge array every few hundred splits); `CHESHIRE_MESHCLEAN_CHECK=1` compares every
-  structure with upstream's passes. The setup's sorts (about 11 s of 56 on house-pc) are still open.
+  structure with upstream's passes. **Setup done the same day, step 6l:** counting instead of the two
+  qsorts, 10 s to 0.9 s at 884 views, checked against upstream's setup.
 - **Graph-cut post-processing flood fills** (M). Three serial flood fills still take about 4.2 s
   (`docs/11-meshing-cpu.md:191-196`). A parallel connected-components pass checked against
   `_cellIsFull` under `CHESHIRE_SEGMENT_CHECK` keeps the result exact. The solid-angle pass
