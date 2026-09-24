@@ -34,3 +34,7 @@ else()
   target_link_libraries(CheshireEXR PUBLIC hip::host)
 endif()
 target_include_directories(CheshireEXR PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} PRIVATE ${CHESHIREEXR_SHARED})
+# Position-independent, as CheshireJPG: the library links into PIE executables (Ubuntu's gcc default)
+# and into AliceVision's shared libraries; without it the device-compiled object fails to link on
+# Linux (R_X86_64_32S against .text).
+set_target_properties(CheshireEXR PROPERTIES POSITION_INDEPENDENT_CODE ON)
