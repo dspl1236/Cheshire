@@ -82,6 +82,7 @@ SILENT_PORTS = None  # 0.3.2: no port is silent on either path any more
 SELF_CHECK_ENV = {
     "CHESHIRE_FILTER_CHECK": "1", "CHESHIRE_MAXFLOW_CHECK": "1", "CHESHIRE_GPU_VIS_CHECK": "1",
     "CHESHIRE_SEGMENT_CHECK": "1", "CHESHIRE_GPU_TEDGE_CHECK": "1", "CHESHIRE_GPU_VOTE_LOG": "1",
+    "CHESHIRE_MESHCLEAN_CHECK": "1",
 }
 SELF_CHECK_VERDICTS = {
     "Meshing": [
@@ -90,10 +91,20 @@ SELF_CHECK_VERDICTS = {
         # (docs/12); the labelling is the verdict. The first version asserted "(identical)" on the
         # flows and failed a run whose labelling was 0 of 1,676,527 cells different.
         r"max-flow check: .*cells labelled differently: 0 of \d+",
-        # The knn check's verdict is the VERTEX each query names; the distance it reports may differ
-                 # in the last bits by card (RX 6750 XT on Linux: 0 vertices differ, ~1.6 M distances do, on
-                 # the 0.3.1 bundle as well; RX 9070: identical). Either wording passes.
-                 r"GPU knn check: (identical to nanoflann on all|0 of \d+ queries name a different vertex)",
+        # The knn check: identical, vertex AND distance, in both visibility passes (its line names no
+        # pass, so the pattern needs two). Until 2026-09-24 Linux builds differed in the last bits of
+        # ~20 % of the distances: HIP's __dadd_rn/__dmul_rn live in a header included before the
+        # file's fp-contract pragma and fused anyway (docs/04, step 6k). Since then: 0 on the
+        # RX 6750 XT (Linux) and the RX 9070 (Windows).
+        r"(?s)GPU knn check: identical to nanoflann on all.*GPU knn check: identical to nanoflann on all",
+        # The visibility queries built on the device (6k), and the votes, per pass.
+        r"GPU backprojection check \(pass 1\): identical to MultiViewParams on all",
+        r"GPU backprojection check \(pass 2\): identical to MultiViewParams on all",
+        r"visibility votes check \(pass 1, [^)]*\): identical to the ordered host reference on all",
+        r"visibility votes check \(pass 2, [^)]*\): identical to the ordered host reference on all",
+        # MeshClean's counting setup (6l) and pre-screened passes (6i) against upstream's.
+        r"MeshClean setup check: identical to upstream's",
+        r"cleanMesh check: .*every structure identical",
         r"segmentFullOrFree check: identical to upstream on all",
         r"tedge check: cells with on != 0: cpu (\d+), gpu \1;",
         r"facet weight check: .*differing from the sequential computation: 0\b",

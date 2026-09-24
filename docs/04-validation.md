@@ -2031,3 +2031,23 @@ bucket, gives the same arrays with the same capacities: 0.86-0.91 s at 884 views
 on mini6, at 41 views (1,157,308 lists, 7,034,610 edge entries) and at 884 (4,053,812 lists,
 24,409,083 edge entries), and the cleaning passes after it identical as before.
 `CHESHIRE_MESHCLEAN_SETUP=0` restores upstream's.
+
+**On Linux, the RX 6750 XT (house-pc), 2026-09-24.** The s9 bundle (built from 39e8490 in WSL, gcc
+host, so the plain arithmetic forms) on the 41-view set: DepthMap and DepthMapFilter with the engine
+bay job's own node parameters through Meshroom's paired wrappers, then Meshing with
+`CHESHIRE_GPU_VIS_CHECK=1`, `CHESHIRE_GPU_VOTE_LOG=1` and `CHESHIRE_MESHCLEAN_CHECK=1`:
+
+| check | pass 1 | pass 2 |
+|---|---|---|
+| GPU backprojection | identical on all 88,257,069 queries | identical on all 88,257,069 |
+| GPU knn against nanoflann | identical on all | identical on all |
+| visibility votes against the ordered host reference | identical on all 4,139,042 vertices | identical on all 1,861,491 |
+
+and the facet weights 0 of 47,100,904 different, MeshClean's setup and its 4 passes identical to
+upstream's. The knn line is the news: the 0.3.3 and step-1 bundles on the same card reported
+17,383,299 and 18,404,248 of 87,354,192 distances different (docs above, "The Linux knn distances are
+not a contraction"). It was the HIP intrinsics fusing despite the pragma, as 6k found; the gate
+(`scripts/verify_end_to_end.py`) now requires "identical to nanoflann" in both passes, and the
+backprojection, votes and MeshClean verdicts per pass. On the 107-photo engine bay the s9 bundle's
+Meshing is 126 s against s8's 159 s on house-pc (visibility passes 24.3 to 18.1 s, max angle 4.5 to
+1.1 s, facet weights and graph 23.7 to 12.8 s, cleaning 15.8 to 3.2 s), the job 21.1 to 20.5 minutes.
