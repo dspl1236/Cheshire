@@ -262,6 +262,12 @@ L items can slide.
   this is Cheshire's work at all. If it is, output must stay at 107/107 byte-identical EXRs.
   **2026-09-24, step 6f:** the EXR write at ZIP level 1 (30 % less write CPU than level 4, 1.4 %
   larger, same pixels; `CHESHIRE_PDS_EXR_COMPRESSION=method[:level]`).
+- **GPU JPEG decode for the reads** (L). The codec exists (docs/19): a baseline decoder and
+  encoder in HIP compute kernels, not VCN, so Windows and RDNA1 are covered, identical to
+  libjpeg-turbo on 88 of 89 camera files (the 89th is damaged and handed back) and on 833
+  synthetic encode/decode cases, checked on the host backend. Not yet run on a card. Order: run
+  `jpeg_gpu_check` on the three test cards; profile; then wire it into PrepareDenseScene's read
+  behind a switch, held to 107/107 byte-identical EXRs; then FeatureExtraction's loads.
 - **DepthMap host image loads** (M). About 30 % of the 41-view run is host time, and twelve
   parallel loads finish at roughly one per 0.5 s (`docs/05-performance.md:27-31`). Add a per-phase
   split in the style of `CHESHIRE_PDS_PROFILE` to tell a serial section from 6-core saturation.
