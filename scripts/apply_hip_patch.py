@@ -4502,6 +4502,37 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
             sys.exit("step 6l: MeshClean::init not found once in mesh/MeshClean.cpp")
         mcf.write_text(t.replace(old, new, 1), encoding="utf-8", newline="")
 
+    # 6n. An 8-bit RGB JPEG or PNG read as float RGB/RGBA without OpenImageIO's full-image passes
+    #     (hip/port/image_read/direct8.txt). PrepareDenseScene's read of a 12 MP photo is 556 ms on
+    #     one thread, of which the JPEG decode is 60: the colour conversion is 267 (48 %) and the
+    #     channels pass that adds alpha 152 (27 %), both copying the whole image around the 102 ms
+    #     the OCIO processor itself takes. The direct path fills the same per-row RGBA scratch line
+    #     colorconvert builds and applies the same processor to it; 8 of 8 photos byte-identical in
+    #     hip/tests/pdsread/pdsreadbench.cpp. The ColorConfig is kept for the process instead of one
+    #     per read. CHESHIRE_READ_DIRECT=0 disables it, CHESHIRE_READ_DIRECT_CHECK=1 compares.
+    iop = AV / "src/aliceVision/image/io.cpp"
+    t = iop.read_text(encoding="utf-8")
+    if "cheshire (step 6n)" not in t:
+        helper, call = [x.replace("\n", NL) for x in (ROOT / "hip/port/image_read/direct8.txt").read_text(encoding="utf-8").split("=====\n")]
+        inc = "#include <OpenImageIO/imagecache.h>" + NL
+        if t.count(inc) != 1:
+            sys.exit("step 6n: imagecache include not found once in image/io.cpp")
+        t = t.replace(inc, inc + "#include <OpenImageIO/parallel.h>  // cheshire: step 6n" + NL
+                      + "#include <aliceVision/alicevision_omp.hpp>" + NL
+                      + "#if !ALICEVISION_IS_DEFINED(ALICEVISION_HAVE_OPENMP)" + NL + "inline int omp_in_parallel() { return 0; }" + NL + "#endif" + NL
+                      + "#include <array>" + NL + "#include <atomic>" + NL + "#include <cstdio>" + NL + "#include <cstdlib>" + NL
+                      + "#include <map>" + NL + "#include <memory>" + NL + "#include <mutex>" + NL + "#include <vector>" + NL, 1)
+        sig = ("template<typename T>" + NL + "void readImage(const std::string& path, oiio::TypeDesc format, int nchannels, Image<T>& image, "
+               "const ImageReadOptions& imageReadOptions)" + NL)
+        if t.count(sig) != 1:
+            sys.exit("step 6n: readImage definition not found once in image/io.cpp")
+        t = t.replace(sig, helper + sig, 1)
+        anchor = "    oiio::ImageSpec configSpec;" + NL + NL + "    const bool isRawImage = isRawFormat(path);" + NL
+        if t.count(anchor) != 1:
+            sys.exit("step 6n: readImage configSpec anchor not found once in image/io.cpp")
+        t = t.replace(anchor, call + anchor, 1)
+        iop.write_text(t, encoding="utf-8", newline="")
+
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
     #     when the cards in front of us are both compute 6.1. FORCE beats -D on the command line, so

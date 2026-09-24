@@ -1,0 +1,254 @@
+// cheshire (step 6n): an 8-bit RGB file read as float RGB or RGBA straight into the caller's buffer.
+// Upstream's readImage reads the file into a float ImageBuf, builds a ColorConfig for the call,
+// converts with ImageBufAlgo::colorconvert (per row: a scratch line of RGBA floats with alpha 0, the
+// OCIO processor applied to it, RGB stored back), adds the alpha channel with ImageBufAlgo::channels
+// and copies the result out. For a 12 MP JPEG that is 556 ms on one thread, 60 of them the JPEG
+// decode (hip/tests/pdsread/pdsreadbench.cpp). Here the 8-bit pixels go into the same scratch line
+// through OpenImageIO's own uint8-to-float values, the same processor (from a ColorConfig kept for
+// the process) is applied to it the same way, and the line is stored in the output: the same values,
+// bit for bit, in a third of the time. Only for what that covers - three-channel 8-bit JPEG or PNG,
+// read as float RGB or RGBA, no DCP profile, converted through the AliceVision config or not at all;
+// everything else returns false and takes upstream's path. CHESHIRE_READ_DIRECT=0 disables it;
+// CHESHIRE_READ_DIRECT_CHECK=1 reads each such image both ways, keeps upstream's result and says
+// whether they are identical.
+namespace {
+
+bool cheshireReadDirectEnabled()
+{
+    static const bool on = [] {
+        const char* e = std::getenv("CHESHIRE_READ_DIRECT");
+        return !(e && std::string(e) == "0");
+    }();
+    return on;
+}
+
+bool cheshireReadDirectCheck()
+{
+    static const bool on = [] {
+        const char* e = std::getenv("CHESHIRE_READ_DIRECT_CHECK");
+        return e && std::string(e) == "1";
+    }();
+    return on;
+}
+
+// set while the check reads the same image through upstream's path
+thread_local bool cheshireReadDirectBypass = false;
+
+struct CheshireReadDirectStats
+{
+    std::atomic<long long> direct{0}, checked{0}, identical{0};
+    std::atomic<bool> announced{false};
+    ~CheshireReadDirectStats()
+    {
+        if (checked.load())
+            std::fprintf(stderr, "[cheshire] direct 8-bit read check: %lld of %lld images identical to OpenImageIO's path\n",
+                         identical.load(), checked.load());
+    }
+} cheshireReadDirectStats;
+
+// OpenImageIO's uint8-to-float conversion (convert_pixel_values, the one its readers use), per value
+const float* cheshireUint8ToFloat()
+{
+    static const std::array<float, 256> table = [] {
+        std::array<unsigned char, 256> ramp;
+        for (int v = 0; v < 256; ++v)
+            ramp[v] = static_cast<unsigned char>(v);
+        std::array<float, 256> t;
+        oiio::convert_pixel_values(oiio::TypeDesc::UINT8, ramp.data(), oiio::TypeDesc::FLOAT, t.data(), 256);
+        return t;
+    }();
+    return table.data();
+}
+
+// One ColorConfig per config path for the process; upstream builds one per read (14 ms). OpenImageIO
+// caches the processors inside it and locks its own state.
+const oiio::ColorConfig& cheshireColorConfig(const std::string& configPath)
+{
+    static std::mutex mutex;
+    static std::map<std::string, std::unique_ptr<oiio::ColorConfig>> configs;
+    std::lock_guard<std::mutex> lock(mutex);
+    std::unique_ptr<oiio::ColorConfig>& config = configs[configPath];
+    if (!config)
+        config = std::make_unique<oiio::ColorConfig>(configPath);
+    return *config;
+}
+
+template<typename T>
+bool cheshireReadDirect(const std::string& path, oiio::TypeDesc format, int nchannels, Image<T>& image, const ImageReadOptions& imageReadOptions)
+{
+    if (format != oiio::TypeDesc::FLOAT || (nchannels != 3 && nchannels != 4) || sizeof(T) != static_cast<std::size_t>(nchannels) * sizeof(float))
+        return false;
+    if (imageReadOptions.workingColorSpace == EImageColorSpace::AUTO)
+        return false;  // upstream throws
+    if (!imageReadOptions.colorProfileFileName.empty() && imageReadOptions.rawColorInterpretation == ERawColorInterpretation::DcpLinearProcessing)
+        return false;  // upstream applies the DCP profile to the float pixels
+
+    // the file, opened as upstream opens it (a non-raw file gets no configuration attributes)
+    oiio::ImageSpec configSpec;
+    oiio::ImageBuf inBuf(path, 0, 0, NULL, &configSpec);
+    const oiio::ImageSpec& fileSpec = inBuf.spec();
+    const std::string fileFormat(inBuf.file_format_name());
+    if (!inBuf.initialized() || (fileFormat != "jpeg" && fileFormat != "png") || fileSpec.format != oiio::TypeDesc::UINT8 ||
+        fileSpec.nchannels != 3 || fileSpec.width <= 0 || fileSpec.height <= 0 || fileSpec.depth != 1 || fileSpec.deep)
+        return false;
+
+    // the colour space decisions of upstream's path, in its order
+    const std::string ext = boost::to_lower_copy(fs::path(path).extension().string());
+    const std::string fromColorSpaceName = imageReadOptions.inputColorSpace == EImageColorSpace::AUTO
+                                             ? getImageColorSpace(fileSpec, ext == ".exr" ? "linear" : "sRGB", path)
+                                             : EImageColorSpace_enumToString(imageReadOptions.inputColorSpace);
+    if (fromColorSpaceName.substr(0, 5) == "Gamma" || fromColorSpaceName == "no_conversion")
+        return false;
+    bool convert = false;
+    if (imageReadOptions.workingColorSpace != EImageColorSpace::NO_CONVERSION)
+    {
+        EImageColorSpace from;
+        try
+        {
+            from = EImageColorSpace_stringToEnum(fromColorSpaceName);
+        }
+        catch (const std::exception&)
+        {
+            return false;  // upstream throws
+        }
+        if (imageReadOptions.workingColorSpace != from)
+        {
+            if (!EImageColorSpace_isSupportedOIIOEnum(imageReadOptions.workingColorSpace) || !EImageColorSpace_isSupportedOIIOEnum(from))
+                return false;  // upstream converts with OpenImageIO's default config
+            convert = true;
+        }
+    }
+    oiio::ColorProcessorHandle processor;
+    if (convert)
+    {
+        const std::string colorConfigPath = getAliceVisionOCIOConfig();
+        if (colorConfigPath.empty())
+            return false;  // upstream throws
+        // what colorconvert(dst, src, from, to, ..., &colorConfig) asks its config for
+        const oiio::ColorConfig& colorConfig = cheshireColorConfig(colorConfigPath);
+        const std::string toColorSpaceName = EImageColorSpace_enumToOIIOString(imageReadOptions.workingColorSpace);
+        processor = colorConfig.createColorProcessor(colorConfig.resolve(fromColorSpaceName), colorConfig.resolve(toColorSpaceName), "", "");
+        if (!processor)
+            return false;
+        if (processor->isNoOp())
+            processor.reset();  // colorconvert copies
+    }
+
+    if (!inBuf.read(0, 0, true, oiio::TypeDesc::UINT8) || !inBuf.localpixels() || inBuf.spec().format != oiio::TypeDesc::UINT8 || inBuf.spec().nchannels != 3)
+        return false;
+    const int width = inBuf.spec().width, height = inBuf.spec().height;
+    const unsigned char* src = static_cast<const unsigned char*>(inBuf.localpixels());
+    const oiio::stride_t xstride = inBuf.pixel_stride(), ystride = inBuf.scanline_stride();
+    const float* toFloat = cheshireUint8ToFloat();
+    image.resize(width, height, false);
+    float* dst = reinterpret_cast<float*>(image.data());
+    const oiio::ColorProcessor* proc = processor.get();
+
+    auto row = [&](int64_t y) {
+        thread_local std::vector<float> scratch;
+        float* out = dst + y * width * nchannels;
+        float* line = out;
+        if (nchannels != 4)
+        {
+            scratch.resize(static_cast<std::size_t>(width) * 4);
+            line = scratch.data();
+        }
+        const unsigned char* s = src + y * ystride;
+        for (int x = 0; x < width; ++x, s += xstride)
+        {
+            line[4 * x + 0] = toFloat[s[0]];
+            line[4 * x + 1] = toFloat[s[1]];
+            line[4 * x + 2] = toFloat[s[2]];
+            line[4 * x + 3] = 0.0f;
+        }
+        if (proc)
+            proc->apply(line, width, 1, 4, sizeof(float), 4 * sizeof(float), static_cast<oiio::stride_t>(width) * 4 * sizeof(float));
+        if (nchannels == 4)
+        {
+            for (int x = 0; x < width; ++x)
+                out[4 * x + 3] = 1.0f;
+        }
+        else
+        {
+            for (int x = 0; x < width; ++x)
+            {
+                out[3 * x + 0] = line[4 * x + 0];
+                out[3 * x + 1] = line[4 * x + 1];
+                out[3 * x + 2] = line[4 * x + 2];
+            }
+        }
+    };
+    // rows in parallel unless the caller already is (as colorconvert would, step 5w's rule)
+    oiio::parallel_for(int64_t(0), int64_t(height), row, oiio::paropt(omp_in_parallel() ? 1 : 0));
+
+    ++cheshireReadDirectStats.direct;
+    if (!cheshireReadDirectStats.announced.exchange(true))
+        ALICEVISION_LOG_INFO("cheshire: 8-bit images read directly into float RGB(A), the colour conversion applied per row as "
+                             "OpenImageIO does (CHESHIRE_READ_DIRECT=0 to disable, CHESHIRE_READ_DIRECT_CHECK=1 to compare)");
+    return true;
+}
+
+template<typename T>
+void cheshireReadDirectCompare(const std::string& path, const Image<T>& direct, const Image<T>& upstream)
+{
+    ++cheshireReadDirectStats.checked;
+    if (direct.width() != upstream.width() || direct.height() != upstream.height())
+    {
+        ALICEVISION_LOG_WARNING("cheshire: direct 8-bit read check: " << path << ": " << direct.width() << "x" << direct.height()
+                                                                        << " against OpenImageIO's " << upstream.width() << "x" << upstream.height());
+        return;
+    }
+    const std::size_t n = static_cast<std::size_t>(direct.width()) * direct.height() * sizeof(T) / sizeof(float);
+    const float* a = reinterpret_cast<const float*>(direct.data());
+    const float* b = reinterpret_cast<const float*>(upstream.data());
+    std::size_t diff = 0, first = n;
+    for (std::size_t i = 0; i < n; ++i)
+        if (std::memcmp(a + i, b + i, sizeof(float)) != 0)
+        {
+            if (!diff)
+                first = i;
+            ++diff;
+        }
+    if (!diff)
+    {
+        ++cheshireReadDirectStats.identical;
+        return;
+    }
+    ALICEVISION_LOG_WARNING("cheshire: direct 8-bit read check: " << path << ": " << diff << " of " << n << " values differ, first at " << first << " ("
+                                                                    << a[first] << " against " << b[first] << ")");
+}
+
+}  // namespace
+
+=====
+    // cheshire (step 6n): an 8-bit RGB JPEG or PNG read as float RGB/RGBA goes straight into the
+    // output (cheshireReadDirect above); anything else, and the check's second read, continues below
+    if (!cheshireReadDirectBypass && cheshireReadDirectEnabled())
+    {
+        if (!cheshireReadDirectCheck())
+        {
+            if (cheshireReadDirect(path, format, nchannels, image, imageReadOptions))
+                return;
+        }
+        else
+        {
+            Image<T> direct;
+            if (cheshireReadDirect(path, format, nchannels, direct, imageReadOptions))
+            {
+                cheshireReadDirectBypass = true;
+                try
+                {
+                    readImage(path, format, nchannels, image, imageReadOptions);
+                }
+                catch (...)
+                {
+                    cheshireReadDirectBypass = false;
+                    throw;
+                }
+                cheshireReadDirectBypass = false;
+                cheshireReadDirectCompare(path, direct, image);
+                return;
+            }
+        }
+    }
+
