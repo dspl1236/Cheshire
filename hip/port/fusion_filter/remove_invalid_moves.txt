@@ -1,0 +1,3 @@
+            verticesAttrTmp.push_back(verticesAttrPrepare[i]);
+=====
+            verticesAttrTmp.push_back(std::move(verticesAttrPrepare[i]));  // cheshire (step 6j): the camera list moved, not copied

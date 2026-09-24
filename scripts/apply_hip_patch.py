@@ -4416,6 +4416,80 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
         t = t.replace(inc, inc + "#include <thread>  // cheshire (step 6e)" + NL, 1)
         tx.write_text(t, encoding="utf-8", newline="")
 
+    # 6f. PrepareDenseScene writes ZIP at level 1 (method:level in CHESHIRE_PDS_EXR_COMPRESSION):
+    #     a third less write time than OpenEXR's default level 4 for a 1.7 % larger file and the same
+    #     pixels. 5y inserts the new helper in a fresh tree; this upgrades a tree that has the old one.
+    pds = AV / "src/software/pipeline/main_prepareDenseScene.cpp"
+    t = pds.read_text(encoding="utf-8")
+    if "step 6f" not in t:
+        old, new = [x.replace("\n", NL) for x in (ROOT / "hip/port/sgm_fused/pds_level_upgrade.txt").read_text(encoding="utf-8").split("=====\n")]
+        if t.count(old) != 1:
+            sys.exit("the 5y write-options helper not found once in main_prepareDenseScene.cpp")
+        t = t.replace(old, new, 1)
+        t = t.replace("(CHESHIRE_PDS_EXR_COMPRESSION to change; upstream's default is zips)",
+                      "(CHESHIRE_PDS_EXR_COMPRESSION=method[:level] to change; upstream's default is zips at level 4)")
+        pds.write_text(t, encoding="utf-8", newline="")
+
+    # 6g. Fusion's max observation angle per point over unordered camera pairs, each camera's
+    #     direction normalised once: the angle is symmetric bit for bit and never NaN, and the
+    #     directions and angles are upstream's expressions, so the maximum is unchanged with half
+    #     the acos calls and k normalisations instead of 2k(k-1) (48 s of the 884-view Meshing on
+    #     house-pc).
+    pcf = AV / "src/aliceVision/fuseCut/PointCloud.cpp"
+    t = pcf.read_text(encoding="utf-8")
+    if "cheshire (step 6g)" not in t:
+        old, new = [x.replace("\n", NL) for x in (ROOT / "hip/port/fusion_filter/angle_pairs.txt").read_text(encoding="utf-8").split("=====\n")]
+        if t.count(old) != 1:
+            sys.exit("max-angle loop not found once in fuseCut/PointCloud.cpp")
+        pcf.write_text(t.replace(old, new, 1), encoding="utf-8", newline="")
+
+    # 6j. removeInvalidPoints (the variant with the vertex attributes) moves each surviving vertex's
+    #     camera list into the new array instead of copying it: the same contents, without a heap
+    #     allocation and a free per vertex (about ten million at 884 views, five calls per Meshing).
+    t = pcf.read_text(encoding="utf-8")
+    if "cheshire (step 6j)" not in t:
+        old, new = [x.replace("\n", NL) for x in (ROOT / "hip/port/fusion_filter/remove_invalid_moves.txt").read_text(encoding="utf-8").split("=====\n")]
+        if t.count(old) != 1:
+            sys.exit("step 6j: the attribute copy not found once in fuseCut/PointCloud.cpp")
+        pcf.write_text(t.replace(old, new, 1), encoding="utf-8", newline="")
+
+    # 6h. binarize's facet weights once per interior facet (hip/port/meshing_csr/facet_pairs.txt):
+    #     both weights of a facet need the same two circumsphere centres and the mirror's entry is
+    #     the same values swapped, so each centre is computed once per cell and each interior facet
+    #     once (16 centres per cell to about 3; 33 s on house-pc's i3 at 884 views). Exact:
+    #     CHESHIRE_GPU_VOTE_LOG=1 compares every entry with upstream's per-facet computation.
+    t = gfp.read_text(encoding="utf-8")
+    if "cheshire (step 6h)" not in t:
+        old_loop, new_loop, anchor, helper, inc_old, inc_new = [
+            x.replace("\n", NL) for x in (ROOT / "hip/port/meshing_csr/facet_pairs.txt").read_text(encoding="utf-8").split("=====\n")]
+        for what, text in (("facet-weight loop", old_loop), ("binarizeImpl", anchor), ("<cmath> include", inc_old)):
+            if t.count(text) != 1:
+                sys.exit("step 6h: %s not found once in fuseCut/GraphFiller.cpp" % what)
+        t = t.replace(old_loop, new_loop, 1).replace(anchor, helper + anchor, 1).replace(inc_old, inc_new, 1)
+        gfp.write_text(t, encoding="utf-8", newline="")
+
+    # 6i. MeshClean's passes with a parallel read-only pre-screen (hip/port/meshing_cpu/
+    #     meshclean_prescreen.txt): path::isWrongPt on every candidate in parallel, upstream's
+    #     deployAll in parallel on those that do not split (they write only their own entries), then
+    #     upstream's deployAll in index order on the splitting points and on every point an earlier
+    #     split of the pass touched; after the first pass the candidates are the points a split
+    #     touched. And the arrays a split appends to grow by an eighth instead of a fixed step (the
+    #     first pass copied the 24-million-entry edge array every few hundred splits). 56 s of the
+    #     884-view Meshing on house-pc. CHESHIRE_MESHCLEAN_CHECK=1 compares every structure with
+    #     upstream's passes from the same state.
+    mcf = AV / "src/aliceVision/mesh/MeshClean.cpp"
+    t = mcf.read_text(encoding="utf-8")
+    if "cheshire (step 6i)" not in t:
+        parts = [x.replace("\n", NL) for x in (ROOT / "hip/port/meshing_cpu/meshclean_prescreen.txt").read_text(encoding="utf-8").split("=====\n")]
+        for old, new in zip(parts[0::2], parts[1::2]):
+            if t.count(old) != 1:
+                sys.exit("step 6i: anchor not found once in mesh/MeshClean.cpp: " + old.splitlines()[0])
+            t = t.replace(old, new, 1)
+        t, n = re.subn(r"meshClean->(\w+)\.reserveAddIfNeeded\(", r"cheshireReserveAddIfNeeded(meshClean->\1, ", t)
+        if n != 9:
+            sys.exit("step 6i: expected 9 growth calls in mesh/MeshClean.cpp, found %d" % n)
+        mcf.write_text(t, encoding="utf-8", newline="")
+
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
     #     when the cards in front of us are both compute 6.1. FORCE beats -D on the command line, so

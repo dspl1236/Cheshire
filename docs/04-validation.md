@@ -1884,3 +1884,90 @@ the 884-view Meshing, 120 s of 716. Step 6b computes F from E once per model in
 deterministic digests are unchanged on the 41-view set and the engine bay. And step 5f counted the
 native camera mipmaps at half their size - `CudaRGBA` is already the 8-byte half4 - so mini6's image
 peak reads 186 MB instead of 93, with the maps unchanged.
+
+## 0.3.4: Meshing's host phases after the s7 run, and PrepareDenseScene at ZIP level 1 (2026-09-24)
+
+**Where the 884-view Meshing goes on house-pc.** The s7 run's Meshing (i3-4330 with 4 threads, RX
+6750 XT, 819 of 884 views registered) took 716 s, split from its log:
+
+| phase | s |
+|---|---|
+| depth-map load, first filters, first kd-tree | 131 |
+| visibility pass 1 | 153 |
+| max observation angle per point | 48 |
+| angle and similarity filter, pixel-size filter rounds | 23 |
+| visibility pass 2 | 143 |
+| tetrahedralization | 29 |
+| s-t weights (GPU votes) | 32 |
+| facet weights and graph | 33 |
+| CSR layout and GPU cut | 13 |
+| post-cut processing | 24 |
+| mesh cleaning | 58 |
+| mesh save | 19 |
+
+The two visibility passes are 296 s, 41 % of the node, at 187 ms per camera where the RX 9070 box
+runs 62 ms: the i3 backprojects each camera's 3.76 million pixels and applies its votes on four
+threads, and only the knn search overlaps them (the next item). The rest of this section takes the
+host phases that are pure CPU and can be made exact: each is proven in-process against upstream's
+own computation, and at scale by the tetrahedralization input checksum of the kept False Door
+cache (4,701,419 points, `64b36ee445e30d38`).
+
+**6f. PrepareDenseScene at ZIP level 1.** Step 5y's ZIP was written at OpenEXR's default zlib level,
+4. Level 1 on the mini6 set: 282,699,910 bytes against 278,680,274 (1.4 % larger), the write's
+thread-seconds 4.0 against 5.7, the decoded pixels identical in all 6 files. Inflate costs the same
+at either level, so every later reader is unchanged. `CHESHIRE_PDS_EXR_COMPRESSION` now takes
+`method[:level]`; a tree patched before this step is upgraded in place.
+
+**6g. The max observation angle over pairs of cameras.** For every fused point, upstream takes the
+largest angle between any two of its cameras, over ordered pairs: two normalisations and an acos per
+pair, twice per pair. The angle is symmetric bit for bit (two separate normalisations and a dot
+product of the same products in the same order), it is never NaN (0 is returned instead), and the
+angles are non-negative, so the maximum over unordered pairs is the same value. Each camera's
+direction from the point is normalised once with the same expression, and the angle uses
+angleBetwV1andV2's: half the acos calls and k normalisations instead of 2k(k-1). Locally the loop went
+from 5.5 s to 3.4 s with the pairs alone and to 1.9 s with the directions too; the tetrahedralization
+input is unchanged on mini6 and at 884 views. Upstream's count of the points this filter removes is a
+plain int incremented inside the OpenMP loop, so it loses increments at random (225,329 and 225,314 in
+two runs); the count of points actually removed, 225,360, is the one to compare.
+
+**6h. Facet weights once per interior facet.** Before the cut, every cell's four entries computed
+both directed weights of their facet with getFaceWeight, and each weight takes the circumsphere
+centres of the facet's two cells: 16 centre computations per cell, every interior facet twice. The two
+weights of a facet need the same two centres and the mirror's entry is the same pair of values
+swapped, so each interior facet is now computed once, from its lower-numbered cell, which computes its
+own centre once: about 3 centres per cell. `cheshireFaceWeight` is getFaceWeight's expressions with the
+centres passed in. The existing check (`CHESHIRE_GPU_VOTE_LOG=1`) compares every entry with upstream's
+per-facet computation: 0 of 6,689,240 facets differ on mini6 and 0 of 116,323,696 at 884 views. The phase
+went from 7.7 s to 5.3 s locally (4.6 s of it the weights, the rest the serial edge recording); on
+house-pc, where four threads compute it, it was 33 s. `CHESHIRE_FACET_PAIRS=0` restores
+upstream's loop.
+
+**6i. MeshClean with a parallel pre-screen.** Mesh cleaning splits the vertices whose triangle fan is
+not a single disc, one point after another in index order, and repeats until a pass splits nothing:
+four passes of 8.4 s over every point on house-pc, and a first pass of 19 s. A point's pass reads only
+its own triangle list, those triangles and the edge entries between it and its one-ring, and a split
+rewrites only those of the split point, its one-ring and the new points (the edge index stays sorted
+with unique keys, so appending to it does not move a lookup). So each pass now runs upstream's read-only
+path::isWrongPt on the candidates in parallel, upstream's deployAll in parallel on the candidates that
+would not split (they write only their own entries), and upstream's deployAll in index order on the
+points that split and on every point an earlier split of the pass touched. After the first pass the
+candidates are the points a split touched in the previous one; the others would write the same values
+again. The first pass was slow for another reason: the arrays a split appends to grew by a fixed 1,000
+or 3,000 entries, so the 24-million-entry edge array was copied every few hundred splits; they now grow
+by an eighth. `CHESHIRE_MESHCLEAN_CHECK=1` runs upstream's passes from the same state and compares every
+structure (points, triangles, colours, the triangle and neighbour lists, the boundary flags, the edge
+index, the new points' origins): identical on mini6 (3 passes, 250,207 points) and at 884 views (3 passes,
+4,071,677 points, 8,136,361 triangles). mini6's passes: 110, 5.4 and 0.4 ms. At 884 views the passes take 2.5, 0.11 and 0.01 s where
+upstream's took 10.0, 8.5 and 8.7 s in the same process, and the cleaning step went from 44.3 s to
+14.0 s, 10.5 s of it now the setup's sorts. The mesh itself differs between runs as it always has
+(geogram numbers the cells differently), so a run may take a fourth pass: the check compares within one.
+`CHESHIRE_MESHCLEAN_PRESCREEN=0` restores upstream's passes.
+
+**6j. removeInvalidPoints moves the camera lists.** The variant with the vertex attributes copied each
+surviving vertex's camera list into the new array, a heap allocation and a free per vertex, five times
+per Meshing; it now moves them. Same contents; the checksum is unchanged.
+
+**The device downscale on house-pc (6d, Linux).** The s8 bundle, built from 919eba8, ran 4 views of
+the s7 job's first DepthMap chunk with `CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK=1` on the RX 6750 XT:
+every image 0 of 20,256,000 floats and 0 texels different from the host path, and the 8 maps
+byte-identical to the s7 job's (73 s for the 4 views with the check).

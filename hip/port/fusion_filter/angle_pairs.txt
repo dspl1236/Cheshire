@@ -1,0 +1,38 @@
+        double maxAngle = 0.0;
+        for (int i : visCams)
+        {
+            for (int j : visCams)
+            {
+                if (i == j)
+                    continue;
+                double angle = angleBetwABandAC(verticesCoordsPrepare[vIndex], _mp.CArr[i], _mp.CArr[j]);
+                maxAngle = std::max(angle, maxAngle);
+            }
+        }
+=====
+        double maxAngle = 0.0;
+        // cheshire (step 6g): each unordered pair of cameras once, with each camera's direction from the
+        // point normalised once. angleBetwABandAC(A, B, C) normalises B - A and C - A and takes the acos
+        // of their dot product. It is symmetric bit for bit in B and C (the dot product's terms are the
+        // same products in the same order), it returns 0 rather than a NaN, and the angles are >= 0, so
+        // the maximum over the unordered pairs is the maximum over the ordered ones. The directions use
+        // the same expressions (Point3d::normalize on C - A) and the angle angleBetwV1andV2's, so each
+        // value is the one upstream computes: half the acos calls, and k normalisations per point
+        // instead of 2k(k-1).
+        thread_local std::vector<Point3d> cheshireDirs;
+        cheshireDirs.resize(visCams.size());
+        for (std::size_t ii = 0; ii < visCams.size(); ++ii)
+            cheshireDirs[ii] = (_mp.CArr[visCams[ii]] - verticesCoordsPrepare[vIndex]).normalize();
+        for (std::size_t ii = 0; ii < visCams.size(); ++ii)
+        {
+            const Point3d& V1 = cheshireDirs[ii];
+            for (std::size_t jj = ii + 1; jj < visCams.size(); ++jj)
+            {
+                if (visCams[ii] == visCams[jj])
+                    continue;
+                const Point3d& V2 = cheshireDirs[jj];
+                const double a = acos((double)(V1.x * V2.x + V1.y * V2.y + V1.z * V2.z));
+                const double angle = std::isnan(a) ? 0.0 : fabs(a / (M_PI / 180.0));
+                maxAngle = std::max(angle, maxAngle);
+            }
+        }

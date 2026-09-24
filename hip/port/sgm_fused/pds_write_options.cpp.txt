@@ -8,13 +8,19 @@
 static image::ImageWriteOptions cheshirePdsWriteOptions()
 {
     static const image::ImageWriteOptions options = [] {
-        std::string method = "zip";
+        std::string method = "zip:1";
         if (const char* v = std::getenv("CHESHIRE_PDS_EXR_COMPRESSION"))
             method = v;
         image::ImageWriteOptions o;
-        o.exrCompressionMethod(image::EImageExrCompression_stringToEnum(method));
+        // cheshire (step 6f): "method:level". ZIP at level 1 writes a 6000x3376 half RGBA image in 0.95 s
+        // against 1.45 s at OpenEXR's default level 4, for a file 1.7 % larger, the same read time and
+        // the same pixels (build/exrbench/exrwrite.cpp).
+        const std::size_t colon = method.find(':');
+        o.exrCompressionMethod(image::EImageExrCompression_stringToEnum(method.substr(0, colon)));
+        if (colon != std::string::npos)
+            o.exrCompressionLevel(std::atoi(method.c_str() + colon + 1));
         ALICEVISION_LOG_INFO("cheshire: undistorted images written with EXR compression '" << method
-                             << "' (CHESHIRE_PDS_EXR_COMPRESSION to change; upstream's default is zips)");
+                             << "' (CHESHIRE_PDS_EXR_COMPRESSION=method[:level] to change; upstream's default is zips at level 4)");
         return o;
     }();
     return options;

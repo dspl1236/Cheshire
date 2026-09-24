@@ -1,0 +1,111 @@
+#pragma omp parallel for schedule(static)
+        for (long long ci = 0; ci < (long long)nbCells; ++ci)
+            for (VertexIndex k = 0; k < 4; ++k)
+                computeFacet((CellIndex)ci, k, table[std::size_t(ci) * 4 + k]);
+=====
+        // cheshire (step 6h): each interior facet once, from the lower-numbered of its two cells. Its
+        // two weights need the same two circumsphere centres - getFaceWeight(fu) takes fu's cell and
+        // the mirror's, getFaceWeight(fv) the same two the other way round - and the mirror's entry
+        // is this one with the two weights swapped. So a cell's centre is computed once and each
+        // interior facet's weights once, where every entry computed both weights with two centres
+        // each: 16 centres per cell to about 3. cheshireFaceWeight is getFaceWeight's expressions
+        // with the centres passed in. CHESHIRE_FACET_PAIRS=0 computes every entry on its own as
+        // before; CHESHIRE_GPU_VOTE_LOG=1 compares every entry with upstream's computation either way.
+        const auto cheshireFacetT0 = std::chrono::steady_clock::now();
+        const char* cheshireFacetPairsEnv = std::getenv("CHESHIRE_FACET_PAIRS");
+        const bool cheshireFacetPairs = cheshireFacetPairsEnv == nullptr || std::string(cheshireFacetPairsEnv) != "0";
+        if (cheshireFacetPairs)
+        {
+#pragma omp parallel for schedule(static)
+            for (long long cl = 0; cl < (long long)nbCells; ++cl)
+            {
+                const CellIndex ci = (CellIndex)cl;
+                const bool ciFinite = !_tetrahedralization.isInfiniteCell(ci);
+                bool haveCentre = false;
+                Point3d sci;
+                for (VertexIndex k = 0; k < 4; ++k)
+                {
+                    const Facet fu(ci, k);
+                    const Facet fv = _tetrahedralization.mirrorFacet(fu);
+                    if (!ciFinite || _tetrahedralization.isInvalidOrInfiniteCell(fv.cellIndex))
+                    {
+                        // no face weight in these entries: each computed on its own, as upstream
+                        computeFacet(ci, k, table[std::size_t(ci) * 4 + k]);
+                        continue;
+                    }
+                    if (fv.cellIndex < ci)
+                        continue;  // written with the lower-numbered cell's entry
+                    if (!haveCentre)
+                    {
+                        sci = _tetrahedralization.cellCircumScribedSphereCentre(ci);
+                        haveCentre = true;
+                    }
+                    const Point3d scv = _tetrahedralization.cellCircumScribedSphereCentre(fv.cellIndex);
+                    const float a1 = cheshireFaceWeight(_tetrahedralization, fu, sci, scv);
+                    const float a2 = cheshireFaceWeight(_tetrahedralization, fv, scv, sci);
+                    FacetEdge& e = table[std::size_t(ci) * 4 + k];
+                    e.fv = (std::uint32_t)fv.cellIndex;
+                    e.wFvFu = _cellsAttr[fu.cellIndex].gEdgeVisWeight[fu.localVertexIndex] * CONSTalphaVIS + a1 * CONSTalphaPHOTO;
+                    e.wFuFv = _cellsAttr[fv.cellIndex].gEdgeVisWeight[fv.localVertexIndex] * CONSTalphaVIS + a2 * CONSTalphaPHOTO;
+                    FacetEdge& m = table[std::size_t(fv.cellIndex) * 4 + fv.localVertexIndex];
+                    m.fv = (std::uint32_t)ci;
+                    m.wFuFv = e.wFvFu;
+                    m.wFvFu = e.wFuFv;
+                }
+            }
+        }
+        else
+        {
+#pragma omp parallel for schedule(static)
+            for (long long ci = 0; ci < (long long)nbCells; ++ci)
+                for (VertexIndex k = 0; k < 4; ++k)
+                    computeFacet((CellIndex)ci, k, table[std::size_t(ci) * 4 + k]);
+        }
+        ALICEVISION_LOG_INFO("cheshire: facet weights" << (cheshireFacetPairs ? " (each interior facet once)" : "") << ": "
+                             << std::chrono::duration<double>(std::chrono::steady_clock::now() - cheshireFacetT0).count() << " s");
+=====
+template<class MaxFlowT>
+float GraphFiller::binarizeImpl(std::vector<bool>& cellIsFull)
+=====
+// cheshire (step 6h): Tetrahedralization::getFaceWeight with the two circumsphere centres passed in
+// (s1 of the facet's cell, s2 of its mirror's), the same expressions in the same order, so binarize
+// can compute each centre once per cell.
+static double cheshireFaceWeight(const Tetrahedralization& tetra, const Facet& f1, const Point3d& s1, const Point3d& s2)
+{
+    const std::vector<Point3d>& vertices = tetra.getVertices();
+    const Point3d A = vertices[tetra.getVertexIndex(f1, 0)];
+    const Point3d B = vertices[tetra.getVertexIndex(f1, 1)];
+    const Point3d C = vertices[tetra.getVertexIndex(f1, 2)];
+
+    const Point3d n = cross((B - A).normalize(), (C - A).normalize()).normalize();
+
+    double a1 = fabs(angleBetwV1andV2(n, (A - s1).normalize()));
+    if (a1 > 90)
+    {
+        a1 = 180.0 - a1;
+    }
+
+    double a2 = fabs(angleBetwV1andV2(n, (A - s2).normalize()));
+    if (a2 > 90)
+    {
+        a2 = 180.0 - a2;
+    }
+
+    a1 = a1 * ((double)M_PI / 180.0);
+    a2 = a2 * ((double)M_PI / 180.0);
+
+    double wf = 1.0 - std::min(std::cos(a1), std::cos(a2));
+
+    if ((std::isnan(wf)) || (wf < 0.0f) || (wf > 1.0f))
+        return 1.0;
+
+    return wf;
+}
+
+=====
+#include <cmath>
+=====
+#include <cmath>
+#include <chrono>  // cheshire (step 6h)
+#include <string>  // cheshire (step 6h)
+#include <aliceVision/mvsData/geometry.hpp>  // cheshire (step 6h)

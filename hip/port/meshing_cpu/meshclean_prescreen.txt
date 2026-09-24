@@ -1,0 +1,311 @@
+#include <cstdlib>  // cheshire
+#include <chrono>
+=====
+#include <cstdlib>  // cheshire
+#include <chrono>
+#include <algorithm>  // cheshire (step 6i)
+#include <atomic>     // cheshire (step 6i)
+#include <cstring>    // cheshire (step 6i)
+#include <memory>     // cheshire (step 6i)
+#include <stdexcept>  // cheshire (step 6i)
+#include <string>     // cheshire (step 6i)
+#include <vector>     // cheshire (step 6i)
+=====
+namespace aliceVision {
+namespace mesh {
+
+MeshClean::path::path(MeshClean* mesh, int ptId)
+=====
+namespace aliceVision {
+namespace mesh {
+
+// cheshire (step 6i): the arrays a split appends to grew by a fixed 1000 or 3000 entries, so the
+// first cleaning pass of a large mesh reallocated and copied them every few hundred splits (the
+// 24-million-entry edge array among them). They now grow by an eighth of their capacity at least:
+// the same contents, a few reallocations.
+template<class T>
+static void cheshireReserveAddIfNeeded(StaticVector<T>& v, int nplanned, int ntoallocated)
+{
+    if (v.size() + nplanned > v.capacity())
+        v.reserveAdd(std::max<int>(nplanned + ntoallocated, static_cast<int>(v.capacity() / 8)));
+}
+
+MeshClean::path::path(MeshClean* mesh, int ptId)
+=====
+int MeshClean::cleanMesh(int maxIters)
+{
+=====
+// cheshire (step 6i): everything a cleaning pass reads or writes, for CHESHIRE_MESHCLEAN_CHECK=1,
+// which runs the pre-screened passes and upstream's from the same state and compares the two.
+namespace {
+struct CheshireCleanState
+{
+    StaticVector<Point3d> pts;
+    StaticVector<Mesh::triangle> tris;
+    std::vector<rgb> colors;
+    StaticVector<StaticVector<int>> ptsNeighTrisSortedAsc;
+    StaticVector<StaticVector<int>> ptsNeighPtsOrdered;
+    StaticVectorBool ptsBoundary;
+    StaticVector<int> newPtsOldPtId;
+    StaticVectorBool edgesNeigTrisAlive;
+    StaticVector<Voxel> edgesNeigTris;
+    StaticVector<Voxel> edgesXStat;
+    StaticVector<Voxel> edgesXYStat;
+    int nPtsInit = 0;
+
+    void capture(MeshClean& m)
+    {
+        pts = m.pts; tris = m.tris; colors = m.colors();
+        ptsNeighTrisSortedAsc = m.ptsNeighTrisSortedAsc; ptsNeighPtsOrdered = m.ptsNeighPtsOrdered;
+        ptsBoundary = m.ptsBoundary; newPtsOldPtId = m.newPtsOldPtId;
+        edgesNeigTrisAlive = m.edgesNeigTrisAlive; edgesNeigTris = m.edgesNeigTris;
+        edgesXStat = m.edgesXStat; edgesXYStat = m.edgesXYStat; nPtsInit = m.nPtsInit;
+    }
+    void restore(MeshClean& m) const
+    {
+        m.pts = pts; m.tris = tris; m.colors() = colors;
+        m.ptsNeighTrisSortedAsc = ptsNeighTrisSortedAsc; m.ptsNeighPtsOrdered = ptsNeighPtsOrdered;
+        m.ptsBoundary = ptsBoundary; m.newPtsOldPtId = newPtsOldPtId;
+        m.edgesNeigTrisAlive = edgesNeigTrisAlive; m.edgesNeigTris = edgesNeigTris;
+        m.edgesXStat = edgesXStat; m.edgesXYStat = edgesXYStat; m.nPtsInit = nPtsInit;
+    }
+};
+
+template<class T, class Eq>
+std::size_t cheshireCountDiff(const StaticVector<T>& a, const StaticVector<T>& b, Eq eq)
+{
+    std::size_t n = a.size() > b.size() ? a.size() - b.size() : b.size() - a.size();
+    const int m = std::min(a.size(), b.size());
+    for (int i = 0; i < m; ++i)
+        n += eq(a[i], b[i]) ? 0 : 1;
+    return n;
+}
+
+// names and counts of the structures that differ; empty when the two states are the same
+std::string cheshireCompare(const CheshireCleanState& a, const CheshireCleanState& b)
+{
+    std::string out;
+    auto note = [&](const char* name, std::size_t n) {
+        if (n != 0)
+            out += std::string(out.empty() ? "" : ", ") + name + " " + std::to_string(n);
+    };
+    note("pts", cheshireCountDiff(a.pts, b.pts, [](const Point3d& x, const Point3d& y) {
+             return std::memcmp(&x.x, &y.x, sizeof(double)) == 0 && std::memcmp(&x.y, &y.y, sizeof(double)) == 0 &&
+                    std::memcmp(&x.z, &y.z, sizeof(double)) == 0; }));
+    note("tris", cheshireCountDiff(a.tris, b.tris, [](const Mesh::triangle& x, const Mesh::triangle& y) {
+             return x.v[0] == y.v[0] && x.v[1] == y.v[1] && x.v[2] == y.v[2] && x.alive == y.alive; }));
+    {
+        std::size_t n = a.colors.size() > b.colors.size() ? a.colors.size() - b.colors.size() : b.colors.size() - a.colors.size();
+        for (std::size_t i = 0; i < std::min(a.colors.size(), b.colors.size()); ++i)
+            n += (a.colors[i].r == b.colors[i].r && a.colors[i].g == b.colors[i].g && a.colors[i].b == b.colors[i].b) ? 0 : 1;
+        note("colors", n);
+    }
+    auto sameList = [](const StaticVector<int>& x, const StaticVector<int>& y) { return x.getData() == y.getData(); };
+    note("ptsNeighTrisSortedAsc", cheshireCountDiff(a.ptsNeighTrisSortedAsc, b.ptsNeighTrisSortedAsc, sameList));
+    note("ptsNeighPtsOrdered", cheshireCountDiff(a.ptsNeighPtsOrdered, b.ptsNeighPtsOrdered, sameList));
+    note("ptsBoundary", cheshireCountDiff(a.ptsBoundary, b.ptsBoundary, [](char x, char y) { return x == y; }));
+    note("newPtsOldPtId", cheshireCountDiff(a.newPtsOldPtId, b.newPtsOldPtId, [](int x, int y) { return x == y; }));
+    note("edgesNeigTrisAlive", cheshireCountDiff(a.edgesNeigTrisAlive, b.edgesNeigTrisAlive, [](char x, char y) { return x == y; }));
+    auto sameVoxel = [](const Voxel& x, const Voxel& y) { return x.x == y.x && x.y == y.y && x.z == y.z; };
+    note("edgesNeigTris", cheshireCountDiff(a.edgesNeigTris, b.edgesNeigTris, sameVoxel));
+    note("edgesXStat", cheshireCountDiff(a.edgesXStat, b.edgesXStat, sameVoxel));
+    note("edgesXYStat", cheshireCountDiff(a.edgesXYStat, b.edgesXYStat, sameVoxel));
+    note("nPtsInit", a.nPtsInit == b.nPtsInit ? 0 : 1);
+    return out;
+}
+}  // namespace
+
+int MeshClean::cleanMesh(int maxIters)
+{
+=====
+    int nupd = 1;
+    for (int iter = 0; (iter < maxIters) && (nupd > 0); ++iter)
+    {
+        const auto cheshireT0 = std::chrono::steady_clock::now();
+        nupd = cleanMesh();
+=====
+    // cheshire (step 6i): the cleaning pass with a parallel read-only pre-screen. A point's pass
+    // (path::deployAll) reads its own triangle list, those triangles and the edge entries between the
+    // point and its one-ring; a split at a point rewrites only those of the point, its one-ring and
+    // the new points (the edge index is sorted with unique keys, so appending to it does not move a
+    // lookup). So, per pass: (A) path::isWrongPt on every candidate in parallel - it counts the splits
+    // deployAll would make with the same path code and writes nothing; (B) upstream's deployAll in
+    // parallel on the candidates that would not split, which write only their own entries (the same
+    // triangle list, the boundary flag, the ordered neighbours); (C) in index order, upstream's
+    // deployAll on every point that would split and on every point an earlier split of this pass
+    // touched. The candidates are every point on the first pass, then the points a split touched in
+    // the previous one: the others' inputs have not changed, so their pass would write the same
+    // values again. CHESHIRE_MESHCLEAN_PRESCREEN=0 runs upstream's pass on every point;
+    // CHESHIRE_MESHCLEAN_CHECK=1 runs both from the same state and compares every structure.
+    const char* cheshirePrescreenEnv = std::getenv("CHESHIRE_MESHCLEAN_PRESCREEN");
+    const bool cheshirePrescreen = cheshirePrescreenEnv == nullptr || std::string(cheshirePrescreenEnv) != "0";
+    const bool cheshireCheck = cheshirePrescreen && std::getenv("CHESHIRE_MESHCLEAN_CHECK") != nullptr;
+    std::unique_ptr<CheshireCleanState> cheshireBefore;
+    if (cheshireCheck)
+    {
+        cheshireBefore = std::make_unique<CheshireCleanState>();
+        cheshireBefore->capture(*this);
+    }
+    std::vector<int> cheshireCounts;
+    std::vector<char> cheshireTouched;  // empty: every point is a candidate
+    auto cheshirePass = [&](std::vector<char>& touched) -> int {
+        using clock = std::chrono::steady_clock;
+        const auto t0 = clock::now();
+        const int nv = pts.size();
+        std::vector<int> cand;
+        if (touched.empty())
+        {
+            cand.resize(nv);
+            for (int i = 0; i < nv; ++i)
+                cand[i] = i;
+        }
+        else
+        {
+            for (int i = 0; i < nv && i < (int)touched.size(); ++i)
+                if (touched[i])
+                    cand.push_back(i);
+        }
+        std::vector<char> wrongAt(nv, 0);
+        std::atomic<int> failed{0};
+#pragma omp parallel for schedule(dynamic, 1024)
+        for (long long c = 0; c < (long long)cand.size(); ++c)
+        {
+            try
+            {
+                path pth(this, cand[c]);
+                wrongAt[cand[c]] = pth.isWrongPt() ? 1 : 0;
+            }
+            catch (...)
+            {
+                failed = 1;
+            }
+        }
+        if (failed != 0)
+        {
+            // upstream's pass, which fails where upstream fails
+            ALICEVISION_LOG_WARNING("cheshire: cleanMesh pre-screen stopped on an exception; upstream's pass instead.");
+            touched.clear();
+            return cleanMesh();
+        }
+        const auto t1 = clock::now();
+#pragma omp parallel for schedule(dynamic, 1024)
+        for (long long c = 0; c < (long long)cand.size(); ++c)
+        {
+            if (wrongAt[cand[c]])
+                continue;
+            try
+            {
+                path pth(this, cand[c]);
+                if (pth.deployAll() != 0)
+                    failed = 2;
+            }
+            catch (...)
+            {
+                failed = 2;
+            }
+        }
+        if (failed != 0)
+            throw std::runtime_error("cheshire: cleanMesh pre-screen: a point screened as not splitting failed or split");
+        const auto t2 = clock::now();
+        std::vector<char> dirty(nv, 0);
+        std::vector<char> next(nv, 0);
+        std::vector<int> ring;
+        int nWrongPts = 0;
+        int nInOrder = 0;
+        for (int p = 0; p < nv; ++p)
+        {
+            if (!wrongAt[p] && !dirty[p])
+                continue;
+            ++nInOrder;
+            const std::vector<int>& ptTris = ptsNeighTrisSortedAsc[p].getData();
+            ring.assign(ptTris.begin(), ptTris.end());
+            path pth(this, p);
+            if (pth.deployAll() > 0)
+            {
+                ++nWrongPts;
+                if (next.size() < (std::size_t)pts.size())
+                    next.resize(pts.size(), 0);
+                next[p] = 1;
+                for (int t : ring)
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const int v = tris[t].v[k];
+                        if (v < 0)
+                            continue;
+                        if (v < nv)
+                            dirty[v] = 1;
+                        next[v] = 1;
+                    }
+            }
+        }
+        if (next.size() < (std::size_t)pts.size())
+            next.resize(pts.size(), 0);
+        for (int i = nv; i < pts.size(); ++i)
+            next[i] = 1;
+        touched.swap(next);
+        const auto t3 = clock::now();
+        auto ms = [](clock::time_point a, clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        ALICEVISION_LOG_INFO("cheshire: cleanMesh pre-screen: " << cand.size() << " candidates of " << nv << " points, "
+                             << nInOrder << " passes in order; screen " << ms(t0, t1) << " ms, own entries " << ms(t1, t2)
+                             << " ms, in order " << ms(t2, t3) << " ms");
+
+        // the rest of upstream's cleanMesh(), unchanged
+        // update vertex color data (if any) if points were modified
+        if (!_colors.empty() && !newPtsOldPtId.empty())
+        {
+            std::vector<rgb> newColors(pts.size(), {0, 0, 0});
+            for (std::size_t newId = 0; newId < newPtsOldPtId.size(); ++newId)
+            {
+                const std::size_t oldId = newPtsOldPtId[newId];
+                newColors[newId] = _colors[oldId];
+            }
+            std::swap(_colors, newColors);
+        }
+
+        ALICEVISION_LOG_INFO("cleanMesh:" << std::endl << "\t- # wrong points: " << nWrongPts << std::endl << "\t- # new points: " << (pts.size() - nv));
+
+        return pts.size() - nv;
+    };
+    int nupd = 1;
+    for (int iter = 0; (iter < maxIters) && (nupd > 0); ++iter)
+    {
+        const auto cheshireT0 = std::chrono::steady_clock::now();
+        nupd = cheshirePrescreen ? cheshirePass(cheshireTouched) : cleanMesh();
+        cheshireCounts.push_back(nupd);
+=====
+            testPtsNeighPtsOrdered();
+        }
+    }
+
+    return nupd;
+}
+=====
+            testPtsNeighPtsOrdered();
+        }
+    }
+
+    if (cheshireCheck)
+    {
+        // cheshire (step 6i): upstream's passes from the same state, compared structure by structure
+        CheshireCleanState fast;
+        fast.capture(*this);
+        cheshireBefore->restore(*this);
+        std::vector<int> upstreamCounts;
+        int nupdUp = 1;
+        for (int iter = 0; (iter < maxIters) && (nupdUp > 0); ++iter)
+        {
+            nupdUp = cleanMesh();
+            upstreamCounts.push_back(nupdUp);
+        }
+        CheshireCleanState up;
+        up.capture(*this);
+        const std::string diff = cheshireCompare(fast, up);
+        ALICEVISION_LOG_INFO("cheshire: cleanMesh check: " << cheshireCounts.size() << " passes against upstream's "
+                             << upstreamCounts.size() << (cheshireCounts == upstreamCounts ? " with the same new-point counts" : " with DIFFERENT new-point counts")
+                             << "; " << (diff.empty() ? std::string("every structure identical") : "DIFFERENT: " + diff) << " ("
+                             << pts.size() << " points, " << tris.size() << " triangles)");
+        nupd = nupdUp;
+    }
+
+    return nupd;
+}

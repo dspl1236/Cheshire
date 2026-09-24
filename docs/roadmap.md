@@ -191,10 +191,18 @@ L items can slide.
 - **Fusion: the rest** (M). filterByPixSize's CPU kd-tree is about 16 s at 833 views (the GPU
   radius filter that was briefed was never built), removeInvalidPoints plus margin setup about 9 s,
   and the depth-map load 43 s warm or 111 s cold, which is disk and EXR decode, not a GPU job.
+  **2026-09-24, steps 6g and 6j (docs/04 "Meshing's host phases after the s7 run"):** the max-angle
+  loop over unordered camera pairs with each direction normalised once (48 s on house-pc), and
+  removeInvalidPoints moving the camera lists instead of copying them; tetrahedralization input
+  unchanged at 6 and 884 views.
 - **MeshClean** (M). 12.9 s on the engine bay: 6.6 s of setup, then four single-threaded iterations
   (`docs/11-meshing-cpu.md:84-89`). At 833 views, post-cut processing plus cleaning is about 95 s
   (`docs/04-validation.md:1197`). Plan: a parallel read-only pre-screen, then a serial index-order
   pass checked byte for byte, with the setup built as a counting table like 4g.
+  **Done 2026-09-24, step 6i (docs/04):** the pre-screen and index-order pass as planned, later passes
+  restricted to the points a split touched, and geometric growth of the split arrays (the first pass
+  copied the edge array every few hundred splits); `CHESHIRE_MESHCLEAN_CHECK=1` compares every
+  structure with upstream's passes. The setup's sorts (about 11 s of 56 on house-pc) are still open.
 - **Graph-cut post-processing flood fills** (M). Three serial flood fills still take about 4.2 s
   (`docs/11-meshing-cpu.md:191-196`). A parallel connected-components pass checked against
   `_cellIsFull` under `CHESHIRE_SEGMENT_CHECK` keeps the result exact. The solid-angle pass
@@ -203,6 +211,8 @@ L items can slide.
   kernels (about 11-15 s), serial host packing (about 2.3 s), facet weights and edge recording. The
   serial CSR layout, about 3-4 s (`hip/port/meshing_csr/MaxFlow_CSR.hpp:192-233`), is billed to the
   cut. Add per-phase timestamps, then parallelise under `CHESHIRE_MAXFLOW_CHECK=1`.
+  **2026-09-24, step 6h (docs/04):** the facet weights, 33 s on house-pc, computed once per interior
+  facet with each circumsphere centre once per cell, checked entry by entry against getFaceWeight.
 
 ### Texturing CPU
 
@@ -240,6 +250,8 @@ L items can slide.
   On house-pc the split is read 50.6, undistort 36.5 and write 94.7 thread-seconds
   (`docs/04-validation.md:853-855`), and Rubble spent 3363 s in this node. First decide whether
   this is Cheshire's work at all. If it is, output must stay at 107/107 byte-identical EXRs.
+  **2026-09-24, step 6f:** the EXR write at ZIP level 1 (30 % less write CPU than level 4, 1.4 %
+  larger, same pixels; `CHESHIRE_PDS_EXR_COMPRESSION=method[:level]`).
 - **DepthMap host image loads** (M). About 30 % of the 41-view run is host time, and twelve
   parallel loads finish at roughly one per 0.5 s (`docs/05-performance.md:27-31`). Add a per-phase
   split in the style of `CHESHIRE_PDS_PROFILE` to tell a serial section from 6-core saturation.
