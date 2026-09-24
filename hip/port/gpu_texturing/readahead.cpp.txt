@@ -1,0 +1,23 @@
+#ifdef ALICEVISION_HAVE_GPU_TEX
+    // cheshire (step 6e): each read-ahead thread decodes on its own thread since step 6c, so the depth
+    // that keeps the cores busy is about the thread count: every hardware thread but one, within the
+    // image cache's slots (grown to depth + 1 when RAM allows; the default cache already has about 20
+    // slots at 6000x3376, so on a small host the deeper read-ahead costs no memory). Before, a host
+    // whose available RAM missed the 4 GB margin read one camera ahead. CHESHIRE_TEX_READAHEAD=n sets it.
+    if (imageType != mvsUtils::EFileType::normalMap && gpu::texAvailable())
+    {
+        int cheshireDepth = std::max(1, int(std::thread::hardware_concurrency()) - 1);
+        if (const char* e = std::getenv("CHESHIRE_TEX_READAHEAD"))
+            cheshireDepth = std::max(1, std::atoi(e));
+        if (imageCache.getCacheSize() < cheshireDepth + 1 && availableRam > 4096 &&
+            std::size_t(availableRam - 4096) > std::size_t(cheshireDepth + 1) * imageMaxMemSize)
+            imageCache.setCacheSize(cheshireDepth + 1);
+        cheshireDepth = std::min(cheshireDepth, imageCache.getCacheSize() - 1);
+        if (cheshireDepth != cheshirePrefetchDepth)
+        {
+            cheshirePrefetchDepth = std::max(1, cheshireDepth);
+            ALICEVISION_LOG_INFO("cheshire: reading " << cheshirePrefetchDepth << " cameras ahead (" << imageCache.getCacheSize()
+                                                      << " image slots; CHESHIRE_TEX_READAHEAD=n to set)");
+        }
+    }
+#endif

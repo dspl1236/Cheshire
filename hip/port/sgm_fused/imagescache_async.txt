@@ -1,0 +1,14 @@
+void ImagesCache<Image>::refreshImage_async(int camId)
+{
+    _asyncObjects.emplace_back(std::async(std::launch::async, &ImagesCache<Image>::refreshImage_sync, this, camId));
+}
+=====
+void ImagesCache<Image>::refreshImage_async(int camId)
+{
+    // cheshire (step 6c): a read-ahead thread is one of several loads at once; its reader decodes on
+    // this thread rather than through the shared pool (image/cheshireExr.hpp)
+    _asyncObjects.emplace_back(std::async(std::launch::async, [this, camId]() {
+        image::ConcurrentLoadScope cheshireScope;
+        refreshImage_sync(camId);
+    }));
+}

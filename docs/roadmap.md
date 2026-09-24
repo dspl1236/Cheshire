@@ -66,6 +66,11 @@ L items can slide.
   in parallel (`hip/port/sgm_fused/prefetch.cpp.txt:17`). Compare the batch camera count (R plus
   the SGM and refine T cameras) with the cache capacity; if a batch can exceed it, cap or chunk the
   prefetch in step 1h. File upstream only if upstream's own path can reach it.
+  **Closed 2026-09-24 by analysis.** The depth-map loader (5t) decodes in groups no larger than
+  the host cache and uploads a group before the next one decodes, so no refresh can evict an image
+  that is still waiting for its upload. Texturing reads 4 cameras ahead through a 5-slot cache;
+  since a slot's clock is set only when it is loaded, the slot evicted by the read of camera c+4 is
+  camera c-1's, which is finished. Upstream's own path loads one image at a time.
 
 ### SfM and FeatureMatching CPU
 
@@ -80,6 +85,10 @@ L items can slide.
   Re-profile at Meshroom's `--maxIteration 2048` first. At real settings geometric filtering is
   about 8 s of a 24 s chunk (`docs/07-gpu-matcher.md:116-118`), so the payoff is small except on
   2-4-core hosts. The byte-identical match-file gate applies.
+  **Declined 2026-09-24 on arithmetic.** The fit is 14.2 us per call (docs/15: 1589 thread-s over
+  111.7 M calls) and the per-iteration allocations are a handful of small vectors and 2x7
+  matrices, well under a microsecond: a percent or two of the stage, while the fit itself is the
+  9x9 JacobiSVD that docs/17's QR replaces. That lever is the 0.3.5 "QR nullspace default" item.
 - **Analytic Jacobians for bundle adjustment** (M). Jacobians are 49 % of BA on the engine bay and
   421 s of 733 s of BA on the False Door (`docs/04-validation.md:1052`). Upstream already has
   analytic intrinsic and point derivatives. The autodiff cost comes from the pose and subpose Jet
@@ -142,6 +151,11 @@ L items can slide.
   `CHESHIRE_SFM_LOCAL_PASSES=1` - on a mis-measurement that put them at 605 s; they are about
   40 s at 884 views either way, docs/04 "the passes after every bundle adjustment". The
   BA-build walk, 177 s over the run there, is the real one and is still open.)
+  **Closed 2026-09-24 by measurement: the walk is not the cost.** Regressing the 64 group solves
+  of the 884-view deterministic run on their active residual blocks and the scene's landmark count
+  gives 2.53 us per active block and 263 ns per landmark: the scene-wide walk is 8 s of the 153 s
+  build over the run. The build is proportional to the active set already; the higher per-block
+  cost than at 41 views (1.2 us) is memory locality in a larger scene, not the walk.
 - **Eigen temporaries in the inner projection derivatives** (M). **Done 2026-09-23 (docs/04
   "the inner projection fused"):** one walk of the chain for pinhole + none / K1 / K3 / Brown,
   contraction off; Jacobians 5.5 s to 3.2-3.5 s at 41 views, the node 59 s to 50 s.
@@ -150,6 +164,10 @@ L items can slide.
   (`docs/04-validation.md:1034`), but the matcher vs AC-RANSAC split there is a guess. Measure it,
   and run `CHESHIRE_BA_PROFILE` on the 1591-pose SfM before choosing between the two items above;
   that replay doubles as the CHOLMOD item under Packaging if it is run against both Ceres builds.
+  **Measured 2026-09-24 on house-pc (i3-4330, 4 threads), 884 views, s7 bundle, from the 44
+  chunk logs: feature loading 183 s, GPU matching 428 s, geometric filtering 638 s** of a 21-minute
+  node. On a four-thread host the CPU filter is half the stage; on the 12-thread RX 9070 box it is
+  a third. SfM there is 32 min after 5m-5r (78 before).
 - **A current end-to-end engine-bay run** (S). One 107-photo run on the RX 9070 box with the 0.3.3
   package, all eight nodes paired, per-node times recorded in docs/04. The README's 39 to 30 minute
   figure (`README.md:44-47`) was measured at v0.2.5 (`docs/07-gpu-matcher.md:77`), and every
@@ -197,6 +215,17 @@ L items can slide.
 
   Source: `docs/04-validation.md:783-784`. The "UV generation ~53 s" label at `:515` looks wrong,
   so the order of work is unknown until the profile.
+  **Profiled 2026-09-24 (False Door, 884 views, RX 9070 box, `CHESHIRE_GPU_TEX_LOG=1`): the node
+  is image loads.** Every pass re-reads the cameras that contribute to its atlases, and the loads
+  were 443 s of the first 486 s pass and 600-640 s of each later 11-12 minute pass, against 30-90 s
+  for upload, pyramids and rasterisation together. `CHESHIRE_LOAD_PROFILE=1` splits a load into the
+  read, the second open for the exposure metadata, the exposure multiply and the conversion to
+  sRGB, which is where the fix will come from.
+  **Done 2026-09-24 (6a, 6c, 6e; docs/04 "texturing was loading images too"):** the read was
+  1.79 s of a 2.01 s load because four read-ahead threads shared OpenEXR's pool; decoding on the
+  read-ahead thread halved the first pass (486 to 243 s). What is left is the disk: 60 GB per pass
+  at 283 MB/s on this box's SATA SSD, so the lever is now the number of passes (atlas slots per
+  pass are VRAM-bound) or bytes per image.
 - **computeTrisCamsFromPtsCams** (M). createCharts spends 2.44 s here serially, plus about 2.96 s
   in the projection loop (`docs/10-gpu-texturing.md:147-150`, `mesh/Mesh.cpp:2076-2097`). Filling
   the list by index keeps it exact. The gain is at most about 5 s on the engine bay.
@@ -214,6 +243,11 @@ L items can slide.
 - **DepthMap host image loads** (M). About 30 % of the 41-view run is host time, and twelve
   parallel loads finish at roughly one per 0.5 s (`docs/05-performance.md:27-31`). Add a per-phase
   split in the style of `CHESHIRE_PDS_PROFILE` to tell a serial section from 6-core saturation.
+  **2026-09-24, 6d:** the process downscale on the device, byte-identical after two fusion barriers
+  (docs/04). **Done 2026-09-23 (steps 5t-5z, docs/04 "the depth-map node was loading images").** The
+  per-file profile found the host downscale after every read; tour order, once-per-batch loads,
+  the direct EXR reader, the exact downscale and chunks of 48 took the 884-view node on house-pc
+  from 395 to 143 min. `CHESHIRE_EXR_PROFILE=1` and `CHESHIRE_LOAD_PROFILE=1` are the split.
 
 ### Rides the same rebuild
 

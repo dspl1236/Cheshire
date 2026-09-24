@@ -1,0 +1,285 @@
+// This file is part of the Cheshire project (MPL-2.0), a patch set over AliceVision.
+// Copied into src/aliceVision/depthMap/cuda/imageProcessing/ by scripts/apply_hip_patch.py (step 6d)
+// and compiled in the HIP device unity translation unit (hip/port/unity/depthmap_device_unity.hip).
+//
+// The depth-map node's process downscale on the device. Measured on the 884-view set: the host
+// lanczos3 downscale after every read was 55 % of a load's CPU, and loads were about half of each
+// DepthMap chunk on house-pc's i3. See cheshireDownscale.hpp for the exactness argument.
+
+#include "cheshireDownscale.hpp"
+
+#include <aliceVision/depthMap/cuda/host/divUp.hpp>
+#include <aliceVision/depthMap/cuda/device/buffer.cuh>
+#include <aliceVision/image/Image.hpp>
+#include <aliceVision/image/imageAlgo.hpp>
+#include <aliceVision/image/cheshireResize.hpp>
+
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <tuple>
+#include <vector>
+
+#ifdef __clang__
+    #pragma clang fp contract(off)
+#endif
+
+namespace aliceVision {
+namespace depthMap {
+
+namespace {
+
+// one axis of the resize, on the device: per output coordinate the range of taps, each tap's clamped
+// source coordinate and normalised weight (image::cheshire::resizeTaps)
+struct DeviceTaps
+{
+    int* begin = nullptr;
+    int* idx = nullptr;
+    float* w = nullptr;
+};
+
+DeviceTaps uploadTaps(const image::cheshire::ResizeTaps& t)
+{
+    DeviceTaps d;
+    CHECK_CUDA_RETURN_ERROR(cudaMalloc(reinterpret_cast<void**>(&d.begin), t.begin.size() * sizeof(int)));
+    CHECK_CUDA_RETURN_ERROR(cudaMalloc(reinterpret_cast<void**>(&d.idx), std::max<std::size_t>(1, t.idx.size()) * sizeof(int)));
+    CHECK_CUDA_RETURN_ERROR(cudaMalloc(reinterpret_cast<void**>(&d.w), std::max<std::size_t>(1, t.w.size()) * sizeof(float)));
+    CHECK_CUDA_RETURN_ERROR(cudaMemcpy(d.begin, t.begin.data(), t.begin.size() * sizeof(int), cudaMemcpyHostToDevice));
+    if (!t.idx.empty())
+    {
+        CHECK_CUDA_RETURN_ERROR(cudaMemcpy(d.idx, t.idx.data(), t.idx.size() * sizeof(int), cudaMemcpyHostToDevice));
+        CHECK_CUDA_RETURN_ERROR(cudaMemcpy(d.w, t.w.data(), t.w.size() * sizeof(float), cudaMemcpyHostToDevice));
+    }
+    return d;
+}
+
+// tap tables per (device, input size, output size), built once: every image of a set is usually the
+// same size, and the tables are a pure function of the sizes
+std::pair<DeviceTaps, DeviceTaps> tapsFor(int inW, int inH, int outW, int outH)
+{
+    static std::mutex m;
+    static std::map<std::tuple<int, int, int, int, int>, std::pair<DeviceTaps, DeviceTaps>> cache;
+    int device = 0;
+    CHECK_CUDA_RETURN_ERROR(cudaGetDevice(&device));
+    const auto key = std::make_tuple(device, inW, inH, outW, outH);
+    std::lock_guard<std::mutex> lock(m);
+    auto it = cache.find(key);
+    if (it != cache.end())
+        return it->second;
+    image::cheshire::ResizeTaps tx, ty;
+    image::cheshire::resizeTaps(inW, outW, tx);
+    image::cheshire::resizeTaps(inH, outH, ty);
+    const auto taps = std::make_pair(uploadTaps(tx), uploadTaps(ty));
+    cache.emplace(key, taps);
+    return taps;
+}
+
+}  // namespace
+
+__global__ void cheshireDownscale_kernel(const float4* in_d,
+                                         unsigned int in_p,
+                                         const int* xBegin,
+                                         const int* xIdx,
+                                         const float* xW,
+                                         const int* yBegin,
+                                         const int* yIdx,
+                                         const float* yW,
+                                         CudaRGBA* out_d,
+                                         unsigned int out_p,
+                                         unsigned int outWidth,
+                                         unsigned int outHeight,
+                                         float4* debugFloat_d)
+{
+    const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if ((x >= outWidth) || (y >= outHeight))
+        return;
+
+    // image::cheshire::resizeRow<4>: rows outer, columns inner, per channel pel += (wy * wx) * value,
+    // each product and sum rounded on its own
+    float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
+    const int jb = yBegin[y], je = yBegin[y + 1];
+    const int ib = xBegin[x], ie = xBegin[x + 1];
+    for (int j = jb; j < je; ++j)
+    {
+        const float wy = yW[j];
+        const float4* row = reinterpret_cast<const float4*>(reinterpret_cast<const char*>(in_d) + std::size_t(yIdx[j]) * in_p);
+        for (int i = ib; i < ie; ++i)
+        {
+            const float w = wy * xW[i];
+            const float4 p = row[xIdx[i]];
+            // each product rounded on its own before the add: on HIP, __fmul_rn/__fadd_rn come from
+            // the device library's bitcode with the contraction flag set and were fused into FMAs
+            // (32 % of the floats differed from the host); an empty asm on the product is a barrier
+            // the compiler cannot fuse across, whatever the contraction mode
+            float px = w * p.x, py = w * p.y, pz = w * p.z, pw = w * p.w;
+#if defined(__HIP_DEVICE_COMPILE__)
+            asm volatile("" : "+v"(px), "+v"(py), "+v"(pz), "+v"(pw));
+#endif
+            r = r + px;
+            g = g + py;
+            b = b + pz;
+            a = a + pw;
+        }
+    }
+
+    if (debugFloat_d != nullptr)  // the check mode: the accumulated floats themselves
+        debugFloat_d[std::size_t(y) * outWidth + x] = make_float4(r, g, b, a);
+
+    // DeviceCache::addMipmapImage's host conversion: CudaRGBA = value * 255. The host rounds the
+    // product to float, then to half (ties to even); left alone the GPU fuses the multiply and the
+    // conversion into one mixed-precision instruction with a single rounding of the exact product,
+    // which differs at half-float ties (524 of 3 M texels on mini6). The barrier keeps two roundings.
+    float cr = r * 255.0f, cg = g * 255.0f, cb = b * 255.0f, ca = a * 255.0f;
+#if defined(__HIP_DEVICE_COMPILE__)
+    asm volatile("" : "+v"(cr), "+v"(cg), "+v"(cb), "+v"(ca));
+#endif
+    CudaRGBA* out = get2DBufferAt(out_d, out_p, x, y);
+#ifdef ALICEVISION_DEPTHMAP_TEXTURE_USE_HALF
+    out->x = __float2half(cr);
+    out->y = __float2half(cg);
+    out->z = __float2half(cb);
+    out->w = __float2half(ca);
+#else
+    out->x = cr;
+    out->y = cg;
+    out->z = cb;
+    out->w = ca;
+#endif
+}
+
+void cuda_cheshireDownscaleToCudaRGBA(const float* in_hostRGBA, int inWidth, int inHeight, CudaDeviceMemoryPitched<CudaRGBA, 2>& out_dmp)
+{
+    const int outWidth = int(out_dmp.getSize().x());
+    const int outHeight = int(out_dmp.getSize().y());
+    const auto taps = tapsFor(inWidth, inHeight, outWidth, outHeight);
+
+    // the full-resolution image on the device, float RGBA
+    CudaDeviceMemoryPitched<float4, 2> in_dmp(CudaSize<2>(inWidth, inHeight));
+    CHECK_CUDA_RETURN_ERROR(cudaMemcpy2D(in_dmp.getBuffer(), in_dmp.getPitch(), in_hostRGBA, std::size_t(inWidth) * 4 * sizeof(float),
+                                         std::size_t(inWidth) * 4 * sizeof(float), std::size_t(inHeight), cudaMemcpyHostToDevice));
+
+    const dim3 block(32, 4, 1);
+    const dim3 grid(divUp(outWidth, block.x), divUp(outHeight, block.y), 1);
+    cheshireDownscale_kernel<<<grid, block, 0, 0>>>(in_dmp.getBuffer(),
+                                                    (unsigned int)in_dmp.getPitch(),
+                                                    taps.first.begin,
+                                                    taps.first.idx,
+                                                    taps.first.w,
+                                                    taps.second.begin,
+                                                    taps.second.idx,
+                                                    taps.second.w,
+                                                    out_dmp.getBuffer(),
+                                                    (unsigned int)out_dmp.getPitch(),
+                                                    (unsigned int)outWidth,
+                                                    (unsigned int)outHeight,
+                                                    nullptr);
+    CHECK_CUDA_ERROR();
+    CHECK_CUDA_RETURN_ERROR(cudaDeviceSynchronize());
+
+    static const bool checkFloats = std::getenv("CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK") != nullptr;
+    std::vector<float> devFloats;
+    if (checkFloats)
+    {
+        float4* dbg = nullptr;
+        CHECK_CUDA_RETURN_ERROR(cudaMalloc(reinterpret_cast<void**>(&dbg), std::size_t(outWidth) * outHeight * sizeof(float4)));
+        CudaDeviceMemoryPitched<CudaRGBA, 2> scratch(CudaSize<2>(outWidth, outHeight));
+        cheshireDownscale_kernel<<<grid, block, 0, 0>>>(in_dmp.getBuffer(), (unsigned int)in_dmp.getPitch(), taps.first.begin, taps.first.idx,
+                                                        taps.first.w, taps.second.begin, taps.second.idx, taps.second.w, scratch.getBuffer(),
+                                                        (unsigned int)scratch.getPitch(), (unsigned int)outWidth, (unsigned int)outHeight, dbg);
+        CHECK_CUDA_RETURN_ERROR(cudaDeviceSynchronize());
+        devFloats.resize(std::size_t(outWidth) * outHeight * 4);
+        CHECK_CUDA_RETURN_ERROR(cudaMemcpy(devFloats.data(), dbg, devFloats.size() * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA_RETURN_ERROR(cudaFree(dbg));
+    }
+    // in_dmp is freed on return
+
+    // CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK=1: where does the device result part from the host path?
+    // (a) the resize computed here (this translation unit's taps) vs the image library's resizeImage,
+    // (b) the device halves vs this translation unit's host conversion of (a)'s float result.
+    static const bool check = std::getenv("CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK") != nullptr;
+    if (check)
+    {
+        const std::size_t n = std::size_t(outWidth) * outHeight * 4;
+        std::vector<float> here(n);
+        image::cheshire::resizeExact<4>(in_hostRGBA, inWidth, inHeight, here.data(), outWidth, outHeight, false);
+        image::Image<image::RGBAfColor> full(inWidth, inHeight, false), lib;
+        std::memcpy(full.data(), in_hostRGBA, std::size_t(inWidth) * inHeight * 4 * sizeof(float));
+        imageAlgo::resizeImage(inWidth / outWidth, full, lib);
+        std::size_t floatDiff = 0;
+        const float* libf = reinterpret_cast<const float*>(lib.data());
+        for (std::size_t i = 0; i < n; ++i)
+            if (std::memcmp(&here[i], &libf[i], 4) != 0)
+                ++floatDiff;
+        std::vector<CudaRGBA> dev(std::size_t(outWidth) * outHeight);
+        CHECK_CUDA_RETURN_ERROR(cudaMemcpy2D(dev.data(), std::size_t(outWidth) * sizeof(CudaRGBA), out_dmp.getBuffer(), out_dmp.getPitch(),
+                                             std::size_t(outWidth) * sizeof(CudaRGBA), std::size_t(outHeight), cudaMemcpyDeviceToHost));
+        std::size_t halfDiff = 0, firstDiff = std::size_t(-1);
+        for (std::size_t p = 0; p < dev.size(); ++p)
+        {
+            CudaRGBA h;
+#ifdef ALICEVISION_DEPTHMAP_TEXTURE_USE_HALF
+            h.x = __float2half(libf[p * 4 + 0] * 255.0f);
+            h.y = __float2half(libf[p * 4 + 1] * 255.0f);
+            h.z = __float2half(libf[p * 4 + 2] * 255.0f);
+            h.w = __float2half(libf[p * 4 + 3] * 255.0f);
+#else
+            h.x = libf[p * 4 + 0] * 255.0f;
+            h.y = libf[p * 4 + 1] * 255.0f;
+            h.z = libf[p * 4 + 2] * 255.0f;
+            h.w = libf[p * 4 + 3] * 255.0f;
+#endif
+            if (std::memcmp(&h, &dev[p], sizeof(CudaRGBA)) != 0)
+            {
+                ++halfDiff;
+                if (firstDiff == std::size_t(-1))
+                    firstDiff = p;
+            }
+        }
+        std::size_t devFloatDiff = 0, convDiff = 0;
+        for (std::size_t i = 0; i < n && i < devFloats.size(); ++i)
+            if (std::memcmp(&devFloats[i], &libf[i], 4) != 0)
+                ++devFloatDiff;
+        // the conversion alone: the device's own floats converted on the host vs the device texels
+        for (std::size_t p = 0; p < dev.size() && !devFloats.empty(); ++p)
+        {
+            CudaRGBA h;
+#ifdef ALICEVISION_DEPTHMAP_TEXTURE_USE_HALF
+            h.x = __float2half(devFloats[p * 4 + 0] * 255.0f);
+            h.y = __float2half(devFloats[p * 4 + 1] * 255.0f);
+            h.z = __float2half(devFloats[p * 4 + 2] * 255.0f);
+            h.w = __float2half(devFloats[p * 4 + 3] * 255.0f);
+#else
+            h.x = devFloats[p * 4 + 0] * 255.0f;
+            h.y = devFloats[p * 4 + 1] * 255.0f;
+            h.z = devFloats[p * 4 + 2] * 255.0f;
+            h.w = devFloats[p * 4 + 3] * 255.0f;
+#endif
+            if (std::memcmp(&h, &dev[p], sizeof(CudaRGBA)) != 0)
+            {
+                if (convDiff < 6)
+                {
+                    const std::uint16_t* hb = reinterpret_cast<const std::uint16_t*>(&h);
+                    const std::uint16_t* db = reinterpret_cast<const std::uint16_t*>(&dev[p]);
+                    for (int c = 0; c < 4; ++c)
+                        if (hb[c] != db[c])
+                            std::fprintf(stderr, "[cheshire]   conversion differs: float %.9g (0x%08x) x 255 = %.9g -> host half 0x%04x, device half 0x%04x\n",
+                                         devFloats[p * 4 + c], *reinterpret_cast<const std::uint32_t*>(&devFloats[p * 4 + c]),
+                                         devFloats[p * 4 + c] * 255.0f, hb[c], db[c]);
+                }
+                ++convDiff;
+            }
+        }
+        std::fprintf(stderr, "[cheshire] device downscale check %dx%d -> %dx%d: floats here vs image library %zu of %zu differ; device floats vs image library %zu differ; "
+                     "device conversion of its own floats vs host conversion %zu texels differ; device texels vs host path %zu of %zu differ",
+                     inWidth, inHeight, outWidth, outHeight, floatDiff, n, devFloatDiff, convDiff, halfDiff, dev.size());
+        if (firstDiff != std::size_t(-1))
+            std::fprintf(stderr, " (first at %zu: host float %.9g %.9g %.9g %.9g)", firstDiff, libf[firstDiff * 4], libf[firstDiff * 4 + 1], libf[firstDiff * 4 + 2], libf[firstDiff * 4 + 3]);
+        std::fprintf(stderr, "\n");
+    }
+}
+
+}  // namespace depthMap
+}  // namespace aliceVision

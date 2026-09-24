@@ -1800,8 +1800,87 @@ the `.pyc` (Python prefers the `.py`); `--unpair` removes it. Same attributes, s
 same UID, so an existing cache stays valid. `CHESHIRE_DEPTHMAP_BLOCK` sets another size for the
 2023.3 override, 0 for Meshroom's 12.
 
+**The 884-view job on house-pc, before and after (2026-09-24).** The same photographs, the
+same standard preset, on the i3-4330 with the RX 6750 XT: the s1 bundle (the 0.3.3 release plus
+the knn pragma) against the s7 bundle (everything above, steps 5m through 5z).
+
+| stage | s1 | s7 |
+|---|---|---|
+| FeatureExtraction | 7.9 min | 9 min |
+| FeatureMatching | 21.0 min | 21 min |
+| StructureFromMotion | 77.9 min | 32 min |
+| PrepareDenseScene | 37.5 min | 40 min |
+| DepthMap | 395.0 min | 143 min (19 chunks) |
+| DepthMapFilter | 16.2 min | 17 min |
+| Meshing | 12.6 min | 12 min |
+| Texturing | 220.6 min | 250 min (17 passes of 14.5 min) |
+| whole job | 13 h 11 min | 8 h 46 min |
+
+SfM did better than the local numbers predicted, since the four-thread box was even more
+Jacobian-bound. PrepareDenseScene did not gain: ZIP is a read-side change, and the sixteen-line
+blocks cost the i3 slightly more to write. Texturing's pace did not move either, which says a
+pass's time is not in the per-camera reads there; that node's profile is the next measurement.
+
 What is left in the node after this is the first batch of each chunk, which is cold by
 construction, and the downscale, now a fraction of the read: the level stored in the EXR at
 PrepareDenseScene time would remove it from the node entirely with the values unchanged, and a
 2x2 average on the device would remove the read bytes too, at the price of changed values and a
 new reference.
+
+## 0.3.4: texturing was loading images too, and the depth-map downscale moves to the device (2026-09-24)
+
+**Texturing is load-bound.** The same per-phase view that found the depth-map cost, on the False
+Door's texturing (884 views, RX 9070 box, `CHESHIRE_GPU_TEX_LOG=1`): every pass re-reads the
+cameras that contribute to its atlases, and the loads were 443 s of the first 486 s pass and
+600-640 s of each later 11-12 minute pass, against 30-90 s for the upload, pyramids and
+rasterisation together. Step 6a adds `CHESHIRE_LOAD_PROFILE=1`, one line per image load with its
+parts. A load averaged 2.01 s: the read 1.79 s, the conversion to sRGB 0.18 s (OpenImageIO resolves
+"linear" and "srgb" through OpenColorIO's built-in config, whose fast approximation matches the
+textbook formula in only 1 % of values, so it stays), the exposure multiply 0.04 s and the second
+open for the metadata 4 ms. The read was 0.1-0.25 s for the first loads and about 3 s once four
+read-ahead threads were decoding at once: the texturing node reads ahead through `std::async`,
+outside any OpenMP region, so every read went through OpenEXR's one shared pool, which serialises
+concurrent files - the depth-map finding of 5v again.
+
+Step 6c marks the image cache's read-ahead threads (a thread-local `ConcurrentLoadScope`) and the
+direct reader decodes on such a thread instead of the pool. First pass 486 s to 243 s, loads 443 s
+to 204 s, a read 1.79 s to 0.88 s. Step 6e reads ahead on every hardware thread but one, within the
+image cache's slots. It did not speed this box up (257 s with eleven reads in flight): a pass reads
+829 images of 73 MB, about 60 GB, and 60 GB in 214 s is 283 MB/s, the read rate of the SATA SSD the
+cache sits on, so texturing here is now disk-bound. It matters on house-pc, whose available RAM
+missed the 4 GB margin of the read-ahead rule and so read one camera ahead, with the image cache's
+20 default slots allocated anyway; it now reads three ahead at no extra memory. Gate: the mini6
+texture differs from the pre-6c run in 557-569 texels by at most one half-float step, the same as
+two runs of the same build (556); the OBJ is identical.
+
+**The depth-map process downscale on the device (6d).** Even exact and 18x cheaper (5x), the host
+lanczos3 downscale was the larger half of a depth-map load's CPU, and loads were about half of each
+chunk on house-pc's i3. With 6d the image cache keeps full-resolution floats, `DeviceCache::
+addMipmapImage` uploads them, and `imageProcessing/cheshireDownscale.cu` applies the tap tables
+computed on the host by the same code, in the host's order, then the host's half(value x 255)
+conversion. The first build differed from the host path in every file of the gate, at the rounding
+level (99.7-99.9 % of pixels within 0.5 %), and a check mode found two fusions the source did not
+ask for. `__fmul_rn` and `__fadd_rn` on HIP come from the device library's bitcode with the
+contraction flag set, so the multiply-adds became FMAs: 32 % of the accumulated floats differed.
+And the GPU fused `value * 255` and the conversion to half into one mixed-precision instruction
+with a single rounding of the exact product, where the host rounds to float first: at a half-float
+tie such as 0.417279422 x 255 = 106.40625261 the host gets the tie 106.40625 and rounds to even
+(106.375), the device 106.4375 - 524 of 3 million texels. An empty `asm volatile` on each product
+is a barrier neither fusion can cross. With it: device floats and texels 0 of 12.2 million and 0 of
+3 million different from the host path on mini6, **the 884-view chunk's 24 files byte-identical to
+the reference, mini6 identical with the switch off and on.** On this box the batch loads drop by
+about 40 % (4.4, 2.0, 1.6 s against 5.7, 3.0, 3.6 s) but the chunk barely moves (116 against
+120 s): DepthMap here is now GPU-bound. It is for the i3. HIP builds only; the CUDA backend keeps
+the host path. `CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE=0` restores the host path and
+`CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK=1` compares every image with it.
+
+**Smaller items in the same batch.** The direct reader takes one-channel EXRs (depth and similarity
+maps; DepthMapFilter and Meshing read them through OpenImageIO before): DepthMapFilter's twelve
+mini6 files identical with the reader off and on, and Meshing's tetrahedralization input identical
+(265,271 points, the same checksum) - the cells then differ as they do between any two runs
+(geogram's numbering, a parked item). On house-pc the depth-map load was the largest single step of
+the 884-view Meshing, 120 s of 716. Step 6b computes F from E once per model in
+`RelativePoseKernel_K::errors()` instead of once per correspondence (SfM's initial pair): the
+deterministic digests are unchanged on the 41-view set and the engine bay. And step 5f counted the
+native camera mipmaps at half their size - `CudaRGBA` is already the 8-byte half4 - so mini6's image
+peak reads 186 MB instead of 93, with the maps unchanged.

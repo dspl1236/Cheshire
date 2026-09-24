@@ -15,3 +15,6 @@
 // host-side shadow variables are TU-local too, so these must live in the same TU.
 #include <aliceVision/depthMap/cuda/host/DeviceCache.cpp>
 #include <aliceVision/depthMap/cuda/host/patchPattern.cpp>
+// Cheshire step 6d: last, because it (and the resize header it includes) turns fp contraction off
+// for the rest of the translation unit.
+#include <aliceVision/depthMap/cuda/imageProcessing/cheshireDownscale.cu>

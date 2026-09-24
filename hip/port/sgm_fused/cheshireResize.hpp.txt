@@ -20,7 +20,7 @@
 #include <cstddef>
 #include <vector>
 
-#if defined(__SSE__) || defined(_M_X64) || defined(_M_AMD64)
+#if (defined(__SSE__) || defined(_M_X64) || defined(_M_AMD64)) && !defined(__HIP_DEVICE_COMPILE__) && !defined(__CUDA_ARCH__)
     #include <xmmintrin.h>
     #define CHESHIRE_RESIZE_SSE 1
 #endif

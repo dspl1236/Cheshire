@@ -1,0 +1,72 @@
+[
+ [
+  "src/aliceVision/mvsUtils/fileIO.hpp",
+  "void loadImage(const std::string& path, const MultiViewParams& mp, int camId, Image& img, image::EImageColorSpace colorspace, ECorrectEV correctEV);\n",
+  "void loadImage(const std::string& path, const MultiViewParams& mp, int camId, Image& img, image::EImageColorSpace colorspace, ECorrectEV correctEV);\n\n/**\n * @brief cheshire (step 6d): while alive with on == true, loadImage on this thread skips the process\n * downscale - the depth-map node then downscales on the device with the same arithmetic.\n */\nstruct CheshireFullResolutionScope\n{\n    explicit CheshireFullResolutionScope(bool on);\n    ~CheshireFullResolutionScope();\n    CheshireFullResolutionScope(const CheshireFullResolutionScope&) = delete;\n    CheshireFullResolutionScope& operator=(const CheshireFullResolutionScope&) = delete;\n\n  private:\n    bool _on;\n};\n"
+ ],
+ [
+  "src/aliceVision/mvsUtils/fileIO.cpp",
+  "inline bool cheshireLoadProfileOn()\n",
+  "// cheshire (step 6d): the full-resolution scope (fileIO.hpp)\nnamespace {\nthread_local int tlCheshireFullResolution = 0;\n}\nCheshireFullResolutionScope::CheshireFullResolutionScope(bool on)\n  : _on(on)\n{\n    if (_on)\n        ++tlCheshireFullResolution;\n}\nCheshireFullResolutionScope::~CheshireFullResolutionScope()\n{\n    if (_on)\n        --tlCheshireFullResolution;\n}\n\ninline bool cheshireLoadProfileOn()\n"
+ ],
+ [
+  "src/aliceVision/mvsUtils/fileIO.cpp",
+  "    const int processScale = mp.getProcessDownscale();\n\n    if (processScale > 1)\n",
+  "    const int processScale = mp.getProcessDownscale();\n\n    if (processScale > 1 && tlCheshireFullResolution == 0)  // cheshire (step 6d): or on the device\n"
+ ],
+ [
+  "src/aliceVision/mvsUtils/ImagesCache.hpp",
+  "    std::mutex _slotMutex;  // cheshire: slot bookkeeping, allows parallel loads of different cameras\n",
+  "    std::mutex _slotMutex;  // cheshire: slot bookkeeping, allows parallel loads of different cameras\n    bool _fullResolution = false;  // cheshire (step 6d): images kept at full resolution, downscaled on the device\n"
+ ],
+ [
+  "src/aliceVision/mvsUtils/ImagesCache.hpp",
+  "    int getCacheSize() const { return _N_PRELOADED_IMAGES; }  // cheshire: the loader decodes in groups of this size\n",
+  "    int getCacheSize() const { return _N_PRELOADED_IMAGES; }  // cheshire: the loader decodes in groups of this size\n    /// cheshire (step 6d): keep images at full resolution (the depth-map node downscales on the device);\n    /// resizes the cache so it holds the same megabytes as before. Call before the first load.\n    void setFullResolution(bool on);\n    bool isFullResolution() const { return _fullResolution; }\n"
+ ],
+ [
+  "src/aliceVision/mvsUtils/ImagesCache.cpp",
+  "template<typename Image>\nvoid ImagesCache<Image>::refreshImage_sync(int camId)\n",
+  "template<typename Image>\nvoid ImagesCache<Image>::setFullResolution(bool on)\n{\n    // cheshire (step 6d): initIC's cache size at the full-resolution image size\n    _fullResolution = on;\n    const float s = on ? float(_mp.getProcessDownscale()) : 1.0f;\n    const float oneimagemb = (sizeof(Color) * _mp.getMaxImageWidth() * _mp.getMaxImageHeight()) / 1024.f / 1024.f * s * s;\n    const float maxmbCPU = (float)_mp.userParams.get<int>(\"images_cache.maxmbCPU\", 5000);\n    int npreload = (int)(maxmbCPU / oneimagemb);\n    if (npreload < 5)\n        npreload = 5;\n    if (npreload > _mp.ncams)\n        npreload = _mp.ncams;\n    setCacheSize(npreload);\n}\n\ntemplate<typename Image>\nvoid ImagesCache<Image>::refreshImage_sync(int camId)\n"
+ ],
+ [
+  "src/aliceVision/mvsUtils/ImagesCache.cpp",
+  "        loadImage(imagePath, _mp, camId, *(_imgs[mapId]), _colorspace, _correctEV);\n",
+  "        {\n            CheshireFullResolutionScope cheshireFullResolution(_fullResolution);  // cheshire (step 6d)\n            loadImage(imagePath, _mp, camId, *(_imgs[mapId]), _colorspace, _correctEV);\n        }\n"
+ ],
+ [
+  "src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.hpp",
+  "    void fill(const CudaHostMemoryHeap<CudaRGBA, 2>& in_img_hmh, int minDownscale, int maxDownscale);\n",
+  "    void fill(const CudaHostMemoryHeap<CudaRGBA, 2>& in_img_hmh, int minDownscale, int maxDownscale);\n\n    /**\n     * @brief cheshire (step 6d): fill() from an image already on the device (the device downscale);\n     * the same steps after fill()'s host-to-device copy. The buffer is consumed.\n     */\n    void fillFromDevice(std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> img_dmpPtr, int minDownscale, int maxDownscale);\n"
+ ],
+ [
+  "src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.hpp",
+  "#include <aliceVision/depthMap/cuda/host/memory.hpp>\n",
+  "#include <aliceVision/depthMap/cuda/host/memory.hpp>\n#include <memory>  // cheshire (step 6d)\n"
+ ],
+ [
+  "src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.cpp",
+  "float DeviceMipmapImage::getLevel(unsigned int downscale) const\n",
+  "void DeviceMipmapImage::fillFromDevice(std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> img_dmpPtr, int minDownscale, int maxDownscale)\n{\n    // cheshire (step 6d): fill() from here on, with the image already on the device\n    _minDownscale = minDownscale;\n    _maxDownscale = maxDownscale;\n    _width = img_dmpPtr->getSize().x();\n    _height = img_dmpPtr->getSize().y();\n    _levels = log2(maxDownscale / minDownscale) + 1;\n\n    if (_textureObject != 0)\n        CHECK_CUDA_RETURN_ERROR(cudaDestroyTextureObject(_textureObject));\n\n    if (_mipmappedArray != nullptr)\n    {\n        cheshire::bridge::forgetExternal(_mipmappedArray);\n        CHECK_CUDA_RETURN_ERROR(cudaFreeMipmappedArray(_mipmappedArray));\n    }\n\n    if (minDownscale > 1)\n    {\n        CudaRGBATexture fullSizeImg(*img_dmpPtr);\n        const size_t downscaledWidth = size_t(divideRoundUp(int(_width), int(minDownscale)));\n        const size_t downscaledHeight = size_t(divideRoundUp(int(_height), int(minDownscale)));\n        auto downscaledImg_dmpPtr = std::make_shared<CudaDeviceMemoryPitched<CudaRGBA, 2>>(CudaSize<2>(downscaledWidth, downscaledHeight));\n        const int gaussianFilterRadius = minDownscale;\n        cuda_downscaleWithGaussianBlur(*downscaledImg_dmpPtr, fullSizeImg.textureObj, minDownscale, gaussianFilterRadius, 0 /*stream*/);\n        CHECK_CUDA_RETURN_ERROR(cudaDeviceSynchronize());\n        CHECK_CUDA_ERROR();\n        img_dmpPtr.swap(downscaledImg_dmpPtr);\n    }\n\n    cuda_rgb2lab(*img_dmpPtr, 0 /*stream*/);\n    CHECK_CUDA_RETURN_ERROR(cudaDeviceSynchronize());\n    cuda_createMipmappedArrayFromImage(&_mipmappedArray, *img_dmpPtr, _levels);\n    cuda_createMipmappedArrayTexture(&_textureObject, _mipmappedArray, _levels);\n    CHECK_CUDA_ERROR();\n}\n\nfloat DeviceMipmapImage::getLevel(unsigned int downscale) const\n"
+ ],
+ [
+  "src/aliceVision/depthMap/cuda/host/DeviceCache.cpp",
+  "    mvsUtils::ImagesCache<image::Image<image::RGBAfColor>>::ImgSharedPtr img = imageCache.getImg_sync(camId);\n",
+  "    mvsUtils::ImagesCache<image::Image<image::RGBAfColor>>::ImgSharedPtr img = imageCache.getImg_sync(camId);\n\n#if defined(CHESHIRE_HIP)\n    // cheshire (step 6d): a full-resolution image is downscaled on the device, with the host's taps\n    // and arithmetic (imageProcessing/cheshireDownscale.cu), then filled like the host path\n    if (imageCache.isFullResolution() && mp.getProcessDownscale() > 1)\n    {\n        const int s = mp.getProcessDownscale();\n        auto down_dmpPtr = std::make_shared<CudaDeviceMemoryPitched<CudaRGBA, 2>>(CudaSize<2>(img->width() / s, img->height() / s));\n        cuda_cheshireDownscaleToCudaRGBA(reinterpret_cast<const float*>(img->data()), img->width(), img->height(), *down_dmpPtr);\n        DeviceMipmapImage& deviceMipmapImageFromDevice = *(currentDeviceCache.mipmaps.at(deviceMipmapId));\n        deviceMipmapImageFromDevice.fillFromDevice(down_dmpPtr, minDownscale, maxDownscale);\n        return;\n    }\n#endif\n"
+ ],
+ [
+  "src/aliceVision/depthMap/cuda/host/DeviceCache.cpp",
+  "#include <aliceVision/system/Logger.hpp>\n",
+  "#include <aliceVision/system/Logger.hpp>\n#include <aliceVision/depthMap/cuda/imageProcessing/cheshireDownscale.hpp>  // cheshire (step 6d)\n"
+ ],
+ [
+  "src/aliceVision/depthMap/DepthMapEstimator.cpp",
+  "    mvsUtils::ImagesCache<image::Image<image::RGBAfColor>> ic(_mp, image::EImageColorSpace::LINEAR);\n",
+  "    mvsUtils::ImagesCache<image::Image<image::RGBAfColor>> ic(_mp, image::EImageColorSpace::LINEAR);\n#if defined(CHESHIRE_HIP)\n    // cheshire (step 6d): the process downscale on the device (CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE=0 for the host)\n    if (_mp.getProcessDownscale() > 1 && cheshireDeviceDownscaleEnabled())\n    {\n        ic.setFullResolution(true);\n        ALICEVISION_LOG_INFO(\"cheshire: depth map images downscaled on the device (x\" << _mp.getProcessDownscale()\n                             << \", exact; CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE=0 for the host); image cache \" << ic.getCacheSize() << \" slots\");\n    }\n#endif\n"
+ ],
+ [
+  "src/aliceVision/depthMap/DepthMapEstimator.cpp",
+  "#include <aliceVision/depthMap/cuda/host/DeviceCache.hpp>\n",
+  "#include <aliceVision/depthMap/cuda/host/DeviceCache.hpp>\n#include <aliceVision/depthMap/cuda/imageProcessing/cheshireDownscale.hpp>  // cheshire (step 6d)\n"
+ ]
+]

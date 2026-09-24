@@ -62,6 +62,10 @@ TRACKED = [
     "src/software/pipeline/main_depthMapEstimation.cpp",
     "src/aliceVision/image/io.cpp",
     "src/aliceVision/image/CMakeLists.txt",
+    "src/aliceVision/mvsUtils/fileIO.cpp",
+    "src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.cpp",
+    "src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.hpp",
+    "src/aliceVision/mvsUtils/fileIO.hpp",
     "meshroom/aliceVision/DepthMap.py",
     "src/aliceVision/matching/RegionsMatcher.cpp",
     "src/aliceVision/matching/CMakeLists.txt",
@@ -3030,11 +3034,7 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
         size_t bytes = 0, w = in_imgSize.x(), h = in_imgSize.y();
         for (unsigned l = 0; l < levels; ++l)
         {
-            bytes += w * h * sizeof(CudaRGBA)
-#ifdef ALICEVISION_DEPTHMAP_TEXTURE_USE_HALF
-                     / 2
-#endif
-                ;
+            bytes += w * h * sizeof(CudaRGBA);  // the stored texel: 8 bytes as half4 under USE_HALF (memory.hpp)
             w = w > 1 ? w / 2 : 1;
             h = h > 1 ? h / 2 : 1;
         }
@@ -3042,6 +3042,14 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
     }
 #endif
 """.replace("\n", NL), 1)
+        dm.write_text(t, encoding="utf-8", newline="")
+    # 5f (fix, 2026-09-24): an already-patched tree counted native mipmaps at half their size;
+    # CudaRGBA is the stored texel, 8 bytes as half4 under ALICEVISION_DEPTHMAP_TEXTURE_USE_HALF.
+    t = dm.read_text(encoding="utf-8")
+    old = ("            bytes += w * h * sizeof(CudaRGBA)" + NL + "#ifdef ALICEVISION_DEPTHMAP_TEXTURE_USE_HALF" + NL
+           + "                     / 2" + NL + "#endif" + NL + "                ;" + NL)
+    if old in t:
+        t = t.replace(old, "            bytes += w * h * sizeof(CudaRGBA);  // the stored texel: 8 bytes as half4 under USE_HALF (memory.hpp)" + NL, 1)
         dm.write_text(t, encoding="utf-8", newline="")
     di = AV / "src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.cpp"
     t = di.read_text(encoding="utf-8")
@@ -4321,6 +4329,92 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                 + "install(" + NL + "    DIRECTORY meshroom-overrides" + NL + "    DESTINATION ${CMAKE_INSTALL_DATADIR}/cheshire" + NL + ")" + NL)
         t = t.replace(anchor, anchor + rule, 1)
         top.write_text(t, encoding="utf-8", newline="")
+
+    # 6a. A per-phase profile of mvsUtils::loadImage, CHESHIRE_LOAD_PROFILE=1: the read, the second
+    #     open for the exposure metadata, the exposure multiply, the colour conversion and the process
+    #     downscale, one line per load. Texturing is load-bound (600-640 s of an 11-12 min pass at 884
+    #     views on the RX 9070 box) and the load's parts are unmeasured. The edits are in
+    #     hip/port/sgm_fused/load_profile.json (anchor, replacement pairs). No change when unset.
+    fio = AV / "src/aliceVision/mvsUtils/fileIO.cpp"
+    t = fio.read_text(encoding="utf-8")
+    if "cheshireLoadProfileOn" not in t:
+        import json as _json
+        for old, new in _json.loads((ROOT / "hip/port/sgm_fused/load_profile.json").read_text(encoding="utf-8")):
+            o, n = old.replace("\n", NL), new.replace("\n", NL)
+            if t.count(o) != 1:
+                sys.exit("loadImage profile anchor not found once in fileIO.cpp: " + old[:60])
+            t = t.replace(o, n, 1)
+        fio.write_text(t, encoding="utf-8", newline="")
+
+    # 6b. RelativePoseKernel_K, the essential-matrix sibling of 4x: its error() rebuilds F from E
+    #     for every correspondence. errors() now builds F once per model and applies the same
+    #     per-point error, so the residuals are unchanged. SfM's initial pair and the E filter.
+    rp = AV / "src/aliceVision/multiview/RelativePoseKernel.hpp"
+    t = rp.read_text(encoding="utf-8")
+    if "cheshire (step 6b)" not in t:
+        old = (ROOT / "hip/port/sgm_fused/f_once_anchor.txt").read_text(encoding="utf-8").replace("\n", NL)
+        if t.count(old) != 1:
+            sys.exit("RelativePoseKernel_K::error not found once in RelativePoseKernel.hpp")
+        t = t.replace(old, old + (ROOT / "hip/port/sgm_fused/f_once_errors.txt").read_text(encoding="utf-8").replace("\n", NL), 1)
+        rp.write_text(t, encoding="utf-8", newline="")
+
+    # 6c. The image cache's read-ahead threads decode on their own thread. Texturing reads 4 cameras
+    #     ahead through std::async and each read went through OpenEXR's one shared pool, which
+    #     serialises concurrent files (the 5v finding). cheshireExr.hpp's ConcurrentLoadScope, set by
+    #     the async task, makes the direct reader decode inline as it does inside an OpenMP loop.
+    icc = AV / "src/aliceVision/mvsUtils/ImagesCache.cpp"
+    t = icc.read_text(encoding="utf-8")
+    if "cheshire (step 6c)" not in t:
+        old, new = [x.replace("\n", NL) for x in (ROOT / "hip/port/sgm_fused/imagescache_async.txt").read_text(encoding="utf-8").split("=====\n")]
+        if t.count(old) != 1:
+            sys.exit("refreshImage_async not found once in ImagesCache.cpp")
+        t = t.replace(old, new, 1)
+        inc = "#include <aliceVision/mvsUtils/fileIO.hpp>" + NL
+        if t.count(inc) != 1:
+            sys.exit("fileIO.hpp include not found once in ImagesCache.cpp")
+        t = t.replace(inc, inc + "#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 6c" + NL, 1)
+        icc.write_text(t, encoding="utf-8", newline="")
+    # the reader's own files are copied fresh by step 5v on every run
+
+    # 6d. The depth-map node's process downscale on the device (HIP builds). The host lanczos3
+    #     downscale after every read was 55 % of a depth-map load's CPU (5x made it exact and 18x
+    #     cheaper, it is still the larger half of a load on the i3). The image cache keeps full-
+    #     resolution floats (CheshireFullResolutionScope in fileIO), DeviceCache::addMipmapImage
+    #     uploads them, imageProcessing/cheshireDownscale.cu applies the host's tap tables in the host's
+    #     order with contraction off and the same half(value * 255) conversion, and the mipmap is filled
+    #     from the device buffer. Same bytes. CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE=0 keeps the host path.
+    #     The edits are (file, anchor, replacement) triples in hip/port/sgm_fused/device_downscale.json.
+    cu_dir = AV / "src/aliceVision/depthMap/cuda/imageProcessing"
+    shutil.copy2(ROOT / "hip/port/sgm_fused/cheshireDownscale.cu.txt", cu_dir / "cheshireDownscale.cu")
+    shutil.copy2(ROOT / "hip/port/sgm_fused/cheshireDownscale.hpp.txt", cu_dir / "cheshireDownscale.hpp")
+    import json as _json
+    for rel, old, new in _json.loads((ROOT / "hip/port/sgm_fused/device_downscale.json").read_text(encoding="utf-8")):
+        f = AV / rel
+        t = f.read_text(encoding="utf-8")
+        o, n = old.replace("\n", NL), new.replace("\n", NL)
+        if n in t:
+            continue
+        if t.count(o) != 1:
+            sys.exit("step 6d anchor not found once in " + rel + ": " + old[:60])
+        t = t.replace(o, n, 1)
+        f.write_text(t, encoding="utf-8", newline="")
+
+    # 6e. Texturing reads ahead on every hardware thread but one (within the image cache's slots).
+    #     After 6c each read-ahead thread decodes on its own thread; four of them kept a 12-thread box
+    #     waiting 0.25 s per camera, and a host whose available RAM missed the 4 GB margin (house-pc)
+    #     read one camera ahead with 20 cache slots already allocated. Concurrency only.
+    tx = AV / "src/aliceVision/mesh/Texturing.cpp"
+    t = tx.read_text(encoding="utf-8")
+    if "cheshire (step 6e)" not in t:
+        anchor = '    ALICEVISION_LOG_INFO("Total amount of available RAM: " << availableRam << " MB.");' + NL
+        if t.count(anchor) != 1:
+            sys.exit("texturing RAM log line not found once in Texturing.cpp")
+        t = t.replace(anchor, anchor + (ROOT / "hip/port/gpu_texturing/readahead.cpp.txt").read_text(encoding="utf-8").replace("\n", NL), 1)
+        inc = "#include <cstdlib>  // cheshire" + NL
+        if t.count(inc) != 1:
+            sys.exit("cheshire cstdlib include not found once in Texturing.cpp")
+        t = t.replace(inc, inc + "#include <thread>  // cheshire (step 6e)" + NL, 1)
+        tx.write_text(t, encoding="utf-8", newline="")
 
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu

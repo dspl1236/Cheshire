@@ -11,8 +11,9 @@ namespace image {
 /**
  * @brief cheshire: read an EXR straight through OpenEXR into a float RGB or RGBA buffer.
  *
- * Applies to a scanline or tiled single-part .exr with channels R, G, B and optionally A, half or
- * float, sampling 1, data window equal to the display window at the origin; when
+ * Applies to a scanline or tiled single-part .exr with channels R, G, B and optionally A, or a
+ * single channel (a depth or similarity map) when one channel is requested, half or float,
+ * sampling 1, data window equal to the display window at the origin; when
  * requireLinearMetadata is set the file's "AliceVision:ColorSpace" attribute must be absent or
  * "linear" (what the OpenImageIO path would otherwise convert from). Anything else returns false
  * and the caller takes the OpenImageIO path. allocate(width, height) must size the destination and
@@ -20,6 +21,22 @@ namespace image {
  * The values equal OpenImageIO's (half to float is exact). CHESHIRE_EXR_DIRECT=0 disables it.
  */
 bool cheshireReadExr(const std::string& path, int nchannels, bool requireLinearMetadata, const std::function<float*(int, int)>& allocate);
+
+/**
+ * @brief cheshire: marks the calling thread as one of several image loads running at once (the image
+ * cache's read-ahead). While a scope is alive the direct reader decodes on the calling thread instead
+ * of OpenEXR's shared pool, which serialises concurrent files. Nesting is allowed.
+ */
+struct ConcurrentLoadScope
+{
+    ConcurrentLoadScope();
+    ~ConcurrentLoadScope();
+    ConcurrentLoadScope(const ConcurrentLoadScope&) = delete;
+    ConcurrentLoadScope& operator=(const ConcurrentLoadScope&) = delete;
+};
+
+/// cheshire: true inside a ConcurrentLoadScope on this thread
+bool inConcurrentLoad();
 
 }  // namespace image
 }  // namespace aliceVision

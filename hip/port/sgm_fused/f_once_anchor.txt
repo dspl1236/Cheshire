@@ -1,0 +1,7 @@
+    double error(std::size_t sample, const ModelT_& model) const override
+    {
+        Mat3 F;
+        fundamentalFromEssential(model.getMatrix(), _K1, _K2, &F);
+        const ModelT_ modelF(F);
+        return _errorEstimator.error(modelF, PFRansacKernel::PFKernel::_x1.col(sample), PFRansacKernel::PFKernel::_x2.col(sample));
+    }

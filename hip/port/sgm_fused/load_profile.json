@@ -1,0 +1,26 @@
+[
+ [
+  "#include <aliceVision/mvsUtils/MultiViewParams.hpp>\n",
+  "#include <aliceVision/mvsUtils/MultiViewParams.hpp>\n#include <chrono>   // cheshire: step 6a\n#include <cstdlib>\n#include <string>\n"
+ ],
+ [
+  "template<class Image>\nvoid loadImage(const std::string& path, const MultiViewParams& mp, int camId, Image& img, image::EImageColorSpace colorspace, ECorrectEV correctEV)\n{\n",
+  "// cheshire (step 6a): CHESHIRE_LOAD_PROFILE=1 prints one line per image load with the time of each\n// phase - the read, the second open for the exposure metadata, the exposure multiply, the colour\n// conversion and the process downscale - so a node bound by its loads says which part binds it.\ninline bool cheshireLoadProfileOn()\n{\n    static const bool on = [] {\n        const char* v = std::getenv(\"CHESHIRE_LOAD_PROFILE\");\n        return v != nullptr && std::string(v) == \"1\";\n    }();\n    return on;\n}\n\ntemplate<class Image>\nvoid loadImage(const std::string& path, const MultiViewParams& mp, int camId, Image& img, image::EImageColorSpace colorspace, ECorrectEV correctEV)\n{\n    const bool cheshireProfile = cheshireLoadProfileOn();\n    const auto cheshireStart = std::chrono::steady_clock::now();\n    auto cheshireT = cheshireStart;\n    double cheshireRead = 0.0, cheshireMeta = 0.0, cheshireEv = 0.0, cheshireColour = 0.0, cheshireScale = 0.0;\n    auto cheshireLap = [&](double& acc) {\n        if (!cheshireProfile)\n            return;\n        const auto now = std::chrono::steady_clock::now();\n        acc += std::chrono::duration<double>(now - cheshireT).count();\n        cheshireT = now;\n    };\n"
+ ],
+ [
+  "        image::readImage(path, img, colorspace);\n        checkImageSize();\n    }\n",
+  "        image::readImage(path, img, colorspace);\n        checkImageSize();\n        cheshireLap(cheshireRead);\n    }\n"
+ ],
+ [
+  "        image::readImage(path, img, image::EImageColorSpace::LINEAR);\n        checkImageSize();\n\n        const auto metadata = image::readImageMetadata(path);\n",
+  "        image::readImage(path, img, image::EImageColorSpace::LINEAR);\n        checkImageSize();\n        cheshireLap(cheshireRead);\n\n        const auto metadata = image::readImageMetadata(path);\n        cheshireLap(cheshireMeta);\n"
+ ],
+ [
+  "                img(i)[2] *= exposureCompensation;\n            }\n\n            imageAlgo::colorconvert(img, image::EImageColorSpace::LINEAR, colorspace);\n",
+  "                img(i)[2] *= exposureCompensation;\n            }\n            cheshireLap(cheshireEv);\n\n            imageAlgo::colorconvert(img, image::EImageColorSpace::LINEAR, colorspace);\n            cheshireLap(cheshireColour);\n"
+ ],
+ [
+  "        imageAlgo::resizeImage(processScale, img, bmpr);\n        img.swap(bmpr);\n    }\n}\n",
+  "        imageAlgo::resizeImage(processScale, img, bmpr);\n        img.swap(bmpr);\n        cheshireLap(cheshireScale);\n    }\n    if (cheshireProfile)\n        ALICEVISION_LOG_INFO(\"cheshire: load profile: view \" << mp.getViewId(camId) << \" read \" << cheshireRead << \" s, metadata \" << cheshireMeta\n                                                            << \" s, exposure \" << cheshireEv << \" s, colour \" << cheshireColour << \" s, downscale \"\n                                                            << cheshireScale << \" s, total \"\n                                                            << std::chrono::duration<double>(std::chrono::steady_clock::now() - cheshireStart).count() << \" s\");\n}\n"
+ ]
+]

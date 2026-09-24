@@ -317,7 +317,7 @@ index 25b80d4..84dba54 100644
          aliceVision_gpu
          aliceVision_sfmData
 diff --git a/src/aliceVision/depthMap/DepthMapEstimator.cpp b/src/aliceVision/depthMap/DepthMapEstimator.cpp
-index 187e8f5..3c73ecb 100644
+index 187e8f5..967606a 100644
 --- a/src/aliceVision/depthMap/DepthMapEstimator.cpp
 +++ b/src/aliceVision/depthMap/DepthMapEstimator.cpp
 @@ -5,6 +5,10 @@
@@ -331,7 +331,15 @@ index 187e8f5..3c73ecb 100644
  
  #include <aliceVision/system/Logger.hpp>
  #include <aliceVision/system/Timer.hpp>
-@@ -109,6 +113,68 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
+@@ -19,6 +23,7 @@
+ #include <aliceVision/depthMap/cuda/host/utils.hpp>
+ #include <aliceVision/depthMap/cuda/host/patchPattern.hpp>
+ #include <aliceVision/depthMap/cuda/host/DeviceCache.hpp>
++#include <aliceVision/depthMap/cuda/imageProcessing/cheshireDownscale.hpp>  // cheshire (step 6d)
+ #include <aliceVision/depthMap/cuda/host/DeviceStreamManager.hpp>
+ #include <aliceVision/depthMap/cuda/planeSweeping/deviceDepthSimilarityMap.hpp>
+ 
+@@ -109,6 +114,68 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
      const double rcMinCostMB = rcCamsCostMB + tileCostMB;
      const double rcMaxCostMB = rcCamsCostMB + nbTilesPerCamera * tileCostMB;
  
@@ -400,7 +408,7 @@ index 187e8f5..3c73ecb 100644
      // available device memory
      double deviceMemoryMB;
      {
-@@ -126,6 +192,7 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
+@@ -126,6 +193,7 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
          const double remainingMemoryMB = deviceMemoryMB - (nbSimultaneousFullRc * rcMaxCostMB);
          nbRemainingTiles = static_cast<int>(std::max(0.0, remainingMemoryMB - rcCamsCostMB) / tileCostMB);
      }
@@ -408,7 +416,23 @@ index 187e8f5..3c73ecb 100644
  
      // check that we do not need more constant camera parameters than the ones in device constant memory
      if (ALICEVISION_DEVICE_MAX_CONSTANT_CAMERA_PARAM_SETS < ((nbSimultaneousFullRc + ((nbRemainingTiles > 0) ? 1 : 0)) * rcCamParams))
-@@ -331,6 +398,69 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -230,6 +298,15 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+     // initialize RAM image cache
+     // note: maybe move it as class member in order to share it across multiple GPUs
+     mvsUtils::ImagesCache<image::Image<image::RGBAfColor>> ic(_mp, image::EImageColorSpace::LINEAR);
++#if defined(CHESHIRE_HIP)
++    // cheshire (step 6d): the process downscale on the device (CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE=0 for the host)
++    if (_mp.getProcessDownscale() > 1 && cheshireDeviceDownscaleEnabled())
++    {
++        ic.setFullResolution(true);
++        ALICEVISION_LOG_INFO("cheshire: depth map images downscaled on the device (x" << _mp.getProcessDownscale()
++                             << ", exact; CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE=0 for the host); image cache " << ic.getCacheSize() << " slots");
++    }
++#endif
+ 
+     // build tile list order by R camera
+     std::vector<Tile> tiles;
+@@ -331,6 +408,69 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          const int firstTileIndex = b * nbTilesPerBatch;
          const int lastTileIndex = std::min((b + 1) * nbTilesPerBatch, static_cast<int>(tiles.size()));
  
@@ -478,7 +502,7 @@ index 187e8f5..3c73ecb 100644
          // load tile R and corresponding T cameras in device cache
          for (int i = firstTileIndex; i < lastTileIndex; ++i)
          {
-@@ -375,7 +505,10 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -375,7 +515,10 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          for (int i = firstTileIndex; i < lastTileIndex; ++i)
          {
              Tile& tile = tiles.at(i);
@@ -490,7 +514,7 @@ index 187e8f5..3c73ecb 100644
              const int streamIndex = tile.id % nbStreams;
  
              // do not compute empty ROI
-@@ -446,18 +579,22 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -446,18 +589,22 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          // wait for tiles batch computation
          cudaDeviceSynchronize();
  
@@ -1840,10 +1864,10 @@ index 0000000..fc9c490
 +#include <cheshire/cuda_to_hip.h>
 diff --git a/src/aliceVision/depthMap/cuda/hip/depthmap_device_unity.hip b/src/aliceVision/depthMap/cuda/hip/depthmap_device_unity.hip
 new file mode 100644
-index 0000000..222a211
+index 0000000..784f75d
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/depthmap_device_unity.hip
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,20 @@
 +// Cheshire: single device translation unit for AliceVision's depthMap CUDA sources.
 +// Windows HIP (ROCm 7.2.1) cannot do relocatable device code (-fgpu-rdc: the
 +// clang-offload-bundler/llvm-objcopy step fails on COFF objects), and the kernels
@@ -1861,6 +1885,9 @@ index 0000000..222a211
 +// host-side shadow variables are TU-local too, so these must live in the same TU.
 +#include <aliceVision/depthMap/cuda/host/DeviceCache.cpp>
 +#include <aliceVision/depthMap/cuda/host/patchPattern.cpp>
++// Cheshire step 6d: last, because it (and the resize header it includes) turns fp contraction off
++// for the rest of the translation unit.
++#include <aliceVision/depthMap/cuda/imageProcessing/cheshireDownscale.cu>
 diff --git a/src/aliceVision/depthMap/cuda/hip/math_constants.h b/src/aliceVision/depthMap/cuda/hip/math_constants.h
 new file mode 100644
 index 0000000..e7182a6
@@ -1871,10 +1898,39 @@ index 0000000..e7182a6
 +#pragma once
 +#include <cheshire/cuda_to_hip.h>
 diff --git a/src/aliceVision/depthMap/cuda/host/DeviceCache.cpp b/src/aliceVision/depthMap/cuda/host/DeviceCache.cpp
-index 32f0bd4..dac9524 100644
+index 32f0bd4..c51abc9 100644
 --- a/src/aliceVision/depthMap/cuda/host/DeviceCache.cpp
 +++ b/src/aliceVision/depthMap/cuda/host/DeviceCache.cpp
-@@ -280,6 +280,12 @@ void DeviceCache::addMipmapImage(int camId,
+@@ -7,6 +7,7 @@
+ #include "DeviceCache.hpp"
+ 
+ #include <aliceVision/system/Logger.hpp>
++#include <aliceVision/depthMap/cuda/imageProcessing/cheshireDownscale.hpp>  // cheshire (step 6d)
+ #include <aliceVision/depthMap/cuda/host/utils.hpp>
+ #include <aliceVision/depthMap/cuda/device/DeviceCameraParams.hpp>
+ #include <aliceVision/depthMap/cuda/imageProcessing/deviceGaussianFilter.hpp>
+@@ -248,6 +249,20 @@ void DeviceCache::addMipmapImage(int camId,
+     // get image buffer
+     mvsUtils::ImagesCache<image::Image<image::RGBAfColor>>::ImgSharedPtr img = imageCache.getImg_sync(camId);
+ 
++#if defined(CHESHIRE_HIP)
++    // cheshire (step 6d): a full-resolution image is downscaled on the device, with the host's taps
++    // and arithmetic (imageProcessing/cheshireDownscale.cu), then filled like the host path
++    if (imageCache.isFullResolution() && mp.getProcessDownscale() > 1)
++    {
++        const int s = mp.getProcessDownscale();
++        auto down_dmpPtr = std::make_shared<CudaDeviceMemoryPitched<CudaRGBA, 2>>(CudaSize<2>(img->width() / s, img->height() / s));
++        cuda_cheshireDownscaleToCudaRGBA(reinterpret_cast<const float*>(img->data()), img->width(), img->height(), *down_dmpPtr);
++        DeviceMipmapImage& deviceMipmapImageFromDevice = *(currentDeviceCache.mipmaps.at(deviceMipmapId));
++        deviceMipmapImageFromDevice.fillFromDevice(down_dmpPtr, minDownscale, maxDownscale);
++        return;
++    }
++#endif
++
+     // allocate the full size host-sided image buffer
+     CudaSize<2> imgSize(img->width(), img->height());
+     CudaHostMemoryHeap<CudaRGBA, 2> img_hmh(imgSize);
+@@ -280,6 +295,12 @@ void DeviceCache::addMipmapImage(int camId,
      deviceMipmapImage.fill(img_hmh, minDownscale, maxDownscale);
  }
  
@@ -1904,7 +1960,7 @@ index 32d0d45..43106e3 100644
  
      /**
 diff --git a/src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.cpp b/src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.cpp
-index 51697cd..2294862 100644
+index 51697cd..6949671 100644
 --- a/src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.cpp
 +++ b/src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.cpp
 @@ -10,6 +10,7 @@
@@ -1939,6 +1995,76 @@ index 51697cd..2294862 100644
  
      // allocate the device-sided full-size input image buffer
      auto img_dmpPtr = std::make_shared<CudaDeviceMemoryPitched<CudaRGBA, 2>>(in_img_hmh.getSize());
+@@ -89,6 +96,44 @@ void DeviceMipmapImage::fill(const CudaHostMemoryHeap<CudaRGBA, 2>& in_img_hmh,
+     CHECK_CUDA_ERROR();
+ }
+ 
++void DeviceMipmapImage::fillFromDevice(std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> img_dmpPtr, int minDownscale, int maxDownscale)
++{
++    // cheshire (step 6d): fill() from here on, with the image already on the device
++    _minDownscale = minDownscale;
++    _maxDownscale = maxDownscale;
++    _width = img_dmpPtr->getSize().x();
++    _height = img_dmpPtr->getSize().y();
++    _levels = log2(maxDownscale / minDownscale) + 1;
++
++    if (_textureObject != 0)
++        CHECK_CUDA_RETURN_ERROR(cudaDestroyTextureObject(_textureObject));
++
++    if (_mipmappedArray != nullptr)
++    {
++        cheshire::bridge::forgetExternal(_mipmappedArray);
++        CHECK_CUDA_RETURN_ERROR(cudaFreeMipmappedArray(_mipmappedArray));
++    }
++
++    if (minDownscale > 1)
++    {
++        CudaRGBATexture fullSizeImg(*img_dmpPtr);
++        const size_t downscaledWidth = size_t(divideRoundUp(int(_width), int(minDownscale)));
++        const size_t downscaledHeight = size_t(divideRoundUp(int(_height), int(minDownscale)));
++        auto downscaledImg_dmpPtr = std::make_shared<CudaDeviceMemoryPitched<CudaRGBA, 2>>(CudaSize<2>(downscaledWidth, downscaledHeight));
++        const int gaussianFilterRadius = minDownscale;
++        cuda_downscaleWithGaussianBlur(*downscaledImg_dmpPtr, fullSizeImg.textureObj, minDownscale, gaussianFilterRadius, 0 /*stream*/);
++        CHECK_CUDA_RETURN_ERROR(cudaDeviceSynchronize());
++        CHECK_CUDA_ERROR();
++        img_dmpPtr.swap(downscaledImg_dmpPtr);
++    }
++
++    cuda_rgb2lab(*img_dmpPtr, 0 /*stream*/);
++    CHECK_CUDA_RETURN_ERROR(cudaDeviceSynchronize());
++    cuda_createMipmappedArrayFromImage(&_mipmappedArray, *img_dmpPtr, _levels);
++    cuda_createMipmappedArrayTexture(&_textureObject, _mipmappedArray, _levels);
++    CHECK_CUDA_ERROR();
++}
++
+ float DeviceMipmapImage::getLevel(unsigned int downscale) const
+ {
+     // check given downscale
+diff --git a/src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.hpp b/src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.hpp
+index 1bb58fd..c7cd556 100644
+--- a/src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.hpp
++++ b/src/aliceVision/depthMap/cuda/host/DeviceMipmapImage.hpp
+@@ -7,6 +7,7 @@
+ #pragma once
+ 
+ #include <aliceVision/depthMap/cuda/host/memory.hpp>
++#include <memory>  // cheshire (step 6d)
+ 
+ namespace aliceVision {
+ namespace depthMap {
+@@ -38,6 +39,12 @@ class DeviceMipmapImage
+      */
+     void fill(const CudaHostMemoryHeap<CudaRGBA, 2>& in_img_hmh, int minDownscale, int maxDownscale);
+ 
++    /**
++     * @brief cheshire (step 6d): fill() from an image already on the device (the device downscale);
++     * the same steps after fill()'s host-to-device copy. The buffer is consumed.
++     */
++    void fillFromDevice(std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> img_dmpPtr, int minDownscale, int maxDownscale);
++
+     /**
+      * @brief Get the corresponding mipmap image level of the given downscale
+      * @note throw if the given downscale is not contained in the mipmap image
 diff --git a/src/aliceVision/depthMap/cuda/host/memory.hpp b/src/aliceVision/depthMap/cuda/host/memory.hpp
 index 294259f..4ef2d9d 100644
 --- a/src/aliceVision/depthMap/cuda/host/memory.hpp
@@ -2055,7 +2181,7 @@ index 294259f..4ef2d9d 100644
          buffer = nullptr;
      }
 diff --git a/src/aliceVision/depthMap/cuda/imageProcessing/deviceMipmappedArray.cu b/src/aliceVision/depthMap/cuda/imageProcessing/deviceMipmappedArray.cu
-index e059d0d..5966250 100644
+index e059d0d..230ac58 100644
 --- a/src/aliceVision/depthMap/cuda/imageProcessing/deviceMipmappedArray.cu
 +++ b/src/aliceVision/depthMap/cuda/imageProcessing/deviceMipmappedArray.cu
 @@ -219,6 +219,67 @@ __global__ void createMipmappedArrayDebugFlatImage_kernel(CudaRGBA* out_flatImag
@@ -2126,7 +2252,7 @@ index e059d0d..5966250 100644
  __host__ void cuda_createMipmappedArrayFromImage(cudaMipmappedArray_t* out_mipmappedArrayPtr,
                                                   const CudaDeviceMemoryPitched<CudaRGBA, 2>& in_img_dmp,
                                                   const unsigned int levels)
-@@ -234,6 +295,25 @@ __host__ void cuda_createMipmappedArrayFromImage(cudaMipmappedArray_t* out_mipma
+@@ -234,6 +295,21 @@ __host__ void cuda_createMipmappedArrayFromImage(cudaMipmappedArray_t* out_mipma
  
      // allocate CUDA mipmapped array
      CHECK_CUDA_RETURN_ERROR(cudaMallocMipmappedArray(out_mipmappedArrayPtr, &desc, imgSize, levels));
@@ -2138,11 +2264,7 @@ index e059d0d..5966250 100644
 +        size_t bytes = 0, w = in_imgSize.x(), h = in_imgSize.y();
 +        for (unsigned l = 0; l < levels; ++l)
 +        {
-+            bytes += w * h * sizeof(CudaRGBA)
-+#ifdef ALICEVISION_DEPTHMAP_TEXTURE_USE_HALF
-+                     / 2
-+#endif
-+                ;
++            bytes += w * h * sizeof(CudaRGBA);  // the stored texel: 8 bytes as half4 under USE_HALF (memory.hpp)
 +            w = w > 1 ? w / 2 : 1;
 +            h = h > 1 ? h / 2 : 1;
 +        }
@@ -2152,7 +2274,7 @@ index e059d0d..5966250 100644
  
      // get mipmapped array at level 0
      cudaArray_t level0;
-@@ -303,6 +383,20 @@ __host__ void cuda_createMipmappedArrayFromImage(cudaMipmappedArray_t* out_mipma
+@@ -303,6 +379,20 @@ __host__ void cuda_createMipmappedArrayFromImage(cudaMipmappedArray_t* out_mipma
          }
  
          // generate surface object for current level writing
@@ -2173,7 +2295,7 @@ index e059d0d..5966250 100644
          cudaSurfaceObject_t currentLevel_surf;
          {
              cudaResourceDesc surfRes;
-@@ -329,6 +423,7 @@ __host__ void cuda_createMipmappedArrayFromImage(cudaMipmappedArray_t* out_mipma
+@@ -329,6 +419,7 @@ __host__ void cuda_createMipmappedArrayFromImage(cudaMipmappedArray_t* out_mipma
          // destroy temporary CUDA objects
          CHECK_CUDA_RETURN_ERROR(cudaDestroySurfaceObject(currentLevel_surf));
          CHECK_CUDA_RETURN_ERROR(cudaDestroyTextureObject(previousLevel_tex));
@@ -3711,7 +3833,7 @@ index 1f29fe2..7055c2a 100644
                     image::Image<float>& outBuffer,
                     const std::string& kernel = "gaussian",
 diff --git a/src/aliceVision/image/io.cpp b/src/aliceVision/image/io.cpp
-index 8c5e1d3..30f524c 100644
+index 8c5e1d3..ff24afa 100644
 --- a/src/aliceVision/image/io.cpp
 +++ b/src/aliceVision/image/io.cpp
 @@ -7,6 +7,7 @@
@@ -3728,7 +3850,7 @@ index 8c5e1d3..30f524c 100644
  
 +    // cheshire (step 5v): an EXR read as float RGB/RGBA in the colour space it is stored in goes
 +    // straight through OpenEXR (image/cheshireExr.cpp); anything else is OpenImageIO's job below
-+    if (format == oiio::TypeDesc::FLOAT && (nchannels == 3 || nchannels == 4) && sizeof(T) == static_cast<std::size_t>(nchannels) * sizeof(float) &&
++    if (format == oiio::TypeDesc::FLOAT && (nchannels == 1 || nchannels == 3 || nchannels == 4) && sizeof(T) == static_cast<std::size_t>(nchannels) * sizeof(float) &&
 +        imageReadOptions.inputColorSpace == EImageColorSpace::AUTO &&
 +        (imageReadOptions.workingColorSpace == EImageColorSpace::LINEAR || imageReadOptions.workingColorSpace == EImageColorSpace::NO_CONVERSION) &&
 +        cheshireReadExr(path, nchannels, imageReadOptions.workingColorSpace == EImageColorSpace::LINEAR, [&image](int width, int height) {
@@ -3996,14 +4118,15 @@ index b0b5910..8569072 100644
  
      return nupd;
 diff --git a/src/aliceVision/mesh/Texturing.cpp b/src/aliceVision/mesh/Texturing.cpp
-index 76bf7e5..7bd49cb 100644
+index 76bf7e5..03ef9ed 100644
 --- a/src/aliceVision/mesh/Texturing.cpp
 +++ b/src/aliceVision/mesh/Texturing.cpp
-@@ -5,6 +5,17 @@
+@@ -5,6 +5,18 @@
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
  #include "Texturing.hpp"
 +#include <cstdlib>  // cheshire
++#include <thread>  // cheshire (step 6e)
 +#include <cstdio>   // cheshire: direct OBJ writer
 +#include <stdexcept>
 +#include <cstdint>
@@ -4017,7 +4140,7 @@ index 76bf7e5..7bd49cb 100644
  #include "geoMesh.hpp"
  #include "UVAtlas.hpp"
  
-@@ -463,6 +474,33 @@ void Texturing::generateTextures(const mvsUtils::MultiViewParams& mp,
+@@ -463,7 +475,57 @@ void Texturing::generateTextures(const mvsUtils::MultiViewParams& mp,
          nbAtlasMax -= 1;
      nbAtlasMax = std::max(1, nbAtlasMax);  // if not enough memory, do it one by one
  
@@ -4049,9 +4172,33 @@ index 76bf7e5..7bd49cb 100644
 +    }
 +#endif
      ALICEVISION_LOG_INFO("Total amount of available RAM: " << availableRam << " MB.");
++#ifdef ALICEVISION_HAVE_GPU_TEX
++    // cheshire (step 6e): each read-ahead thread decodes on its own thread since step 6c, so the depth
++    // that keeps the cores busy is about the thread count: every hardware thread but one, within the
++    // image cache's slots (grown to depth + 1 when RAM allows; the default cache already has about 20
++    // slots at 6000x3376, so on a small host the deeper read-ahead costs no memory). Before, a host
++    // whose available RAM missed the 4 GB margin read one camera ahead. CHESHIRE_TEX_READAHEAD=n sets it.
++    if (imageType != mvsUtils::EFileType::normalMap && gpu::texAvailable())
++    {
++        int cheshireDepth = std::max(1, int(std::thread::hardware_concurrency()) - 1);
++        if (const char* e = std::getenv("CHESHIRE_TEX_READAHEAD"))
++            cheshireDepth = std::max(1, std::atoi(e));
++        if (imageCache.getCacheSize() < cheshireDepth + 1 && availableRam > 4096 &&
++            std::size_t(availableRam - 4096) > std::size_t(cheshireDepth + 1) * imageMaxMemSize)
++            imageCache.setCacheSize(cheshireDepth + 1);
++        cheshireDepth = std::min(cheshireDepth, imageCache.getCacheSize() - 1);
++        if (cheshireDepth != cheshirePrefetchDepth)
++        {
++            cheshirePrefetchDepth = std::max(1, cheshireDepth);
++            ALICEVISION_LOG_INFO("cheshire: reading " << cheshirePrefetchDepth << " cameras ahead (" << imageCache.getCacheSize()
++                                                      << " image slots; CHESHIRE_TEX_READAHEAD=n to set)");
++        }
++    }
++#endif
      ALICEVISION_LOG_INFO("Total amount of memory remaining for the computation: " << availableMem << " MB.");
      ALICEVISION_LOG_INFO("Total amount of an image in memory: " << imageMaxMemSize << " MB.");
-@@ -513,9 +551,17 @@ void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
+     ALICEVISION_LOG_INFO("Total amount of an atlas pyramid in memory: " << atlasPyramidMaxMemSize << " MB.");
+@@ -513,9 +575,17 @@ void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
          ALICEVISION_LOG_INFO("Generating texture for atlas " << atlasID + 1 << "/" << _atlases.size() << " (" << _atlases[atlasID].size()
                                                               << " triangles).");
  
@@ -4071,7 +4218,7 @@ index 76bf7e5..7bd49cb 100644
              int triangleID = _atlases[atlasID][i];
  
              // Fuse visibilities of the 3 vertices
-@@ -632,9 +678,165 @@ void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
+@@ -632,9 +702,165 @@ void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
                  }
              }
          }
@@ -4237,7 +4384,7 @@ index 76bf7e5..7bd49cb 100644
  
      // pyramid of atlases frequency bands
      std::map<AtlasIndex, AccuPyramid> accuPyramids;
-@@ -1004,7 +1206,9 @@ void Texturing::writeTexture(AccuImage& atlasTexture,
+@@ -1004,7 +1230,9 @@ void Texturing::writeTexture(AccuImage& atlasTexture,
      unsigned int outTextureSide = texParams.textureSide;
      // WARNING: we modify the "imgCount" to apply the padding (to avoid the creation of a new buffer)
      // edge padding (dilate gutter)
@@ -4248,7 +4395,7 @@ index 76bf7e5..7bd49cb 100644
      {
          const unsigned int padding = texParams.padding * 3;
          ALICEVISION_LOG_INFO("  - Edge padding (" << padding << " pixels).");
-@@ -1120,8 +1324,32 @@ void Texturing::writeTexture(AccuImage& atlasTexture,
+@@ -1120,8 +1348,32 @@ void Texturing::writeTexture(AccuImage& atlasTexture,
      {
          image::Image<image::RGBfColor> resizedColorBuffer;
  
@@ -4283,7 +4430,7 @@ index 76bf7e5..7bd49cb 100644
  
          // Normalize normal map after dowscaling
          /*if(imageType == mvsUtils::EFileType::normalMap)
-@@ -1304,6 +1532,70 @@ void Texturing::saveAs(const fs::path& dir, const std::string& basename, EFileTy
+@@ -1304,6 +1556,70 @@ void Texturing::saveAs(const fs::path& dir, const std::string& basename, EFileTy
      const std::string meshFileTypeStr = EFileType_enumToString(meshFileType);
      const std::string filepath = (dir / (basename + "." + meshFileTypeStr)).string();
  
@@ -4354,7 +4501,7 @@ index 76bf7e5..7bd49cb 100644
      ALICEVISION_LOG_INFO("Saving " << meshFileTypeStr << " mesh file using Assimp.");
  
      if (_atlases.empty())
-@@ -1489,7 +1781,7 @@ void Texturing::saveAs(const fs::path& dir, const std::string& basename, EFileTy
+@@ -1489,7 +1805,7 @@ void Texturing::saveAs(const fs::path& dir, const std::string& basename, EFileTy
  
      // export mesh
      Assimp::Exporter exporter;
@@ -4549,7 +4696,7 @@ index 54a051c..73aae06 100644
      };
  
 diff --git a/src/aliceVision/multiview/RelativePoseKernel.hpp b/src/aliceVision/multiview/RelativePoseKernel.hpp
-index c0a3ab3..643f300 100644
+index c0a3ab3..1cbe627 100644
 --- a/src/aliceVision/multiview/RelativePoseKernel.hpp
 +++ b/src/aliceVision/multiview/RelativePoseKernel.hpp
 @@ -79,6 +79,19 @@ class RelativePoseKernel : public robustEstimation::PointFittingRansacKernel<Sol
@@ -4572,6 +4719,30 @@ index c0a3ab3..643f300 100644
      double logalpha0() const override { return _logalpha0; }
      double errorVectorDimension() const override { return (_pointToLine) ? 1.0 : 2.0; }
      Mat3 normalizer1() const override { return _N1; }
+@@ -155,6 +168,23 @@ class RelativePoseKernel_K : public robustEstimation::PointFittingRansacKernel<S
+         return _errorEstimator.error(modelF, PFRansacKernel::PFKernel::_x1.col(sample), PFRansacKernel::PFKernel::_x2.col(sample));
+     }
+ 
++    // cheshire (step 6b): the inherited errors() calls error() once per correspondence, and error()
++    // rebuilds F from E - two 3x3 inverses and three products - each time, for a result that is the
++    // same for every point of the call. F once per model, then the same per-point error: the same F
++    // from the same function on the same inputs, so the residuals are unchanged. This kernel is on
++    // SfM's relative-pose path (the initial pair, RelativePoseInfo.cpp) and the essential-matrix
++    // geometric filter.
++    void errors(const ModelT_& model, std::vector<double>& errors) const override
++    {
++        Mat3 F;
++        fundamentalFromEssential(model.getMatrix(), _K1, _K2, &F);
++        const ModelT_ modelF(F);
++        const std::size_t n = PFRansacKernel::PFKernel::_x1.cols();
++        errors.resize(n);
++        for (std::size_t i = 0; i < n; ++i)
++            errors[i] = _errorEstimator.error(modelF, PFRansacKernel::PFKernel::_x1.col(i), PFRansacKernel::PFKernel::_x2.col(i));
++    }
++
+     void unnormalize(ModelT_& model) const override
+     {
+         // do nothing, no normalization in this case
 diff --git a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
 index 298c9d2..8880d5d 100644
 --- a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
@@ -4631,10 +4802,18 @@ index e3b2880..b4e5c7b 100644
  {
      os << range.begin << "-" << range.end;
 diff --git a/src/aliceVision/mvsUtils/ImagesCache.cpp b/src/aliceVision/mvsUtils/ImagesCache.cpp
-index c7e42f4..2e47e2d 100644
+index c7e42f4..3502463 100644
 --- a/src/aliceVision/mvsUtils/ImagesCache.cpp
 +++ b/src/aliceVision/mvsUtils/ImagesCache.cpp
-@@ -89,22 +89,29 @@ void ImagesCache<Image>::setCacheSize(int nbPreload)
+@@ -7,6 +7,7 @@
+ #include "ImagesCache.hpp"
+ #include <aliceVision/mvsUtils/common.hpp>
+ #include <aliceVision/mvsUtils/fileIO.hpp>
++#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 6c
+ 
+ #include <future>
+ 
+@@ -89,22 +90,29 @@ void ImagesCache<Image>::setCacheSize(int nbPreload)
  template<typename Image>
  void ImagesCache<Image>::refreshData(int camId)
  {
@@ -4678,26 +4857,217 @@ index c7e42f4..2e47e2d 100644
          // reload data from files
          long t1 = clock();
          if (_imgs[mapId] == nullptr)
+@@ -115,7 +123,10 @@ void ImagesCache<Image>::refreshData(int camId)
+         }
+ 
+         const std::string imagePath = _imagesNames.at(camId);
+-        loadImage(imagePath, _mp, camId, *(_imgs[mapId]), _colorspace, _correctEV);
++        {
++            CheshireFullResolutionScope cheshireFullResolution(_fullResolution);  // cheshire (step 6d)
++            loadImage(imagePath, _mp, camId, *(_imgs[mapId]), _colorspace, _correctEV);
++        }
+ 
+         ALICEVISION_LOG_DEBUG("Add " << imagePath << " to image cache. " << formatElapsedTime(t1));
+     }
+@@ -125,6 +136,22 @@ void ImagesCache<Image>::refreshData(int camId)
+     }
+ }
+ 
++template<typename Image>
++void ImagesCache<Image>::setFullResolution(bool on)
++{
++    // cheshire (step 6d): initIC's cache size at the full-resolution image size
++    _fullResolution = on;
++    const float s = on ? float(_mp.getProcessDownscale()) : 1.0f;
++    const float oneimagemb = (sizeof(Color) * _mp.getMaxImageWidth() * _mp.getMaxImageHeight()) / 1024.f / 1024.f * s * s;
++    const float maxmbCPU = (float)_mp.userParams.get<int>("images_cache.maxmbCPU", 5000);
++    int npreload = (int)(maxmbCPU / oneimagemb);
++    if (npreload < 5)
++        npreload = 5;
++    if (npreload > _mp.ncams)
++        npreload = _mp.ncams;
++    setCacheSize(npreload);
++}
++
+ template<typename Image>
+ void ImagesCache<Image>::refreshImage_sync(int camId)
+ {
+@@ -135,7 +162,12 @@ void ImagesCache<Image>::refreshImage_sync(int camId)
+ template<typename Image>
+ void ImagesCache<Image>::refreshImage_async(int camId)
+ {
+-    _asyncObjects.emplace_back(std::async(std::launch::async, &ImagesCache<Image>::refreshImage_sync, this, camId));
++    // cheshire (step 6c): a read-ahead thread is one of several loads at once; its reader decodes on
++    // this thread rather than through the shared pool (image/cheshireExr.hpp)
++    _asyncObjects.emplace_back(std::async(std::launch::async, [this, camId]() {
++        image::ConcurrentLoadScope cheshireScope;
++        refreshImage_sync(camId);
++    }));
+ }
+ 
+ template<typename Image>
 diff --git a/src/aliceVision/mvsUtils/ImagesCache.hpp b/src/aliceVision/mvsUtils/ImagesCache.hpp
-index 8849153..97243bb 100644
+index 8849153..c0f931a 100644
 --- a/src/aliceVision/mvsUtils/ImagesCache.hpp
 +++ b/src/aliceVision/mvsUtils/ImagesCache.hpp
-@@ -49,6 +49,7 @@ class ImagesCache
+@@ -49,6 +49,8 @@ class ImagesCache
      StaticVector<long> _mapIdClock;
  
      std::vector<std::mutex> _imagesMutexes;
 +    std::mutex _slotMutex;  // cheshire: slot bookkeeping, allows parallel loads of different cameras
++    bool _fullResolution = false;  // cheshire (step 6d): images kept at full resolution, downscaled on the device
      std::vector<std::string> _imagesNames;
  
      std::list<std::future<void>> _asyncObjects;
-@@ -66,6 +67,7 @@ class ImagesCache
+@@ -66,6 +68,11 @@ class ImagesCache
  
      void initIC(std::vector<std::string>& imagesNames);
      void setCacheSize(int nbPreload);
 +    int getCacheSize() const { return _N_PRELOADED_IMAGES; }  // cheshire: the loader decodes in groups of this size
++    /// cheshire (step 6d): keep images at full resolution (the depth-map node downscales on the device);
++    /// resizes the cache so it holds the same megabytes as before. Call before the first load.
++    void setFullResolution(bool on);
++    bool isFullResolution() const { return _fullResolution; }
      void setCorrectEV(const ECorrectEV correctEV) { _correctEV = correctEV; }
      ~ImagesCache() = default;
  
+diff --git a/src/aliceVision/mvsUtils/fileIO.cpp b/src/aliceVision/mvsUtils/fileIO.cpp
+index 0403b03..254e95b 100644
+--- a/src/aliceVision/mvsUtils/fileIO.cpp
++++ b/src/aliceVision/mvsUtils/fileIO.cpp
+@@ -11,6 +11,9 @@
+ #include <aliceVision/image/io.hpp>
+ #include <aliceVision/mvsUtils/common.hpp>
+ #include <aliceVision/mvsUtils/MultiViewParams.hpp>
++#include <chrono>   // cheshire: step 6a
++#include <cstdlib>
++#include <string>
+ 
+ namespace aliceVision {
+ namespace mvsUtils {
+@@ -382,9 +385,48 @@ Matrix3x4 load3x4MatrixFromFile(std::istream& in)
+     return m;
+ }
+ 
++// cheshire (step 6a): CHESHIRE_LOAD_PROFILE=1 prints one line per image load with the time of each
++// phase - the read, the second open for the exposure metadata, the exposure multiply, the colour
++// conversion and the process downscale - so a node bound by its loads says which part binds it.
++// cheshire (step 6d): the full-resolution scope (fileIO.hpp)
++namespace {
++thread_local int tlCheshireFullResolution = 0;
++}
++CheshireFullResolutionScope::CheshireFullResolutionScope(bool on)
++  : _on(on)
++{
++    if (_on)
++        ++tlCheshireFullResolution;
++}
++CheshireFullResolutionScope::~CheshireFullResolutionScope()
++{
++    if (_on)
++        --tlCheshireFullResolution;
++}
++
++inline bool cheshireLoadProfileOn()
++{
++    static const bool on = [] {
++        const char* v = std::getenv("CHESHIRE_LOAD_PROFILE");
++        return v != nullptr && std::string(v) == "1";
++    }();
++    return on;
++}
++
+ template<class Image>
+ void loadImage(const std::string& path, const MultiViewParams& mp, int camId, Image& img, image::EImageColorSpace colorspace, ECorrectEV correctEV)
+ {
++    const bool cheshireProfile = cheshireLoadProfileOn();
++    const auto cheshireStart = std::chrono::steady_clock::now();
++    auto cheshireT = cheshireStart;
++    double cheshireRead = 0.0, cheshireMeta = 0.0, cheshireEv = 0.0, cheshireColour = 0.0, cheshireScale = 0.0;
++    auto cheshireLap = [&](double& acc) {
++        if (!cheshireProfile)
++            return;
++        const auto now = std::chrono::steady_clock::now();
++        acc += std::chrono::duration<double>(now - cheshireT).count();
++        cheshireT = now;
++    };
+     // check image size
+     auto checkImageSize = [&path, &mp, camId, &img]() {
+         if ((mp.getOriginalWidth(camId) != img.width()) || (mp.getOriginalHeight(camId) != img.height()))
+@@ -402,14 +444,17 @@ void loadImage(const std::string& path, const MultiViewParams& mp, int camId, Im
+     {
+         image::readImage(path, img, colorspace);
+         checkImageSize();
++        cheshireLap(cheshireRead);
+     }
+     // if exposure correction, apply it in linear colorspace and then convert colorspace
+     else
+     {
+         image::readImage(path, img, image::EImageColorSpace::LINEAR);
+         checkImageSize();
++        cheshireLap(cheshireRead);
+ 
+         const auto metadata = image::readImageMetadata(path);
++        cheshireLap(cheshireMeta);
+ 
+         float exposureCompensation = metadata.get_float("AliceVision:EVComp", -1);
+ 
+@@ -428,21 +473,29 @@ void loadImage(const std::string& path, const MultiViewParams& mp, int camId, Im
+                 img(i)[1] *= exposureCompensation;
+                 img(i)[2] *= exposureCompensation;
+             }
++            cheshireLap(cheshireEv);
+ 
+             imageAlgo::colorconvert(img, image::EImageColorSpace::LINEAR, colorspace);
++            cheshireLap(cheshireColour);
+         }
+     }
+ 
+     // scale chosen by the user and apply during the process
+     const int processScale = mp.getProcessDownscale();
+ 
+-    if (processScale > 1)
++    if (processScale > 1 && tlCheshireFullResolution == 0)  // cheshire (step 6d): or on the device
+     {
+         ALICEVISION_LOG_DEBUG("Downscale (x" << processScale << ") image: " << mp.getViewId(camId) << ".");
+         Image bmpr;
+         imageAlgo::resizeImage(processScale, img, bmpr);
+         img.swap(bmpr);
++        cheshireLap(cheshireScale);
+     }
++    if (cheshireProfile)
++        ALICEVISION_LOG_INFO("cheshire: load profile: view " << mp.getViewId(camId) << " read " << cheshireRead << " s, metadata " << cheshireMeta
++                                                            << " s, exposure " << cheshireEv << " s, colour " << cheshireColour << " s, downscale "
++                                                            << cheshireScale << " s, total "
++                                                            << std::chrono::duration<double>(std::chrono::steady_clock::now() - cheshireStart).count() << " s");
+ }
+ 
+ template void loadImage<image::Image<image::RGBfColor>>(const std::string& path,
+diff --git a/src/aliceVision/mvsUtils/fileIO.hpp b/src/aliceVision/mvsUtils/fileIO.hpp
+index fc92451..e0e9457 100644
+--- a/src/aliceVision/mvsUtils/fileIO.hpp
++++ b/src/aliceVision/mvsUtils/fileIO.hpp
+@@ -61,5 +61,20 @@ Matrix3x4 load3x4MatrixFromFile(std::istream& in);
+ template<class Image>
+ void loadImage(const std::string& path, const MultiViewParams& mp, int camId, Image& img, image::EImageColorSpace colorspace, ECorrectEV correctEV);
+ 
++/**
++ * @brief cheshire (step 6d): while alive with on == true, loadImage on this thread skips the process
++ * downscale - the depth-map node then downscales on the device with the same arithmetic.
++ */
++struct CheshireFullResolutionScope
++{
++    explicit CheshireFullResolutionScope(bool on);
++    ~CheshireFullResolutionScope();
++    CheshireFullResolutionScope(const CheshireFullResolutionScope&) = delete;
++    CheshireFullResolutionScope& operator=(const CheshireFullResolutionScope&) = delete;
++
++  private:
++    bool _on;
++};
++
+ }  // namespace mvsUtils
+ }  // namespace aliceVision
 diff --git a/src/aliceVision/numeric/algebra.hpp b/src/aliceVision/numeric/algebra.hpp
 index b2047a8..e7542af 100644
 --- a/src/aliceVision/numeric/algebra.hpp

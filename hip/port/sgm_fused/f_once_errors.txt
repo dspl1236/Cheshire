@@ -1,0 +1,17 @@
+
+    // cheshire (step 6b): the inherited errors() calls error() once per correspondence, and error()
+    // rebuilds F from E - two 3x3 inverses and three products - each time, for a result that is the
+    // same for every point of the call. F once per model, then the same per-point error: the same F
+    // from the same function on the same inputs, so the residuals are unchanged. This kernel is on
+    // SfM's relative-pose path (the initial pair, RelativePoseInfo.cpp) and the essential-matrix
+    // geometric filter.
+    void errors(const ModelT_& model, std::vector<double>& errors) const override
+    {
+        Mat3 F;
+        fundamentalFromEssential(model.getMatrix(), _K1, _K2, &F);
+        const ModelT_ modelF(F);
+        const std::size_t n = PFRansacKernel::PFKernel::_x1.cols();
+        errors.resize(n);
+        for (std::size_t i = 0; i < n; ++i)
+            errors[i] = _errorEstimator.error(modelF, PFRansacKernel::PFKernel::_x1.col(i), PFRansacKernel::PFKernel::_x2.col(i));
+    }

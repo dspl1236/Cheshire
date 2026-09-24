@@ -1,0 +1,42 @@
+// This file is part of the Cheshire project (MPL-2.0), a patch set over AliceVision.
+// Copied into src/aliceVision/depthMap/cuda/imageProcessing/ by scripts/apply_hip_patch.py (step 6d).
+#pragma once
+
+#include <aliceVision/depthMap/cuda/host/memory.hpp>
+
+#include <cstdlib>
+#include <string>
+
+namespace aliceVision {
+namespace depthMap {
+
+/// cheshire (step 6d): CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE=0 keeps the process downscale on the host
+inline bool cheshireDeviceDownscaleEnabled()
+{
+    static const bool on = [] {
+        // on by default since its gate passed (byte-identical depth maps on mini6 and the 884-view
+        // chunk); CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK=1 compares every image with the host path
+        const char* v = std::getenv("CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE");
+        return v == nullptr || std::string(v) != "0";
+    }();
+    return on;
+}
+
+/**
+ * @brief cheshire (step 6d): the depth-map node's process downscale on the device, and the conversion
+ * DeviceCache::addMipmapImage does on the host after it.
+ *
+ * The host path is mvsUtils::loadImage's imageAlgo::resizeImage (OpenImageIO's default lanczos3
+ * downscale, computed exactly by image/cheshireResize.hpp), then half(value * 255) per channel. Here
+ * the full-resolution float RGBA image is uploaded, the same tap tables are computed on the host by
+ * the same code and applied on the device in the same order with a multiply and an add per tap and no
+ * contraction, and the same conversion is applied: the output is the host path's, bit for bit.
+ *
+ * @param[in] in_hostRGBA the full-resolution image, row-major float RGBA
+ * @param[in] inWidth, inHeight its size
+ * @param[out] out_dmp the downscaled CudaRGBA image, sized inWidth / downscale x inHeight / downscale
+ */
+void cuda_cheshireDownscaleToCudaRGBA(const float* in_hostRGBA, int inWidth, int inHeight, CudaDeviceMemoryPitched<CudaRGBA, 2>& out_dmp);
+
+}  // namespace depthMap
+}  // namespace aliceVision

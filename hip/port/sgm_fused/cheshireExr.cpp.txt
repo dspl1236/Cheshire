@@ -88,11 +88,17 @@ bool hasExrExtension(const std::string& path)
     return ext == ".exr";
 }
 
+thread_local int tlConcurrentLoad = 0;
+
 }  // namespace
+
+ConcurrentLoadScope::ConcurrentLoadScope() { ++tlConcurrentLoad; }
+ConcurrentLoadScope::~ConcurrentLoadScope() { --tlConcurrentLoad; }
+bool inConcurrentLoad() { return tlConcurrentLoad > 0; }
 
 bool cheshireReadExr(const std::string& path, int nchannels, bool requireLinearMetadata, const std::function<float*(int, int)>& allocate)
 {
-    if (!cheshireExrDirectEnabled() || (nchannels != 3 && nchannels != 4) || !hasExrExtension(path))
+    if (!cheshireExrDirectEnabled() || (nchannels != 1 && nchannels != 3 && nchannels != 4) || !hasExrExtension(path))
         return false;
     try
     {
@@ -102,14 +108,16 @@ bool cheshireReadExr(const std::string& path, int nchannels, bool requireLinearM
             if (const char* v = std::getenv("CHESHIRE_EXR_THREADS"))
                 threads = std::max(0, std::atoi(v));
             Imf::setGlobalThreadCount(threads);
-            ALICEVISION_LOG_INFO("cheshire: EXR files read through OpenEXR directly (RGB/RGBA half or float, linear; " << threads
-                                 << " pool threads for a lone read, inline inside a parallel loop; CHESHIRE_EXR_DIRECT=0 for OpenImageIO)");
+            ALICEVISION_LOG_INFO("cheshire: EXR files read through OpenEXR directly (one-channel, RGB and RGBA half or float, linear; " << threads
+                                 << " pool threads for a lone read, inline inside a parallel loop or a read-ahead thread; CHESHIRE_EXR_DIRECT=0 for OpenImageIO)");
         });
         // A lone read (texturing, one image at a time) spreads its scanlines over the pool. Inside a
         // parallel loop (the depth-map prefetch, a dozen files at once) every file decodes in its own
         // calling thread instead: with all of them queueing 3376 single-scanline tasks into one pool,
         // twenty files took as long as twenty sequential reads.
-        const int fileThreads = omp_in_parallel() ? 0 : Imf::globalThreadCount();
+        // ... and so does a read-ahead thread of the image cache (ConcurrentLoadScope, step 6c): the
+        // texturing node reads 4 cameras ahead through std::async, outside any OpenMP region.
+        const int fileThreads = (omp_in_parallel() || inConcurrentLoad()) ? 0 : Imf::globalThreadCount();
         const bool profile = cheshireExrProfile();
         const auto tOpen0 = std::chrono::steady_clock::now();
         const double cpu0 = profile ? threadCpuSeconds() : 0.0;
@@ -128,22 +136,37 @@ bool cheshireReadExr(const std::string& path, int nchannels, bool requireLinearM
         const int width = dw.max.x + 1;
         const int height = dw.max.y + 1;
         const Imf::ChannelList& channels = header.channels();
-        static const char* const names[4] = {"R", "G", "B", "A"};
-        int present = 0;
-        for (int c = 0; c < 4; ++c)
-        {
-            const Imf::Channel* channel = channels.findChannel(names[c]);
-            if (channel == nullptr)
-                continue;
-            if ((channel->type != Imf::HALF && channel->type != Imf::FLOAT) || channel->xSampling != 1 || channel->ySampling != 1)
-                return false;
-            present |= 1 << c;
-        }
         int nbFileChannels = 0;
         for (Imf::ChannelList::ConstIterator it = channels.begin(); it != channels.end(); ++it)
             ++nbFileChannels;
-        if ((present & 7) != 7 || nbFileChannels != ((present & 8) ? 4 : 3) || (nchannels == 4 && !(present & 8)))
-            return false;  // only R, G, B and optionally A; an alpha requested must exist
+        const char* names[4] = {"R", "G", "B", "A"};
+        if (nchannels == 1)
+        {
+            // one channel requested: only a one-channel file (a depth or similarity map, channel "Y"),
+            // which OpenImageIO reads as its channel 0; a colour file would mean a luminance
+            // conversion, and that stays with OpenImageIO
+            if (nbFileChannels != 1)
+                return false;
+            const Imf::Channel& channel = channels.begin().channel();
+            if ((channel.type != Imf::HALF && channel.type != Imf::FLOAT) || channel.xSampling != 1 || channel.ySampling != 1)
+                return false;
+            names[0] = channels.begin().name();
+        }
+        else
+        {
+            int present = 0;
+            for (int c = 0; c < 4; ++c)
+            {
+                const Imf::Channel* channel = channels.findChannel(names[c]);
+                if (channel == nullptr)
+                    continue;
+                if ((channel->type != Imf::HALF && channel->type != Imf::FLOAT) || channel->xSampling != 1 || channel->ySampling != 1)
+                    return false;
+                present |= 1 << c;
+            }
+            if ((present & 7) != 7 || nbFileChannels != ((present & 8) ? 4 : 3) || (nchannels == 4 && !(present & 8)))
+                return false;  // only R, G, B and optionally A; an alpha requested must exist
+        }
 
         float* base = allocate(width, height);
         const std::size_t xStride = sizeof(float) * static_cast<std::size_t>(nchannels);
