@@ -194,7 +194,7 @@ together as its `verify` configuration ([docs/04](docs/04-validation.md)):
 | option (default: off) | what `=1` prints in the Meshing log |
 |---|---|
 | `CHESHIRE_FILTER_CHECK=1` | `filterByPixSize check: identical to single-threaded upstream on all N slots` |
-| `CHESHIRE_MAXFLOW_CHECK=1` | `max-flow check: ... cells labelled differently: 0 of N` - the labelling is the verdict; the two float flow totals it also prints are never equal and are not the test |
+| `CHESHIRE_MAXFLOW_CHECK=1` | `max-flow check: ... cut values on the adjacency-list graph (double): CSR labelling X, adjacency-list labelling Y (equal, ...)` - equal cut values are the verdict: a minimum cut need not be unique, so the two labellings may differ in cells Boykov-Kolmogorov leaves undetermined (the line also counts them); the two float flow totals it prints are never equal and are not the test |
 | `CHESHIRE_GPU_VIS_CHECK=1` | `GPU knn check: identical to nanoflann on all N queries`, and per pass `visibility votes check (pass N, ...): identical to the ordered host reference on all N vertices` (the votes redone from the host's own answers) |
 | `CHESHIRE_SEGMENT_CHECK=1` | `segmentFullOrFree check: identical to upstream on all N cells` |
 | `CHESHIRE_GPU_TEDGE_CHECK=1` | `tedge check: cells with on != 0: cpu N, gpu N` - the counts must match; the sums differ by an ulp of summation order |
@@ -230,7 +230,11 @@ default); the rest are tuning values:
 | `CHESHIRE_BA_JACOBIANS=analytic` (the default) | bundle adjustment's Jacobians by the chain rule instead of autodiff: 3.0x on that phase (13.0 s to 4.3 s on 41 views, the SfM node 67 s to 57 s), for rounding-level differences from upstream (max 4.4e-10 relative) that move the final landmark count within its run-to-run spread ([docs/04](docs/04-validation.md), 0.3.4); `=stride` keeps upstream's numbers bit for bit |
 
 Everything else produces the same output as the unmodified CPU build; that is checked per release
-against reference values ([docs/04](docs/04-validation.md)). There are about fifty more
+against reference values ([docs/04](docs/04-validation.md)). The exception is incremental SfM,
+whose default output is not upstream's to the bit: the analytic Jacobians above, the fused
+projection and the persistent Problem's summation order differ by rounding, and a random generator
+per task draws different samples than upstream's shared one. `CHESHIRE_SFM_DETERMINISTIC=1` makes
+it reproducible run to run. There are about fifty more
 `CHESHIRE_*` variables in the code for profiling and debugging - they are in the docs for each
 stage, and none of them are needed to use this.
 

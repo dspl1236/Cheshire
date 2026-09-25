@@ -3467,8 +3467,9 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
     #     through DynamicCostFunctionToFunctorTmp; Ceres runs that functor once per 4 derivative
     #     components, so CostIntrinsicsProject::Evaluate computes all its Jacobian blocks 3 to 5
     #     times per residual block per Jacobian. hip/port/sfm_ba/projectionCheshire.hpp has the
-    #     reasoning; CHESHIRE_BA_JACOBIANS=autodiff (default) | stride (one pass) | analytic (the
-    #     chain rule by hand), CHESHIRE_BA_CHECK=1 evaluates a reference next to it and reports.
+    #     reasoning; CHESHIRE_BA_JACOBIANS=autodiff | stride (one pass) | analytic (the chain rule
+    #     by hand; the default since 08b091c), CHESHIRE_BA_CHECK=1 evaluates a reference next to it
+    #     and reports.
     shutil.copy2(ROOT / "hip" / "port" / "sfm_ba" / "projectionCheshire.hpp",
                  AV / "src/aliceVision/sfm/bundle/costfunctions/projectionCheshire.hpp")
     t = bac.read_text(encoding="utf-8")

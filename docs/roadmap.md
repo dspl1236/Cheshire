@@ -11,14 +11,14 @@ prefix are under `third_party/aliceVision/src/aliceVision/`.
 This release covers the CPU work left in the ported nodes and run-to-run determinism. It was
 0.3.5 in the earlier proposal and moved up at the user's request.
 
-**2026-09-24: no separate 0.3.4 release.** The CUDA packages could not be gated (the GTX 1080 Ti is
-out of bench-pc), so everything on main since v0.3.3 ships together with the new pieces after one
-full hardware round: RX 9070 (Windows), RX 6750 XT (house-pc, Linux), RX 5500 XT (bench-pc,
-Windows) and the 1080 Ti for both CUDA packages. Folded in so far: CheshireEXR and DepthMap's device
-decode (PR #2, off by default, `CHESHIRE_DEPTHMAP_GPU_EXR=1`), the direct JPEG read (6n) and the
-texturing read-ahead fix (6o). Still to fold in: CheshireJPG in PrepareDenseScene's read, fusion
-device votes, bundle-adjustment Jacobians on the device. Order of the round: mini6, then 41 views,
-then the large sets.
+**2026-09-25: 0.3.4 ships as main stands.** The 2026-09-24 plan held the release for more fold-ins;
+instead main ships as it is, with one full hardware round: RX 9070 (Windows), RX 6750 XT (house-pc,
+Linux), RX 5500 XT (bench-pc, Windows) and the GTX 1080 Ti for both CUDA packages, each on mini6
+and the 41-view set. In 0.3.4: CheshireEXR and DepthMap's device decode (PR #2, off by default,
+`CHESHIRE_DEPTHMAP_GPU_EXR=1`), the direct JPEG read (6n), the texturing read-ahead fix (6o) and
+the max-flow check by cut value (6p); CheshireJPG is in the tree as a library no node calls. Moved
+to 0.3.5: CheshireJPG in PrepareDenseScene's read (and FeatureExtraction's), fusion device votes,
+bundle-adjustment Jacobians on the device, and the decision on CheshireEXR.
 
 The group is not thin. Several parts of the earlier plan have already shipped and are not
 repeated here:
