@@ -101,6 +101,14 @@ TRACKED = [
     "src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp",
     "src/aliceVision/sfm/bundle/costfunctions/intrinsicsProject.hpp",
     "src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.hpp",
+    # Patched by 5c (SIFT keypoint sort) and 5h (undistortion map) but missing here until 2026-09-25:
+    # their steps skip a file that already carries the patch, so a changed snippet never reached a
+    # tree patched before it. Found by step 6q, which saw the old CHESHIRE_* reads still in them.
+    "src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp",
+    "src/aliceVision/camera/cameraUndistortImage.hpp",
+    "src/software/pipeline/main_incrementalSfM.cpp",  # 5k's CHESHIRE_SFM_PENDING_BA switch; same gap
+    "src/aliceVision/sfm/LocalBundleAdjustmentGraph.cpp",  # 5k, same gap
+    "src/aliceVision/fuseCut/MaxFlow_AdjList.hpp",  # 6p, same gap
 ]
 
 
@@ -114,7 +122,7 @@ def main() -> None:
     for f in ["cuda_runtime.h", "cuda_fp16.h", "math_constants.h"]:
         shutil.copy2(ROOT / "hip" / "compat" / "include" / f, dst / f)
     (dst / "cheshire").mkdir(exist_ok=True)
-    for f in ["cuda_to_hip.h", "bridge.h", "hip_to_cuda.h", "managed_cuda.h", "mipmap_emu.h", "devalloc.h"]:
+    for f in ["cuda_to_hip.h", "bridge.h", "hip_to_cuda.h", "managed_cuda.h", "mipmap_emu.h", "devalloc.h", "env.h"]:
         shutil.copy2(ROOT / "hip" / "compat" / "include" / "cheshire" / f, dst / "cheshire" / f)
     shutil.copy2(ROOT / "hip" / "port" / "unity" / "depthmap_device_unity.hip", dst / "depthmap_device_unity.hip")
     # header overlay (2-line change) applied in place
@@ -203,7 +211,7 @@ def main() -> None:
     import re as _re
     stage_defs = (
         "#ifdef CHESHIRE_HIP\n#include <cstdlib>\n"
-        "static bool cheshire_stage_prof() { static int v = -1; if (v < 0) { const char* e = std::getenv(\"CHESHIRE_PROFILE_SGM\"); v = (e && e[0] == '1') ? 1 : 0; } return v == 1; }\n"
+        "static bool cheshire_stage_prof() { static int v = -1; if (v < 0) { v = ::cheshire::env::flag(\"CHESHIRE_PROFILE_SGM\") ? 1 : 0; } return v == 1; }\n"
         "#define CHESHIRE_STAGE_SYNC(s) if (cheshire_stage_prof()) cudaStreamSynchronize(s)\n"
         "#else\n#define CHESHIRE_STAGE_SYNC(s)\n#endif\n")
     for fname, hdr in [("Sgm.cpp", '#include "Sgm.hpp"\n'), ("Refine.cpp", '#include "Refine.hpp"\n')]:
@@ -370,7 +378,7 @@ def main() -> None:
     t = sv.read_text(encoding="utf-8")
     prof_defs = """#ifdef CHESHIRE_HIP
 static double cheshire_prof_acc[3]; static int cheshire_prof_calls; static std::mutex cheshire_prof_mutex;
-static bool cheshire_prof_on() { static int v = -1; if (v < 0) { const char* e = std::getenv("CHESHIRE_PROFILE_SGM"); v = (e && e[0] == '1') ? 1 : 0; } return v == 1; }
+static bool cheshire_prof_on() { static int v = -1; if (v < 0) { v = ::cheshire::env::flag("CHESHIRE_PROFILE_SGM") ? 1 : 0; } return v == 1; }
 static thread_local std::chrono::steady_clock::time_point _cp_t0;
 #define CHESHIRE_PROF_BEGIN() if (cheshire_prof_on()) { cudaDeviceSynchronize(); _cp_t0 = std::chrono::steady_clock::now(); }
 #define CHESHIRE_PROF_END(i) if (cheshire_prof_on()) { cudaDeviceSynchronize(); std::lock_guard<std::mutex> _cp_g(cheshire_prof_mutex); cheshire_prof_acc[i] += std::chrono::duration<double>(std::chrono::steady_clock::now() - _cp_t0).count(); }
@@ -652,7 +660,7 @@ endif()
             const int tc = tcams[c];
             image::Image<float> tcdepthMap;
             mvsUtils::readMap(tc, _mp, mvsUtils::EFileType::depthMap, tcdepthMap);
-            if (std::getenv("CHESHIRE_GPU_FILTER_DEBUG") && tcdepthMap.height() > 0)
+            if (::cheshire::env::flag("CHESHIRE_GPU_FILTER_DEBUG") && tcdepthMap.height() > 0)
             {
                 // one tc pixel through both implementations, printed side by side
                 int x = tcdepthMap.width() / 2, y = tcdepthMap.height() / 2;
@@ -674,7 +682,7 @@ endif()
             }
             if (tcdepthMap.height() > 0 && tcdepthMap.width() > 0)
                 ok = gf.accumulate(tcdepthMap.data(), geom(tc), pixToleranceFactor, pixSizeBall, pixSizeBallWSP);
-            if (ok && std::getenv("CHESHIRE_GPU_FILTER_DEBUG"))
+            if (ok && ::cheshire::env::flag("CHESHIRE_GPU_FILTER_DEBUG"))
             {
                 long long cnt = -1; gf.voteCount(&cnt);
                 std::fprintf(stderr, "[cheshire] filter votes GPU rc=%d tc=%d (%dx%d): %lld rc pixels voted\\n", rc, tc, tcdepthMap.width(), tcdepthMap.height(), cnt);
@@ -699,7 +707,7 @@ endif()
             {
                 numOfModalsMap(i) += static_cast<int>((*numOfPtsMap)[i] > 0);
             }
-""", """            if (std::getenv("CHESHIRE_GPU_FILTER_DEBUG"))   // cheshire diagnostics
+""", """            if (::cheshire::env::flag("CHESHIRE_GPU_FILTER_DEBUG"))   // cheshire diagnostics
             {
                 long long cnt = 0;
                 for (int i = 0; i < w * h; i++) cnt += (*numOfPtsMap)[i] > 0;
@@ -834,7 +842,7 @@ endif()
     std::vector<float> gpuOn;
     if (gpu::tedgesDone())
     {
-        if (std::getenv("CHESHIRE_GPU_TEDGE_CHECK") == nullptr)
+        if (!::cheshire::env::flag("CHESHIRE_GPU_TEDGE_CHECK"))
         {
             for (GC_cellInfo& c : _cellsAttr)
             {
@@ -929,7 +937,7 @@ endif()
     // cheshire: per camera, upload the image; pyramid, rasterisation and the final fuse on the GPU
     if (imageType != mvsUtils::EFileType::normalMap && gpu::texAvailable())
     {
-        const bool log = std::getenv("CHESHIRE_GPU_TEX_LOG") != nullptr;
+        const bool log = ::cheshire::env::flag("CHESHIRE_GPU_TEX_LOG");
         gpu::Texturer tex;
         bool ok = tex.init((int)atlasIDs.size(), texParams.textureSide, texParams.nbBand, texParams.multiBandDownscale, mp.getMaxImageWidth(), mp.getMaxImageHeight());
         if (ok)
@@ -1032,7 +1040,7 @@ endif()
             // cheshire: the downscale too (step 5j): OIIO's lanczos3 resize transcribed on the device
             image::Image<image::RGBfColor> cheshireSmall;
             float* cheshireSmallPtr = nullptr;
-            if (texParams.downscale > 1 && std::getenv(\"CHESHIRE_GPU_RESIZE\") == nullptr)
+            if (texParams.downscale > 1 && ::cheshire::env::flag(\"CHESHIRE_GPU_RESIZE\", true))   // =0: the host resize
             {
                 const int smallSide = int(texParams.textureSide) / int(texParams.downscale);   // not 'small': windows.h defines it
                 cheshireSmall.resize(smallSide, smallSide);
@@ -1066,7 +1074,7 @@ endif()
 """, """        // cheshire: contiguous triangle ranges scored in parallel into their own lists, merged in order below
         const std::size_t nbAtlasTris = _atlases[atlasID].size();
         int nbParts = std::max(1, std::min(256, (int)(nbAtlasTris / 2048)));
-        if (const char* pe = std::getenv("CHESHIRE_TEX_PARTS")) nbParts = std::max(1, std::atoi(pe));   // 1: the sequential loop
+        nbParts = std::max(1, int(::cheshire::env::integer("CHESHIRE_TEX_PARTS", nbParts)));   // 1: the sequential loop
         std::vector<std::vector<std::map<AtlasIndex, std::vector<ScorePerTriangle>>>> partialContributions(
           nbParts, std::vector<std::map<AtlasIndex, std::vector<ScorePerTriangle>>>(mp.ncams));
 #pragma omp parallel for schedule(static)
@@ -1111,7 +1119,7 @@ endif()
                         dst[band].insert(dst[band].end(), perAtlas.second[band].begin(), perAtlas.second[band].end());
                 }
     }
-    if (std::getenv("CHESHIRE_GPU_TEX_LOG") != nullptr)
+    if (::cheshire::env::flag("CHESHIRE_GPU_TEX_LOG"))
     {
         // order-sensitive checksum of every (camera, atlas, band) list, to compare CHESHIRE_TEX_PARTS=1 against the default
         std::uint64_t h = 1469598103934665603ull; std::size_t n = 0;
@@ -1202,7 +1210,7 @@ endif()
     patch(tz, "void Tetrahedralization::updateVertexToCellsCache(const size_t verticesCount)" + NL + "{" + NL,
           """    // cheshire: cells are visited in ascending order and each cell lists a vertex once, so
     // counting then appending gives exactly the ascending, duplicate-free lists the map of sets did
-    if (std::getenv("CHESHIRE_MESH_OLD_NEIGHBOURS") == nullptr)
+    if (!::cheshire::env::flag("CHESHIRE_MESH_OLD_NEIGHBOURS"))
     {
         _neighboringCellsPerVertex.clear();
         _neighboringCellsPerVertex.resize(verticesCount);
@@ -1226,7 +1234,7 @@ endif()
                     continue;
                 _neighboringCellsPerVertex[vi].push_back(ci);
             }
-        if (std::getenv("CHESHIRE_GPU_VOTE_LOG") != nullptr)
+        if (::cheshire::env::flag("CHESHIRE_GPU_VOTE_LOG"))
         {
             // build upstream's table as well and compare list for list
             std::map<VertexIndex, std::set<CellIndex>> tmp;
@@ -1313,7 +1321,7 @@ endif()
     // cheshire: the CSR graph by default (the same edges in the same order, a fraction of the build
     // and teardown time); CHESHIRE_MAXFLOW_ADJLIST=1 keeps upstream's adjacency list, and
     // CHESHIRE_MAXFLOW_CHECK=1 runs both on the same graph and compares flow value and labelling
-    if (std::getenv("CHESHIRE_MAXFLOW_CHECK") != nullptr)
+    if (::cheshire::env::flag("CHESHIRE_MAXFLOW_CHECK"))
     {
         std::vector<bool> csrFull, adjFull;
         const float fCsr = binarizeImpl<MaxFlow_CSR>(csrFull);
@@ -1325,7 +1333,7 @@ endif()
                                                                   << "; cells labelled differently: " << diff << " of " << csrFull.size());
         _cellIsFull.swap(csrFull);
     }
-    else if (std::getenv("CHESHIRE_MAXFLOW_ADJLIST") != nullptr)
+    else if (::cheshire::env::flag("CHESHIRE_MAXFLOW_ADJLIST"))
         binarizeImpl<MaxFlow_AdjList>(_cellIsFull);
     else
         binarizeImpl<MaxFlow_CSR>(_cellIsFull);
@@ -1437,7 +1445,7 @@ float GraphFiller::binarizeImpl(std::vector<bool>& cellIsFull)
         for (long long ci = 0; ci < (long long)nbCells; ++ci)
             for (VertexIndex k = 0; k < 4; ++k)
                 computeFacet((CellIndex)ci, k, table[std::size_t(ci) * 4 + k]);
-        if (std::getenv("CHESHIRE_GPU_VOTE_LOG") != nullptr)
+        if (::cheshire::env::flag("CHESHIRE_GPU_VOTE_LOG"))
         {
             std::size_t bad = 0;
             for (CellIndex ci = 0; ci < nbCells; ++ci)
@@ -1489,7 +1497,7 @@ struct CheshireDepthMapCache
     std::size_t capBytes = 4096ull << 20;
     CheshireDepthMapCache()
     {
-        if (const char* e = std::getenv("CHESHIRE_FILTER_CACHE_MB")) capBytes = std::size_t(std::atoll(e)) << 20;
+        capBytes = std::size_t(::cheshire::env::integer("CHESHIRE_FILTER_CACHE_MB", 4096)) << 20;
         if (capBytes == 0)
             ALICEVISION_LOG_INFO("cheshire: depth map filter cache: disabled by CHESHIRE_FILTER_CACHE_MB=0");
         else
@@ -1548,7 +1556,7 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
             sys.exit("prepareDenseScene loop not found")
         new = ("    // cheshire: one image per thread on every core (upstream: three threads); CHESHIRE_PDS_THREADS overrides" + NL
                + "    int cheshirePdsThreads = omp_get_max_threads();" + NL
-               + "    if (const char* e = std::getenv(\"CHESHIRE_PDS_THREADS\")) cheshirePdsThreads = std::max(1, std::atoi(e));" + NL
+               + "    cheshirePdsThreads = std::max(1, int(::cheshire::env::integer(\"CHESHIRE_PDS_THREADS\", cheshirePdsThreads)));" + NL
                + "#pragma omp parallel for num_threads(cheshirePdsThreads)" + NL + "    for (int i = 0; i < viewIds.size(); ++i)" + NL)
         t = t.replace(old, new, 1)
         i = t.index("#include")
@@ -1609,7 +1617,7 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
     patch(mc, '    ALICEVISION_LOG_INFO("Saving " << fileTypeStr << " mesh file using Assimp.");' + NL, r"""
     // cheshire: OBJ straight to the file (see scripts/apply_hip_patch.py, step 4n)
     static thread_local bool cheshireForceAssimp = false;
-    if (fileType == EFileType::OBJ && !cheshireForceAssimp && std::getenv("CHESHIRE_OBJ_ASSIMP") == nullptr)
+    if (fileType == EFileType::OBJ && !cheshireForceAssimp && !::cheshire::env::flag("CHESHIRE_OBJ_ASSIMP"))
     {
         ALICEVISION_LOG_INFO("Saving obj mesh file (cheshire direct writer): " << pts.size() << " vertices, " << tris.size() << " faces.");
         FILE* f = std::fopen(filepath.c_str(), "wb");
@@ -1645,7 +1653,7 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
         }
         flush();
         std::fclose(f);
-        if (std::getenv("CHESHIRE_OBJ_CHECK") == nullptr)
+        if (!::cheshire::env::flag("CHESHIRE_OBJ_CHECK"))
             return;
         ALICEVISION_LOG_INFO("cheshire: CHESHIRE_OBJ_CHECK: also writing " << filepath << ".assimp.obj through Assimp");
         cheshireForceAssimp = true;
@@ -1678,7 +1686,7 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
 {
     // cheshire: the consistency tests only log at debug level and never change the mesh; they are
     // 14 full passes over the mesh per call. CHESHIRE_MESHCLEAN_TESTS=1 keeps them.
-    const bool cheshireTests = std::getenv("CHESHIRE_MESHCLEAN_TESTS") != nullptr;
+    const bool cheshireTests = ::cheshire::env::flag("CHESHIRE_MESHCLEAN_TESTS");
     if (cheshireTests)
     {
         testPtsNeighTrisSortedAsc();
@@ -1746,8 +1754,8 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                + "        // index = startIndex[c] + sy * sxMax + sx, so the values do not depend on the thread count." + NL
                + "        // CHESHIRE_FUSION_THREADS overrides; with one camera per thread the inner loop stays serial." + NL
                + "        int cheshireFusionThreads = omp_get_max_threads();" + NL
-               + "        if (const char* e = std::getenv(\"CHESHIRE_FUSION_THREADS\"))" + NL
-               + "            cheshireFusionThreads = std::max(1, std::atoi(e));" + NL
+               + "        cheshireFusionThreads =" + NL
+               + "            std::max(1, int(::cheshire::env::integer(\"CHESHIRE_FUSION_THREADS\", cheshireFusionThreads)));" + NL
                + "        ALICEVISION_LOG_INFO(\"cheshire: loading depth maps on \" << cheshireFusionThreads << \" threads.\");" + NL
                + "        omp_set_nested(cheshireFusionThreads > 1 ? 0 : 1);" + NL
                + "#pragma omp parallel for num_threads(cheshireFusionThreads)" + NL
@@ -1783,8 +1791,8 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                + "    // cheshire: an unset seed drew from std::random_device, so the helper points, and every" + NL
                + "    // mesh built on them, differed from run to run. A fixed value is used instead;" + NL
                + "    // --seed and CHESHIRE_GRID_RANDOM=1 both still ask for something else." + NL
-               + "    const bool cheshireGridOld = std::getenv(\"CHESHIRE_GRID_OLD\") != nullptr;" + NL
-               + "    const bool cheshireGridRandom = std::getenv(\"CHESHIRE_GRID_RANDOM\") != nullptr;" + NL
+               + "    const bool cheshireGridOld = ::cheshire::env::flag(\"CHESHIRE_GRID_OLD\");" + NL
+               + "    const bool cheshireGridRandom = ::cheshire::env::flag(\"CHESHIRE_GRID_RANDOM\");" + NL
                + "    const unsigned int cheshireSeed = seed != 0 ? seed : (cheshireGridRandom ? std::random_device{}() : 1u);" + NL
                + "    std::mt19937 generator(cheshireSeed);" + NL)
         t = t.replace(old, new, 1)
@@ -1860,10 +1868,10 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                + "    // generator, so the same points came out as the same tetrahedra numbered differently on every" + NL
                + "    // run, and every per-cell weight and the mesh that follows moved with them. Resetting the" + NL
                + "    // generator fixes the insertion order. CHESHIRE_TETRA_RANDOM=1 restores geogram's own state." + NL
-               + "    if (std::getenv(\"CHESHIRE_TETRA_RANDOM\") == nullptr)" + NL
+               + "    if (!::cheshire::env::flag(\"CHESHIRE_TETRA_RANDOM\"))" + NL
                + "    {" + NL
                + "        GEO::Numeric::random_reset();" + NL
-               + "        if (std::getenv(\"CHESHIRE_TETRA_SINGLE_THREAD\") != nullptr)" + NL
+               + "        if (::cheshire::env::flag(\"CHESHIRE_TETRA_SINGLE_THREAD\"))" + NL
                + "            GEO::Process::enable_multithreading(false);" + NL
                + "    }" + NL
                + "    // a checksum of the points handed to geogram, in order" + NL
@@ -2008,7 +2016,7 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
         if t.count(old) != 1:
             sys.exit("segmentFullOrFree tail not found once")
         new = ("    out_nsegments = col;" + NL
-               + "    if (std::getenv(\"CHESHIRE_SEGMENT_CHECK\") != nullptr)" + NL
+               + "    if (::cheshire::env::flag(\"CHESHIRE_SEGMENT_CHECK\"))" + NL
                + "    {" + NL
                + "        // upstream's order: colour when the cell is popped" + NL
                + "        StaticVector<int> refColour;" + NL
@@ -2069,7 +2077,7 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                + "    // boost returns the default and it collapses to 1: the loop below ran once whatever was asked" + NL
                + "    // for. CHESHIRE_INVERT_OLD=1 restores that." + NL
                + "    int invertTetrahedronBasedOnNeighborsNbIterations =" + NL
-               + '      (std::getenv("CHESHIRE_INVERT_OLD") != nullptr)' + NL
+               + '      ::cheshire::env::flag("CHESHIRE_INVERT_OLD")' + NL
                + '        ? (int)_mp.userParams.get<bool>("hallucinationsFiltering.invertTetrahedronBasedOnNeighborsNbIterations", 10)' + NL
                + '        : _mp.userParams.get<int>("hallucinationsFiltering.invertTetrahedronBasedOnNeighborsNbIterations", 10);' + NL
                + '    ALICEVISION_LOG_INFO("cheshire: neighbour inversion rounds requested: " << invertTetrahedronBasedOnNeighborsNbIterations);' + NL)
@@ -2166,7 +2174,7 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                + "    std::atomic<long long> n{0};" + NL
                + "    ~CheshireAcrDeferred()" + NL
                + "    {" + NL
-               + "        if (std::getenv(\"CHESHIRE_ACR_NANLOG\") && n.load())" + NL
+               + "        if (::cheshire::env::flag(\"CHESHIRE_ACR_NANLOG\") && n.load())" + NL
                + "            std::fprintf(stderr, \"[cheshire acransac] %lld residual arrays deferred to std::sort\\n\", n.load());" + NL
                + "    }" + NL
                + "};" + NL
@@ -2261,7 +2269,7 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                       + "    std::vector<double> vec_residuals_(nData);" + NL
                       + "    // cheshire: residual bits, sorted for every model; see cheshireRadixSortResiduals" + NL
                       + "    std::vector<std::uint64_t> vec_keys(nData), vec_keysScratch;" + NL
-                      + "    const bool cheshirePairSort = (std::getenv(\"CHESHIRE_ACR_PAIRSORT\") != nullptr);" + NL, 1)
+                      + "    const bool cheshirePairSort = ::cheshire::env::flag(\"CHESHIRE_ACR_PAIRSORT\");" + NL, 1)
 
         # the common path
         old = ("                for (size_t i = 0; i < nData; ++i)" + NL
@@ -2448,7 +2456,7 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                + "        int chBlurKw = 0, chBlurKh = 0, chBlurKx0 = 0, chBlurKy0 = 0;" + NL
                + "        const bool chBlurGpu = gpu::blurAvailable();" + NL
                + "        // CHESHIRE_GPU_BLUR_CHECK=1 also runs OIIO and reports how far apart they were." + NL
-               + "        const bool chBlurCheck = std::getenv(\"CHESHIRE_GPU_BLUR_CHECK\") != nullptr;" + NL
+               + "        const bool chBlurCheck = ::cheshire::env::flag(\"CHESHIRE_GPU_BLUR_CHECK\");" + NL
                + "        std::atomic<long long> chBlurPix{0}, chBlurDiff{0};" + NL
                + "        double chBlurWorst = 0.0;" + NL
                + "        if (chBlurGpu)" + NL
@@ -2818,7 +2826,7 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                + "        // exactly two-dimensional - a Householder QR of the transpose gives a basis for it" + nl_f7
                + "        // without an iterative SVD. A different basis of the same nullspace spans the same" + nl_f7
                + "        // pencil, so det(F1 + a*F2) = 0 has the same solutions to rounding." + nl_f7
-               + "        static const bool cheshireQrNullspace = (std::getenv(\"CHESHIRE_QR_NULLSPACE\") != nullptr);" + nl_f7
+               + "        static const bool cheshireQrNullspace = ::cheshire::env::flag(\"CHESHIRE_QR_NULLSPACE\");" + nl_f7
                + "        static const bool cheshireQrAnnounced = []() {  // once per process, both paths (docs/04 marker rule)" + nl_f7
                + "            std::fprintf(stderr, cheshireQrNullspace ? \"[cheshire] 7-point nullspace: Householder QR (CHESHIRE_QR_NULLSPACE=1)\\n\"" + nl_f7
                + "                                                     : \"[cheshire] 7-point nullspace: SVD (default; CHESHIRE_QR_NULLSPACE=1 for QR)\\n\");" + nl_f7
@@ -2859,8 +2867,7 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
     // in an order that depends only on the image (see scripts/apply_hip_patch.py, step 5c)
     {
         static const bool cheshireSiftSort = []() {
-            const char* e = std::getenv("CHESHIRE_SIFT_SORT");
-            const bool on = !(e != nullptr && e[0] == '0');
+            const bool on = ::cheshire::env::flag("CHESHIRE_SIFT_SORT", true);
             // if/else, not a ternary: ALICEVISION_LOG_INFO(a) expands to `stream << a` without
             // parentheses, so `stream << on ? A : B` logs the bool and discards both strings.
             if (on)
@@ -2938,7 +2945,7 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
             sys.exit("saveAs Assimp log line not found once")
         block = r"""    // cheshire: OBJ and MTL straight to the files (scripts/apply_hip_patch.py, step 5e)
     std::string cheshireAssimpPath = filepath;
-    if (meshFileType == EFileType::OBJ && std::getenv("CHESHIRE_OBJ_ASSIMP") == nullptr && !_atlases.empty()
+    if (meshFileType == EFileType::OBJ && !::cheshire::env::flag("CHESHIRE_OBJ_ASSIMP") && !_atlases.empty()
         && material.getTextures(Material::TextureType::NORMAL).empty()
         && material.getTextures(Material::TextureType::BUMP).empty()
         && material.getTextures(Material::TextureType::DISPLACEMENT).empty())
@@ -2992,7 +2999,7 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
             std::fprintf(m, "\n");
         }
         std::fclose(m);
-        if (std::getenv("CHESHIRE_OBJ_CHECK") == nullptr)
+        if (!::cheshire::env::flag("CHESHIRE_OBJ_CHECK"))
         {
             ALICEVISION_LOG_INFO("Mesh saved.");
             return;
@@ -3087,7 +3094,7 @@ namespace {
 // cheshire: per-phase seconds summed over threads (scripts/apply_hip_patch.py, step 5g)
 struct CheshirePdsProfile
 {
-    bool on = std::getenv("CHESHIRE_PDS_PROFILE") != nullptr;
+    bool on = ::cheshire::env::flag("CHESHIRE_PDS_PROFILE");
     std::atomic<long long> readUs{0}, prepUs{0}, undistortUs{0}, writeUs{0}, views{0};
     ~CheshirePdsProfile()
     {
@@ -3180,8 +3187,8 @@ struct Cache
     bool announced = false;
     Cache()
     {
-        if (const char* e = std::getenv("CHESHIRE_UNDISTORT_MAP")) enabled = !(e[0] == '0');
-        if (const char* e = std::getenv("CHESHIRE_UNDISTORT_MAP_MB")) capBytes = std::size_t(std::atoll(e)) << 20;
+        enabled = ::cheshire::env::flag("CHESHIRE_UNDISTORT_MAP", true);
+        capBytes = std::size_t(::cheshire::env::integer("CHESHIRE_UNDISTORT_MAP_MB", 2048)) << 20;
     }
 };
 inline Cache& cache() { static Cache c; return c; }
@@ -3279,7 +3286,7 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
             sys.exit("ceres::Solve call not found once in BundleAdjustmentCeres.cpp")
         t = t.replace(old, old + r"""    // cheshire: Ceres' own time split, one line per solve (scripts/apply_hip_patch.py, step 5i)
     {
-        static const bool cheshireBaProfile = std::getenv("CHESHIRE_BA_PROFILE") != nullptr;
+        static const bool cheshireBaProfile = ::cheshire::env::flag("CHESHIRE_BA_PROFILE");   // ::, not sfm::cheshire
         if (cheshireBaProfile)
             ALICEVISION_LOG_INFO("cheshire: BA profile: total " << summary.total_time_in_seconds << " s = residuals "
                                  << summary.residual_evaluation_time_in_seconds << " + jacobians " << summary.jacobian_evaluation_time_in_seconds
@@ -3311,7 +3318,7 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
         {
             // cheshire: the device produced it (scripts/apply_hip_patch.py, step 5j)
             ALICEVISION_LOG_INFO("  - Downscaling texture (" << texParams.downscale << "x) done on the GPU.");
-            if (std::getenv("CHESHIRE_GPU_RESIZE_CHECK") != nullptr)
+            if (::cheshire::env::flag("CHESHIRE_GPU_RESIZE_CHECK"))
             {
                 image::Image<image::RGBfColor> hostResized;
                 imageAlgo::resizeImage(texParams.downscale, atlasTexture.img, hostResized);
@@ -3354,10 +3361,7 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
         if t.count(old) != 1:
             sys.exit("globalIteration declaration not found once in ReconstructionEngine_sequentialSfM.cpp")
         t = t.replace(old, old + r"""    // cheshire: see the block after the resection loop (scripts/apply_hip_patch.py, step 5k)
-    static const bool cheshirePendingBA = [] {
-        const char* v = std::getenv("CHESHIRE_SFM_PENDING_BA");
-        return v == nullptr || std::string(v) != "0";
-    }();
+    static const bool cheshirePendingBA = ::cheshire::env::flag("CHESHIRE_SFM_PENDING_BA", true);   // ::, not sfm::cheshire
     if (cheshirePendingBA)
         ALICEVISION_LOG_INFO("cheshire: incremental SfM: a resection pass that ends without a bundle adjustment gets one before the next pass (CHESHIRE_SFM_PENDING_BA=0 restores upstream)");
     else
@@ -3663,8 +3667,8 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
             sys.exit("Problem creation not found once in adjust()")
         t = t.replace(old, "    problemOptions.evaluation_callback = this;" + NL + r"""    // cheshire (step 5o): the phases around Ceres' Solve, printed with CHESHIRE_BA_PROFILE=1. The
     // guard is declared before the Problem so its destructor runs after the Problem's and times it.
-    static const bool cheshireBaProfile = std::getenv("CHESHIRE_BA_PROFILE") != nullptr;
-    static const bool cheshireBaLogCost = std::getenv("CHESHIRE_BA_LOG_COST") != nullptr;
+    static const bool cheshireBaProfile = ::cheshire::env::flag("CHESHIRE_BA_PROFILE");   // ::, not sfm::cheshire
+    static const bool cheshireBaLogCost = ::cheshire::env::flag("CHESHIRE_BA_LOG_COST");
     using cheshireAdjustClock = std::chrono::steady_clock;
     struct CheshireDestroyTimer
     {
@@ -4666,6 +4670,68 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                + '    endif()' + nl_av)
         t = t.replace(old, new, 1)
         av.write_text(t, encoding="utf-8", newline="")
+
+    # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
+    #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports
+    #     and the inline code above had parsed them five ways (a `getenv(X) != nullptr` test turned a
+    #     check ON with X=0). The sources call cheshire::env::*; this step adds the #include to every
+    #     file of the tree that does, and for an .inc to the file that includes it, since an .inc is
+    #     included inside a namespace. Then it refuses a tree that still reads a CHESHIRE_* variable
+    #     any other way. The codec libraries (cheshireexr, and cheshirejpg when it arrives) build on
+    #     their own outside AliceVision and keep their one probe.
+    env_inc = "#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches"
+    src_root = AV / "src"
+    code_ext = {".cpp", ".hpp", ".h", ".cu", ".cuh", ".inc", ".hip"}
+    codec_dirs = ("/cheshireexr/", "/cheshirejpg/")
+    env_dir = (AV / "src/aliceVision/depthMap/cuda/hip/cheshire").as_posix()
+    tree_files = {p: p.read_text(encoding="utf-8", errors="surrogateescape")
+                  for p in src_root.rglob("*") if p.is_file() and p.suffix in code_ext}
+
+    def env_add_include(path: Path) -> bool:
+        t = tree_files[path]
+        if "cheshire/env.h" in t:
+            return False
+        nl_f = "\r\n" if "\r\n" in t else "\n"
+        lines = t.split(nl_f)
+        at = next((i + 1 for i, l in enumerate(lines) if l.strip() == "#pragma once"), None)
+        if at is None:  # before the first #include outside any #if; a classic guard falls back below
+            depth = 0
+            for i, l in enumerate(lines):
+                s = l.strip()
+                if s.startswith("#if"):
+                    depth += 1
+                elif s.startswith("#endif"):
+                    depth -= 1
+                elif s.startswith("#include") and depth == 0:
+                    at = i
+                    break
+        if at is None:
+            at = next(i for i, l in enumerate(lines) if l.strip().startswith("#include"))
+        lines.insert(at, env_inc)
+        tree_files[path] = nl_f.join(lines)
+        path.write_text(tree_files[path], encoding="utf-8", errors="surrogateescape", newline="")
+        return True
+
+    env_added = []
+    for p, t in list(tree_files.items()):
+        if "cheshire::env::" not in t or p.parent.as_posix() == env_dir:
+            continue
+        targets = [p]
+        if p.suffix == ".inc":
+            targets = [q for q, u in tree_files.items()
+                       if any(l.lstrip().startswith("#include") and p.name in l for l in u.splitlines())]
+            if not targets:
+                sys.exit(f"step 6q: {p.relative_to(AV)} uses cheshire::env but no file includes it")
+        for q in targets:
+            if env_add_include(q):
+                env_added.append(q.relative_to(AV).as_posix())
+    raw_read = re.compile(r'getenv\s*\(\s*"CHESHIRE_')
+    left = sorted(p.relative_to(AV).as_posix() for p, t in tree_files.items()
+                  if p.parent.as_posix() != env_dir and raw_read.search(t)
+                  and not any(d in "/" + p.relative_to(AV).as_posix() for d in codec_dirs))
+    if left:
+        sys.exit("step 6q: CHESHIRE_* read outside cheshire/env.h in:\n  " + "\n  ".join(left))
+    print(f"6q: cheshire/env.h included in {len(env_added)} files; no CHESHIRE_* read bypasses it")
 
     # 5. regenerate the reviewable patch.
     # CHESHIRE_SKIP_PATCH_EXPORT=1 leaves it alone. The submodule is normally cloned on Windows with

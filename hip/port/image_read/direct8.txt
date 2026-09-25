@@ -15,19 +15,13 @@ namespace {
 
 bool cheshireReadDirectEnabled()
 {
-    static const bool on = [] {
-        const char* e = std::getenv("CHESHIRE_READ_DIRECT");
-        return !(e && std::string(e) == "0");
-    }();
+    static const bool on = ::cheshire::env::flag("CHESHIRE_READ_DIRECT", true);
     return on;
 }
 
 bool cheshireReadDirectCheck()
 {
-    static const bool on = [] {
-        const char* e = std::getenv("CHESHIRE_READ_DIRECT_CHECK");
-        return e && std::string(e) == "1";
-    }();
+    static const bool on = ::cheshire::env::flag("CHESHIRE_READ_DIRECT_CHECK");
     return on;
 }
 

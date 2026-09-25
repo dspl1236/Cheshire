@@ -132,6 +132,14 @@ path runs unless you set it to `0`. **Options** are off by default and take `1`.
 are numbers with a default you can see here. An earlier version of this section said everything
 was off by default, which was true of the options and the opposite of the truth for the switches.
 
+**How a value is read (since 0.3.5, the same for every `CHESHIRE_*` variable).** For a switch or
+an option, `0`, `false`, `off`, `no` (any case) or an empty value means off, and anything else
+means on - so `CHESHIRE_MAXFLOW_CHECK=0` really turns the check off. Up to 0.3.4 many options
+only tested whether the variable existed, so `=0` turned them *on*, and a few took only a value
+starting with `1`. A tuning value that is empty or not a number falls back to its default; to
+remove the VRAM cap, write `CHESHIRE_BRIDGE_VRAM_MB=0`, not an empty value. The rules live in one
+header, `hip/compat/include/cheshire/env.h`.
+
 **If something looks wrong,** turn stages back to the CPU one at a time to find which. All of
 these are *on* unless set to `0`:
 
@@ -248,11 +256,11 @@ Three layers, set in three different places:
 | **`CHESHIRE_*` environment variables** | every switch, option and tuning value in this section | the environment the node starts in. **Windows:** start Meshroom or `meshroom_batch` from a shell where the variable is set - the paired launcher inherits it and passes it through. **Linux:** the same, and the wrapper also sources `<bundle>/../env.sh`, so a file beside the bundle is the persistent place. Standalone: set them before `cheshire-run.cmd <node> …` |
 | **Tested combinations** | `base`, `tiles`, `coarse`, `verify`, `bridgecap`, `ds1`, `blast` | `CONFIGS` in [`scripts/verify_end_to_end.py`](scripts/verify_end_to_end.py): each is a parameter set plus an environment that is known to run end to end, and a copyable example of the two layers above together. `verify_end_to_end.py … <name>` runs one |
 
-To find any knob that is not on this page: every one is a `getenv("CHESHIRE_…")` in the source,
-with its default beside it -
+To find any knob that is not on this page: every one is a `cheshire::env::` read in the source
+(`flag`, `integer`, `real`, `text` or `isSet`), with its default beside it -
 
 ```
-grep -rn 'getenv("CHESHIRE_' third_party/aliceVision/src hip/
+grep -rnE 'env::(flag|integer|real|text|isSet)\("CHESHIRE_' third_party/aliceVision/src hip/
 ```
 
 - and the doc for the stage that owns it ([docs/07](docs/07-gpu-matcher.md) through

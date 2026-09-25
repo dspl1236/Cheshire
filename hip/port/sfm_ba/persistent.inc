@@ -50,22 +50,19 @@ namespace {
 
 bool cheshirePersistEnabled()
 {
-    static const bool on = [] {
-        const char* v = std::getenv("CHESHIRE_BA_PERSIST");
-        return v == nullptr || std::string(v) != "0";
-    }();
+    static const bool on = ::cheshire::env::flag("CHESHIRE_BA_PERSIST", true);
     return on;
 }
 
 bool cheshirePersistCheckEnabled()
 {
-    static const bool on = std::getenv("CHESHIRE_BA_PERSIST_CHECK") != nullptr;
+    static const bool on = ::cheshire::env::flag("CHESHIRE_BA_PERSIST_CHECK");
     return on;
 }
 
 bool cheshireLogCostEnabled()
 {
-    static const bool on = std::getenv("CHESHIRE_BA_LOG_COST") != nullptr;
+    static const bool on = ::cheshire::env::flag("CHESHIRE_BA_LOG_COST");
     return on;
 }
 
@@ -432,7 +429,7 @@ bool BundleAdjustmentCeres::cheshirePersistentBuild(const sfmData::SfMData& sfmD
             for (const CheshireObs& o : r.obs)
                 landmarksBlockIds.push_back(o.id);
 
-    static const bool profile = std::getenv("CHESHIRE_BA_PROFILE") != nullptr;
+    static const bool profile = ::cheshire::env::flag("CHESHIRE_BA_PROFILE");
     if (profile)
         ALICEVISION_LOG_INFO("cheshire: BA persistent: " << (fresh ? "built" : "synced") << " - residual blocks added " << added << ", removed " << removed
                                                          << ", kept " << kept << "; " << problem.NumResidualBlocks() << " residual blocks, "

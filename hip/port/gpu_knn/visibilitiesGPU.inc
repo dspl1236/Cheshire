@@ -41,13 +41,13 @@ bool cheshireGpuVisEnabled()
     static int v = -1;
     if (v < 0)
     {
-        const char* e = std::getenv("CHESHIRE_GPU_VIS");
-        v = (e != nullptr && *e == '0') ? 0 : (cheshire::knn::available() ? 1 : 0);
+        const bool disabled = !::cheshire::env::flag("CHESHIRE_GPU_VIS", true);
+        v = disabled ? 0 : (cheshire::knn::available() ? 1 : 0);
         // Announced on both paths, unconditionally: until 0.3.2 the only line on the GPU path was
         // behind CHESHIRE_GPU_VIS_LOG, so a default run could not show the port had run.
         if (v == 1)
             ALICEVISION_LOG_INFO("cheshire: visibility knn on the GPU (CHESHIRE_GPU_VIS=0 for nanoflann)");
-        else if (e != nullptr && *e == '0')
+        else if (disabled)
             ALICEVISION_LOG_INFO("cheshire: visibility knn: disabled by CHESHIRE_GPU_VIS=0, nanoflann");
         else
             ALICEVISION_LOG_INFO("cheshire: visibility knn: no GPU device, nanoflann");
@@ -196,8 +196,7 @@ bool cheshireGpuVisBackprojectEnabled()
     static int v = -1;
     if (v < 0)
     {
-        const char* e = std::getenv("CHESHIRE_GPU_VIS_BACKPROJECT");
-        v = (e != nullptr && *e == '0') ? 0 : 1;
+        v = ::cheshire::env::flag("CHESHIRE_GPU_VIS_BACKPROJECT", true) ? 1 : 0;
         if (v == 1)
             ALICEVISION_LOG_INFO("cheshire: visibility backprojection on the GPU (CHESHIRE_GPU_VIS_BACKPROJECT=0 for the host)");
         else
@@ -245,8 +244,8 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
 {
     using Clock = std::chrono::steady_clock;
     const auto tStart = Clock::now();
-    const bool check = std::getenv("CHESHIRE_GPU_VIS_CHECK") != nullptr;
-    const bool logIt = check || std::getenv("CHESHIRE_GPU_VIS_LOG") != nullptr;
+    const bool check = ::cheshire::env::flag("CHESHIRE_GPU_VIS_CHECK");
+    const bool logIt = check || ::cheshire::env::flag("CHESHIRE_GPU_VIS_LOG");
     // the metric's form follows this host build: a compiler allowed to emit FMA (clang-cl under
     // /arch:AVX2, gcc with -mfma) contracts nanoflann's `result += diff * diff`; a generic x86-64
     // build (the Linux bundle) cannot. CHESHIRE_GPU_KNN_FMA=0|1 overrides.
@@ -255,12 +254,10 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
 #else
     const bool fmaDefault = false;
 #endif
-    const char* fmaEnv = std::getenv("CHESHIRE_GPU_KNN_FMA");
-    const bool fma = (fmaEnv != nullptr && *fmaEnv != '\0') ? (*fmaEnv != '0') : fmaDefault;
+    const bool fma = ::cheshire::env::flag("CHESHIRE_GPU_KNN_FMA", fmaDefault);
     // step 6k: the backprojection's fused forms follow the same build rule (mvsUtils and mvsData are
     // compiled with the same flags); CHESHIRE_GPU_VIS_BP_FMA=0|1 overrides, e.g. as CHECK's negative control
-    const char* bpFmaEnv = std::getenv("CHESHIRE_GPU_VIS_BP_FMA");
-    const bool bpFma = (bpFmaEnv != nullptr && *bpFmaEnv != '\0') ? (*bpFmaEnv != '0') : fmaDefault;
+    const bool bpFma = ::cheshire::env::flag("CHESHIRE_GPU_VIS_BP_FMA", fmaDefault);
 
     static_assert(sizeof(Point3d) == 3 * sizeof(double), "Point3d is three contiguous doubles");
     const int pass = g_cheshireVisPass;
@@ -582,10 +579,7 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
     // 4. scatter each chunk's voting queries in order (stable);
     // 5. apply the buckets in parallel, each in its stored order: one thread per vertex, pixel order.
     // Chunks are fixed-size, so the layout does not depend on the thread count.
-    const bool bucketedVotes = []() {
-        const char* e = std::getenv("CHESHIRE_GPU_VIS_BUCKETS");
-        return !(e != nullptr && *e == '0');
-    }();
+    const bool bucketedVotes = ::cheshire::env::flag("CHESHIRE_GPU_VIS_BUCKETS", true);
     constexpr int kBucketShift = 12;
     constexpr std::size_t kChunk = 65536;
     const std::size_t nbBuckets = (nbVertices >> kBucketShift) + 1;
@@ -957,7 +951,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
     else
         createVerticesWithVisibilitiesUpstream(cams, verticesCoordsPrepare, pixSizePrepare, simScorePrepare, verticesAttrPrepare, mp, simFactor, voteMarginFactor, contributeMarginFactor, simGaussianSize);
     // on every path, so the device path, the host path and upstream can be compared across runs
-    if (std::getenv("CHESHIRE_GPU_VIS_LOG") != nullptr || std::getenv("CHESHIRE_GPU_VIS_CHECK") != nullptr)
+    if (::cheshire::env::flag("CHESHIRE_GPU_VIS_LOG") || ::cheshire::env::flag("CHESHIRE_GPU_VIS_CHECK"))
     {
         char hex[17];
         std::snprintf(hex, sizeof(hex), "%016llx", (unsigned long long)cheshireVisDigest(verticesCoordsPrepare, verticesAttrPrepare));

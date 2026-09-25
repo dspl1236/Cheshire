@@ -53,6 +53,8 @@
 // real CUDA headers. bridge.h and hip_to_cuda.h always sit side by side.
 #  include "hip_to_cuda.h"
 #endif
+#include "env.h"
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -129,22 +131,20 @@ struct State {
     long long vramCapEnv = -1;   // -1 unset, 0 no cap, >0 MB
     int planner = 1;
     State() {
-        const char* e = std::getenv("CHESHIRE_BRIDGE");
-        enabled = !(e && e[0] == '0');
-        log = std::getenv("CHESHIRE_BRIDGE_LOG") != nullptr;
-        if (const char* v = std::getenv("CHESHIRE_BRIDGE_VRAM_MB")) vramCapEnv = std::strtoll(v, nullptr, 10);
-        if (const char* f = std::getenv("CHESHIRE_BRIDGE_VRAM_FRACTION")) vramFraction = std::strtod(f, nullptr);
-        if (const char* f = std::getenv("CHESHIRE_BRIDGE_MIN_SPILL_MB")) minSpill = size_t(std::strtod(f, nullptr) * (1 << 20));
-        if (const char* p = std::getenv("CHESHIRE_BRIDGE_PLANNER")) planner = std::atoi(p);
-        const char* hc = std::getenv("CHESHIRE_BRIDGE_HOST_CLASSES");
-        const char* vc = std::getenv("CHESHIRE_BRIDGE_VRAM_ONLY_CLASSES");
+        enabled = ::cheshire::env::flag("CHESHIRE_BRIDGE", true);
+        log = ::cheshire::env::flag("CHESHIRE_BRIDGE_LOG");
+        vramCapEnv = ::cheshire::env::integer("CHESHIRE_BRIDGE_VRAM_MB", vramCapEnv);
+        vramFraction = ::cheshire::env::real("CHESHIRE_BRIDGE_VRAM_FRACTION", vramFraction);
+        minSpill = size_t(::cheshire::env::real("CHESHIRE_BRIDGE_MIN_SPILL_MB", double(minSpill) / (1 << 20)) * (1 << 20));
+        planner = int(::cheshire::env::integer("CHESHIRE_BRIDGE_PLANNER", planner));
+        const std::string hc = ::cheshire::env::text("CHESHIRE_BRIDGE_HOST_CLASSES");
+        const std::string vc = ::cheshire::env::text("CHESHIRE_BRIDGE_VRAM_ONLY_CLASSES");
         for (int c = 0; c < kClasses; ++c) {
-            hostFirst[c] = listHas(hc, className(Class(c)));
-            vramOnly[c] = listHas(vc, className(Class(c)));
+            hostFirst[c] = listHas(hc.c_str(), className(Class(c)));
+            vramOnly[c] = listHas(vc.c_str(), className(Class(c)));
         }
         // camera images stay in VRAM unless explicitly allowed out (13x slower behind PCIe)
-        const char* is = std::getenv("CHESHIRE_BRIDGE_IMAGE_SPILL");
-        if (!(is && is[0] == '1') && planner != 2 && !hostFirst[int(Class::Image)]) vramOnly[int(Class::Image)] = true;
+        if (!::cheshire::env::flag("CHESHIRE_BRIDGE_IMAGE_SPILL") && planner != 2 && !hostFirst[int(Class::Image)]) vramOnly[int(Class::Image)] = true;
         size_t ram = 0;
 #if defined(_WIN32)
         MEMORYSTATUSEX ms; ms.dwLength = sizeof(ms); if (GlobalMemoryStatusEx(&ms)) ram = size_t(ms.ullTotalPhys);
@@ -152,7 +152,9 @@ struct State {
         long pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGE_SIZE); if (pages > 0 && psz > 0) ram = size_t(pages) * size_t(psz);
 #endif
         hostCap = ram / 4;
-        if (const char* h = std::getenv("CHESHIRE_BRIDGE_HOST_MB")) hostCap = size_t(std::strtoull(h, nullptr, 10)) << 20;
+        // the default is in bytes (not a whole number of MB), so unset/unparsable is told apart by a sentinel
+        const long long hostMb = ::cheshire::env::integer("CHESHIRE_BRIDGE_HOST_MB", LLONG_MIN);
+        if (hostMb != LLONG_MIN) hostCap = size_t(hostMb) << 20;
     }
     ~State() {
         if (!log) return;

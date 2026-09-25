@@ -3,6 +3,7 @@
 
 #include <cuda_runtime.h>
 #include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
+#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
 
 // FMA contraction is off for this file so a*b+c rounds twice, as OIIO's does on the CPU. Without it
 // the device fuses and 74.3 M of 244.6 M pixels land a few ULP away - the same 30 % the harness
@@ -67,12 +68,11 @@ bool g_available = false;
 
 void probe()
 {
-    if (const char* e = std::getenv("CHESHIRE_GPU_BLUR"))
-        if (e[0] == '0')
-        {
-            std::fprintf(stderr, "[cheshire] sim blur: disabled by CHESHIRE_GPU_BLUR=0, OIIO\n");
-            return;
-        }
+    if (!::cheshire::env::flag("CHESHIRE_GPU_BLUR", true))
+    {
+        std::fprintf(stderr, "[cheshire] sim blur: disabled by CHESHIRE_GPU_BLUR=0, OIIO\n");
+        return;
+    }
     int n = 0;
     if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1)
     {

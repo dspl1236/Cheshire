@@ -8,6 +8,7 @@
 #include "cheshireDeviceExr.hpp"
 #include "cheshireDownscale.hpp"
 
+#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
 #include <aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp>
 #include <aliceVision/image/cheshireExr.hpp>
 #include <aliceVision/system/Logger.hpp>
@@ -29,22 +30,19 @@ namespace {
 
 int envInt(const char* name, int fallback, int minimum)
 {
-    const char* v = std::getenv(name);
-    return v ? std::max(minimum, std::atoi(v)) : fallback;
+    return static_cast<int>(std::max<long long>(minimum, ::cheshire::env::integer(name, fallback)));
 }
 
 bool envOn(const char* name)
 {
-    const char* v = std::getenv(name);
-    return v != nullptr && std::string(v) != "0";
+    return ::cheshire::env::flag(name);
 }
 
 // the direct EXR reader's own conditions (image/cheshireExr.cpp): the host path this replaces only
 // exists for these files
 bool directExrPath(const std::string& path)
 {
-    const char* direct = std::getenv("CHESHIRE_EXR_DIRECT");
-    if (direct != nullptr && std::string(direct) == "0")
+    if (!::cheshire::env::flag("CHESHIRE_EXR_DIRECT", true))
         return false;
     const std::size_t dot = path.find_last_of('.');
     if (dot == std::string::npos)

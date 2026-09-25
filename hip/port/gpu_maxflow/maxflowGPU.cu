@@ -21,6 +21,8 @@
 #include "maxflowGPU.hpp"
 #include <cuda_runtime.h>
 #include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
+#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
+#include <algorithm>
 #include <chrono>
 #include <climits>
 #include <cstdio>
@@ -259,8 +261,6 @@ bool globalRelabel(const Graph& g, Device& d, int& levels, int levelsPerSync)
     return cudaGetLastError() == cudaSuccess;
 }
 
-int envInt(const char* name, int def) { const char* e = std::getenv(name); return e ? std::atoi(e) : def; }
-
 }  // namespace
 
 bool available()
@@ -269,12 +269,11 @@ bool available()
     if (g_checked) return g_available;
     g_checked = true;
     // Every decision is announced, on the GPU path too, so a run can prove which cut it took.
-    if (const char* e = std::getenv("CHESHIRE_GPU_MAXFLOW"))
-        if (e[0] == '0')
-        {
-            std::fprintf(stderr, "[cheshire] max-flow: disabled by CHESHIRE_GPU_MAXFLOW=0, Boykov-Kolmogorov\n");
-            return g_available = false;
-        }
+    if (!::cheshire::env::flag("CHESHIRE_GPU_MAXFLOW", true))
+    {
+        std::fprintf(stderr, "[cheshire] max-flow: disabled by CHESHIRE_GPU_MAXFLOW=0, Boykov-Kolmogorov\n");
+        return g_available = false;
+    }
     int n = 0;
     if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1)
     {
@@ -304,8 +303,8 @@ bool minCut(const Graph& g, std::vector<std::uint8_t>& sinkSide, Stats& stats, i
     if (cudaDeviceSynchronize() != cudaSuccess) return false;
     if (verbose) std::fprintf(stderr, "[maxflow] uploads and source saturation: %.2f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 
-    const int relabelEvery = envInt("CHESHIRE_MAXFLOW_RELABEL_EVERY", 128);   // sweeps between global relabels, queued without host syncs (engine bay: 32 -> 7.4 s, 128 -> 5.3 s, 512 -> 8.3 s)
-    const int levelsPerSync = envInt("CHESHIRE_MAXFLOW_BFS_BATCH", 32);
+    const int relabelEvery = int(::cheshire::env::integer("CHESHIRE_MAXFLOW_RELABEL_EVERY", 128));   // sweeps between global relabels, queued without host syncs (engine bay: 32 -> 7.4 s, 128 -> 5.3 s, 512 -> 8.3 s)
+    const int levelsPerSync = int(::cheshire::env::integer("CHESHIRE_MAXFLOW_BFS_BATCH", 32));
     int levels = 0;
     if (!globalRelabel(g, d, levels, levelsPerSync)) return false;
     stats.globalRelabels = 1;
@@ -313,7 +312,7 @@ bool minCut(const Graph& g, std::vector<std::uint8_t>& sinkSide, Stats& stats, i
 
     stats.pulses = 0;
     const unsigned nodeGrid = (V + kBlock - 1) / kBlock;
-    const int checkEvery = envInt("CHESHIRE_MAXFLOW_CHECK_EVERY", 16);   // sweeps between looks at the active count
+    const int checkEvery = std::max(1, int(::cheshire::env::integer("CHESHIRE_MAXFLOW_CHECK_EVERY", 16)));   // sweeps between looks at the active count
     double sweepSec = 0, relabelSec = 0;
     auto now = [] { return std::chrono::steady_clock::now(); };
     auto secs = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) { return std::chrono::duration<double>(b - a).count(); };

@@ -7,10 +7,8 @@
         static int overrideY = -2;
         if (overrideY == -2)
         {
-            const char* e = std::getenv("CHESHIRE_BLOCK_Y");
-            overrideY = e ? std::atoi(e) : 0;
-            const char* p = std::getenv("CHESHIRE_PROFILE_SGM");
-            if (p && p[0] == '1')
+            overrideY = static_cast<int>(::cheshire::env::integer("CHESHIRE_BLOCK_Y", 0));
+            if (::cheshire::env::flag("CHESHIRE_PROFILE_SGM"))
                 std::fprintf(stderr, "[cheshire-prof] occupancy block for kernels: 32x%d (min grid %d), CHESHIRE_BLOCK_Y=%d\n",
                              int(divUp(recommendedBlockSize, 32)), recommendedMinGridSize, overrideY);
         }

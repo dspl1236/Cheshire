@@ -12,8 +12,7 @@
         // with the centres passed in. CHESHIRE_FACET_PAIRS=0 computes every entry on its own as
         // before; CHESHIRE_GPU_VOTE_LOG=1 compares every entry with upstream's computation either way.
         const auto cheshireFacetT0 = std::chrono::steady_clock::now();
-        const char* cheshireFacetPairsEnv = std::getenv("CHESHIRE_FACET_PAIRS");
-        const bool cheshireFacetPairs = cheshireFacetPairsEnv == nullptr || std::string(cheshireFacetPairsEnv) != "0";
+        const bool cheshireFacetPairs = ::cheshire::env::flag("CHESHIRE_FACET_PAIRS", true);
         if (cheshireFacetPairs)
         {
 #pragma omp parallel for schedule(static)

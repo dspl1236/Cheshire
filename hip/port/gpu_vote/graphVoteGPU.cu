@@ -13,6 +13,7 @@
 #include "graphVoteGPU.hpp"
 #include <cuda_runtime.h>
 #include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
+#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
 #include <cfloat>
 #include <chrono>
 #include <climits>
@@ -372,7 +373,7 @@ bool voteAvailable()
     std::lock_guard<std::mutex> g(g_mutex);
     if (g_checked) return g_available;
     g_checked = true;
-    if (const char* e = std::getenv("CHESHIRE_GPU_VOTE")) if (e[0] == '0') { std::fprintf(stderr, "[cheshire] meshing votes: disabled by CHESHIRE_GPU_VOTE=0, CPU\n"); return g_available = false; }
+    if (!::cheshire::env::flag("CHESHIRE_GPU_VOTE", true)) { std::fprintf(stderr, "[cheshire] meshing votes: disabled by CHESHIRE_GPU_VOTE=0, CPU\n"); return g_available = false; }
     int n = 0;
     if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1) { std::fprintf(stderr, "[cheshire] meshing votes: no GPU device, CPU\n"); return g_available = false; }
     cudaDeviceProp p{};
@@ -384,7 +385,7 @@ bool voteAvailable()
 bool fillGraph(const VoteInput& in, float* cellAttr)
 {
     // CHESHIRE_GPU_VOTE_LOG=1: where the time goes (uploads, kernels, download)
-    const bool log = std::getenv("CHESHIRE_GPU_VOTE_LOG") != nullptr;
+    const bool log = ::cheshire::env::flag("CHESHIRE_GPU_VOTE_LOG");
     auto now = [] { return std::chrono::steady_clock::now(); };
     auto secs = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) { return std::chrono::duration<double>(b - a).count(); };
     const auto t0 = now();

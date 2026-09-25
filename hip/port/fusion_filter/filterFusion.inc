@@ -124,7 +124,7 @@ void filterByPixSizeCheshire(const std::vector<Point3d>& verticesCoordsPrepare,
 {
     using Clock = std::chrono::steady_clock;
     const auto tStart = Clock::now();
-    const bool logIt = std::getenv("CHESHIRE_FILTER_LOG") != nullptr || std::getenv("CHESHIRE_FILTER_CHECK") != nullptr;
+    const bool logIt = ::cheshire::env::flag("CHESHIRE_FILTER_LOG") || ::cheshire::env::flag("CHESHIRE_FILTER_CHECK");
     const int nbPoints = (int)verticesCoordsPrepare.size();
     const int nbThreads = std::max(1, omp_get_max_threads());
 
@@ -334,12 +334,12 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
                      double pixSizeMarginCoef,
                      std::vector<float>& simScorePrepare)
 {
-    if (std::getenv("CHESHIRE_FILTER_OLD") != nullptr)
+    if (::cheshire::env::flag("CHESHIRE_FILTER_OLD"))
     {
         filterByPixSizeUpstream(verticesCoordsPrepare, pixSizePrepare, pixSizeMarginCoef, simScorePrepare);
         return;
     }
-    if (std::getenv("CHESHIRE_FILTER_CHECK") == nullptr)
+    if (!::cheshire::env::flag("CHESHIRE_FILTER_CHECK"))
     {
         filterByPixSizeCheshire(verticesCoordsPrepare, pixSizePrepare, pixSizeMarginCoef, simScorePrepare);
         return;

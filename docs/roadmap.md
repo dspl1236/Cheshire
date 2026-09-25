@@ -383,7 +383,7 @@ the earlier proposal.
   incremental). It cannot be byte-identical to autodiff, so it ships off by default behind the
   quality gate, like the CPU item. Incremental SfM stays sequential (resect, triangulate, BA); only
   the inner loops move, so the ceiling is the BA share of the node, not the node.
-- **Env switches that `=0` turns on** (M). About 13 behaviour switches and about 15 check, log and
+- **Env switches that `=0` turns on** (M). **Done 2026-09-25 (step 6q, `cheshire/env.h`; docs/04).** About 13 behaviour switches and about 15 check, log and
   profile flags test only whether the variable is set, and four parsing styles coexist (e.g.
   `scripts/apply_hip_patch.py:1017, :2799`). Route them all through one helper, then do a full
   rebuild and re-gate. Do this before flipping any default.

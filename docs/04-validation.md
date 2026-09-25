@@ -2184,3 +2184,38 @@ not reboot during either of its gates (last boot 2026-09-22 before the AMD one, 
 for the CUDA one). The Windows AMD, Linux HIP and Linux CUDA packages are built at a152325, the
 Windows CUDA package at 303bd69 (step 6l's comparator named outside an OpenMP loop for MSVC, C3014;
 no change in behaviour).
+
+## 0.3.5: every CHESHIRE_* variable read one way (step 6q, 2026-09-25)
+
+The ports and the generator's inline code had about 127 reads of `CHESHIRE_*` variables, in five styles:
+`getenv(X) != nullptr` (so `X=0` turned a check or a profile ON), `e[0] == '0'`, `e[0] == '1'` (so
+`X=true` did nothing), atoi / strtoll / strtod (so `X=abc` meant 0), and string compares. Every read
+now goes through `hip/compat/include/cheshire/env.h`: `flag` (unset: the default; `0`, `false`,
+`off`, `no` or empty: off; anything else: on), `integer` and `real` (unset, empty or not a number:
+the default), `text` and `isSet`. Step 6q of the generator copies the header, adds its `#include` to
+the 22 files that use it (for an `.inc`, to the file that includes it, since an `.inc` sits inside a
+namespace), and refuses a tree that still reads a `CHESHIRE_*` variable any other way. The two codec
+libraries, which build on their own outside AliceVision, keep their one probe each.
+
+Behaviour changes, beyond `=0` now meaning off and a bad number meaning the default: a value such as
+`true`, `yes` or `2` now turns on the options that took only a leading `1` (`CHESHIRE_PROFILE_SGM`,
+`CHESHIRE_EXR_PROFILE`, `CHESHIRE_LOAD_PROFILE`, `CHESHIRE_READ_DIRECT_CHECK`,
+`CHESHIRE_SFM_LOCAL_PASSES`, `CHESHIRE_GPU_FILTER_STRICT`, `CHESHIRE_BRIDGE_IMAGE_SPILL`,
+`CHESHIRE_CUDA_MANAGED`); a value that starts with `0` but is not a false word (`00`, `0.5`) no
+longer turns a default-on switch off; `CHESHIRE_GPU_RESIZE` now does what its documentation said
+(`=0` gives the host resize; before, any value, `1` included, did); an empty
+`CHESHIRE_BRIDGE_VRAM_MB` is the default cap, where it used to mean no cap (`=0` still does); and
+`CHESHIRE_MAXFLOW_CHECK_EVERY=0`, which never advanced the max-flow loop, is taken as 1.
+
+The conversion also found five upstream files the generator patches but step 0 did not reset
+(`ImageDescriber_SIFT_popSIFT.cpp`, `cameraUndistortImage.hpp`, `main_incrementalSfM.cpp`,
+`LocalBundleAdjustmentGraph.cpp`, `MaxFlow_AdjList.hpp`): their steps skip a file that already
+carries the patch, so a changed snippet never reached a tree patched before it. They are in the
+reset list now, and the generator's stray-file warning is empty.
+
+Checked: `hip/tests/env/env_test.cpp` (every rule, MSVC and Linux g++); two generator runs give the
+same patch; the Windows HIP tree (gfx12-generic, 284 steps) and the Windows CUDA tree (MSVC, 536
+steps) build clean; mini6 12/12 at 7/7 on the RX 9070 with the HIP build, including `cpufallback`
+(the `=0` switches), `bridgecap` / `bridgespill` (the numbers) and `verify` / `texcheck` (the
+`*_CHECK=1` verdicts); and on the SfM binary, `CHESHIRE_BA_PROFILE=0 CHESHIRE_BA_CHECK=0` print 0
+profile and 0 check lines where `=1` prints 9 of each (before, `=0` printed 9 of each too).

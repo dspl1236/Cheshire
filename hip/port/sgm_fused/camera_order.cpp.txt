@@ -9,8 +9,7 @@ std::vector<int> cheshireCameraOrder(const mvsUtils::MultiViewParams& mp)
 {
     std::vector<int> order(mp.ncams);
     std::iota(order.begin(), order.end(), 0);
-    const char* env = std::getenv("CHESHIRE_DEPTHMAP_ORDER");
-    if ((env != nullptr && std::string(env) == "0") || mp.ncams < 3)
+    if (!::cheshire::env::flag("CHESHIRE_DEPTHMAP_ORDER", true) || mp.ncams < 3)
         return order;
     std::vector<char> visited(mp.ncams, 0);
     order.clear();
