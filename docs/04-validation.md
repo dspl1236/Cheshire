@@ -2219,3 +2219,41 @@ steps) build clean; mini6 12/12 at 7/7 on the RX 9070 with the HIP build, includ
 (the `=0` switches), `bridgecap` / `bridgespill` (the numbers) and `verify` / `texcheck` (the
 `*_CHECK=1` verdicts); and on the SfM binary, `CHESHIRE_BA_PROFILE=0 CHESHIRE_BA_CHECK=0` print 0
 profile and 0 check lines where `=1` prints 9 of each (before, `=0` printed 9 of each too).
+
+## 0.3.5: the reconstruction-quality gate for SfM (2026-09-25)
+
+`scripts/quality_gate.py` asks whether a change makes incremental SfM worse than its own run-to-run
+spread. It runs `sfmbench.py`'s fixed features-and-matches cache n times per leg, legs interleaved
+(A B A B ...) so drift on the box falls on all of them, and compares each candidate with the first
+leg: poses, landmarks and RMSE by Welch's t (two-sided p, and the **resolution**, the smallest
+difference that comparison could have called significant: t_crit x SE), and pose agreement by
+aligning every pair of runs with a similarity (Umeyama on the shared camera centres) - the residual
+RMS over the centres' spread, and the median rotation difference - cross-leg pairs against the
+pairs within the baseline, which are the noise floor. With no ground truth the geometry says
+"different", not "worse", so it flags only past an absolute floor too (0.001 of the spread, 0.1
+degrees); on 41 views two ways of rounding differed by 0.024 degrees against a 0.013-degree floor,
+which a ratio alone called 1.8x. FAIL = significantly worse by more than the tolerance (poses: any
+loss; landmarks and RMSE: 0.5 %), WARN = significantly worse within it. Checked first: the p-values
+against t tables (t 2.0 at 10 df: 0.0734; the 5 % critical value 2.228), a run aligned with itself
+(6e-16), two default 41-view runs (1.8e-5 of the spread, 0.002 degrees).
+
+**Upstream-equivalent SfM against the defaults** (`CHESHIRE_BA_JACOBIANS=autodiff`,
+`CHESHIRE_BA_PERSIST=0`, `CHESHIRE_SFM_TASK_SEED=0` against nothing set), n=10 per leg, RX 9070 box:
+
+| set | landmarks | RMSE | resolution (landmarks / RMSE) | pose agreement, cross / within | verdict |
+|---|---|---|---|---|---|
+| 41 views | 80,801.4 both, p 1.0 | -0.049 %, p 0.17 | 0.007 % / 0.073 % | centres 1.16x, rotation 1.84x (0.024 degrees) | PASS |
+| engine bay, 107 | -0.018 %, p 0.61 | +0.038 %, p 0.41 | 0.073 % / 0.098 % | 0.97x, 0.91x | PASS |
+
+An A/A control (the defaults twice, 41 views) passes with p 0.26 and 0.29 and geometry at 0.36x and
+1.00x. The defaults are also more repeatable than upstream: the median rotation difference between
+two of their runs is 0.0008 degrees on 41 views against upstream's 0.013, and 0.046 against 0.089 on
+the engine bay - the per-task generators of 5n.
+
+**The QR nullspace as a positive control did not reach significance**: -73.8 landmarks (-0.053 %),
+p 0.16, against a resolution of 107 (0.076 %) on the engine bay. docs/17 measured -165 at p 0.0008
+at n=10 on a v0.2.17 build; either the effect is smaller on today's SfM or it sits at the edge of
+what n=10 resolves here. Either way this is what a PASS means: no difference larger than its
+resolution. A regression near the 0.5 % tolerance is about seven times the resolution on the engine
+bay and would not pass unnoticed. Reports: `build/quality/41-upstream-vs-cheshire.md`,
+`41-AA-control.md`, `eb-upstream-vs-cheshire.md`, `eb-cheshire-vs-qr.md`.
