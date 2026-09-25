@@ -92,7 +92,10 @@ SELF_CHECK_VERDICTS = {
         # The float flow totals of the two algorithms are never equal and are documented as junk
         # (docs/12); the labelling is the verdict. The first version asserted "(identical)" on the
         # flows and failed a run whose labelling was 0 of 1,676,527 cells different.
-        r"max-flow check: .*cells labelled differently: 0 of \d+",
+        # Since 6p the verdict is the cut value: a minimum cut need not be unique, and on the 41-view
+        # fold-in graph the two labellings differed in 2 cells Boykov-Kolmogorov left undetermined,
+        # with the same value to the digit. Both labellings are evaluated on the adjacency-list graph.
+        r"max-flow check: .*cut values on the adjacency-list graph \(double\): CSR labelling \S+, adjacency-list labelling \S+ \(equal",
         # The knn check: identical, vertex AND distance, in both visibility passes (its line names no
         # pass, so the pattern needs two). Until 2026-09-24 Linux builds differed in the last bits of
         # ~20 % of the distances: HIP's __dadd_rn/__dmul_rn live in a header included before the

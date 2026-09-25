@@ -1,0 +1,82 @@
+    /// is full
+    inline bool isTarget(NodeType n) const { return (_color[n] == boost::white_color); }
+
+  protected:
+=====
+    /// is full
+    inline bool isTarget(NodeType n) const { return (_color[n] == boost::white_color); }
+
+    /// cheshire (step 6p): the value of the cut a labelling makes on this graph, in double: the
+    /// capacities of the edges from the source side (empty cells and the source) to the sink side
+    /// (full cells and the sink). CHESHIRE_MAXFLOW_CHECK evaluates the GPU labelling and this graph's
+    /// own on the same edges: a minimum cut need not be unique, and two labellings that disagree on
+    /// cells a cut leaves free are equally good when their values are equal.
+    double cheshireCutValue(const std::vector<bool>& full) const
+    {
+        const auto sinkSide = [&](std::size_t n) {
+            return n == std::size_t(_T) || (n != std::size_t(_S) && n < full.size() && full[n]);
+        };
+        double v = 0;
+        typename boost::graph_traits<Graph>::vertex_iterator vi, ve;
+        for (boost::tie(vi, ve) = boost::vertices(_graph); vi != ve; ++vi)
+        {
+            if (sinkSide(std::size_t(*vi)))
+                continue;
+            typename boost::graph_traits<Graph>::out_edge_iterator ei, ee;
+            for (boost::tie(ei, ee) = boost::out_edges(*vi, _graph); ei != ee; ++ei)
+                if (sinkSide(std::size_t(boost::target(*ei, _graph))))
+                    v += double(_graph[*ei].capacity);
+        }
+        return v;
+    }
+
+  protected:
+=====
+    template<class MaxFlowT> float binarizeImpl(std::vector<bool>& cellIsFull);  // cheshire
+=====
+    template<class MaxFlowT> float binarizeImpl(std::vector<bool>& cellIsFull, const std::vector<bool>* cheshireOther = nullptr,
+                                                double* cheshireCutOwn = nullptr, double* cheshireCutOther = nullptr);  // cheshire (step 6p)
+=====
+template<class MaxFlowT>
+float GraphFiller::binarizeImpl(std::vector<bool>& cellIsFull)
+=====
+template<class MaxFlowT>
+float GraphFiller::binarizeImpl(std::vector<bool>& cellIsFull, const std::vector<bool>* cheshireOther, double* cheshireCutOwn, double* cheshireCutOther)
+=====
+    ALICEVISION_LOG_INFO("cheshire: max-flow value " << totalFlow << ", full cells " << nbFullCells);
+    return totalFlow;
+=====
+    ALICEVISION_LOG_INFO("cheshire: max-flow value " << totalFlow << ", full cells " << nbFullCells);
+    // cheshire (step 6p): both labellings' cut values on this graph, for CHESHIRE_MAXFLOW_CHECK
+    if constexpr (std::is_same_v<MaxFlowT, MaxFlow_AdjList>)
+    {
+        if (cheshireOther != nullptr && cheshireCutOwn != nullptr && cheshireCutOther != nullptr)
+        {
+            *cheshireCutOwn = maxFlowGraph.cheshireCutValue(cellIsFull);
+            *cheshireCutOther = maxFlowGraph.cheshireCutValue(*cheshireOther);
+        }
+    }
+    return totalFlow;
+=====
+        const float fAdj = binarizeImpl<MaxFlow_AdjList>(adjFull);
+        std::size_t diff = 0;
+        for (std::size_t i = 0; i < csrFull.size(); ++i)
+            diff += (csrFull[i] != adjFull[i]);
+        ALICEVISION_LOG_INFO("cheshire: max-flow check: CSR flow " << fCsr << ", adjacency-list flow " << fAdj << (fCsr == fAdj ? " (identical)" : " (DIFFERENT)")
+                                                                  << "; cells labelled differently: " << diff << " of " << csrFull.size());
+=====
+        // cheshire (step 6p): the verdict is the cut value. A minimum cut need not be unique: on the
+        // 41-view fold-in graph (11.8 M cells) the GPU and Boykov-Kolmogorov labellings differed in 2
+        // cells that Boykov-Kolmogorov's own search left undetermined, with the same value to the
+        // digit. So both labellings are evaluated on the adjacency-list graph, in double.
+        double cutAdj = 0, cutCsr = 0;
+        const float fAdj = binarizeImpl<MaxFlow_AdjList>(adjFull, &csrFull, &cutAdj, &cutCsr);
+        std::size_t diff = 0;
+        for (std::size_t i = 0; i < csrFull.size(); ++i)
+            diff += (csrFull[i] != adjFull[i]);
+        const double rel = std::abs(cutCsr - cutAdj) / std::max(1.0, std::abs(cutAdj));
+        ALICEVISION_LOG_INFO("cheshire: max-flow check: CSR flow " << fCsr << ", adjacency-list flow " << fAdj << (fCsr == fAdj ? " (identical)" : " (DIFFERENT)")
+                                                                  << "; cells labelled differently: " << diff << " of " << csrFull.size()
+                                                                  << "; cut values on the adjacency-list graph (double): CSR labelling "
+                                                                  << std::setprecision(17) << cutCsr << ", adjacency-list labelling " << cutAdj
+                                                                  << (rel <= 1e-9 ? " (equal" : " (DIFFERENT") << ", relative difference " << rel << ")");

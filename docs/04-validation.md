@@ -2142,3 +2142,21 @@ works. Windows loads a DLL from the executable's folder first and System32 secon
 packages used the bundled copy and the unified release zip, which keeps it in `gpu/rocm7.2` on PATH,
 has been using the driver's. For gates on this box a flat package goes without the two runtime DLLs;
 before the release, whether to bundle the 7.2.1 runtime at all is an open item.
+
+## The max-flow check judges cut values (step 6p, 2026-09-25)
+
+The fold-in 41-view gate on the RX 9070 passed every self-check but one: `CHESHIRE_MAXFLOW_CHECK`
+reported 2 of 11,773,764 cells labelled differently by the GPU push-relabel cut and upstream's
+Boykov-Kolmogorov on the same graph. The graph dumped for `hip/tests/maxflow_test`
+(`CHESHIRE_MAXFLOW_DUMP`) gave the answer: the two cuts' values, computed in double from each
+labelling, were both 218,448,238.9, and Boykov-Kolmogorov's own search left exactly 2 cells gray
+(undetermined). A minimum cut need not be unique; each algorithm put a tie on a different side.
+Earlier graphs happened to have no ties (0 of 11,417,156 at 41 views on v0.2.10, 0 of 29,080,924
+at 884 views on 0.3.3).
+
+The check now also evaluates both labellings on the adjacency-list graph, in double, and says
+whether the values are equal (relative difference at most 1e-9, which leaves room only for the
+order of a double sum over two different edge sets); the gate's verdict is that, and the cell count
+stays in the line for information. On the same 41-view cache: 2 cells, values 218,447,937.91999644
+and 218,447,937.91999739 (equal, relative difference 4.4e-15); mini6 `verify`: 0 cells, values
+identical. The cut itself is unchanged.

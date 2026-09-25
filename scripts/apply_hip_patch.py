@@ -4593,6 +4593,34 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
     elif new6e not in t:
         sys.exit("step 6o: step 6e's comment not found in Texturing.cpp")
 
+    # 6p. The max-flow check judges cut values, not cell labels (hip/port/meshing_csr/maxflow_cut_check.txt).
+    #     A minimum cut need not be unique: on the 41-view fold-in graph (11.8 M cells) the GPU and
+    #     Boykov-Kolmogorov labellings differed in 2 cells that Boykov-Kolmogorov left undetermined,
+    #     and hip/tests/maxflow_test gave both cuts the value 218,448,238.9 in double. CHESHIRE_MAXFLOW_CHECK
+    #     now also evaluates both labellings on the adjacency-list graph and reports whether the values
+    #     are equal; the cell count stays in the line for information.
+    parts = [x.replace("\n", NL) for x in (ROOT / "hip/port/meshing_csr/maxflow_cut_check.txt").read_text(encoding="utf-8").split("=====\n")]
+    edits = [("src/aliceVision/fuseCut/MaxFlow_AdjList.hpp", parts[0], parts[1]),
+             ("src/aliceVision/fuseCut/GraphFiller.hpp", parts[2], parts[3]),
+             ("src/aliceVision/fuseCut/GraphFiller.cpp", parts[4], parts[5]),
+             ("src/aliceVision/fuseCut/GraphFiller.cpp", parts[6], parts[7]),
+             ("src/aliceVision/fuseCut/GraphFiller.cpp", parts[8], parts[9])]
+    for rel, old, new in edits:
+        f = AV / rel
+        t = f.read_text(encoding="utf-8")
+        if new in t:
+            continue
+        if t.count(old) != 1:
+            sys.exit("step 6p anchor not found once in " + rel + ": " + old.strip().splitlines()[0][:70])
+        f.write_text(t.replace(old, new, 1), encoding="utf-8", newline="")
+    gfc = AV / "src/aliceVision/fuseCut/GraphFiller.cpp"
+    t = gfc.read_text(encoding="utf-8")
+    if "<iomanip>  // cheshire (step 6p)" not in t:
+        inc = "#include <cmath>" + NL
+        if t.count(inc) != 1:
+            sys.exit("step 6p: cmath include not found once in GraphFiller.cpp")
+        gfc.write_text(t.replace(inc, inc + "#include <iomanip>  // cheshire (step 6p)" + NL + "#include <type_traits>" + NL + "#include <algorithm>" + NL, 1), encoding="utf-8", newline="")
+
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
     #     when the cards in front of us are both compute 6.1. FORCE beats -D on the command line, so
