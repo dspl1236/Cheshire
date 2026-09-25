@@ -453,10 +453,15 @@ def main(argv):
         results = {n: run_one(n, CONFIGS[n], meshroom, photos, outroot) for n in names}
     finally:
         # Always put Meshroom back: pairing renames its binaries in place, and a half-paired install
-        # is a trap for whoever opens Meshroom next.
-        u = subprocess.run(pair_cmd + [str(meshroom), "--unpair"],
-                           capture_output=True, text=True, shell=win)
-        print("\n" + (u.stdout.strip() or u.stderr.strip()))
+        # is a trap for whoever opens Meshroom next. CHESHIRE_E2E_KEEP_PAIRING=1 leaves it paired: for
+        # a node (house-pc) whose Meshroom is already paired with this same package by its owner, where
+        # unpairing would put the dashboard's jobs back on Meshroom's own binaries.
+        if os.environ.get("CHESHIRE_E2E_KEEP_PAIRING") == "1":
+            print("\nleft Meshroom paired with this package (CHESHIRE_E2E_KEEP_PAIRING=1)")
+        else:
+            u = subprocess.run(pair_cmd + [str(meshroom), "--unpair"],
+                               capture_output=True, text=True, shell=win)
+            print("\n" + (u.stdout.strip() or u.stderr.strip()))
 
     passed = sum(1 for ok, _ in results.values() if ok)
     print(f"\n{passed} of {len(results)} pipelines ran end to end on this package")
