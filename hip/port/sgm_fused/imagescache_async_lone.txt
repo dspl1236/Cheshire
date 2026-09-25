@@ -1,0 +1,31 @@
+void ImagesCache<Image>::refreshImage_async(int camId)
+{
+    // cheshire (step 6c): a read-ahead thread is one of several loads at once; its reader decodes on
+    // this thread rather than through the shared pool (image/cheshireExr.hpp)
+    _asyncObjects.emplace_back(std::async(std::launch::async, [this, camId]() {
+        image::ConcurrentLoadScope cheshireScope;
+        refreshImage_sync(camId);
+    }));
+}
+=====
+void ImagesCache<Image>::refreshImage_async(int camId)
+{
+    // cheshire (step 6c, step 6o): a read-ahead that starts while another is still loading decodes on
+    // its own thread, since the shared pool serialises concurrent files (image/cheshireExr.hpp); a lone
+    // read-ahead keeps the pool, which spreads the one file over every core. Step 6c made every
+    // read-ahead decode inline, and on a host with RAM for two cache slots (one camera ahead:
+    // house-pc, 884 views of 6000x3376) that left texturing's only read on one thread.
+    static std::atomic<int> cheshireInFlight{0};
+    _asyncObjects.emplace_back(std::async(std::launch::async, [this, camId]() {
+        struct InFlight
+        {
+            int others;
+            InFlight() : others(cheshireInFlight.fetch_add(1)) {}
+            ~InFlight() { cheshireInFlight.fetch_sub(1); }
+        } cheshireInFlightNow;
+        std::optional<image::ConcurrentLoadScope> cheshireScope;
+        if (cheshireInFlightNow.others > 0)
+            cheshireScope.emplace();
+        refreshImage_sync(camId);
+    }));
+}

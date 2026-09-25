@@ -1,8 +1,8 @@
 #ifdef ALICEVISION_HAVE_GPU_TEX
     // cheshire (step 6e): each read-ahead thread decodes on its own thread since step 6c, so the depth
     // that keeps the cores busy is about the thread count: every hardware thread but one, within the
-    // image cache's slots (grown to depth + 1 when RAM allows; the default cache already has about 20
-    // slots at 6000x3376, so on a small host the deeper read-ahead costs no memory). Before, a host
+    // image cache's slots (grown to depth + 1 when RAM allows; texturing starts the cache at 2 slots, so a
+    // host short of RAM stays one camera ahead, and step 6o gives that lone read the pool). Before, a host
     // whose available RAM missed the 4 GB margin read one camera ahead. CHESHIRE_TEX_READAHEAD=n sets it.
     if (imageType != mvsUtils::EFileType::normalMap && gpu::texAvailable())
     {

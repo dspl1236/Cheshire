@@ -7036,7 +7036,7 @@ index b0b5910..9d5bb13 100644
  
      return nupd;
 diff --git a/src/aliceVision/mesh/Texturing.cpp b/src/aliceVision/mesh/Texturing.cpp
-index 76bf7e5..03ef9ed 100644
+index 76bf7e5..3e34cc6 100644
 --- a/src/aliceVision/mesh/Texturing.cpp
 +++ b/src/aliceVision/mesh/Texturing.cpp
 @@ -5,6 +5,18 @@
@@ -7093,8 +7093,8 @@ index 76bf7e5..03ef9ed 100644
 +#ifdef ALICEVISION_HAVE_GPU_TEX
 +    // cheshire (step 6e): each read-ahead thread decodes on its own thread since step 6c, so the depth
 +    // that keeps the cores busy is about the thread count: every hardware thread but one, within the
-+    // image cache's slots (grown to depth + 1 when RAM allows; the default cache already has about 20
-+    // slots at 6000x3376, so on a small host the deeper read-ahead costs no memory). Before, a host
++    // image cache's slots (grown to depth + 1 when RAM allows; texturing starts the cache at 2 slots, so a
++    // host short of RAM stays one camera ahead, and step 6o gives that lone read the pool). Before, a host
 +    // whose available RAM missed the 4 GB margin read one camera ahead. CHESHIRE_TEX_READAHEAD=n sets it.
 +    if (imageType != mvsUtils::EFileType::normalMap && gpu::texAvailable())
 +    {
@@ -7720,18 +7720,20 @@ index e3b2880..b4e5c7b 100644
  {
      os << range.begin << "-" << range.end;
 diff --git a/src/aliceVision/mvsUtils/ImagesCache.cpp b/src/aliceVision/mvsUtils/ImagesCache.cpp
-index c7e42f4..3502463 100644
+index c7e42f4..701ad91 100644
 --- a/src/aliceVision/mvsUtils/ImagesCache.cpp
 +++ b/src/aliceVision/mvsUtils/ImagesCache.cpp
-@@ -7,6 +7,7 @@
+@@ -7,6 +7,9 @@
  #include "ImagesCache.hpp"
  #include <aliceVision/mvsUtils/common.hpp>
  #include <aliceVision/mvsUtils/fileIO.hpp>
 +#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 6c
++#include <atomic>  // cheshire: step 6o
++#include <optional>
  
  #include <future>
  
-@@ -89,22 +90,29 @@ void ImagesCache<Image>::setCacheSize(int nbPreload)
+@@ -89,22 +92,29 @@ void ImagesCache<Image>::setCacheSize(int nbPreload)
  template<typename Image>
  void ImagesCache<Image>::refreshData(int camId)
  {
@@ -7775,7 +7777,7 @@ index c7e42f4..3502463 100644
          // reload data from files
          long t1 = clock();
          if (_imgs[mapId] == nullptr)
-@@ -115,7 +123,10 @@ void ImagesCache<Image>::refreshData(int camId)
+@@ -115,7 +125,10 @@ void ImagesCache<Image>::refreshData(int camId)
          }
  
          const std::string imagePath = _imagesNames.at(camId);
@@ -7787,7 +7789,7 @@ index c7e42f4..3502463 100644
  
          ALICEVISION_LOG_DEBUG("Add " << imagePath << " to image cache. " << formatElapsedTime(t1));
      }
-@@ -125,6 +136,22 @@ void ImagesCache<Image>::refreshData(int camId)
+@@ -125,6 +138,22 @@ void ImagesCache<Image>::refreshData(int camId)
      }
  }
  
@@ -7810,15 +7812,27 @@ index c7e42f4..3502463 100644
  template<typename Image>
  void ImagesCache<Image>::refreshImage_sync(int camId)
  {
-@@ -135,7 +162,12 @@ void ImagesCache<Image>::refreshImage_sync(int camId)
+@@ -135,7 +164,24 @@ void ImagesCache<Image>::refreshImage_sync(int camId)
  template<typename Image>
  void ImagesCache<Image>::refreshImage_async(int camId)
  {
 -    _asyncObjects.emplace_back(std::async(std::launch::async, &ImagesCache<Image>::refreshImage_sync, this, camId));
-+    // cheshire (step 6c): a read-ahead thread is one of several loads at once; its reader decodes on
-+    // this thread rather than through the shared pool (image/cheshireExr.hpp)
++    // cheshire (step 6c, step 6o): a read-ahead that starts while another is still loading decodes on
++    // its own thread, since the shared pool serialises concurrent files (image/cheshireExr.hpp); a lone
++    // read-ahead keeps the pool, which spreads the one file over every core. Step 6c made every
++    // read-ahead decode inline, and on a host with RAM for two cache slots (one camera ahead:
++    // house-pc, 884 views of 6000x3376) that left texturing's only read on one thread.
++    static std::atomic<int> cheshireInFlight{0};
 +    _asyncObjects.emplace_back(std::async(std::launch::async, [this, camId]() {
-+        image::ConcurrentLoadScope cheshireScope;
++        struct InFlight
++        {
++            int others;
++            InFlight() : others(cheshireInFlight.fetch_add(1)) {}
++            ~InFlight() { cheshireInFlight.fetch_sub(1); }
++        } cheshireInFlightNow;
++        std::optional<image::ConcurrentLoadScope> cheshireScope;
++        if (cheshireInFlightNow.others > 0)
++            cheshireScope.emplace();
 +        refreshImage_sync(camId);
 +    }));
  }

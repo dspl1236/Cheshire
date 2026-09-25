@@ -4563,6 +4563,36 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
         t = t.replace(anchor, call + anchor, 1)
         iop.write_text(t, encoding="utf-8", newline="")
 
+    # 6o. A lone read-ahead decodes through the pool again. Step 6c made every image-cache read-ahead
+    #     decode on its own thread, which pays off when several run at once (the 12-thread box reads 11
+    #     cameras ahead after 6e). On a host with RAM for only two cache slots texturing reads one camera
+    #     ahead, and 6c left that single read on one thread: house-pc's 884-view texturing went from
+    #     14.7 to 32 minutes per atlas pass between s7 and s9. Now a read-ahead that starts while another
+    #     is loading decodes inline, a lone one keeps the pool (hip/port/sgm_fused/imagescache_async_lone.txt).
+    #     Concurrency only. 6e's comment claimed the default cache has about 20 slots; texturing sets 2.
+    icc = AV / "src/aliceVision/mvsUtils/ImagesCache.cpp"
+    t = icc.read_text(encoding="utf-8")
+    if "step 6o" not in t:
+        old, new = [x.replace("\n", NL) for x in (ROOT / "hip/port/sgm_fused/imagescache_async_lone.txt").read_text(encoding="utf-8").split("=====\n")]
+        if t.count(old) != 1:
+            sys.exit("step 6o: step 6c's refreshImage_async not found once in ImagesCache.cpp")
+        t = t.replace(old, new, 1)
+        inc = "#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 6c" + NL
+        if t.count(inc) != 1:
+            sys.exit("step 6o: the step 6c include not found once in ImagesCache.cpp")
+        t = t.replace(inc, inc + "#include <atomic>  // cheshire: step 6o" + NL + "#include <optional>" + NL, 1)
+        icc.write_text(t, encoding="utf-8", newline="")
+    tx = AV / "src/aliceVision/mesh/Texturing.cpp"
+    t = tx.read_text(encoding="utf-8")
+    old6e = ("    // image cache's slots (grown to depth + 1 when RAM allows; the default cache already has about 20" + NL
+             + "    // slots at 6000x3376, so on a small host the deeper read-ahead costs no memory). Before, a host" + NL)
+    new6e = ("    // image cache's slots (grown to depth + 1 when RAM allows; texturing starts the cache at 2 slots, so a" + NL
+             + "    // host short of RAM stays one camera ahead, and step 6o gives that lone read the pool). Before, a host" + NL)
+    if old6e in t:
+        tx.write_text(t.replace(old6e, new6e, 1), encoding="utf-8", newline="")
+    elif new6e not in t:
+        sys.exit("step 6o: step 6e's comment not found in Texturing.cpp")
+
     # 5b. Let the CUDA architecture list be chosen. Upstream FORCEs "all-major", which on CUDA 12.9
     #     means real code for sm_50/60/70/80/90 plus PTX - five device compilations of every .cu
     #     when the cards in front of us are both compute 6.1. FORCE beats -D on the command line, so
