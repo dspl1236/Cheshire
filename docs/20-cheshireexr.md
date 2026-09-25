@@ -243,8 +243,9 @@ chunks):
 The two jobs ran their own SfM, which is not deterministic by default, so their maps cannot be
 compared byte for byte; each produced 107 depth maps.
 
-**Across the three boxes, DepthMap with the device path against the host path:** +1.5 % on the
-RX 9070 box, +20 % on bench-pc, -8.5 % on house-pc. It helps where the CPU is weak and the card is
+**Across the three boxes, DepthMap with the device path against the host path:** 1.5 % faster on
+the RX 9070 box (328.8 against 333.6 s on the same ZIPS files), 20 % slower on bench-pc, 8.5 % faster
+on house-pc. It helps where the CPU is weak and the card is
 strong, and hurts on an 8-thread CPU with a small RDNA1 card. It stays an off-by-default experiment,
 with no ZIPS output option.
 

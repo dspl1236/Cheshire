@@ -302,9 +302,9 @@ L items can slide.
   same time and 6.3 % more disk. The GPU path saved 4 s of loads and 24 s of CPU per chunk (329
   against 334 s, about 1.5 %), because loads are only about 3 % of that node on 12 threads. Merged
   into main off by default on 2026-09-25 (the fold-in before the full hardware round), so the s10
-  Linux bundle carries it. **Across three boxes** (DepthMap, device path against host): +1.5 % on
-  the RX 9070 box, +20 % on bench-pc (FX-8120 + RX 5500 XT), -8.5 % on house-pc (i3-4330 + RX 6750
-  XT, an engine bay A/B), all exact. It stays an off-by-default experiment with no ZIPS output
+  Linux bundle carries it. **Across three boxes** (DepthMap, device path against host): 1.5 %
+  faster on the RX 9070 box, 20 % slower on bench-pc (FX-8120 + RX 5500 XT), 8.5 % faster on house-pc
+  (i3-4330 + RX 6750 XT, an engine bay A/B), all exact. It stays an off-by-default experiment with no ZIPS output
   option. Open on bench-pc: the in-node decode is 4-6x slower than standalone with no spills, and
   with the check on a good file came back `Corrupt` near the VRAM cap. With per-image timings and a
   log line per `Corrupt`: after the check's first spill every device decode in the process failed,
