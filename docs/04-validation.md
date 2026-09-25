@@ -2257,3 +2257,36 @@ what n=10 resolves here. Either way this is what a PASS means: no difference lar
 resolution. A regression near the 0.5 % tolerance is about seven times the resolution on the engine
 bay and would not pass unnoticed. Reports: `build/quality/41-upstream-vs-cheshire.md`,
 `41-AA-control.md`, `eb-upstream-vs-cheshire.md`, `eb-cheshire-vs-qr.md`.
+
+## 0.3.5: CheshireJPG in PrepareDenseScene's read (step 6r, 2026-09-25, off by default)
+
+`CHESHIRE_GPU_JPEG=1` swaps the libjpeg-turbo decode inside 6n's direct read for CheshireJPG's
+(docs/19): the file's bytes to the device, the 8-bit pixels back, and the rest of the read unchanged.
+A file the codec does not take (progressive, arithmetic, CMYK, a damaged stream, no device) reads as
+before, and `CHESHIRE_GPU_JPEG_CHECK=1` decodes each image through OpenImageIO as well, compares the
+8-bit pixels and keeps OpenImageIO's on a difference. The decoders (`CHESHIRE_GPU_JPEG_CODECS`,
+default 4) are shared by the read threads. After 6n the decode is about 60 of the read's 180 ms per
+12 MP photo, about 12 % of the node's thread time on the RX 9070 box, which is the ceiling here
+(docs/notes/cheshirejpg-reads-plan.md).
+
+Build: the generator adds the codec to the image library from the checkout (`add_subdirectory` of
+`hip/port/cheshirejpg`) with the build's own GPU language and architectures, so
+`aliceVision_image` now carries device code and is one of `build_targets.py`'s per-target
+libraries (six, where there were five). Two fixes the integration needed: inside AliceVision the
+codec must not force-include its own copy of `cuda_to_hip.h` beside the build's (two files, so
+`#pragma once` does not stop the redefinitions), and `jpegTypes.hpp`'s `__builtin_clz` has an MSVC
+branch (`_BitScanReverse`, checked against a loop on 70,159 values), since the Windows CUDA build is
+the first to compile the codec's host code with MSVC.
+
+| where | result |
+|---|---|
+| RX 9070, gfx12-generic code object, mini6 | 6 of 6 decoded on the device, check 6 of 6 identical, EXRs 6 of 6 byte-identical to the libjpeg-turbo run |
+| RX 9070, engine bay | 107 of 107 decoded, check 107 of 107 identical, EXRs 107 of 107 byte-identical |
+| GTX 1080 Ti (CUDA, the codec's first NVIDIA run), 41 views | 41 of 41 decoded, check 41 of 41 identical, EXRs 41 of 41 byte-identical; the node 30.0 s to 26.2 s on bench-pc's FX-8120 (one run each) |
+| Linux HIP build | compiles; `libaliceVision_image.so` carries all 19 bundle targets |
+| hip6.2 gfx1012 payload (Windows) | compiles; the harvest finds `aliceVision_image.dll` with gfx1012 only |
+
+The end-to-end harness has a `gpujpeg` configuration (the switch and its check, both verdicts
+required). Still to do before it can be on by default: the RX 5500 XT and RX 6750 XT runs, the
+timings on the idle RX 9070 box and on house-pc, and a bundled Windows package built with the six
+per-target libraries.

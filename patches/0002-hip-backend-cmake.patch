@@ -5909,7 +5909,7 @@ index bd5e932..987a60c 100644
  
      std::map<VertexIndex, std::set<CellIndex>> neighboringCellsPerVertexTmp;
 diff --git a/src/aliceVision/image/CMakeLists.txt b/src/aliceVision/image/CMakeLists.txt
-index 1907d8f..26ce5fd 100644
+index 1907d8f..f189c15 100644
 --- a/src/aliceVision/image/CMakeLists.txt
 +++ b/src/aliceVision/image/CMakeLists.txt
 @@ -14,6 +14,8 @@ set(image_files_headers
@@ -5921,7 +5921,7 @@ index 1907d8f..26ce5fd 100644
      jetColorMap.cpp
      resampling.hpp
      pixelTypes.hpp
-@@ -30,6 +32,7 @@ set(image_files_sources
+@@ -30,12 +32,28 @@ set(image_files_sources
      dcp.cpp
      filtering.cpp
      io.cpp
@@ -5929,6 +5929,39 @@ index 1907d8f..26ce5fd 100644
      imageAlgo.cpp
      jetColorMap.cpp
      remap.cpp
+     cache.cpp
+ )
+ 
++# cheshire (step 6r): CheshireJPG (hip/port/cheshirejpg, docs/19) for the direct read's device JPEG
++# decode, built from the Cheshire checkout with the build's GPU language and architectures
++set(CHESHIRE_JPG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../hip/port/cheshirejpg")
++set(CHESHIRE_JPG_LINK "")
++if (ALICEVISION_HAVE_CUDA AND EXISTS "${CHESHIRE_JPG_DIR}/CMakeLists.txt")
++    if (ALICEVISION_HAVE_HIP)
++        set(CHESHIREJPG_GPU HIP CACHE STRING "HIP or CUDA" FORCE)
++    else()
++        set(CHESHIREJPG_GPU CUDA CACHE STRING "HIP or CUDA" FORCE)
++    endif()
++    set(CHESHIREJPG_BUILD_TOOL OFF CACHE BOOL "the cheshirejpg command-line tool" FORCE)
++    add_subdirectory("${CHESHIRE_JPG_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/cheshirejpg")
++    set(CHESHIRE_JPG_LINK CheshireJPG)
++endif()
++
+ alicevision_add_library(aliceVision_image
+     SOURCES ${image_files_headers} ${image_files_sources}
+     PUBLIC_LINKS
+@@ -46,7 +64,11 @@ alicevision_add_library(aliceVision_image
+     PRIVATE_LINKS
+         aliceVision_system
+         OpenEXR::OpenEXR
++        ${CHESHIRE_JPG_LINK}
+ )
++if (CHESHIRE_JPG_LINK)
++    target_compile_definitions(aliceVision_image PRIVATE CHESHIRE_HAVE_JPG=1)
++endif()
+ 
+ # Install config.ocio
+ install(FILES ./share/aliceVision/config.ocio DESTINATION ${CMAKE_INSTALL_DATADIR}/aliceVision)
 diff --git a/src/aliceVision/image/imageAlgo.cpp b/src/aliceVision/image/imageAlgo.cpp
 index d6b69fb..1ab5241 100644
 --- a/src/aliceVision/image/imageAlgo.cpp
@@ -6047,7 +6080,7 @@ index 1f29fe2..7055c2a 100644
                     image::Image<float>& outBuffer,
                     const std::string& kernel = "gaussian",
 diff --git a/src/aliceVision/image/io.cpp b/src/aliceVision/image/io.cpp
-index 8c5e1d3..4b2f0a2 100644
+index 8c5e1d3..009177b 100644
 --- a/src/aliceVision/image/io.cpp
 +++ b/src/aliceVision/image/io.cpp
 @@ -6,7 +6,9 @@
@@ -6060,11 +6093,17 @@ index 8c5e1d3..4b2f0a2 100644
  
  #include <aliceVision/image/Image.hpp>
  #include <aliceVision/image/colorspace.hpp>
-@@ -21,6 +23,19 @@
+@@ -21,6 +23,25 @@
  #include <OpenImageIO/imagebufalgo.h>
  #include <OpenImageIO/color.h>
  #include <OpenImageIO/imagecache.h>
 +#include <OpenImageIO/parallel.h>  // cheshire: step 6n
++#if defined(CHESHIRE_HAVE_JPG)  // cheshire: step 6r
++#include <jpegCodec.hpp>
++#endif
++#include <algorithm>
++#include <condition_variable>
++#include <fstream>
 +#include <aliceVision/alicevision_omp.hpp>
 +#if !ALICEVISION_IS_DEFINED(ALICEVISION_HAVE_OPENMP)
 +inline int omp_in_parallel() { return 0; }
@@ -6080,7 +6119,7 @@ index 8c5e1d3..4b2f0a2 100644
  
  #include <boost/algorithm/string.hpp>
  
-@@ -601,6 +616,222 @@ bool isRawFormat(const std::string& path)
+@@ -601,6 +622,364 @@ bool isRawFormat(const std::string& path)
      return (imgFormat.compare("raw") == 0);
  }
  
@@ -6153,6 +6192,117 @@ index 8c5e1d3..4b2f0a2 100644
 +    return *config;
 +}
 +
++#if defined(CHESHIRE_HAVE_JPG)
++// cheshire (step 6r): CHESHIRE_GPU_JPEG=1 decodes a baseline JPEG on the device with CheshireJPG
++// (hip/port/cheshirejpg, docs/19), whose pixels are libjpeg-turbo's - the decoder OpenImageIO uses -
++// so the rest of the direct read is unchanged. A file the codec does not take (progressive,
++// arithmetic, CMYK, a damaged stream, no device) is read as before. CHESHIRE_GPU_JPEG_CHECK=1 reads
++// every such image through OpenImageIO as well, compares the 8-bit pixels and keeps OpenImageIO's
++// when they differ. CHESHIRE_GPU_JPEG_CODECS (default 4) bounds the decoders, and with them the
++// device memory, that the read threads share.
++bool cheshireGpuJpegEnabled()
++{
++    static const bool on = ::cheshire::env::flag("CHESHIRE_GPU_JPEG") && ::cheshire::jpeg::Codec::deviceAvailable();
++    return on;
++}
++
++bool cheshireGpuJpegCheck()
++{
++    static const bool on = ::cheshire::env::flag("CHESHIRE_GPU_JPEG_CHECK");
++    return on;
++}
++
++struct CheshireGpuJpegStats
++{
++    std::atomic<long long> device{0}, handedBack{0}, checked{0}, identical{0};
++    std::atomic<bool> announced{false};
++    ~CheshireGpuJpegStats()
++    {
++        if (device.load() || handedBack.load())
++            std::fprintf(stderr, "[cheshire] GPU JPEG: %lld decoded on the device (CheshireJPG), %lld read by OpenImageIO\n",
++                         device.load(), handedBack.load());
++        if (checked.load())
++            std::fprintf(stderr, "[cheshire] GPU JPEG check: %lld of %lld images identical to libjpeg-turbo\n", identical.load(), checked.load());
++    }
++} cheshireGpuJpegStats;
++
++// A decoder per concurrent read, up to the bound; a read beyond it waits for one. Created once and
++// never destroyed: at process exit the device runtime may already be gone.
++class CheshireGpuJpegPool
++{
++  public:
++    ::cheshire::jpeg::Codec* acquire()
++    {
++        std::unique_lock<std::mutex> lock(_mutex);
++        _changed.wait(lock, [&] { return !_idle.empty() || static_cast<int>(_all.size()) < _max; });
++        if (!_idle.empty())
++        {
++            ::cheshire::jpeg::Codec* c = _idle.back();
++            _idle.pop_back();
++            return c;
++        }
++        _all.emplace_back(new ::cheshire::jpeg::Codec());
++        return _all.back().get();
++    }
++    void release(::cheshire::jpeg::Codec* c)
++    {
++        {
++            std::lock_guard<std::mutex> lock(_mutex);
++            _idle.push_back(c);
++        }
++        _changed.notify_one();
++    }
++
++  private:
++    std::mutex _mutex;
++    std::condition_variable _changed;
++    std::vector<std::unique_ptr<::cheshire::jpeg::Codec>> _all;
++    std::vector<::cheshire::jpeg::Codec*> _idle;
++    const int _max = static_cast<int>(std::max(1LL, ::cheshire::env::integer("CHESHIRE_GPU_JPEG_CODECS", 4)));
++};
++
++bool cheshireGpuJpegDecode(const std::string& path, int width, int height, ::cheshire::jpeg::Image& out)
++{
++    std::ifstream f(path, std::ios::binary | std::ios::ate);
++    if (!f)
++        return false;
++    const std::streamsize size = f.tellg();
++    if (size <= 0)
++        return false;
++    std::vector<uint8_t> bytes(static_cast<std::size_t>(size));
++    f.seekg(0);
++    if (!f.read(reinterpret_cast<char*>(bytes.data()), size))
++        return false;
++    static CheshireGpuJpegPool* pool = new CheshireGpuJpegPool();
++    ::cheshire::jpeg::Codec* codec = pool->acquire();
++    const ::cheshire::jpeg::Status st = codec->decode(bytes.data(), bytes.size(), out);
++    pool->release(codec);
++    return st == ::cheshire::jpeg::Status::Ok && out.width == width && out.height == height && out.channels == 3 &&
++           out.pixels.size() == static_cast<std::size_t>(width) * height * 3;
++}
++
++// CHESHIRE_GPU_JPEG_CHECK: the same file through OpenImageIO, the 8-bit pixels compared
++bool cheshireGpuJpegSame(oiio::ImageBuf& inBuf, const ::cheshire::jpeg::Image& jpg)
++{
++    ++cheshireGpuJpegStats.checked;
++    if (!inBuf.read(0, 0, true, oiio::TypeDesc::UINT8) || !inBuf.localpixels() || inBuf.spec().nchannels != 3 ||
++        inBuf.spec().width != jpg.width || inBuf.spec().height != jpg.height)
++        return false;
++    const unsigned char* s = static_cast<const unsigned char*>(inBuf.localpixels());
++    const oiio::stride_t xs = inBuf.pixel_stride(), ys = inBuf.scanline_stride();
++    for (int y = 0; y < jpg.height; ++y)
++    {
++        const unsigned char* a = s + y * ys;
++        const uint8_t* b = jpg.pixels.data() + static_cast<std::size_t>(y) * jpg.width * 3;
++        for (int x = 0; x < jpg.width; ++x, a += xs, b += 3)
++            if (a[0] != b[0] || a[1] != b[1] || a[2] != b[2])
++                return false;
++    }
++    ++cheshireGpuJpegStats.identical;
++    return true;
++}
++#endif
++
 +template<typename T>
 +bool cheshireReadDirect(const std::string& path, oiio::TypeDesc format, int nchannels, Image<T>& image, const ImageReadOptions& imageReadOptions)
 +{
@@ -6214,11 +6364,42 @@ index 8c5e1d3..4b2f0a2 100644
 +            processor.reset();  // colorconvert copies
 +    }
 +
-+    if (!inBuf.read(0, 0, true, oiio::TypeDesc::UINT8) || !inBuf.localpixels() || inBuf.spec().format != oiio::TypeDesc::UINT8 || inBuf.spec().nchannels != 3)
-+        return false;
-+    const int width = inBuf.spec().width, height = inBuf.spec().height;
-+    const unsigned char* src = static_cast<const unsigned char*>(inBuf.localpixels());
-+    const oiio::stride_t xstride = inBuf.pixel_stride(), ystride = inBuf.scanline_stride();
++    // the 8-bit pixels: from the device decoder (step 6r) when it takes the file, else from OpenImageIO
++    int width = 0, height = 0;
++    const unsigned char* src = nullptr;
++    oiio::stride_t xstride = 0, ystride = 0;
++#if defined(CHESHIRE_HAVE_JPG)
++    ::cheshire::jpeg::Image jpg;
++    bool viaDevice = false;
++    if (fileFormat == "jpeg" && cheshireGpuJpegEnabled())
++    {
++        viaDevice = cheshireGpuJpegDecode(path, fileSpec.width, fileSpec.height, jpg);
++        if (viaDevice && cheshireGpuJpegCheck() && !cheshireGpuJpegSame(inBuf, jpg))
++            viaDevice = false;  // keep OpenImageIO's pixels
++        ++(viaDevice ? cheshireGpuJpegStats.device : cheshireGpuJpegStats.handedBack);
++        if (viaDevice && !cheshireGpuJpegStats.announced.exchange(true))
++            ALICEVISION_LOG_INFO("cheshire: JPEG photos decoded on the device (CheshireJPG, identical to libjpeg-turbo); "
++                                 "CHESHIRE_GPU_JPEG_CHECK=1 compares every one");
++    }
++    if (viaDevice)
++    {
++        width = jpg.width;
++        height = jpg.height;
++        src = jpg.pixels.data();
++        xstride = 3;
++        ystride = static_cast<oiio::stride_t>(width) * 3;
++    }
++    else
++#endif
++    {
++        if (!inBuf.read(0, 0, true, oiio::TypeDesc::UINT8) || !inBuf.localpixels() || inBuf.spec().format != oiio::TypeDesc::UINT8 || inBuf.spec().nchannels != 3)
++            return false;
++        width = inBuf.spec().width;
++        height = inBuf.spec().height;
++        src = static_cast<const unsigned char*>(inBuf.localpixels());
++        xstride = inBuf.pixel_stride();
++        ystride = inBuf.scanline_stride();
++    }
 +    const float* toFloat = cheshireUint8ToFloat();
 +    image.resize(width, height, false);
 +    float* dst = reinterpret_cast<float*>(image.data());
@@ -6303,7 +6484,7 @@ index 8c5e1d3..4b2f0a2 100644
  template<typename T>
  void readImage(const std::string& path, oiio::TypeDesc format, int nchannels, Image<T>& image, const ImageReadOptions& imageReadOptions)
  {
-@@ -612,6 +843,48 @@ void readImage(const std::string& path, oiio::TypeDesc format, int nchannels, Im
+@@ -612,6 +991,48 @@ void readImage(const std::string& path, oiio::TypeDesc format, int nchannels, Im
      if (nchannels == 2)
          ALICEVISION_THROW_ERROR("Load of 2 channels is not supported. Image file: '" + path + "'.")
  
