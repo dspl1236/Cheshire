@@ -82,9 +82,11 @@ SILENT_PORTS = None  # 0.3.2: no port is silent on either path any more
 SELF_CHECK_ENV = {
     "CHESHIRE_FILTER_CHECK": "1", "CHESHIRE_MAXFLOW_CHECK": "1", "CHESHIRE_GPU_VIS_CHECK": "1",
     "CHESHIRE_SEGMENT_CHECK": "1", "CHESHIRE_GPU_TEDGE_CHECK": "1", "CHESHIRE_GPU_VOTE_LOG": "1",
-    "CHESHIRE_MESHCLEAN_CHECK": "1",
+    "CHESHIRE_MESHCLEAN_CHECK": "1", "CHESHIRE_READ_DIRECT_CHECK": "1",
 }
 SELF_CHECK_VERDICTS = {
+    # The direct 8-bit read (6n) against OpenImageIO's path, every image, printed at process exit.
+    "PrepareDenseScene": [r"direct 8-bit read check: (\d+) of \1 images identical to OpenImageIO's path"],
     "Meshing": [
         r"filterByPixSize check: identical to single-threaded upstream on all",
         # The float flow totals of the two algorithms are never equal and are documented as junk

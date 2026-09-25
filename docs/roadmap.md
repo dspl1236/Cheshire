@@ -11,6 +11,15 @@ prefix are under `third_party/aliceVision/src/aliceVision/`.
 This release covers the CPU work left in the ported nodes and run-to-run determinism. It was
 0.3.5 in the earlier proposal and moved up at the user's request.
 
+**2026-09-24: no separate 0.3.4 release.** The CUDA packages could not be gated (the GTX 1080 Ti is
+out of bench-pc), so everything on main since v0.3.3 ships together with the new pieces after one
+full hardware round: RX 9070 (Windows), RX 6750 XT (house-pc, Linux), RX 5500 XT (bench-pc,
+Windows) and the 1080 Ti for both CUDA packages. Folded in so far: CheshireEXR and DepthMap's device
+decode (PR #2, off by default, `CHESHIRE_DEPTHMAP_GPU_EXR=1`), the direct JPEG read (6n) and the
+texturing read-ahead fix (6o). Still to fold in: CheshireJPG in PrepareDenseScene's read, fusion
+device votes, bundle-adjustment Jacobians on the device. Order of the round: mini6, then 41 views,
+then the large sets.
+
 The group is not thin. Several parts of the earlier plan have already shipped and are not
 repeated here:
 - dense point-cloud fusion, in part: the exact multi-threaded load and filter (4p, v0.2.12) and

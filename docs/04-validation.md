@@ -2107,3 +2107,38 @@ box, and the direct read moves four fewer full-size float images per view. On ho
 threads PrepareDenseScene was 133 s on the engine bay and 2,425 s at 884 views; the next Linux
 bundle measures it. What remains of the read is the decode and the transform itself, which is where
 CheshireJPG comes in. `CHESHIRE_READ_DIRECT=0` restores upstream's read.
+
+## Texturing's lone read-ahead back on the pool (step 6o, 2026-09-24)
+
+house-pc's 884-view False Door texturing (51 atlases, 3 atlas slots in the RX 6750 XT's VRAM, so 17
+passes over 835 cameras) took 14.7 minutes per pass on the s7 bundle and 32 on s9: 2.2x slower,
+with the process using about 1.3 of the i3's four threads and the disk nearly idle. Both runs had
+the same cache: at 6000x3376 an image is 231 MB, the host had 4.1-4.4 GB over the read-ahead's 4 GB
+margin, not enough for the 5 slots of the deeper read-ahead, so texturing kept upstream's 2 slots
+and read one camera ahead. What changed between s7 and s9 is step 6c: every image-cache read-ahead
+decodes on its own thread instead of through OpenEXR's pool. With eleven read-aheads in flight (the
+12-thread box after 6e) that is the faster arrangement; with one, it put texturing's only read on a
+single thread. Step 6e's comment assumed the default cache has about 20 slots; texturing sets 2.
+
+Step 6o counts the read-aheads in flight: one that starts while another is loading still decodes
+inline, a lone one keeps the pool. Concurrency only, no value can change. The engine bay never
+showed it: at 4032x2268 the images fit the deeper read-ahead.
+
+Fold-in gate, RX 9070 (2026-09-24): main with PR #2 (CheshireEXR, off by default), 6n and 6o,
+packaged flat (`package_windows.py`): the mini6 end-to-end matrix 12 of 12 at 7 of 7 ports, and the
+`verify` config now also runs `CHESHIRE_READ_DIRECT_CHECK=1` and requires its verdict (6 of 6 images
+identical to OpenImageIO's path).
+
+## The bundled HIP runtime and this box since 2026-09-22
+
+The first run of that gate failed every config: FeatureMatching crashed inside `amdhip64_7.dll` and
+DepthMap reported "no kernel image is available". `AMD_LOG_LEVEL=3` gave the runtime's own reason:
+"KMD failed to setup the trap handler", then "AMD HSA Code Object loading failed". v0.3.3's released
+binaries, laid out the same way, fail identically; the same code objects load under the driver's
+runtime. The ROCm 7.2.1 `amdhip64_7.dll` the packages bundle (HIP 7.2.53211) stopped working here
+when the box rebooted at 13:16 on 2026-09-22 with a pending Windows update (KB5129195); the 0.3.3
+flat test package had passed at 02:01 that day. The driver's own runtime in System32 (7.2.60201)
+works. Windows loads a DLL from the executable's folder first and System32 second, so the flat test
+packages used the bundled copy and the unified release zip, which keeps it in `gpu/rocm7.2` on PATH,
+has been using the driver's. For gates on this box a flat package goes without the two runtime DLLs;
+before the release, whether to bundle the 7.2.1 runtime at all is an open item.
