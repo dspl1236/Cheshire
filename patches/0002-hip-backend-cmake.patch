@@ -2933,10 +2933,10 @@ index 0000000..dbb6316
 +}  // namespace cheshire
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrPipeline.hpp b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrPipeline.hpp
 new file mode 100644
-index 0000000..4a41612
+index 0000000..83a26b3
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrPipeline.hpp
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,226 @@
 +// CheshireEXR: the decode sequence, written once over a backend (cheshiregpu/asyncBackend.hpp on
 +// the device, cheshiregpu/cpuBackend.hpp in the host check).
 +#pragma once
@@ -3146,9 +3146,13 @@ index 0000000..4a41612
 +        Slot& s = slots_[id];
 +        if (s.cap < bytes)
 +        {
++            // The file's size varies from image to image: an eighth more than asked for, so a
++            // slightly larger file does not free and allocate its buffer again (a Codec kept for a
++            // whole node's run would otherwise do that every few images).
++            const size_t want = id == kFile ? bytes + bytes / 8 : bytes;
 +            b_.release(s.p);
-+            s.p = b_.alloc(bytes);
-+            s.cap = s.p ? bytes : 0;
++            s.p = b_.alloc(want);
++            s.cap = s.p ? want : 0;
 +        }
 +        return static_cast<T*>(s.p);
 +    }

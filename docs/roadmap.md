@@ -311,7 +311,11 @@ L items can slide.
   fresh buffers and new decoders included (device- or runtime-wide, HIP 6.2 Windows gfx1012), and the
   in-node cost is the file reads and the wait for two decoders, not decoder setup. The loader now
   logs a device diagnosis (copy-engine vs kernel view of the uploaded file) and switches the device
-  decode off for the rest of a process that hits it; the check no longer uses device memory. The check mode's
+  decode off for the rest of a process that hits it; the check no longer uses device memory. Run 2
+  (host-side check): 132 of 132 identical, no spills, no `Corrupt`; the decode runs at standalone
+  speed for the first batches and 10x slower once the device cache fills the card (likely WDDM
+  placing reallocated buffers in system memory), so the decoders are now kept for the process,
+  allocated at the first batch, with per-batch free-VRAM logging. The check mode's
   heap corruption on Windows is fixed, and so is the GPU check's throughput mode, which counted
   failed decodes (an out-of-memory at 8 threads on the RX 5500 XT printed 25.5 images/s and PASS).
 - **CheshireJPG for the reads** (L). The GPU JPEG codec exists (docs/19): a baseline decoder and

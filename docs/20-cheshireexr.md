@@ -292,6 +292,25 @@ fails too, the loader now:
 - switches the device decode off for the rest of the process, so every later image goes straight to
   the host path instead of failing twice first.
 
+**bench-pc run 2 (6d0b48d, the check's reference on the host):** the check found 132 of 132
+images identical, with 0 spills and 0 `Corrupt`, so the old check was the trigger. Maps were
+byte-identical four ways. The summed per-image table corrected run 1's first look:
+
+- In batches 1-5 a decode takes 0.3-0.5 s, the standalone speed. From about batch 7 the decode and
+  the downscale both slow down, to 2-5 s and 0.4-1.7 s, as the device cache fills the card. The file
+  read stays at 0.2-2 s throughout, and a decoder's first decode costs about the same as the others.
+- The depth-map compute outside the loads is 36 s slower too, and the bridge counts no spills: most
+  likely WDDM placing the late allocations in system memory, where kernels run at PCIe speed. The
+  loader freed about 1.3 GB of decoder buffers after every batch and allocated it again at the next,
+  when the card was fuller.
+
+So the decoders are now kept for the process: sized from the bridge's budget at the first batch,
+allocated while the card is empty, and counted in the bridge's VRAM use from then on. The file
+buffer is allocated an eighth larger than asked for, so a slightly larger file doesn't reallocate
+it. If a later batch finds the camera images' reserve no longer fitting beside the decoders, it frees
+their buffers and uses the host path. With `CHESHIRE_EXR_PROFILE=1` each batch logs the device's
+free memory (`hipMemGetInfo`) and the bridge's VRAM use at its start and after its loads.
+
 **What the loader reports**, for the runs on bench-pc:
 
 - With `CHESHIRE_EXR_PROFILE=1` or `CHESHIRE_LOAD_PROFILE=1`, one line per image splits its time into

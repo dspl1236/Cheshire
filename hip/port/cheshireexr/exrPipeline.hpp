@@ -207,9 +207,13 @@ class Pipeline
         Slot& s = slots_[id];
         if (s.cap < bytes)
         {
+            // The file's size varies from image to image: an eighth more than asked for, so a
+            // slightly larger file does not free and allocate its buffer again (a Codec kept for a
+            // whole node's run would otherwise do that every few images).
+            const size_t want = id == kFile ? bytes + bytes / 8 : bytes;
             b_.release(s.p);
-            s.p = b_.alloc(bytes);
-            s.cap = s.p ? bytes : 0;
+            s.p = b_.alloc(want);
+            s.cap = s.p ? want : 0;
         }
         return static_cast<T*>(s.p);
     }

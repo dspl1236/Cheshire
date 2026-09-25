@@ -38,9 +38,11 @@ bool cheshireDeviceExrEnabled();
  * not 0), plus CheshireEXR's own scope (scanline RGBA, NONE/RLE/ZIPS/ZIP). For anything else load()
  * returns null and the caller takes the host path, which then reports what is wrong with the file.
  *
- * One loader per batch, made on the thread that owns the device. It sizes its decoders from the
- * memory bridge's VRAM budget and frees their buffers when destroyed, so none of this memory is held
- * while the batch's tiles run. load() may be called from several threads at once.
+ * One loader per batch, made on the thread that owns the device. The decoders are sized from the
+ * memory bridge's VRAM budget at the first batch and kept for the process, so their buffers are
+ * allocated once, while the card is empty, and count in the bridge's VRAM use from then on. A batch
+ * that finds the camera images' reserve no longer fitting beside them frees their buffers and uses
+ * the host path. load() may be called from several threads at once.
  *
  * CHESHIRE_DEPTHMAP_GPU_EXR_MIN_CHUNKS (default 1024): files with fewer chunks (ZIP, 16 scanlines per
  * chunk) stay on the host path, where they decode faster; 0 takes them all.
@@ -73,6 +75,10 @@ class CheshireDeviceExrLoader
     /// decodes that came back Corrupt, and of those, the ones a retry with fresh buffers decoded
     int deviceCorrupt() const { return _deviceCorrupt.load(); }
     int recovered() const { return _recovered.load(); }
+    /// batches given to the host path because the camera images' VRAM reserve no longer fit beside the decoders
+    int pressureBatches() const { return _pressureBatches; }
+
+    struct Pool;  // the decoders, kept for the process (cheshireDeviceExr.cu)
 
   private:
     cheshire::exr::Codec* acquire(bool& fresh);
@@ -82,10 +88,8 @@ class CheshireDeviceExrLoader
     int _downscale = 1;
     int _nbCodecs = 0;
     int _groupSize = 1;
-    std::mutex _mutex;
-    std::condition_variable _idleChanged;
-    std::vector<std::unique_ptr<cheshire::exr::Codec>> _codecs;
-    std::vector<cheshire::exr::Codec*> _idle;
+    int _pressureBatches = 0;
+    Pool* _pool = nullptr;
     std::atomic<int> _decoded{0}, _handedBack{0}, _fewChunks{0}, _checkMismatches{0}, _deviceCorrupt{0}, _recovered{0};
 };
 

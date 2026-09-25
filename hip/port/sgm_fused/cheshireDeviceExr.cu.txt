@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -123,11 +124,59 @@ bool cheshireDeviceExrEnabled()
     return on;
 }
 
+// The decoders, kept for the whole process (one pool per device). The loader used to create them at
+// each batch and free them at its end: about 1.3 GB freed and allocated again every batch. On bench-pc
+// (RX 5500 XT, 8 GB, Windows) the decode ran at its standalone speed in the first batches and ten
+// times slower once the device cache had filled the card, the downscale and the depth-map compute
+// slowing with it, with no spill the bridge could see: most likely WDDM placing the late allocations
+// in system memory (dspl1236/Cheshire#3). Allocated once, at the first batch, while the card is
+// empty, they stay where they were put, and they count in the bridge's VRAM use from then on.
+struct CheshireDeviceExrLoader::Pool
+{
+    bool sized = false;
+    int nbCodecs = 0;
+    int groupSize = 1;
+    std::mutex mutex;
+    std::condition_variable idleChanged;
+    std::vector<std::unique_ptr<cheshire::exr::Codec>> codecs;
+    std::vector<cheshire::exr::Codec*> idle;
+};
+
+namespace {
+
+// never destroyed: its streams and buffers go with the process, not with a static destructor that
+// could run after the runtime has shut down
+CheshireDeviceExrLoader::Pool& poolFor(int device)
+{
+    static std::mutex m;
+    static std::map<int, CheshireDeviceExrLoader::Pool*> pools;
+    std::lock_guard<std::mutex> lock(m);
+    CheshireDeviceExrLoader::Pool*& p = pools[device];
+    if (p == nullptr)
+        p = new CheshireDeviceExrLoader::Pool();
+    return *p;
+}
+
+std::string memoryState()
+{
+    std::size_t freeB = 0, totalB = 0;
+    (void)cudaMemGetInfo(&freeB, &totalB);
+    const cheshire::bridge::Budget b = cheshire::bridge::budget();
+    return "device free " + std::to_string(freeB >> 20) + " of " + std::to_string(totalB >> 20) + " MB; bridge VRAM " +
+           std::to_string(b.vramUsed >> 20) + " of " + std::to_string(b.vramCap >> 20) + " MB, image reserve left " +
+           std::to_string(b.imageReserveLeft >> 20) + " MB, " + std::to_string(b.hostUsed >> 20) + " MB spilled";
+}
+
+}  // namespace
+
 CheshireDeviceExrLoader::CheshireDeviceExrLoader(int maxWidth, int maxHeight, int downscale)
   : _downscale(std::max(1, downscale))
 {
     if (cudaGetDevice(&_device) != cudaSuccess || maxWidth <= 0 || maxHeight <= 0)
         return;
+    _pool = &poolFor(_device);
+    Pool& pool = *_pool;
+    std::lock_guard<std::mutex> lock(pool.mutex);
 
     // VRAM per decoder: the file (at most its unpacked size, half RGBA), the inflated chunks (the
     // same), and the float RGBA output. Per image waiting for the device cache: its downscaled
@@ -139,68 +188,84 @@ CheshireDeviceExrLoader::CheshireDeviceExrLoader(int maxWidth, int maxHeight, in
     const std::size_t perImage = std::size_t(maxWidth / _downscale + 64) * std::size_t(maxHeight / _downscale) * sizeof(CudaRGBA);
     const std::size_t margin = std::size_t(256) << 20;
     const cheshire::bridge::Budget b = cheshire::bridge::budget();
-    const std::size_t used = b.vramUsed + b.imageReserveLeft + margin;
-    const std::size_t avail = b.vramCap > used ? b.vramCap - used : 0;
 
-    int group = envInt("CHESHIRE_DEPTHMAP_GPU_EXR_GROUP", 8, 1);
-    int codecs = envInt("CHESHIRE_DEPTHMAP_GPU_EXR_CODECS", 2, 1);
-    while (codecs > 0 && std::size_t(codecs) * perCodec + std::size_t(group) * perImage > avail)
+    if (!pool.sized || pool.nbCodecs == 0)
     {
-        if (group > codecs)
-            --group;
-        else
-            --codecs;
+        // sized once, at the first batch, while the card holds no camera images yet
+        const std::size_t used = b.vramUsed + b.imageReserveLeft + margin;
+        const std::size_t avail = b.vramCap > used ? b.vramCap - used : 0;
+        int group = envInt("CHESHIRE_DEPTHMAP_GPU_EXR_GROUP", 8, 1);
+        int codecs = envInt("CHESHIRE_DEPTHMAP_GPU_EXR_CODECS", 2, 1);
+        while (codecs > 0 && std::size_t(codecs) * perCodec + std::size_t(group) * perImage > avail)
+        {
+            if (group > codecs)
+                --group;
+            else
+                --codecs;
+        }
+        pool.sized = true;
+        pool.nbCodecs = codecs;
+        pool.groupSize = std::max(1, group);
+        if (pool.nbCodecs == 0)
+        {
+            noteOnce("vram", "not enough VRAM for a decoder (" + std::to_string(avail >> 20) + " MB available, " +
+                     std::to_string((perCodec + perImage) >> 20) + " MB needed)");
+            return;
+        }
+        ALICEVISION_LOG_INFO("cheshire: depth map EXRs decoded on the device (CheshireEXR, exact): "
+                             << pool.nbCodecs << " decoders, kept for the process, groups of " << pool.groupSize << " images, "
+                             << (avail >> 20) << " MB of VRAM available at the first batch; CHESHIRE_DEPTHMAP_GPU_EXR=0 for the host path");
     }
-    _nbCodecs = codecs;
-    _groupSize = std::max(1, group);
-    if (_nbCodecs == 0)
+    else if (b.vramUsed + b.imageReserveLeft + margin > b.vramCap)
     {
-        noteOnce("vram", "not enough VRAM for a decoder (" + std::to_string(avail >> 20) + " MB available, " +
-                 std::to_string((perCodec + perImage) >> 20) + " MB needed)");
+        // The camera images' reserve no longer fits beside the decoders: free the decoders' buffers
+        // (every decoder is idle between batches) and give this batch to the host path, so the images
+        // never lose VRAM to a decoder. A later batch with room allocates them again.
+        for (auto& c : pool.codecs)
+            c->trim();
+        noteOnce("pressure", "the camera images' VRAM reserve no longer fits beside the decoders (" + memoryState() +
+                                 "); their buffers are freed for this batch (the first of its kind)");
+        ++_pressureBatches;
         return;
     }
-    static std::once_flag once;
-    std::call_once(once, [&] {
-        ALICEVISION_LOG_INFO("cheshire: depth map EXRs decoded on the device (CheshireEXR, exact): "
-                             << _nbCodecs << " decoders, groups of " << _groupSize << " images, " << (avail >> 20)
-                             << " MB of VRAM available at the first batch; CHESHIRE_DEPTHMAP_GPU_EXR=0 for the host path");
-    });
+    _nbCodecs = pool.nbCodecs;
+    _groupSize = pool.groupSize;
+    if (profileOn())
+        ALICEVISION_LOG_INFO("cheshire: GPU EXR memory at the batch's start: " << memoryState() << "; " << pool.codecs.size()
+                                                                                << " decoders kept");
 }
 
 CheshireDeviceExrLoader::~CheshireDeviceExrLoader()
 {
-    // the decoders' streams and buffers go with them: nothing of this is held while the tiles run
-    const auto t0 = std::chrono::steady_clock::now();
-    const std::size_t n = _codecs.size();
-    _idle.clear();
-    _codecs.clear();
-    if (profileOn() && n > 0)
-        ALICEVISION_LOG_INFO("cheshire: GPU EXR profile: " << n << " decoders freed in " << secondsSince(t0) << " s");
+    // the decoders stay in the pool (see Pool); nothing is freed here
+    if (profileOn() && _nbCodecs > 0)
+        ALICEVISION_LOG_INFO("cheshire: GPU EXR memory after the batch's loads: " << memoryState());
 }
 
 cheshire::exr::Codec* CheshireDeviceExrLoader::acquire(bool& fresh)
 {
     fresh = false;
-    std::unique_lock<std::mutex> lock(_mutex);
-    _idleChanged.wait(lock, [&] { return !_idle.empty() || int(_codecs.size()) < _nbCodecs; });
-    if (!_idle.empty())
+    Pool& pool = *_pool;
+    std::unique_lock<std::mutex> lock(pool.mutex);
+    pool.idleChanged.wait(lock, [&] { return !pool.idle.empty() || int(pool.codecs.size()) < _nbCodecs; });
+    if (!pool.idle.empty())
     {
-        cheshire::exr::Codec* c = _idle.back();
-        _idle.pop_back();
+        cheshire::exr::Codec* c = pool.idle.back();
+        pool.idle.pop_back();
         return c;
     }
-    _codecs.emplace_back(new cheshire::exr::Codec());
+    pool.codecs.emplace_back(new cheshire::exr::Codec());
     fresh = true;  // its stream, pinned staging and device buffers are created by its first decode
-    return _codecs.back().get();
+    return pool.codecs.back().get();
 }
 
 void CheshireDeviceExrLoader::release(cheshire::exr::Codec* codec)
 {
     {
-        std::lock_guard<std::mutex> lock(_mutex);
-        _idle.push_back(codec);
+        std::lock_guard<std::mutex> lock(_pool->mutex);
+        _pool->idle.push_back(codec);
     }
-    _idleChanged.notify_one();
+    _pool->idleChanged.notify_one();
 }
 
 std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> CheshireDeviceExrLoader::load(const std::string& path, int width, int height)

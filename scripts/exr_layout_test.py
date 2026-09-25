@@ -113,7 +113,7 @@ RE_DEVICE = re.compile(r"cheshire: depth map batch \d+/\d+: (\d+) decoded on the
 RE_EXR = re.compile(r"cheshire: EXR profile: .* open " + NUM + r" s, read " + NUM + r" s, thread cpu " + NUM + r" s")
 RE_GPU = re.compile(r"cheshire: GPU EXR profile: .* read " + NUM + r" s, wait " + NUM + r" s, decode " + NUM + r" s( \(new decoder\))?, downscale "
                     + NUM + r" s")
-RE_FREED = re.compile(r"cheshire: GPU EXR profile: \d+ decoders freed in " + NUM + r" s")
+RE_MEM = re.compile(r"cheshire: GPU EXR memory at the batch's start: device free (\d+) of (\d+) MB; bridge VRAM (\d+) of (\d+) MB")
 RE_CORRUPT = re.compile(r"CheshireEXR returned corrupt EXR for .*the host's parse of its chunk table: (.+?); .*a retry with fresh buffers: (.+)$")
 RE_DIAG = re.compile(r"CheshireEXR device diagnosis for (.*)$")
 RE_OFF = re.compile(r"the device decode is off for the rest of this process")
@@ -125,7 +125,7 @@ def parse_log(path: str) -> dict:
     s = {"decode": 0.0, "load": 0.0, "batches": 0, "on_device": 0, "host": 0, "few_chunks": 0,
          "exr_files": 0, "exr_read": 0.0, "exr_cpu": 0.0, "check_ok": 0, "check_bad": 0,
          "gpu_images": 0, "gpu_read": 0.0, "gpu_wait": 0.0, "gpu_decode": 0.0, "gpu_new_decoders": 0, "gpu_new_decode": 0.0,
-         "gpu_downscale": 0.0, "gpu_freed": 0.0, "corrupt": 0, "corrupt_host_ok": 0, "corrupt_recovered": 0,
+         "gpu_downscale": 0.0, "free_mb": [], "bridge_mb": [], "corrupt": 0, "corrupt_host_ok": 0, "corrupt_recovered": 0,
          "diagnoses": [], "device_off": False}
     for line in open(path, encoding="utf-8", errors="replace"):
         if m := RE_BATCH.search(line):
@@ -145,8 +145,9 @@ def parse_log(path: str) -> dict:
                 s["gpu_new_decoders"] += 1
                 s["gpu_new_decode"] += float(m.group(3))
             s["gpu_downscale"] += float(m.group(5))
-        elif m := RE_FREED.search(line):
-            s["gpu_freed"] += float(m.group(1))
+        elif m := RE_MEM.search(line):
+            s["free_mb"].append(int(m.group(1)))
+            s["bridge_mb"].append(int(m.group(3)))
         elif m := RE_DIAG.search(line):
             s["diagnoses"].append(m.group(1).strip())
         elif RE_OFF.search(line):
@@ -345,11 +346,12 @@ def summary(r: dict) -> str:
     gpu_runs = {tag: d for tag, d in list(r["depthmap"].items()) + [("zips-gpu-check", r.get("depthmap_check"))] if d and d.get("gpu_images")}
     if gpu_runs:
         L += ["", "Device path, per image (sums over the chunk; 'first decode' is a new decoder's first, which creates its buffers):", "",
-              "| run | images | read | wait for a decoder | decode | of which first decodes | downscale | decoders freed |",
+              "| run | images | read | wait for a decoder | decode | of which first decodes | downscale | device free at batch starts: first, min, last |",
               "|---|---|---|---|---|---|---|---|"]
         for tag, d in gpu_runs.items():
             L.append(f"| {tag} | {d['gpu_images']} | {fmt(d['gpu_read'])} | {fmt(d['gpu_wait'])} | {fmt(d['gpu_decode'])} | "
-                     f"{d['gpu_new_decoders']}, {fmt(d['gpu_new_decode'])} | {fmt(d['gpu_downscale'])} | {fmt(d['gpu_freed'])} |")
+                     f"{d['gpu_new_decoders']}, {fmt(d['gpu_new_decode'])} | {fmt(d['gpu_downscale'])} | "
+                     + (f"{d['free_mb'][0]}, {min(d['free_mb'])}, {d['free_mb'][-1]} MB |" if d.get("free_mb") else "- |"))
     for tag, d in list(r["depthmap"].items()) + [("zips-gpu-check", r.get("depthmap_check"))]:
         if d and d.get("corrupt"):
             L.append(f"\n**{tag}: {d['corrupt']} decodes came back corrupt**: the host parsed {d['corrupt_host_ok']} of those files "
