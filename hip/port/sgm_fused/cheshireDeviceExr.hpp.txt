@@ -70,9 +70,12 @@ class CheshireDeviceExrLoader
     /// of those handed back, the files with fewer chunks than CHESHIRE_DEPTHMAP_GPU_EXR_MIN_CHUNKS
     int fewChunks() const { return _fewChunks.load(); }
     int checkMismatches() const { return _checkMismatches.load(); }
+    /// decodes that came back Corrupt, and of those, the ones a retry with fresh buffers decoded
+    int deviceCorrupt() const { return _deviceCorrupt.load(); }
+    int recovered() const { return _recovered.load(); }
 
   private:
-    cheshire::exr::Codec* acquire();
+    cheshire::exr::Codec* acquire(bool& fresh);
     void release(cheshire::exr::Codec* codec);
 
     int _device = 0;
@@ -83,7 +86,7 @@ class CheshireDeviceExrLoader
     std::condition_variable _idleChanged;
     std::vector<std::unique_ptr<cheshire::exr::Codec>> _codecs;
     std::vector<cheshire::exr::Codec*> _idle;
-    std::atomic<int> _decoded{0}, _handedBack{0}, _fewChunks{0}, _checkMismatches{0};
+    std::atomic<int> _decoded{0}, _handedBack{0}, _fewChunks{0}, _checkMismatches{0}, _deviceCorrupt{0}, _recovered{0};
 };
 
 }  // namespace depthMap

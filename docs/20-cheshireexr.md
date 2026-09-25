@@ -220,9 +220,67 @@ about 97 minutes there.
   348 and 329 s), so the host paths are level. After steps 5t-5z, loads are about 3 % of this node
   on a 12-thread box, which leaves a decoder little to win.
 
-On this box it is a wash: exact, harmless while off, a small gain for 6.3 % more disk. It stays
-unmerged until the same test runs on house-pc's 4-thread i3, where the host decode is a larger share
-of the node and the CPU it frees is worth more.
+On this box it is a wash: exact, harmless while off, a small gain for 6.3 % more disk.
+
+**bench-pc, FX-8120 (8 threads) and RX 5500 XT 8 GB, 2026-09-25** (the same test and chunk, one run
+each, main at a152325). Exact again: 96 maps byte-identical four ways, and the chunk threshold kept
+ZIP off the device. **Slower, though.** The node took 982 s against 817 s (+20 %). The chunk's decode
+took 228 s on the device against 36 s on the CPU, and the process CPU rose from 962 to 1250 s.
+Writing ZIPS cost the same (799 against 803 s).
+
+**house-pc, i3-4330 (2 cores, 4 threads) and RX 6750 XT 12 GB** (an engine bay A/B through the
+dashboard, 107 photographs, bundle b033s10, times from Meshroom's status files over DepthMap's 3
+chunks):
+
+| | ZIP, host decode | ZIPS, device decode |
+|---|---|---|
+| PrepareDenseScene | 95.6 s | 86.7 s |
+| DepthMap | 331.4 s | 303.3 s (-8.5 %) |
+| decode, summed over 27 batches | 31.1 s | 17.6 s |
+| loads, summed | 40.2 s | 19.2 s |
+| on the device / host | 0 / all | 169 / 0 |
+
+The two jobs ran their own SfM, which is not deterministic by default, so their maps cannot be
+compared byte for byte; each produced 107 depth maps.
+
+**Across the three boxes, DepthMap with the device path against the host path:** +1.5 % on the
+RX 9070 box, +20 % on bench-pc, -8.5 % on house-pc. It helps where the CPU is weak and the card is
+strong, and hurts on an 8-thread CPU with a small RDNA1 card. It stays an off-by-default experiment,
+with no ZIPS output option.
+
+**Two things on bench-pc are not understood yet:**
+
+- **In the node, the device decode is 4 to 6 times slower than on its own.** Standalone, a
+  6000x3376 ZIPS file decodes to the device in 308 ms on the RX 5500 XT, so 132 images would take
+  about 41 s one after another. In the node they took 182 to 228 s, with two decoders, and
+  `CHESHIRE_BRIDGE_LOG=1` showed no spills. The loader now reports where each image's time goes (see
+  below).
+- **With the check on, good files came back `Corrupt`.** In two runs with
+  `CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1`, the same batch (18 of 24) returned `corrupt EXR` for a file
+  that had decoded, and been checked identical, earlier in the run. The two runs named different
+  files. Both files decode bit for bit in `cheshireexr_gpu_check` and in the runs without the check.
+  Every image from then on went through the host path, so 89 were decoded on the device and checked
+  (all identical) and 43 were read by the host. With the check on, the bridge spilled 72 times: the
+  check's full-resolution upload in 6d's host downscale is 309 MB per image, and several threads
+  check at once. The `corrupt` line came right after one of those spills, near the VRAM cap. An
+  allocation failure returns `DeviceError`, not `Corrupt`. `Corrupt` comes either from the host's
+  parse of the chunk table or from the inflate kernel's bad-data flag, so the host bytes, the device
+  copy of the file or the scratch were wrong while that decode ran. The output stays exact, because
+  the host path is. But a good file is reported corrupt.
+
+**What the loader reports now**, for the next run on bench-pc:
+
+- With `CHESHIRE_EXR_PROFILE=1` or `CHESHIRE_LOAD_PROFILE=1`, one line per image splits its time into
+  reading the file, waiting for a decoder, the decode (marked when it is a new decoder's first,
+  which creates the decoder's stream, pinned staging and device buffers) and the downscale. A line
+  per batch gives the time taken to free the decoders.
+- Every `Corrupt` is logged as a warning, not just the first, with the host's parse of the same
+  bytes, the bridge's VRAM use and spilled bytes at that moment, and the result of one more decode
+  with fresh device buffers. If the retry decodes cleanly (every zlib check passes), its result is
+  used, and the batch log counts both. A clean host parse with a clean retry points at the device
+  side; a failed host parse points at the host's copy of the file.
+- `scripts/exr_layout_test.py` sums the per-image lines into a device-path table and reports the
+  `Corrupt` count, the host parses and the retries.
 
 ## Build and run
 
@@ -246,7 +304,11 @@ per thread; any failed decode fails the run.
 
 ## Next
 
-1. **The deciding test on house-pc** (done on the RX 9070 box, above: a wash). One False Door chunk
+1. **bench-pc again**, with the loader's new reporting: `exr_layout_test.py --check` with
+   `CHESHIRE_EXR_PROFILE=1` in the config's environment, to find where the in-node decode time goes
+   and which side the `Corrupt` comes from.
+2. **Reference: the deciding test** (run on the RX 9070 box and bench-pc; house-pc ran an A/B through
+   its dashboard instead, all above). One False Door chunk
    with identical pixels, once as ZIP level 1 through the host path and once as ZIPS through the
    device path, including what ZIPS costs PrepareDenseScene to write and, if the DepthMap numbers
    justify its 97 minutes, one Texturing pass per layout. If ZIPS with the GPU wins overall there,
@@ -258,8 +320,8 @@ per thread; any failed decode fails the run.
    layout. It writes `exr_layout_test.md` with wall and process CPU times and the load, decode and
    EXR-read totals from the logs. The config holds the three command lines from the Meshroom cache
    (see the script's docstring).
-2. **`cheshireexr_gpu_check` on house-pc's RX 6750 XT**, and the house-pc load profiles
+3. **`cheshireexr_gpu_check` on house-pc's RX 6750 XT**, and the house-pc load profiles
    (`CHESHIRE_LOAD_PROFILE=1`, `CHESHIRE_EXR_PROFILE=1`).
-3. **Then** put it in front of `cheshireReadExr` behind a switch, and hold the result to the
+4. **Then** put it in front of `cheshireReadExr` behind a switch, and hold the result to the
    existing gates: DepthMap's chunks byte-identical, Texturing's output within its run-to-run band.
    The texturing node uploads its images too and could take the step 6m route.

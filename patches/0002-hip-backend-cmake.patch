@@ -317,7 +317,7 @@ index 25b80d4..84dba54 100644
          aliceVision_gpu
          aliceVision_sfmData
 diff --git a/src/aliceVision/depthMap/DepthMapEstimator.cpp b/src/aliceVision/depthMap/DepthMapEstimator.cpp
-index 187e8f5..e908b79 100644
+index 187e8f5..4d7d6e7 100644
 --- a/src/aliceVision/depthMap/DepthMapEstimator.cpp
 +++ b/src/aliceVision/depthMap/DepthMapEstimator.cpp
 @@ -5,6 +5,10 @@
@@ -436,7 +436,7 @@ index 187e8f5..e908b79 100644
  
      // build tile list order by R camera
      std::vector<Tile> tiles;
-@@ -331,6 +412,112 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -331,6 +412,114 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          const int firstTileIndex = b * nbTilesPerBatch;
          const int lastTileIndex = std::min((b + 1) * nbTilesPerBatch, static_cast<int>(tiles.size()));
  
@@ -542,6 +542,8 @@ index 187e8f5..e908b79 100644
 +            if (exrLoader)
 +                ALICEVISION_LOG_INFO("cheshire: depth map batch " << (b + 1) << "/" << nbBatches << ": " << exrLoader->decoded()
 +                                                                  << " decoded on the device (CheshireEXR), " << exrLoader->handedBack() << " by the host path (" << exrLoader->fewChunks() << " with too few chunks)"
++                                                                  << (exrLoader->deviceCorrupt() ? ", " + std::to_string(exrLoader->deviceCorrupt()) + " came back corrupt ("
++                                                                                                      + std::to_string(exrLoader->recovered()) + " decoded by a retry)" : std::string())
 +                                                                  << (exrLoader->checkMismatches() ? ", CHECK MISMATCHES: " + std::to_string(exrLoader->checkMismatches()) : std::string()));
 +#endif
 +        }
@@ -549,7 +551,7 @@ index 187e8f5..e908b79 100644
          // load tile R and corresponding T cameras in device cache
          for (int i = firstTileIndex; i < lastTileIndex; ++i)
          {
-@@ -375,7 +562,10 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -375,7 +564,10 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          for (int i = firstTileIndex; i < lastTileIndex; ++i)
          {
              Tile& tile = tiles.at(i);
@@ -561,7 +563,7 @@ index 187e8f5..e908b79 100644
              const int streamIndex = tile.id % nbStreams;
  
              // do not compute empty ROI
-@@ -446,18 +636,22 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -446,18 +638,22 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          // wait for tiles batch computation
          cudaDeviceSynchronize();
  

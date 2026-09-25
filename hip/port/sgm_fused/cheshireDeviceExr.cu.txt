@@ -9,11 +9,13 @@
 #include "cheshireDownscale.hpp"
 
 #include <aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp>
+#include <aliceVision/depthMap/cuda/hip/cheshireexr/exrHost.hpp>
 #include <aliceVision/image/cheshireExr.hpp>
 #include <aliceVision/system/Logger.hpp>
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -37,6 +39,18 @@ bool envOn(const char* name)
 {
     const char* v = std::getenv(name);
     return v != nullptr && std::string(v) != "0";
+}
+
+// CHESHIRE_EXR_PROFILE=1 or CHESHIRE_LOAD_PROFILE=1: one line per image with where its load went
+bool profileOn()
+{
+    static const bool on = envOn("CHESHIRE_EXR_PROFILE") || envOn("CHESHIRE_LOAD_PROFILE");
+    return on;
+}
+
+double secondsSince(std::chrono::steady_clock::time_point t0)
+{
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 }
 
 // the direct EXR reader's own conditions (image/cheshireExr.cpp): the host path this replaces only
@@ -150,12 +164,17 @@ CheshireDeviceExrLoader::CheshireDeviceExrLoader(int maxWidth, int maxHeight, in
 CheshireDeviceExrLoader::~CheshireDeviceExrLoader()
 {
     // the decoders' streams and buffers go with them: nothing of this is held while the tiles run
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::size_t n = _codecs.size();
     _idle.clear();
     _codecs.clear();
+    if (profileOn() && n > 0)
+        ALICEVISION_LOG_INFO("cheshire: GPU EXR profile: " << n << " decoders freed in " << secondsSince(t0) << " s");
 }
 
-cheshire::exr::Codec* CheshireDeviceExrLoader::acquire()
+cheshire::exr::Codec* CheshireDeviceExrLoader::acquire(bool& fresh)
 {
+    fresh = false;
     std::unique_lock<std::mutex> lock(_mutex);
     _idleChanged.wait(lock, [&] { return !_idle.empty() || int(_codecs.size()) < _nbCodecs; });
     if (!_idle.empty())
@@ -165,6 +184,7 @@ cheshire::exr::Codec* CheshireDeviceExrLoader::acquire()
         return c;
     }
     _codecs.emplace_back(new cheshire::exr::Codec());
+    fresh = true;  // its stream, pinned staging and device buffers are created by its first decode
     return _codecs.back().get();
 }
 
@@ -189,6 +209,7 @@ std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> CheshireDeviceExrLoader::l
     try
     {
         CHECK_CUDA_RETURN_ERROR(cudaSetDevice(_device));  // an OpenMP worker, not the thread that owns the device
+        const auto tRead = std::chrono::steady_clock::now();
 
         // The header first, from the file's first 64 KB (AliceVision's metadata makes a header a few KB;
         // a longer one is parsed from the whole file). A file handed back costs this read, not 73 MB.
@@ -235,9 +256,35 @@ std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> CheshireDeviceExrLoader::l
             return nullptr;
         }
 
-        codec = acquire();
+        const double readSeconds = secondsSince(tRead);
+
+        const auto tWait = std::chrono::steady_clock::now();
+        bool fresh = false;
+        codec = acquire(fresh);
+        const double waitSeconds = secondsSince(tWait);
+        const auto tDecode = std::chrono::steady_clock::now();
         DeviceImage img;
-        const Status st = codec->decodeToDevice(file.data(), file.size(), 4, img);
+        Status st = codec->decodeToDevice(file.data(), file.size(), 4, img);
+        if (st == Status::Corrupt)
+        {
+            // A file that decodes everywhere else came back Corrupt on bench-pc (RX 5500 XT, with
+            // CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1, VRAM at the bridge's cap; dspl1236/Cheshire#2).
+            // Corrupt means the host's parse of the chunk table failed, or the inflate kernel flagged
+            // a chunk. Say which: parse the same bytes on the host, then decode once more with fresh
+            // device buffers. Every occurrence is logged, with the VRAM state, and a retry that
+            // decodes cleanly (every zlib check passed) is used.
+            ++_deviceCorrupt;
+            cheshire::exr::Plan plan;
+            const Status hostParse = cheshire::exr::makePlan(file.data(), file.size(), 4, plan);
+            const cheshire::bridge::Budget b = cheshire::bridge::budget();
+            codec->trim();
+            st = codec->decodeToDevice(file.data(), file.size(), 4, img);
+            if (st == Status::Ok)
+                ++_recovered;
+            ALICEVISION_LOG_WARNING("cheshire: CheshireEXR returned corrupt EXR for " << path << "; the host's parse of its chunk table: "
+                                    << statusName(hostParse) << "; VRAM " << (b.vramUsed >> 20) << " of " << (b.vramCap >> 20)
+                                    << " MB used, " << (b.hostUsed >> 20) << " MB spilled; a retry with fresh buffers: " << statusName(st));
+        }
         if (st != Status::Ok)
         {
             release(codec);
@@ -246,13 +293,19 @@ std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> CheshireDeviceExrLoader::l
             ++_handedBack;
             return nullptr;
         }
+        const double decodeSeconds = secondsSince(tDecode);
 
         // the host path's CudaRGBA image: DeviceCache::addMipmapImage after step 6d's downscale
+        const auto tDown = std::chrono::steady_clock::now();
         auto out = std::make_shared<CudaDeviceMemoryPitched<CudaRGBA, 2>>(CudaSize<2>(width / _downscale, height / _downscale));
         cuda_cheshireDownscaleDeviceToCudaRGBA(reinterpret_cast<const float4*>(img.data), img.rowBytes, width, height, *out,
                                                static_cast<cudaStream_t>(codec->stream()));
         release(codec);
         codec = nullptr;
+        if (profileOn())
+            ALICEVISION_LOG_INFO("cheshire: GPU EXR profile: " << path.substr(path.find_last_of("/\\") + 1) << " read " << readSeconds
+                                 << " s, wait " << waitSeconds << " s, decode " << decodeSeconds << " s" << (fresh ? " (new decoder)" : "")
+                                 << ", downscale " << secondsSince(tDown) << " s");
 
         // CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1: the host path for the same file (OpenEXR on the CPU through
         // the direct reader, which is what readImage uses for every file this loader takes, then step
