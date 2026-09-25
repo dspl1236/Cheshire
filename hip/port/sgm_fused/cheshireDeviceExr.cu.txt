@@ -109,6 +109,12 @@ void noteOnce(const std::string& kind, const std::string& what)
     ALICEVISION_LOG_INFO("cheshire: depth map GPU EXR decode: " << what << "; the host path reads these images");
 }
 
+// Set once a decode fails on the device for a file the host parses, on fresh buffers too. On bench-pc
+// (RX 5500 XT, HIP 6.2, Windows) that state was process-wide: after the first such failure every
+// later device decode in the process failed, new decoders included (dspl1236/Cheshire#3). From then
+// on every image goes through the host path, which is exact, instead of failing twice first.
+std::atomic<bool> gDeviceDecodeOff{false};
+
 }  // namespace
 
 bool cheshireDeviceExrEnabled()
@@ -200,7 +206,7 @@ void CheshireDeviceExrLoader::release(cheshire::exr::Codec* codec)
 std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> CheshireDeviceExrLoader::load(const std::string& path, int width, int height)
 {
     using namespace cheshire::exr;
-    if (!active() || !directExrPath(path))
+    if (!active() || !directExrPath(path) || gDeviceDecodeOff.load())
     {
         ++_handedBack;
         return nullptr;
@@ -284,6 +290,21 @@ std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> CheshireDeviceExrLoader::l
             ALICEVISION_LOG_WARNING("cheshire: CheshireEXR returned corrupt EXR for " << path << "; the host's parse of its chunk table: "
                                     << statusName(hostParse) << "; VRAM " << (b.vramUsed >> 20) << " of " << (b.vramCap >> 20)
                                     << " MB used, " << (b.hostUsed >> 20) << " MB spilled; a retry with fresh buffers: " << statusName(st));
+            if (st == Status::Corrupt && hostParse == Status::Ok)
+            {
+                // Device-side. Which side of the device: the file as the copy engine wrote it (a
+                // plain download) against the file as a kernel reads it (a kernel copy, then a
+                // download), and the chunk table, against the host bytes.
+                const cheshire::exr::Diagnosis dg = codec->diagnose(file.data(), file.size(), 4);
+                ALICEVISION_LOG_WARNING("cheshire: CheshireEXR device diagnosis for " << path << ": "
+                                        << (dg.ran ? "" : "INCOMPLETE; ") << dg.bytes << " bytes; copy-engine download: "
+                                        << dg.copyMismatches << " bytes differ (first at " << dg.firstCopyMismatch << "); read by a kernel: "
+                                        << dg.shaderMismatches << " differ (first at " << dg.firstShaderMismatch << "); chunk table "
+                                        << (dg.chunkTableMatches ? "matches" : "DIFFERS") << "; last runtime error: " << dg.runtimeError);
+                if (!gDeviceDecodeOff.exchange(true))
+                    ALICEVISION_LOG_WARNING("cheshire: CheshireEXR is failing on this device for files the host reads; the device "
+                                            "decode is off for the rest of this process, and every image goes through the host path");
+            }
         }
         if (st != Status::Ok)
         {

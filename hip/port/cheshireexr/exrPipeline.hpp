@@ -7,6 +7,7 @@
 #include "exrStages.hpp"
 
 #include <cstring>
+#include <vector>
 
 namespace cheshire {
 namespace exr {
@@ -81,6 +82,43 @@ class Pipeline
             return Status::InvalidArgument;
         downloadPieces(dst, img.data, img.rowBytes * (size_t)img.height);
         return b_.ok() ? Status::Ok : Status::DeviceError;
+    }
+
+    // Codec::diagnose: the device copy of file (this pipeline's last upload) against the host bytes,
+    // by download and through a kernel, and the chunk table.
+    Diagnosis diagnose(const uint8_t* file, size_t size, int nchannels)
+    {
+        Diagnosis d;
+        d.bytes = size;
+        Plan p;
+        const Slot& fs = slots_[kFile];
+        const Slot& cs = slots_[kChunks];
+        if (!file || !fs.p || fs.cap < size || makePlan(file, size, nchannels, p) != Status::Ok || !b_.begin())
+            return d;
+        std::vector<uint8_t> back(size);
+        downloadPieces(back.data(), fs.p, size);
+        for (size_t i = 0; i < size; ++i)
+            if (back[i] != file[i] && d.copyMismatches++ == 0)
+                d.firstCopyMismatch = i;
+        void* tmp = b_.alloc(size);
+        if (tmp)
+        {
+            b_.forEach(size, CopyBytes{static_cast<const uint8_t*>(fs.p), static_cast<uint8_t*>(tmp)});
+            downloadPieces(back.data(), tmp, size);
+            b_.release(tmp);
+            for (size_t i = 0; i < size; ++i)
+                if (back[i] != file[i] && d.shaderMismatches++ == 0)
+                    d.firstShaderMismatch = i;
+        }
+        const size_t tableBytes = p.chunks.size() * sizeof(ChunkInfo);
+        if (cs.p && cs.cap >= tableBytes)
+        {
+            std::vector<uint8_t> table(tableBytes);
+            b_.download(table.data(), cs.p, tableBytes);
+            d.chunkTableMatches = std::memcmp(table.data(), p.chunks.data(), tableBytes) == 0;
+        }
+        d.ran = b_.ok() && tmp != nullptr;
+        return d;
     }
 
     // Frees the device buffers (they are kept between decodes and only grow otherwise).

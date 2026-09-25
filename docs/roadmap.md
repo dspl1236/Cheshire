@@ -306,9 +306,12 @@ L items can slide.
   the RX 9070 box, +20 % on bench-pc (FX-8120 + RX 5500 XT), -8.5 % on house-pc (i3-4330 + RX 6750
   XT, an engine bay A/B), all exact. It stays an off-by-default experiment with no ZIPS output
   option. Open on bench-pc: the in-node decode is 4-6x slower than standalone with no spills, and
-  with the check on a good file came back `Corrupt` near the VRAM cap. The loader now logs per-image
-  timings and every `Corrupt`, with the host's parse of the same bytes and one retry on fresh
-  buffers, for the next run there. The check mode's
+  with the check on a good file came back `Corrupt` near the VRAM cap. With per-image timings and a
+  log line per `Corrupt`: after the check's first spill every device decode in the process failed,
+  fresh buffers and new decoders included (device- or runtime-wide, HIP 6.2 Windows gfx1012), and the
+  in-node cost is the file reads and the wait for two decoders, not decoder setup. The loader now
+  logs a device diagnosis (copy-engine vs kernel view of the uploaded file) and switches the device
+  decode off for the rest of a process that hits it; the check no longer uses device memory. The check mode's
   heap corruption on Windows is fixed, and so is the GPU check's throughput mode, which counted
   failed decodes (an out-of-memory at 8 threads on the RX 5500 XT printed 25.5 images/s and PASS).
 - **CheshireJPG for the reads** (L). The GPU JPEG codec exists (docs/19): a baseline decoder and

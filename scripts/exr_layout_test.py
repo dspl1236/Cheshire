@@ -115,6 +115,8 @@ RE_GPU = re.compile(r"cheshire: GPU EXR profile: .* read " + NUM + r" s, wait " 
                     + NUM + r" s")
 RE_FREED = re.compile(r"cheshire: GPU EXR profile: \d+ decoders freed in " + NUM + r" s")
 RE_CORRUPT = re.compile(r"CheshireEXR returned corrupt EXR for .*the host's parse of its chunk table: (.+?); .*a retry with fresh buffers: (.+)$")
+RE_DIAG = re.compile(r"CheshireEXR device diagnosis for (.*)$")
+RE_OFF = re.compile(r"the device decode is off for the rest of this process")
 RE_CHECK_BAD = re.compile(r"CHESHIRE_DEPTHMAP_GPU_EXR_CHECK: .*(texels differ|did not read)")
 RE_CHECK_OK = re.compile(r"CHESHIRE_DEPTHMAP_GPU_EXR_CHECK: .*identical to the host path")
 
@@ -123,7 +125,8 @@ def parse_log(path: str) -> dict:
     s = {"decode": 0.0, "load": 0.0, "batches": 0, "on_device": 0, "host": 0, "few_chunks": 0,
          "exr_files": 0, "exr_read": 0.0, "exr_cpu": 0.0, "check_ok": 0, "check_bad": 0,
          "gpu_images": 0, "gpu_read": 0.0, "gpu_wait": 0.0, "gpu_decode": 0.0, "gpu_new_decoders": 0, "gpu_new_decode": 0.0,
-         "gpu_downscale": 0.0, "gpu_freed": 0.0, "corrupt": 0, "corrupt_host_ok": 0, "corrupt_recovered": 0}
+         "gpu_downscale": 0.0, "gpu_freed": 0.0, "corrupt": 0, "corrupt_host_ok": 0, "corrupt_recovered": 0,
+         "diagnoses": [], "device_off": False}
     for line in open(path, encoding="utf-8", errors="replace"):
         if m := RE_BATCH.search(line):
             s["decode"] += float(m.group(1))
@@ -144,6 +147,10 @@ def parse_log(path: str) -> dict:
             s["gpu_downscale"] += float(m.group(5))
         elif m := RE_FREED.search(line):
             s["gpu_freed"] += float(m.group(1))
+        elif m := RE_DIAG.search(line):
+            s["diagnoses"].append(m.group(1).strip())
+        elif RE_OFF.search(line):
+            s["device_off"] = True
         elif m := RE_CORRUPT.search(line):
             s["corrupt"] += 1
             s["corrupt_host_ok"] += m.group(1).strip() == "ok"
@@ -346,7 +353,10 @@ def summary(r: dict) -> str:
     for tag, d in list(r["depthmap"].items()) + [("zips-gpu-check", r.get("depthmap_check"))]:
         if d and d.get("corrupt"):
             L.append(f"\n**{tag}: {d['corrupt']} decodes came back corrupt**: the host parsed {d['corrupt_host_ok']} of those files "
-                     f"cleanly, and a retry with fresh buffers decoded {d['corrupt_recovered']}.")
+                     f"cleanly, and a retry with fresh buffers decoded {d['corrupt_recovered']}."
+                     + (" The device decode was then switched off for the rest of the run." if d.get("device_off") else ""))
+            for dg in d.get("diagnoses", []):
+                L.append(f"- device diagnosis: {dg}")
     if "depthmap_check" in r:
         c = r["depthmap_check"]
         L.append(f"\nCHESHIRE_DEPTHMAP_GPU_EXR_CHECK: {c['check_ok']} images identical to the host path, {c['check_bad']} not.")

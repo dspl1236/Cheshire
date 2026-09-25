@@ -77,6 +77,16 @@ struct InflateChunks
     }
 };
 
+// Diagnostics only (Codec::diagnose): copy bytes through the shader path, so a download of the copy
+// shows what a kernel reads, next to a plain download that shows what the copy engine wrote.
+struct CopyBytes
+{
+    const uint8_t* src;
+    uint8_t* dst;
+
+    CHESHIRE_EXR_HD void operator()(size_t i) const { dst[i] = src[i]; }
+};
+
 struct ConvertPixels
 {
     ExrGeom g;

@@ -2273,10 +2273,10 @@ index 0000000..45ddbff
 +}  // namespace cheshire
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp
 new file mode 100644
-index 0000000..13d6de2
+index 0000000..7bf1a0e
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,176 @@
 +// CheshireEXR: an OpenEXR scanline decoder that runs on the GPU, with output identical to
 +// OpenEXR's.
 +//
@@ -2389,6 +2389,19 @@ index 0000000..13d6de2
 +    size_t rowBytes = 0;
 +};
 +
++// What Codec::diagnose found about the device copy of the last file this Codec decoded.
++struct Diagnosis
++{
++    bool ran = false;               // false: no file on the device, or a runtime call failed
++    size_t bytes = 0;               // the file's size
++    size_t copyMismatches = 0;      // bytes that differ in a plain download of the device copy
++    size_t firstCopyMismatch = 0;
++    size_t shaderMismatches = 0;    // bytes that differ after a kernel copied them to a new buffer
++    size_t firstShaderMismatch = 0;
++    bool chunkTableMatches = false;  // the chunk table on the device equals the host's
++    std::string runtimeError;       // the runtime's last error, as the runtime names it
++};
++
 +// One codec instance owns its stream and device buffers and reuses them. Not thread-safe; use one
 +// per thread.
 +class Codec
@@ -2424,6 +2437,11 @@ index 0000000..13d6de2
 +    // with the Codec's own. Null before the first decode.
 +    void* stream() const;
 +
++    // For a decode that came back Corrupt although the host parses the file: compares the device's
++    // copy of file (the last one this Codec uploaded, decoded with nchannels) with the host bytes, once as the copy engine
++    // wrote it and once as a kernel reads it, and the chunk table likewise. Slow; diagnostics only.
++    Diagnosis diagnose(const uint8_t* file, size_t size, int nchannels);
++
 +    // Frees the device buffers, which are otherwise kept for the next decode (a 6000x3376 RGBA file
 +    // holds about 0.6 GB: the file, the inflated chunks and the floats).
 +    void trim();
@@ -2437,10 +2455,10 @@ index 0000000..13d6de2
 +}  // namespace cheshire
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrGPU.cu b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrGPU.cu
 new file mode 100644
-index 0000000..07ff2bc
+index 0000000..bbae886
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrGPU.cu
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,100 @@
 +// CheshireEXR: the device backend and the public Codec. CUDA dialect; the HIP build force-includes
 +// cheshire/cuda_to_hip.h (allocations go through the memory bridge). Each Codec has its own stream
 +// and pinned staging area (cheshiregpu/asyncBackend.hpp), as CheshireJPG's does.
@@ -2531,6 +2549,13 @@ index 0000000..07ff2bc
 +void* Codec::stream() const { return impl_->backend.runtime().stream(); }
 +
 +void Codec::trim() { impl_->pipeline.trim(); }
++
++Diagnosis Codec::diagnose(const uint8_t* file, size_t size, int nchannels)
++{
++    Diagnosis d = impl_->pipeline.diagnose(file, size, nchannels);
++    d.runtimeError = cudaGetErrorString(cudaPeekAtLastError());
++    return d;
++}
 +
 +}  // namespace exr
 +}  // namespace cheshire
@@ -2908,10 +2933,10 @@ index 0000000..dbb6316
 +}  // namespace cheshire
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrPipeline.hpp b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrPipeline.hpp
 new file mode 100644
-index 0000000..422bf13
+index 0000000..4a41612
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrPipeline.hpp
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,222 @@
 +// CheshireEXR: the decode sequence, written once over a backend (cheshiregpu/asyncBackend.hpp on
 +// the device, cheshiregpu/cpuBackend.hpp in the host check).
 +#pragma once
@@ -2921,6 +2946,7 @@ index 0000000..422bf13
 +#include "exrStages.hpp"
 +
 +#include <cstring>
++#include <vector>
 +
 +namespace cheshire {
 +namespace exr {
@@ -2995,6 +3021,43 @@ index 0000000..422bf13
 +            return Status::InvalidArgument;
 +        downloadPieces(dst, img.data, img.rowBytes * (size_t)img.height);
 +        return b_.ok() ? Status::Ok : Status::DeviceError;
++    }
++
++    // Codec::diagnose: the device copy of file (this pipeline's last upload) against the host bytes,
++    // by download and through a kernel, and the chunk table.
++    Diagnosis diagnose(const uint8_t* file, size_t size, int nchannels)
++    {
++        Diagnosis d;
++        d.bytes = size;
++        Plan p;
++        const Slot& fs = slots_[kFile];
++        const Slot& cs = slots_[kChunks];
++        if (!file || !fs.p || fs.cap < size || makePlan(file, size, nchannels, p) != Status::Ok || !b_.begin())
++            return d;
++        std::vector<uint8_t> back(size);
++        downloadPieces(back.data(), fs.p, size);
++        for (size_t i = 0; i < size; ++i)
++            if (back[i] != file[i] && d.copyMismatches++ == 0)
++                d.firstCopyMismatch = i;
++        void* tmp = b_.alloc(size);
++        if (tmp)
++        {
++            b_.forEach(size, CopyBytes{static_cast<const uint8_t*>(fs.p), static_cast<uint8_t*>(tmp)});
++            downloadPieces(back.data(), tmp, size);
++            b_.release(tmp);
++            for (size_t i = 0; i < size; ++i)
++                if (back[i] != file[i] && d.shaderMismatches++ == 0)
++                    d.firstShaderMismatch = i;
++        }
++        const size_t tableBytes = p.chunks.size() * sizeof(ChunkInfo);
++        if (cs.p && cs.cap >= tableBytes)
++        {
++            std::vector<uint8_t> table(tableBytes);
++            b_.download(table.data(), cs.p, tableBytes);
++            d.chunkTableMatches = std::memcmp(table.data(), p.chunks.data(), tableBytes) == 0;
++        }
++        d.ran = b_.ok() && tmp != nullptr;
++        return d;
 +    }
 +
 +    // Frees the device buffers (they are kept between decodes and only grow otherwise).
@@ -3098,10 +3161,10 @@ index 0000000..422bf13
 +}  // namespace cheshire
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrStages.hpp b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrStages.hpp
 new file mode 100644
-index 0000000..dc7a951
+index 0000000..14e5c15
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrStages.hpp
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,127 @@
 +// CheshireEXR: the decode stages as functors over plain structs, run as kernels by the device
 +// backend and as loops by the host backend (cheshiregpu/), like CheshireJPG's.
 +//
@@ -3179,6 +3242,16 @@ index 0000000..dc7a951
 +        }
 +        unpredict(dst, c.unpacked);
 +    }
++};
++
++// Diagnostics only (Codec::diagnose): copy bytes through the shader path, so a download of the copy
++// shows what a kernel reads, next to a plain download that shows what the copy engine wrote.
++struct CopyBytes
++{
++    const uint8_t* src;
++    uint8_t* dst;
++
++    CHESHIRE_EXR_HD void operator()(size_t i) const { dst[i] = src[i]; }
 +};
 +
 +struct ConvertPixels

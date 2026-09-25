@@ -268,7 +268,31 @@ with no ZIPS output option.
   copy of the file or the scratch were wrong while that decode ran. The output stays exact, because
   the host path is. But a good file is reported corrupt.
 
-**What the loader reports now**, for the next run on bench-pc:
+**bench-pc with that reporting (7bee71a, the old check, 2026-09-25):**
+
+- **The `Corrupt` is process-wide.** Batches 1-9 decoded all 72 images on the device, each identical
+  under the check. Then, right after the bridge spilled one of the check's 309 MB buffers, every
+  device decode failed: 55 in a row, with the host parsing every file cleanly and every retry on
+  fresh buffers failing too. The loader frees its decoders after each batch, so the later batches
+  failed with brand-new streams, pinned staging and device buffers as well. The bad state is in the
+  device or the runtime (HIP 6.2, Windows, gfx1012), not in any decoder. Runs without the check never
+  hit it: they don't spill.
+- **Decoder setup isn't the in-node cost.** A decoder's first decode adds a few tenths of a second,
+  and freeing two decoders takes 15-40 ms. Per image, the file read (about 2.3 s, with eight
+  threads reading 73 MB files at once from a SATA SSD doing 214-250 MB/s) and the wait for one of the
+  two decoders (0-2 s) take the time; the decode is 0.3-0.5 s and the downscale 0.06-0.67 s.
+
+In response, on a decode that fails on the device although the host parses the file and a retry
+fails too, the loader now:
+
+- logs a device diagnosis (`Codec::diagnose`): the device copy of the file downloaded by the copy
+  engine, the same bytes copied by a kernel and then downloaded, and the chunk table, each compared
+  with the host's, plus the runtime's last error. The copy engine matching while the kernel's view
+  differs would mean the GPU's shader path sees stale memory.
+- switches the device decode off for the rest of the process, so every later image goes straight to
+  the host path instead of failing twice first.
+
+**What the loader reports**, for the runs on bench-pc:
 
 - With `CHESHIRE_EXR_PROFILE=1` or `CHESHIRE_LOAD_PROFILE=1`, one line per image splits its time into
   reading the file, waiting for a decoder, the decode (marked when it is a new decoder's first,
