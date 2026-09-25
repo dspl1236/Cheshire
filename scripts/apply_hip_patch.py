@@ -4501,6 +4501,23 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
         if t.count(old) != 1:
             sys.exit("step 6l: MeshClean::init not found once in mesh/MeshClean.cpp")
         mcf.write_text(t.replace(old, new, 1), encoding="utf-8", newline="")
+    # A tree patched before 2026-09-25 has the edge-bucket sort's comparator as a lambda inside the
+    # parallel for, which MSVC's OpenMP rejects (C3014, the Windows CUDA build): name it outside.
+    t = mcf.read_text(encoding="utf-8")
+    lam_old = (NL.join([
+        "#pragma omp parallel for schedule(dynamic, 65536)",
+        "        for (int p = 0; p < nPts; ++p)",
+        "            if (start[p + 1] - start[p] > 1)",
+        "                std::sort(&edgesNeigTris[start[p]], &edgesNeigTris[start[p]] + (start[p + 1] - start[p]),",
+        "                          [](const Voxel& u, const Voxel& v) { return u.y < v.y || (u.y == v.y && u.z < v.z); });",
+        ""]))
+    if lam_old in t:
+        # the named-comparator form, taken from meshclean_setup.txt so the two cannot drift
+        lam_new = (ROOT / "hip/port/meshing_cpu/meshclean_setup.txt").read_text(encoding="utf-8").split("=====\n")[1]
+        a = lam_new.index("        // the comparator is named outside the loop")
+        end = "(start[p + 1] - start[p]), byYZ);\n        }\n"
+        b = lam_new.index(end, a) + len(end)
+        mcf.write_text(t.replace(lam_old, lam_new[a:b].replace("\n", NL), 1), encoding="utf-8", newline="")
 
     # 6m. The depth-map node's EXRs decoded on the device (HIP builds, CHESHIRE_DEPTHMAP_GPU_EXR=1).
     #     After 6d a load is: OpenEXR inflates the file on the CPU, the image cache holds 324 MB of

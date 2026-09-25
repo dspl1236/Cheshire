@@ -230,11 +230,15 @@ void MeshClean::init()
                 edgesNeigTris[cursor[x2]++] = Voxel(x2, std::min(c, a), i);
             }
         }
+        // the comparator is named outside the loop: MSVC's OpenMP rejects a lambda in the body of a
+        // parallel for (C3014, the Windows CUDA build), which clang accepts
+        const auto byYZ = [](const Voxel& u, const Voxel& v) { return u.y < v.y || (u.y == v.y && u.z < v.z); };
 #pragma omp parallel for schedule(dynamic, 65536)
         for (int p = 0; p < nPts; ++p)
+        {
             if (start[p + 1] - start[p] > 1)
-                std::sort(&edgesNeigTris[start[p]], &edgesNeigTris[start[p]] + (start[p + 1] - start[p]),
-                          [](const Voxel& u, const Voxel& v) { return u.y < v.y || (u.y == v.y && u.z < v.z); });
+                std::sort(&edgesNeigTris[start[p]], &edgesNeigTris[start[p]] + (start[p + 1] - start[p]), byYZ);
+        }
 
         // the stats as upstream builds them from the sorted entries
         int i0 = 0;
