@@ -263,8 +263,7 @@ void MeshClean::init()
         }
     };
 
-    const char* cheshireSetupEnv = std::getenv("CHESHIRE_MESHCLEAN_SETUP");
-    const bool cheshireCounting = !(cheshireSetupEnv != nullptr && *cheshireSetupEnv == '0');
+    const bool cheshireCounting = ::cheshire::env::flag("CHESHIRE_MESHCLEAN_SETUP", true);
     const auto cheshireT0 = std::chrono::steady_clock::now();
     if (cheshireCounting)
         countingSetup();
@@ -272,7 +271,7 @@ void MeshClean::init()
         upstreamSetup();
     const double cheshireSetupMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cheshireT0).count();
     ALICEVISION_LOG_INFO("cheshire: MeshClean setup" << (cheshireCounting ? " (counting)" : "") << ": " << cheshireSetupMs << " ms");
-    if (cheshireCounting && std::getenv("CHESHIRE_MESHCLEAN_CHECK") != nullptr)
+    if (cheshireCounting && ::cheshire::env::flag("CHESHIRE_MESHCLEAN_CHECK"))
     {
         const StaticVector<StaticVector<int>> fastTris = ptsNeighTrisSortedAsc;
         const StaticVector<Voxel> fastEdges = edgesNeigTris, fastX = edgesXStat, fastXY = edgesXYStat;

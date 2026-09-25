@@ -130,10 +130,18 @@ index 8e3e862..456b000 100644
  # SYCL/AdaptiveCpp
  # ==============================================================================
 diff --git a/src/aliceVision/camera/cameraUndistortImage.hpp b/src/aliceVision/camera/cameraUndistortImage.hpp
-index ef0d52f..6bd2db5 100644
+index ef0d52f..458d8a2 100644
 --- a/src/aliceVision/camera/cameraUndistortImage.hpp
 +++ b/src/aliceVision/camera/cameraUndistortImage.hpp
-@@ -17,6 +17,102 @@
+@@ -6,6 +6,7 @@
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
+ #pragma once
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ 
+ #include <aliceVision/config.hpp>
+ #include <aliceVision/system/Logger.hpp>
+@@ -17,6 +18,102 @@
  #include <aliceVision/camera/Pinhole.hpp>
  #include <aliceVision/camera/Undistortion.hpp>
  #include <aliceVision/image/io.hpp>
@@ -172,8 +180,8 @@ index ef0d52f..6bd2db5 100644
 +    bool announced = false;
 +    Cache()
 +    {
-+        if (const char* e = std::getenv("CHESHIRE_UNDISTORT_MAP")) enabled = !(e[0] == '0');
-+        if (const char* e = std::getenv("CHESHIRE_UNDISTORT_MAP_MB")) capBytes = std::size_t(std::atoll(e)) << 20;
++        enabled = ::cheshire::env::flag("CHESHIRE_UNDISTORT_MAP", true);
++        capBytes = std::size_t(::cheshire::env::integer("CHESHIRE_UNDISTORT_MAP_MB", 2048)) << 20;
 +    }
 +};
 +inline Cache& cache() { static Cache c; return c; }
@@ -236,7 +244,7 @@ index ef0d52f..6bd2db5 100644
  
  #include <memory>
  
-@@ -120,6 +216,9 @@ void UndistortImage(const image::Image<T>& imageIn,
+@@ -120,6 +217,9 @@ void UndistortImage(const image::Image<T>& imageIn,
      image_ud.resize(widthRoi, heightRoi, true, fillcolor);
      const image::Sampler2d<image::SamplerLinear> sampler;
  
@@ -246,7 +254,7 @@ index ef0d52f..6bd2db5 100644
  #pragma omp parallel for
      for (int y = 0; y < heightRoi; ++y)
      {
-@@ -127,7 +226,8 @@ void UndistortImage(const image::Image<T>& imageIn,
+@@ -127,7 +227,8 @@ void UndistortImage(const image::Image<T>& imageIn,
          {
              const Vec2 undisto_pix(x + xOffset, y + yOffset);
              // compute coordinates with distortion
@@ -594,16 +602,18 @@ index 187e8f5..4d7d6e7 100644
              if (_depthMapParams.useRefine)
                  writeDepthSimMapFromTileList(
 diff --git a/src/aliceVision/depthMap/Refine.cpp b/src/aliceVision/depthMap/Refine.cpp
-index 64f1f95..6f3d608 100644
+index 64f1f95..fc49fcf 100644
 --- a/src/aliceVision/depthMap/Refine.cpp
 +++ b/src/aliceVision/depthMap/Refine.cpp
-@@ -5,6 +5,13 @@
+@@ -4,7 +4,15 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
  #include "Refine.hpp"
 +#ifdef CHESHIRE_HIP
 +#include <cstdlib>
-+static bool cheshire_stage_prof() { static int v = -1; if (v < 0) { const char* e = std::getenv("CHESHIRE_PROFILE_SGM"); v = (e && e[0] == '1') ? 1 : 0; } return v == 1; }
++static bool cheshire_stage_prof() { static int v = -1; if (v < 0) { v = ::cheshire::env::flag("CHESHIRE_PROFILE_SGM") ? 1 : 0; } return v == 1; }
 +#define CHESHIRE_STAGE_SYNC(s) if (cheshire_stage_prof()) cudaStreamSynchronize(s)
 +#else
 +#define CHESHIRE_STAGE_SYNC(s)
@@ -611,7 +621,7 @@ index 64f1f95..6f3d608 100644
  
  #include <aliceVision/alicevision_omp.hpp>
  #include <aliceVision/system/Logger.hpp>
-@@ -172,6 +179,8 @@ void Refine::refineRc(const Tile& tile,
+@@ -172,6 +180,8 @@ void Refine::refineRc(const Tile& tile,
      if (_refineParams.exportIntermediateNormalMaps)
          computeAndWriteNormalMap(tile, _optimizedDepthSimMap_dmp);
  
@@ -620,7 +630,7 @@ index 64f1f95..6f3d608 100644
      ALICEVISION_LOG_INFO(tile << "Refine depth/sim map done.");
  }
  
-@@ -238,6 +247,8 @@ void Refine::refineAndFuseDepthSimMap(const Tile& tile)
+@@ -238,6 +248,8 @@ void Refine::refineAndFuseDepthSimMap(const Tile& tile)
      // compute sub-pixel sample using a sliding gaussian
      cuda_volumeRefineBestDepth(_refinedDepthSimMap_dmp, _sgmDepthPixSizeMap_dmp, _volumeRefineSim_dmp, _refineParams, downscaledRoi, _stream);
  
@@ -629,7 +639,7 @@ index 64f1f95..6f3d608 100644
      ALICEVISION_LOG_INFO(tile << "Refine and fuse depth/sim map volume done.");
  }
  
-@@ -268,6 +279,8 @@ void Refine::optimizeDepthSimMap(const Tile& tile)
+@@ -268,6 +280,8 @@ void Refine::optimizeDepthSimMap(const Tile& tile)
                                              downscaledRoi,
                                              _stream);
  
@@ -639,16 +649,18 @@ index 64f1f95..6f3d608 100644
  }
  
 diff --git a/src/aliceVision/depthMap/Sgm.cpp b/src/aliceVision/depthMap/Sgm.cpp
-index 0564791..d2e3efc 100644
+index 0564791..cd10c46 100644
 --- a/src/aliceVision/depthMap/Sgm.cpp
 +++ b/src/aliceVision/depthMap/Sgm.cpp
-@@ -5,6 +5,13 @@
+@@ -4,7 +4,15 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
  #include "Sgm.hpp"
 +#ifdef CHESHIRE_HIP
 +#include <cstdlib>
-+static bool cheshire_stage_prof() { static int v = -1; if (v < 0) { const char* e = std::getenv("CHESHIRE_PROFILE_SGM"); v = (e && e[0] == '1') ? 1 : 0; } return v == 1; }
++static bool cheshire_stage_prof() { static int v = -1; if (v < 0) { v = ::cheshire::env::flag("CHESHIRE_PROFILE_SGM") ? 1 : 0; } return v == 1; }
 +#define CHESHIRE_STAGE_SYNC(s) if (cheshire_stage_prof()) cudaStreamSynchronize(s)
 +#else
 +#define CHESHIRE_STAGE_SYNC(s)
@@ -656,7 +668,7 @@ index 0564791..d2e3efc 100644
  
  #include <aliceVision/system/Logger.hpp>
  #include <aliceVision/mvsUtils/fileIO.hpp>
-@@ -184,6 +191,8 @@ void Sgm::sgmRc(const Tile& tile, const SgmDepthList& tileDepthList)
+@@ -184,6 +192,8 @@ void Sgm::sgmRc(const Tile& tile, const SgmDepthList& tileDepthList)
          }
      }
  
@@ -665,7 +677,7 @@ index 0564791..d2e3efc 100644
      ALICEVISION_LOG_INFO(tile << "SGM depth/thickness map done.");
  }
  
-@@ -197,6 +206,8 @@ void Sgm::smoothThicknessMap(const Tile& tile, const depthMapCommon::RefineParam
+@@ -197,6 +207,8 @@ void Sgm::smoothThicknessMap(const Tile& tile, const depthMapCommon::RefineParam
      // in-place result thickness map smoothing with adjacent pixels
      cuda_depthThicknessSmoothThickness(_depthThicknessMap_dmp, _sgmParams, refineParams, downscaledRoi, _stream);
  
@@ -674,7 +686,7 @@ index 0564791..d2e3efc 100644
      ALICEVISION_LOG_INFO(tile << "SGM Smooth thickness map done.");
  }
  
-@@ -269,6 +280,8 @@ void Sgm::computeSimilarityVolumes(const Tile& tile, const SgmDepthList& tileDep
+@@ -269,6 +281,8 @@ void Sgm::computeSimilarityVolumes(const Tile& tile, const SgmDepthList& tileDep
          cuda_volumeUpdateUninitializedSimilarity(_volumeBestSim_dmp, _volumeSecBestSim_dmp, _stream);
      }
  
@@ -683,7 +695,7 @@ index 0564791..d2e3efc 100644
      ALICEVISION_LOG_INFO(tile << "SGM Compute similarity volume done.");
  }
  
-@@ -294,6 +307,8 @@ void Sgm::optimizeSimilarityVolume(const Tile& tile, const SgmDepthList& tileDep
+@@ -294,6 +308,8 @@ void Sgm::optimizeSimilarityVolume(const Tile& tile, const SgmDepthList& tileDep
                          downscaledRoi,
                          _stream);
  
@@ -692,7 +704,7 @@ index 0564791..d2e3efc 100644
      ALICEVISION_LOG_INFO(tile << "SGM Optimizing volume done.");
  }
  
-@@ -321,6 +336,8 @@ void Sgm::retrieveBestDepth(const Tile& tile, const SgmDepthList& tileDepthList)
+@@ -321,6 +337,8 @@ void Sgm::retrieveBestDepth(const Tile& tile, const SgmDepthList& tileDepthList)
                                   downscaledRoi,
                                   _stream);
  
@@ -703,10 +715,10 @@ index 0564791..d2e3efc 100644
  
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h b/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h
 new file mode 100644
-index 0000000..4f0f6cb
+index 0000000..6ba23ae
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h
-@@ -0,0 +1,426 @@
+@@ -0,0 +1,428 @@
 +// Cheshire memory bridge v2: VRAM first, mapped system RAM when VRAM is short, and the
 +// choice of *what* spills made by buffer class instead of by arrival order.
 +//
@@ -762,6 +774,8 @@ index 0000000..4f0f6cb
 +// real CUDA headers. bridge.h and hip_to_cuda.h always sit side by side.
 +#  include "hip_to_cuda.h"
 +#endif
++#include "env.h"
++#include <climits>
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
@@ -838,22 +852,20 @@ index 0000000..4f0f6cb
 +    long long vramCapEnv = -1;   // -1 unset, 0 no cap, >0 MB
 +    int planner = 1;
 +    State() {
-+        const char* e = std::getenv("CHESHIRE_BRIDGE");
-+        enabled = !(e && e[0] == '0');
-+        log = std::getenv("CHESHIRE_BRIDGE_LOG") != nullptr;
-+        if (const char* v = std::getenv("CHESHIRE_BRIDGE_VRAM_MB")) vramCapEnv = std::strtoll(v, nullptr, 10);
-+        if (const char* f = std::getenv("CHESHIRE_BRIDGE_VRAM_FRACTION")) vramFraction = std::strtod(f, nullptr);
-+        if (const char* f = std::getenv("CHESHIRE_BRIDGE_MIN_SPILL_MB")) minSpill = size_t(std::strtod(f, nullptr) * (1 << 20));
-+        if (const char* p = std::getenv("CHESHIRE_BRIDGE_PLANNER")) planner = std::atoi(p);
-+        const char* hc = std::getenv("CHESHIRE_BRIDGE_HOST_CLASSES");
-+        const char* vc = std::getenv("CHESHIRE_BRIDGE_VRAM_ONLY_CLASSES");
++        enabled = ::cheshire::env::flag("CHESHIRE_BRIDGE", true);
++        log = ::cheshire::env::flag("CHESHIRE_BRIDGE_LOG");
++        vramCapEnv = ::cheshire::env::integer("CHESHIRE_BRIDGE_VRAM_MB", vramCapEnv);
++        vramFraction = ::cheshire::env::real("CHESHIRE_BRIDGE_VRAM_FRACTION", vramFraction);
++        minSpill = size_t(::cheshire::env::real("CHESHIRE_BRIDGE_MIN_SPILL_MB", double(minSpill) / (1 << 20)) * (1 << 20));
++        planner = int(::cheshire::env::integer("CHESHIRE_BRIDGE_PLANNER", planner));
++        const std::string hc = ::cheshire::env::text("CHESHIRE_BRIDGE_HOST_CLASSES");
++        const std::string vc = ::cheshire::env::text("CHESHIRE_BRIDGE_VRAM_ONLY_CLASSES");
 +        for (int c = 0; c < kClasses; ++c) {
-+            hostFirst[c] = listHas(hc, className(Class(c)));
-+            vramOnly[c] = listHas(vc, className(Class(c)));
++            hostFirst[c] = listHas(hc.c_str(), className(Class(c)));
++            vramOnly[c] = listHas(vc.c_str(), className(Class(c)));
 +        }
 +        // camera images stay in VRAM unless explicitly allowed out (13x slower behind PCIe)
-+        const char* is = std::getenv("CHESHIRE_BRIDGE_IMAGE_SPILL");
-+        if (!(is && is[0] == '1') && planner != 2 && !hostFirst[int(Class::Image)]) vramOnly[int(Class::Image)] = true;
++        if (!::cheshire::env::flag("CHESHIRE_BRIDGE_IMAGE_SPILL") && planner != 2 && !hostFirst[int(Class::Image)]) vramOnly[int(Class::Image)] = true;
 +        size_t ram = 0;
 +#if defined(_WIN32)
 +        MEMORYSTATUSEX ms; ms.dwLength = sizeof(ms); if (GlobalMemoryStatusEx(&ms)) ram = size_t(ms.ullTotalPhys);
@@ -861,7 +873,9 @@ index 0000000..4f0f6cb
 +        long pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGE_SIZE); if (pages > 0 && psz > 0) ram = size_t(pages) * size_t(psz);
 +#endif
 +        hostCap = ram / 4;
-+        if (const char* h = std::getenv("CHESHIRE_BRIDGE_HOST_MB")) hostCap = size_t(std::strtoull(h, nullptr, 10)) << 20;
++        // the default is in bytes (not a whole number of MB), so unset/unparsable is told apart by a sentinel
++        const long long hostMb = ::cheshire::env::integer("CHESHIRE_BRIDGE_HOST_MB", LLONG_MIN);
++        if (hostMb != LLONG_MIN) hostCap = size_t(hostMb) << 20;
 +    }
 +    ~State() {
 +        if (!log) return;
@@ -1446,6 +1460,92 @@ index 0000000..557c093
 +inline hipError_t devFree(void* devPtr) { return bridge::free(devPtr); }
 +
 +}  // namespace cheshire
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/env.h b/src/aliceVision/depthMap/cuda/hip/cheshire/env.h
+new file mode 100644
+index 0000000..55b4e96
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshire/env.h
+@@ -0,0 +1,80 @@
++// cheshire/env.h - one reading of the CHESHIRE_* environment variables for every port.
++//
++// Before this header, the ports and the generator's inline code parsed their switches five different
++// ways: `getenv(X) != nullptr` (so `X=0` turned a check ON), `e[0] == '0'`, `e[0] == '1'` (so
++// `X=true` did nothing), atoi / strtoll / strtod (so `X=abc` meant 0), and string compares. Every
++// CHESHIRE_* read now goes through these functions, with one rule per kind:
++//
++//   flag     unset -> the default; "0", "false", "off", "no" (any case) or empty -> off; else on
++//   integer  unset, empty or not a number -> the default; otherwise strtoll's value
++//   real     the same with strtod
++//   text     unset -> the default string; otherwise the value as given
++//   isSet    set at all, to anything (for a value that is a path)
++//
++// Header-only and free of AliceVision types, so the same file serves host C++, HIP and nvcc
++// translation units. Callers that read a switch in a hot path keep doing so once, in a
++// function-local static, as before. scripts/apply_hip_patch.py copies this file next to bridge.h and
++// refuses a generated tree that still reads a CHESHIRE_* variable any other way.
++#pragma once
++
++#include <cctype>
++#include <cstdlib>
++#include <string>
++
++namespace cheshire {
++namespace env {
++namespace detail {
++// MSVC's C4996 on getenv, once here instead of at every former call site: each value is parsed or
++// copied at once and the pointer never kept, which is the case the warning is about.
++#if defined(_MSC_VER)
++#pragma warning(push)
++#pragma warning(disable : 4996)
++#endif
++inline const char* raw(const char* name) { return std::getenv(name); }
++#if defined(_MSC_VER)
++#pragma warning(pop)
++#endif
++}  // namespace detail
++
++inline bool isSet(const char* name) { return detail::raw(name) != nullptr; }
++
++inline bool flag(const char* name, bool def = false)
++{
++    const char* v = detail::raw(name);
++    if (v == nullptr)
++        return def;
++    std::string s;
++    for (const char* p = v; *p; ++p)
++        if (!std::isspace(static_cast<unsigned char>(*p)))
++            s += static_cast<char>(std::tolower(static_cast<unsigned char>(*p)));
++    return !(s.empty() || s == "0" || s == "false" || s == "off" || s == "no");
++}
++
++inline long long integer(const char* name, long long def)
++{
++    const char* v = detail::raw(name);
++    if (v == nullptr || *v == '\0')
++        return def;
++    char* end = nullptr;
++    const long long x = std::strtoll(v, &end, 10);
++    return end == v ? def : x;
++}
++
++inline double real(const char* name, double def)
++{
++    const char* v = detail::raw(name);
++    if (v == nullptr || *v == '\0')
++        return def;
++    char* end = nullptr;
++    const double x = std::strtod(v, &end);
++    return end == v ? def : x;
++}
++
++inline std::string text(const char* name, const char* def = "")
++{
++    const char* v = detail::raw(name);
++    return v != nullptr ? std::string(v) : std::string(def);
++}
++
++}  // namespace env
++}  // namespace cheshire
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/hip_to_cuda.h b/src/aliceVision/depthMap/cuda/hip/cheshire/hip_to_cuda.h
 new file mode 100644
 index 0000000..ac2f25c
@@ -1531,10 +1631,10 @@ index 0000000..ac2f25c
 +inline cudaError_t hipGetLastError() { return cudaGetLastError(); }
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/managed_cuda.h b/src/aliceVision/depthMap/cuda/hip/cheshire/managed_cuda.h
 new file mode 100644
-index 0000000..8308d0e
+index 0000000..8cd7717
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshire/managed_cuda.h
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,82 @@
 +// Cheshire: the CUDA unified-memory arm of the device allocator, for comparison against the
 +// memory bridge.
 +//
@@ -1555,16 +1655,14 @@ index 0000000..8308d0e
 +#pragma once
 +#include <cuda_runtime.h>
 +#include <cstdlib>
++#include "env.h"
 +
 +namespace cheshire {
 +namespace managed {
 +
 +inline bool enabled()
 +{
-+    static const bool on = [] {
-+        const char* e = std::getenv("CHESHIRE_CUDA_MANAGED");
-+        return e && e[0] == '1';
-+    }();
++    static const bool on = ::cheshire::env::flag("CHESHIRE_CUDA_MANAGED");
 +    return on;
 +}
 +
@@ -1621,7 +1719,7 @@ index 0000000..8308d0e
 +}  // namespace cheshire
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/mipmap_emu.h b/src/aliceVision/depthMap/cuda/hip/cheshire/mipmap_emu.h
 new file mode 100644
-index 0000000..d5bcb15
+index 0000000..5dad2bb
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshire/mipmap_emu.h
 @@ -0,0 +1,273 @@
@@ -1705,6 +1803,7 @@ index 0000000..d5bcb15
 +#include <unordered_map>
 +#include <vector>
 +#include <cheshire/bridge.h>
++#include "env.h"
 +
 +namespace cheshire { namespace mip {
 +
@@ -1723,10 +1822,9 @@ index 0000000..d5bcb15
 +    std::unordered_map<void*, TexRec> texs;      // fake texture handle (device TexSet*) -> level textures
 +    Storage storage = Storage::Linear;   // same speed as arrays, and the bridge can account for it
 +    Registry() {
-+        if (const char* s = std::getenv("CHESHIRE_MIPMAP_STORAGE")) {
-+            if (s[0] == 'l' || s[0] == 'L') storage = Storage::Linear;
-+            else if (s[0] == 'a' || s[0] == 'A') storage = Storage::Array;
-+        }
++        const std::string s = ::cheshire::env::text("CHESHIRE_MIPMAP_STORAGE");
++        if (s[0] == 'l' || s[0] == 'L') storage = Storage::Linear;   // s[0] is '\0' when unset or empty
++        else if (s[0] == 'a' || s[0] == 'A') storage = Storage::Array;
 +    }
 +};
 +inline Registry& reg() { static Registry r; return r; }
@@ -1771,7 +1869,7 @@ index 0000000..d5bcb15
 +        rec.levels.push_back(lv);
 +        w /= 2; h /= 2;
 +    }
-+    if (std::getenv("CHESHIRE_BRIDGE_LOG"))
++    if (::cheshire::env::flag("CHESHIRE_BRIDGE_LOG"))
 +        std::fprintf(stderr, "[cheshire] mip: %zux%zu, %u levels, %zu B/texel, storage=%s\n", rec.w, rec.h, levels, rec.elemBytes, rec.st == Storage::Linear ? "linear" : "array");
 +    void* handle = rec.levels[0];  // the level-0 record doubles as the fake mipmap handle
 +    { std::lock_guard<std::mutex> g(reg().m);
@@ -4278,12 +4376,14 @@ index e059d0d..230ac58 100644
  }
  
 diff --git a/src/aliceVision/depthMap/cuda/planeSweeping/deviceSimilarityVolume.cu b/src/aliceVision/depthMap/cuda/planeSweeping/deviceSimilarityVolume.cu
-index 117850f..205a787 100644
+index 117850f..03c33f0 100644
 --- a/src/aliceVision/depthMap/cuda/planeSweeping/deviceSimilarityVolume.cu
 +++ b/src/aliceVision/depthMap/cuda/planeSweeping/deviceSimilarityVolume.cu
-@@ -5,6 +5,9 @@
+@@ -4,7 +4,11 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
  #include "deviceSimilarityVolume.hpp"
 +#include <chrono>
 +#include <cstdlib>
@@ -4291,7 +4391,7 @@ index 117850f..205a787 100644
  #include "deviceSimilarityVolumeKernels.cuh"
  
  #include <aliceVision/depthMap/cuda/host/divUp.hpp>
-@@ -47,7 +50,23 @@ __host__ dim3 getMaxPotentialBlockSize(T kernelFuction)
+@@ -47,7 +51,21 @@ __host__ dim3 getMaxPotentialBlockSize(T kernelFuction)
  
      if(recommendedBlockSize > 32)
      {
@@ -4303,10 +4403,8 @@ index 117850f..205a787 100644
 +        static int overrideY = -2;
 +        if (overrideY == -2)
 +        {
-+            const char* e = std::getenv("CHESHIRE_BLOCK_Y");
-+            overrideY = e ? std::atoi(e) : 0;
-+            const char* p = std::getenv("CHESHIRE_PROFILE_SGM");
-+            if (p && p[0] == '1')
++            overrideY = static_cast<int>(::cheshire::env::integer("CHESHIRE_BLOCK_Y", 0));
++            if (::cheshire::env::flag("CHESHIRE_PROFILE_SGM"))
 +                std::fprintf(stderr, "[cheshire-prof] occupancy block for kernels: 32x%d (min grid %d), CHESHIRE_BLOCK_Y=%d\n",
 +                             int(divUp(recommendedBlockSize, 32)), recommendedMinGridSize, overrideY);
 +        }
@@ -4316,13 +4414,13 @@ index 117850f..205a787 100644
          return recommendedBlock;
      }
  
-@@ -259,6 +278,18 @@ extern void cuda_volumeRefineSimilarity(CudaDeviceMemoryPitched<TSimRefine, 3>&
+@@ -259,6 +277,18 @@ extern void cuda_volumeRefineSimilarity(CudaDeviceMemoryPitched<TSimRefine, 3>&
  }
  
  
 +#ifdef CHESHIRE_HIP
 +static double cheshire_prof_acc[3]; static int cheshire_prof_calls; static std::mutex cheshire_prof_mutex;
-+static bool cheshire_prof_on() { static int v = -1; if (v < 0) { const char* e = std::getenv("CHESHIRE_PROFILE_SGM"); v = (e && e[0] == '1') ? 1 : 0; } return v == 1; }
++static bool cheshire_prof_on() { static int v = -1; if (v < 0) { v = ::cheshire::env::flag("CHESHIRE_PROFILE_SGM") ? 1 : 0; } return v == 1; }
 +static thread_local std::chrono::steady_clock::time_point _cp_t0;
 +#define CHESHIRE_PROF_BEGIN() if (cheshire_prof_on()) { cudaDeviceSynchronize(); _cp_t0 = std::chrono::steady_clock::now(); }
 +#define CHESHIRE_PROF_END(i) if (cheshire_prof_on()) { cudaDeviceSynchronize(); std::lock_guard<std::mutex> _cp_g(cheshire_prof_mutex); cheshire_prof_acc[i] += std::chrono::duration<double>(std::chrono::steady_clock::now() - _cp_t0).count(); }
@@ -4335,7 +4433,7 @@ index 117850f..205a787 100644
  __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_volAgr_dmp,
                                         CudaDeviceMemoryPitched<TSimAcc, 2>& inout_volSliceAccA_dmp,
                                         CudaDeviceMemoryPitched<TSimAcc, 2>& inout_volSliceAccB_dmp,
-@@ -298,6 +329,67 @@ __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_vol
+@@ -298,6 +328,67 @@ __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_vol
      const dim3 blockVolSlide(blockSizeL, 1, 1);
      const dim3 gridVolSlide(divUp(volDimX, blockVolSlide.x), volDimZ, 1);
  
@@ -4403,7 +4501,7 @@ index 117850f..205a787 100644
      CudaDeviceMemoryPitched<TSimAcc, 2>* xzSliceForY_dmpPtr   = &inout_volSliceAccA_dmp; // Y slice
      CudaDeviceMemoryPitched<TSimAcc, 2>* xzSliceForYm1_dmpPtr = &inout_volSliceAccB_dmp; // Y-1 slice
      CudaDeviceMemoryPitched<TSimAcc, 2>* bestSimInYm1_dmpPtr  = &inout_volAxisAcc_dmp;   // best sim score along the Y axis for each Z value
-@@ -368,6 +460,7 @@ __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_vol
+@@ -368,6 +459,7 @@ __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_vol
  
          std::swap(xzSliceForYm1_dmpPtr, xzSliceForY_dmpPtr);
      }
@@ -4555,10 +4653,18 @@ index 514487d..8f5fb98 100644
  
  # Link OpenCV library
 diff --git a/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp b/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp
-index 97f4ed5..3809a4e 100644
+index 97f4ed5..08742bc 100644
 --- a/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp
 +++ b/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp
-@@ -15,6 +15,10 @@
+@@ -5,6 +5,7 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include "ImageDescriber_SIFT_popSIFT.hpp"
+ #include <aliceVision/system/Logger.hpp>
+ 
+@@ -15,6 +16,10 @@
  #include <popsift/common/device_prop.h>
  
  #include <atomic>
@@ -4569,7 +4675,7 @@ index 97f4ed5..3809a4e 100644
  
  namespace aliceVision {
  namespace feature {
-@@ -66,6 +70,49 @@ bool ImageDescriber_SIFT_popSIFT::describe(const image::Image<float>& image,
+@@ -66,6 +71,48 @@ bool ImageDescriber_SIFT_popSIFT::describe(const image::Image<float>& image,
          }
      }
  
@@ -4577,8 +4683,7 @@ index 97f4ed5..3809a4e 100644
 +    // in an order that depends only on the image (see scripts/apply_hip_patch.py, step 5c)
 +    {
 +        static const bool cheshireSiftSort = []() {
-+            const char* e = std::getenv("CHESHIRE_SIFT_SORT");
-+            const bool on = !(e != nullptr && e[0] == '0');
++            const bool on = ::cheshire::env::flag("CHESHIRE_SIFT_SORT", true);
 +            // if/else, not a ternary: ALICEVISION_LOG_INFO(a) expands to `stream << a` without
 +            // parentheses, so `stream << on ? A : B` logs the bool and discards both strings.
 +            if (on)
@@ -4661,10 +4766,18 @@ index 1b7f39c..70c80a0 100644
  # Unit tests
  alicevision_add_test(DelaunayGraphCut_test.cpp
 diff --git a/src/aliceVision/fuseCut/Fuser.cpp b/src/aliceVision/fuseCut/Fuser.cpp
-index 7b385ee..c4e3fc4 100644
+index 7b385ee..98fe21f 100644
 --- a/src/aliceVision/fuseCut/Fuser.cpp
 +++ b/src/aliceVision/fuseCut/Fuser.cpp
-@@ -16,6 +16,9 @@
+@@ -4,6 +4,7 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include "Fuser.hpp"
+ #include <aliceVision/image/io.hpp>
+ #include <aliceVision/system/Logger.hpp>
+@@ -16,6 +17,9 @@
  #include <aliceVision/mvsUtils/common.hpp>
  #include <aliceVision/mvsUtils/fileIO.hpp>
  #include <aliceVision/mvsUtils/mapIO.hpp>
@@ -4674,7 +4787,7 @@ index 7b385ee..c4e3fc4 100644
  #include <aliceVision/image/io.hpp>
  #include <aliceVision/image/imageAlgo.hpp>
  
-@@ -26,6 +29,57 @@
+@@ -26,6 +30,57 @@
  
  #include <iostream>
  
@@ -4692,7 +4805,7 @@ index 7b385ee..c4e3fc4 100644
 +    std::size_t capBytes = 4096ull << 20;
 +    CheshireDepthMapCache()
 +    {
-+        if (const char* e = std::getenv("CHESHIRE_FILTER_CACHE_MB")) capBytes = std::size_t(std::atoll(e)) << 20;
++        capBytes = std::size_t(::cheshire::env::integer("CHESHIRE_FILTER_CACHE_MB", 4096)) << 20;
 +        if (capBytes == 0)
 +            ALICEVISION_LOG_INFO("cheshire: depth map filter cache: disabled by CHESHIRE_FILTER_CACHE_MB=0");
 +        else
@@ -4732,7 +4845,7 @@ index 7b385ee..c4e3fc4 100644
  namespace aliceVision {
  namespace fuseCut {
  
-@@ -171,6 +225,78 @@ bool Fuser::filterGroupsRC(int rc, float pixToleranceFactor, int pixSizeBall, in
+@@ -171,6 +226,78 @@ bool Fuser::filterGroupsRC(int rc, float pixToleranceFactor, int pixSizeBall, in
  
      StaticVector<int> tcams = _mp.findNearestCamsFromLandmarks(rc, nNearestCams);
  
@@ -4765,7 +4878,7 @@ index 7b385ee..c4e3fc4 100644
 +            const int tc = tcams[c];
 +            const std::shared_ptr<image::Image<float>> tcdepthMapPtr = cheshireDepthMaps().get(tc, _mp);  // cheshire
 +            image::Image<float>& tcdepthMap = *tcdepthMapPtr;
-+            if (std::getenv("CHESHIRE_GPU_FILTER_DEBUG") && tcdepthMap.height() > 0)
++            if (::cheshire::env::flag("CHESHIRE_GPU_FILTER_DEBUG") && tcdepthMap.height() > 0)
 +            {
 +                // one tc pixel through both implementations, printed side by side
 +                int x = tcdepthMap.width() / 2, y = tcdepthMap.height() / 2;
@@ -4787,7 +4900,7 @@ index 7b385ee..c4e3fc4 100644
 +            }
 +            if (tcdepthMap.height() > 0 && tcdepthMap.width() > 0)
 +                ok = gf.accumulate(tcdepthMap.data(), geom(tc), pixToleranceFactor, pixSizeBall, pixSizeBallWSP);
-+            if (ok && std::getenv("CHESHIRE_GPU_FILTER_DEBUG"))
++            if (ok && ::cheshire::env::flag("CHESHIRE_GPU_FILTER_DEBUG"))
 +            {
 +                long long cnt = -1; gf.voteCount(&cnt);
 +                std::fprintf(stderr, "[cheshire] filter votes GPU rc=%d tc=%d (%dx%d): %lld rc pixels voted\n", rc, tc, tcdepthMap.width(), tcdepthMap.height(), cnt);
@@ -4811,11 +4924,11 @@ index 7b385ee..c4e3fc4 100644
      for (int c = 0; c < tcams.size(); c++)
      {
          numOfPtsMap->resize_with(w * h, 0);
-@@ -201,6 +327,12 @@ bool Fuser::filterGroupsRC(int rc, float pixToleranceFactor, int pixSizeBall, in
+@@ -201,6 +328,12 @@ bool Fuser::filterGroupsRC(int rc, float pixToleranceFactor, int pixSizeBall, in
              {
                  numOfModalsMap(i) += static_cast<int>((*numOfPtsMap)[i] > 0);
              }
-+            if (std::getenv("CHESHIRE_GPU_FILTER_DEBUG"))   // cheshire diagnostics
++            if (::cheshire::env::flag("CHESHIRE_GPU_FILTER_DEBUG"))   // cheshire diagnostics
 +            {
 +                long long cnt = 0;
 +                for (int i = 0; i < w * h; i++) cnt += (*numOfPtsMap)[i] > 0;
@@ -4825,10 +4938,16 @@ index 7b385ee..c4e3fc4 100644
      }
  
 diff --git a/src/aliceVision/fuseCut/GraphFiller.cpp b/src/aliceVision/fuseCut/GraphFiller.cpp
-index 6647c39..358fee9 100644
+index 6647c39..2fe221e 100644
 --- a/src/aliceVision/fuseCut/GraphFiller.cpp
 +++ b/src/aliceVision/fuseCut/GraphFiller.cpp
-@@ -9,8 +9,20 @@
+@@ -4,13 +4,26 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include "GraphFiller.hpp"
+ 
  #include <aliceVision/mvsUtils/common.hpp>
  #include <aliceVision/fuseCut/Intersections.hpp>
  #include <aliceVision/fuseCut/MaxFlow_AdjList.hpp>
@@ -4849,7 +4968,7 @@ index 6647c39..358fee9 100644
  
  
  namespace aliceVision {
-@@ -83,6 +95,69 @@ void GraphFiller::fillGraph(double nPixelSizeBehind, float fullWeight)
+@@ -83,6 +96,69 @@ void GraphFiller::fillGraph(double nPixelSizeBehind, float fullWeight)
  {
      ALICEVISION_LOG_INFO("Computing s-t graph weights.");
  
@@ -4919,7 +5038,7 @@ index 6647c39..358fee9 100644
      // choose random order to prevent waiting
      const unsigned int seed = (unsigned int)_mp.userParams.get<unsigned int>("delaunaycut.seed", 0);
      const std::vector<int> verticesRandIds = mvsUtils::createRandomArrayOfIntegers(_verticesAttr.size(), seed);
-@@ -266,6 +341,25 @@ void GraphFiller::rayMarchingGraphFull(int vertexIndex,
+@@ -266,6 +342,25 @@ void GraphFiller::rayMarchingGraphFull(int vertexIndex,
  
  void GraphFiller::forceTedgesByGradientIJCV(float nPixelSizeBehind)
  {
@@ -4929,7 +5048,7 @@ index 6647c39..358fee9 100644
 +    std::vector<float> gpuOn;
 +    if (gpu::tedgesDone())
 +    {
-+        if (std::getenv("CHESHIRE_GPU_TEDGE_CHECK") == nullptr)
++        if (!::cheshire::env::flag("CHESHIRE_GPU_TEDGE_CHECK"))
 +        {
 +            for (GC_cellInfo& c : _cellsAttr)
 +            {
@@ -4945,7 +5064,7 @@ index 6647c39..358fee9 100644
      const float forceTEdgeDelta = 0.1f;
      const float minJumpPartRange = 10000.0f;
      const float maxSilentPartRange = 100.0f;
-@@ -465,6 +559,23 @@ void GraphFiller::forceTedgesByGradientIJCV(float nPixelSizeBehind)
+@@ -465,6 +560,23 @@ void GraphFiller::forceTedgesByGradientIJCV(float nPixelSizeBehind)
          }
      }
  
@@ -4969,7 +5088,7 @@ index 6647c39..358fee9 100644
      for (GC_cellInfo& c : _cellsAttr)
      {
          const float w = std::max(1.0f, c.cellTWeight) * c.on;
-@@ -492,10 +603,79 @@ std::vector<CellIndex> GraphFiller::getNeighboringCellsByGeometry(const Geometry
+@@ -492,10 +604,79 @@ std::vector<CellIndex> GraphFiller::getNeighboringCellsByGeometry(const Geometry
  }
  
  void GraphFiller::binarize()
@@ -4977,7 +5096,7 @@ index 6647c39..358fee9 100644
 +    // cheshire: the CSR graph by default (the same edges in the same order, a fraction of the build
 +    // and teardown time); CHESHIRE_MAXFLOW_ADJLIST=1 keeps upstream's adjacency list, and
 +    // CHESHIRE_MAXFLOW_CHECK=1 runs both on the same graph and compares flow value and labelling
-+    if (std::getenv("CHESHIRE_MAXFLOW_CHECK") != nullptr)
++    if (::cheshire::env::flag("CHESHIRE_MAXFLOW_CHECK"))
 +    {
 +        std::vector<bool> csrFull, adjFull;
 +        const float fCsr = binarizeImpl<MaxFlow_CSR>(csrFull);
@@ -4998,7 +5117,7 @@ index 6647c39..358fee9 100644
 +                                                                  << (rel <= 1e-9 ? " (equal" : " (DIFFERENT") << ", relative difference " << rel << ")");
 +        _cellIsFull.swap(csrFull);
 +    }
-+    else if (std::getenv("CHESHIRE_MAXFLOW_ADJLIST") != nullptr)
++    else if (::cheshire::env::flag("CHESHIRE_MAXFLOW_ADJLIST"))
 +        binarizeImpl<MaxFlow_AdjList>(_cellIsFull);
 +    else
 +        binarizeImpl<MaxFlow_CSR>(_cellIsFull);
@@ -5050,7 +5169,7 @@ index 6647c39..358fee9 100644
  
      // fill s-t edges
      for (CellIndex ci = 0; ci < nbCells; ++ci)
-@@ -507,21 +687,23 @@ void GraphFiller::binarize()
+@@ -507,21 +688,23 @@ void GraphFiller::binarize()
          maxFlowGraph.addNode(ci, ws, wt);
      }
  
@@ -5080,7 +5199,7 @@ index 6647c39..358fee9 100644
              float a1 = 0.0f;
              float a2 = 0.0f;
              if ((!_tetrahedralization.isInfiniteCell(fu.cellIndex)) && (!_tetrahedralization.isInfiniteCell(fv.cellIndex)))
-@@ -530,29 +712,119 @@ void GraphFiller::binarize()
+@@ -530,29 +713,118 @@ void GraphFiller::binarize()
                  a1 = _tetrahedralization.getFaceWeight(fu);
                  a2 = _tetrahedralization.getFaceWeight(fv);
              }
@@ -5104,8 +5223,7 @@ index 6647c39..358fee9 100644
 +        // with the centres passed in. CHESHIRE_FACET_PAIRS=0 computes every entry on its own as
 +        // before; CHESHIRE_GPU_VOTE_LOG=1 compares every entry with upstream's computation either way.
 +        const auto cheshireFacetT0 = std::chrono::steady_clock::now();
-+        const char* cheshireFacetPairsEnv = std::getenv("CHESHIRE_FACET_PAIRS");
-+        const bool cheshireFacetPairs = cheshireFacetPairsEnv == nullptr || std::string(cheshireFacetPairsEnv) != "0";
++        const bool cheshireFacetPairs = ::cheshire::env::flag("CHESHIRE_FACET_PAIRS", true);
 +        if (cheshireFacetPairs)
 +        {
 +#pragma omp parallel for schedule(static)
@@ -5155,7 +5273,7 @@ index 6647c39..358fee9 100644
 +        }
 +        ALICEVISION_LOG_INFO("cheshire: facet weights" << (cheshireFacetPairs ? " (each interior facet once)" : "") << ": "
 +                             << std::chrono::duration<double>(std::chrono::steady_clock::now() - cheshireFacetT0).count() << " s");
-+        if (std::getenv("CHESHIRE_GPU_VOTE_LOG") != nullptr)
++        if (::cheshire::env::flag("CHESHIRE_GPU_VOTE_LOG"))
 +        {
 +            std::size_t bad = 0;
 +            for (CellIndex ci = 0; ci < nbCells; ++ci)
@@ -5282,19 +5400,20 @@ index 738e413..9d47359 100644
      Graph _graph;
      std::vector<boost::default_color_type> _color;
 diff --git a/src/aliceVision/fuseCut/Mesher.cpp b/src/aliceVision/fuseCut/Mesher.cpp
-index 38d5a37..0d76dd5 100644
+index 38d5a37..0ddeacb 100644
 --- a/src/aliceVision/fuseCut/Mesher.cpp
 +++ b/src/aliceVision/fuseCut/Mesher.cpp
-@@ -4,6 +4,8 @@
+@@ -4,6 +4,9 @@
  // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
 +#include <cstdlib>  // cheshire
 +#include <chrono>  // cheshire
  #include "Mesher.hpp"
  
  #include <aliceVision/mvsData/Universe.hpp>
-@@ -274,14 +276,29 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
+@@ -274,14 +277,29 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
  {
      long timer = std::clock();
      ALICEVISION_LOG_INFO("Graph cut post-processing.");
@@ -5313,7 +5432,7 @@ index 38d5a37..0d76dd5 100644
 +    // for. CHESHIRE_INVERT_OLD=1 restores that.
      int invertTetrahedronBasedOnNeighborsNbIterations =
 -      _mp.userParams.get<bool>("hallucinationsFiltering.invertTetrahedronBasedOnNeighborsNbIterations", 10);
-+      (std::getenv("CHESHIRE_INVERT_OLD") != nullptr)
++      ::cheshire::env::flag("CHESHIRE_INVERT_OLD")
 +        ? (int)_mp.userParams.get<bool>("hallucinationsFiltering.invertTetrahedronBasedOnNeighborsNbIterations", 10)
 +        : _mp.userParams.get<int>("hallucinationsFiltering.invertTetrahedronBasedOnNeighborsNbIterations", 10);
 +    ALICEVISION_LOG_INFO("cheshire: neighbour inversion rounds requested: " << invertTetrahedronBasedOnNeighborsNbIterations);
@@ -5325,7 +5444,7 @@ index 38d5a37..0d76dd5 100644
  
      if (true)
      {
-@@ -306,9 +323,12 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
+@@ -306,9 +324,12 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
          }
      }
  
@@ -5338,7 +5457,7 @@ index 38d5a37..0d76dd5 100644
  
      {
          // Changed status of cells to improve coherence with neighboring tetrahedrons
-@@ -345,10 +365,13 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
+@@ -345,10 +366,13 @@ void Mesher::graphCutPostProcessing(const Point3d hexah[8])
                  else
                      ++movedToEmpty;
              }
@@ -5352,7 +5471,7 @@ index 38d5a37..0d76dd5 100644
  }
  
  int Mesher::removeBubbles()
-@@ -450,13 +473,12 @@ void Mesher::segmentFullOrFree(bool full, StaticVector<int>& out_fullSegsColor,
+@@ -450,13 +474,12 @@ void Mesher::segmentFullOrFree(bool full, StaticVector<int>& out_fullSegsColor,
              // backtrack all connected interior cells
              buff.resize(0);
              buff.push_back(ci);
@@ -5367,7 +5486,7 @@ index 38d5a37..0d76dd5 100644
                  for (int k = 0; k < 4; ++k)
                  {
                      const CellIndex nci = _tetrahedralization.cell_adjacent(tmp_ci, k);
-@@ -464,6 +486,7 @@ void Mesher::segmentFullOrFree(bool full, StaticVector<int>& out_fullSegsColor,
+@@ -464,6 +487,7 @@ void Mesher::segmentFullOrFree(bool full, StaticVector<int>& out_fullSegsColor,
                          continue;
                      if ((!_tetrahedralization.isInfiniteCell(nci)) && (out_fullSegsColor[nci] == -1) && (_cellIsFull[nci] == full))
                      {
@@ -5375,11 +5494,11 @@ index 38d5a37..0d76dd5 100644
                          buff.push_back(nci);
                      }
                  }
-@@ -473,6 +496,47 @@ void Mesher::segmentFullOrFree(bool full, StaticVector<int>& out_fullSegsColor,
+@@ -473,6 +497,47 @@ void Mesher::segmentFullOrFree(bool full, StaticVector<int>& out_fullSegsColor,
      }
  
      out_nsegments = col;
-+    if (std::getenv("CHESHIRE_SEGMENT_CHECK") != nullptr)
++    if (::cheshire::env::flag("CHESHIRE_SEGMENT_CHECK"))
 +    {
 +        // upstream's order: colour when the cell is popped
 +        StaticVector<int> refColour;
@@ -5423,7 +5542,7 @@ index 38d5a37..0d76dd5 100644
  }
  
  void Mesher::invertFullStatusForSmallLabels()
-@@ -576,15 +640,18 @@ void Mesher::cellsStatusFilteringBySolidAngleRatio(int nbSolidAngleFilteringIter
+@@ -576,15 +641,18 @@ void Mesher::cellsStatusFilteringBySolidAngleRatio(int nbSolidAngleFilteringIter
              }
                  
              const std::vector<CellIndex>& neighboringCells = neighboringCellsPerVertex[vi];
@@ -5445,7 +5564,7 @@ index 38d5a37..0d76dd5 100644
                  GEO::signed_index_t localVertexIndex = 0;
                  for (int k = 0; k < 4; ++k)
                  {
-@@ -592,11 +659,15 @@ void Mesher::cellsStatusFilteringBySolidAngleRatio(int nbSolidAngleFilteringIter
+@@ -592,11 +660,15 @@ void Mesher::cellsStatusFilteringBySolidAngleRatio(int nbSolidAngleFilteringIter
                      if (currentVertex == GEO::NO_VERTEX)
                          break;
                      if (currentVertex != vi)
@@ -5463,7 +5582,7 @@ index 38d5a37..0d76dd5 100644
                  {
                      borderCase = true;
                      break;
-@@ -610,7 +681,7 @@ void Mesher::cellsStatusFilteringBySolidAngleRatio(int nbSolidAngleFilteringIter
+@@ -610,7 +682,7 @@ void Mesher::cellsStatusFilteringBySolidAngleRatio(int nbSolidAngleFilteringIter
                  {
                      const Point3d& O = _verticesCoords[vi];
                      const double s =
@@ -5473,13 +5592,14 @@ index 38d5a37..0d76dd5 100644
                  }
              }
 diff --git a/src/aliceVision/fuseCut/PointCloud.cpp b/src/aliceVision/fuseCut/PointCloud.cpp
-index 50a15fd..2937213 100644
+index 50a15fd..8a2fae3 100644
 --- a/src/aliceVision/fuseCut/PointCloud.cpp
 +++ b/src/aliceVision/fuseCut/PointCloud.cpp
-@@ -4,6 +4,12 @@
+@@ -4,6 +4,13 @@
  // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
 +#include <string>  // cheshire
 +#include <thread>  // cheshire
 +#include <cmath>  // cheshire
@@ -5489,7 +5609,7 @@ index 50a15fd..2937213 100644
  #include "PointCloud.hpp"
  
  #include <aliceVision/utils/filesIO.hpp>
-@@ -15,6 +21,18 @@
+@@ -15,6 +22,18 @@
  #include <aliceVision/mvsData/geometry.hpp>
  
  #include <aliceVision/fuseCut/Kdtree.hpp>
@@ -5508,7 +5628,7 @@ index 50a15fd..2937213 100644
  
  #include <geogram/mesh/mesh.h>
  #include <geogram/basic/geometry_nd.h>
-@@ -27,7 +45,7 @@ namespace fuseCut {
+@@ -27,7 +46,7 @@ namespace fuseCut {
  namespace fs = std::filesystem;
  
  /// Filter by pixSize
@@ -5517,7 +5637,7 @@ index 50a15fd..2937213 100644
                       std::vector<double>& pixSizePrepare,
                       double pixSizeMarginCoef,
                       std::vector<float>& simScorePrepare)
-@@ -35,7 +53,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
+@@ -35,7 +54,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
  
      ALICEVISION_LOG_INFO("Build nanoflann KdTree index.");
      PointVectorAdaptator pointCloudRef(verticesCoordsPrepare);
@@ -5526,7 +5646,7 @@ index 50a15fd..2937213 100644
      kdTree.buildIndex();
  
      ALICEVISION_LOG_INFO("KdTree created for " << verticesCoordsPrepare.size() << " points.");
-@@ -64,6 +82,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
+@@ -64,6 +83,7 @@ void filterByPixSize(const std::vector<Point3d>& verticesCoordsPrepare,
      }
      ALICEVISION_LOG_INFO("Filtering done.");
  }
@@ -5534,7 +5654,7 @@ index 50a15fd..2937213 100644
  
  /// Remove invalid points based on invalid pixSize
  void removeInvalidPoints(std::vector<Point3d>& verticesCoordsPrepare, std::vector<double>& pixSizePrepare, std::vector<float>& simScorePrepare)
-@@ -109,7 +128,7 @@ void removeInvalidPoints(std::vector<Point3d>& verticesCoordsPrepare,
+@@ -109,7 +129,7 @@ void removeInvalidPoints(std::vector<Point3d>& verticesCoordsPrepare,
              verticesCoordsTmp.push_back(verticesCoordsPrepare[i]);
              pixSizeTmp.push_back(pixSizePrepare[i]);
              simScoreTmp.push_back(simScorePrepare[i]);
@@ -5543,7 +5663,7 @@ index 50a15fd..2937213 100644
          }
      }
      ALICEVISION_LOG_INFO((verticesCoordsPrepare.size() - verticesCoordsTmp.size()) << " invalid points removed.");
-@@ -119,7 +138,7 @@ void removeInvalidPoints(std::vector<Point3d>& verticesCoordsPrepare,
+@@ -119,7 +139,7 @@ void removeInvalidPoints(std::vector<Point3d>& verticesCoordsPrepare,
      verticesAttrPrepare.swap(verticesAttrTmp);
  }
  
@@ -5552,7 +5672,7 @@ index 50a15fd..2937213 100644
                                      std::vector<Point3d>& verticesCoordsPrepare,
                                      std::vector<double>& pixSizePrepare,
                                      std::vector<float>& simScorePrepare,
-@@ -132,7 +151,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
+@@ -132,7 +152,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
  {
  
      PointVectorAdaptator pointCloudRef(verticesCoordsPrepare);
@@ -5561,7 +5681,7 @@ index 50a15fd..2937213 100644
      kdTree.buildIndex();
      ALICEVISION_LOG_INFO("NANOFLANN: KdTree created.");
  
-@@ -244,6 +263,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
+@@ -244,6 +264,7 @@ void createVerticesWithVisibilities(const StaticVector<int>& cams,
  
      ALICEVISION_LOG_INFO("Visibilities created.");
  }
@@ -5569,7 +5689,7 @@ index 50a15fd..2937213 100644
  
  
  PointCloud::PointCloud(mvsUtils::MultiViewParams& mp) : _mp(mp)
-@@ -294,8 +314,28 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
+@@ -294,8 +315,28 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
  
      ALICEVISION_LOG_INFO("Load depth maps and add points.");
      {
@@ -5580,8 +5700,8 @@ index 50a15fd..2937213 100644
 +        // index = startIndex[c] + sy * sxMax + sx, so the values do not depend on the thread count.
 +        // CHESHIRE_FUSION_THREADS overrides; with one camera per thread the inner loop stays serial.
 +        int cheshireFusionThreads = omp_get_max_threads();
-+        if (const char* e = std::getenv("CHESHIRE_FUSION_THREADS"))
-+            cheshireFusionThreads = std::max(1, std::atoi(e));
++        cheshireFusionThreads =
++            std::max(1, int(::cheshire::env::integer("CHESHIRE_FUSION_THREADS", cheshireFusionThreads)));
 +        ALICEVISION_LOG_INFO("cheshire: loading depth maps on " << cheshireFusionThreads << " threads.");
 +        // cheshire: the gaussian below is 60 % of this block. Take the weights OIIO would
 +        // build, once, and let the device apply them; CHESHIRE_GPU_BLUR=0 keeps OIIO.
@@ -5589,7 +5709,7 @@ index 50a15fd..2937213 100644
 +        int chBlurKw = 0, chBlurKh = 0, chBlurKx0 = 0, chBlurKy0 = 0;
 +        const bool chBlurGpu = gpu::blurAvailable();
 +        // CHESHIRE_GPU_BLUR_CHECK=1 also runs OIIO and reports how far apart they were.
-+        const bool chBlurCheck = std::getenv("CHESHIRE_GPU_BLUR_CHECK") != nullptr;
++        const bool chBlurCheck = ::cheshire::env::flag("CHESHIRE_GPU_BLUR_CHECK");
 +        std::atomic<long long> chBlurPix{0}, chBlurDiff{0};
 +        double chBlurWorst = 0.0;
 +        if (chBlurGpu)
@@ -5600,7 +5720,7 @@ index 50a15fd..2937213 100644
          for (int c = 0; c < cams.size(); c++)
          {
              image::Image<float> depthMap;
-@@ -320,7 +360,38 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
+@@ -320,7 +361,38 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
                  {
                      mvsUtils::readMap(c, _mp, mvsUtils::EFileType::simMapFiltered, simMap);
                      image::Image<float> simMapTmp;
@@ -5640,7 +5760,7 @@ index 50a15fd..2937213 100644
                      simMap.swap(simMapTmp);
                  }
                  catch (const std::exception& e)
-@@ -425,6 +496,9 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
+@@ -425,6 +497,9 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
              }
          }
          omp_set_nested(0);
@@ -5650,7 +5770,7 @@ index 50a15fd..2937213 100644
      }
  
      ALICEVISION_LOG_INFO("Filter initial 3D points by pixel size to remove duplicates.");
-@@ -480,13 +554,28 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
+@@ -480,13 +555,28 @@ void PointCloud::fuseFromDepthMaps(const StaticVector<int>& cams, const Point3d
              ALICEVISION_LOG_WARNING("BAD: visCams.empty()");
          }
          double maxAngle = 0.0;
@@ -5683,7 +5803,7 @@ index 50a15fd..2937213 100644
                  maxAngle = std::max(angle, maxAngle);
              }
          }
-@@ -769,7 +858,13 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
+@@ -769,7 +859,13 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
      Point3d center = (voxel[0] + voxel[1] + voxel[2] + voxel[3] + voxel[4] + voxel[5] + voxel[6] + voxel[7]) / 8.0;
  
      const unsigned int seed = (unsigned int)_mp.userParams.get<unsigned int>("delaunaycut.seed", 0);
@@ -5691,14 +5811,14 @@ index 50a15fd..2937213 100644
 +    // cheshire: an unset seed drew from std::random_device, so the helper points, and every
 +    // mesh built on them, differed from run to run. A fixed value is used instead;
 +    // --seed and CHESHIRE_GRID_RANDOM=1 both still ask for something else.
-+    const bool cheshireGridOld = std::getenv("CHESHIRE_GRID_OLD") != nullptr;
-+    const bool cheshireGridRandom = std::getenv("CHESHIRE_GRID_RANDOM") != nullptr;
++    const bool cheshireGridOld = ::cheshire::env::flag("CHESHIRE_GRID_OLD");
++    const bool cheshireGridRandom = ::cheshire::env::flag("CHESHIRE_GRID_RANDOM");
 +    const unsigned int cheshireSeed = seed != 0 ? seed : (cheshireGridRandom ? std::random_device{}() : 1u);
 +    std::mt19937 generator(cheshireSeed);
      auto rand = std::bind(std::uniform_real_distribution<float>{-1.0, 1.0}, generator);
  
      const double minDist2 = minDist * minDist;
-@@ -778,7 +873,22 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
+@@ -778,7 +874,22 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
  
      ALICEVISION_LOG_TRACE("GRID: Allocate vertices");
      std::vector<Point3d> gridVerticesCoords(std::pow(float(ns + 1), 3.f));
@@ -5722,7 +5842,7 @@ index 50a15fd..2937213 100644
  
      ALICEVISION_LOG_TRACE("Create helper points.");
  #pragma omp parallel for
-@@ -790,7 +900,9 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
+@@ -790,7 +901,9 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
              {
                  int i = x * (ns + 1) * (ns + 1) + y * (ns + 1) + z;
                  const Point3d pt = voxel[0] + vx * ((double)x / double(ns)) + vy * ((double)y / double(ns)) + vz * ((double)z / double(ns));
@@ -5733,7 +5853,7 @@ index 50a15fd..2937213 100644
                  const Point3d p = pt + noise;
                  std::size_t vi{};
                  double sq_dist{};
-@@ -812,17 +924,24 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
+@@ -812,17 +925,24 @@ void PointCloud::addGridHelperPoints(int helperPointsGridSize, const Point3d vox
      _verticesCoords.reserve(_verticesCoords.size() + gridVerticesCoords.size());
      _verticesAttr.reserve(_verticesAttr.size() + gridVerticesCoords.size());
      int addedPoints = 0;
@@ -5759,20 +5879,21 @@ index 50a15fd..2937213 100644
                                     << std::pow(float(ns + 1), 3.f) << " points).");
  }
 diff --git a/src/aliceVision/fuseCut/Tetrahedralization.cpp b/src/aliceVision/fuseCut/Tetrahedralization.cpp
-index bd5e932..1e5b724 100644
+index bd5e932..987a60c 100644
 --- a/src/aliceVision/fuseCut/Tetrahedralization.cpp
 +++ b/src/aliceVision/fuseCut/Tetrahedralization.cpp
-@@ -4,6 +4,9 @@
+@@ -4,6 +4,10 @@
  // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
 +#include <cstdlib>  // cheshire
 +#include <cstdint>
 +#include <aliceVision/system/Logger.hpp>
  #include "Tetrahedralization.hpp"
  
  #include <aliceVision/mvsData/geometry.hpp>
-@@ -22,6 +25,26 @@ Tetrahedralization::Tetrahedralization(const std::vector<Point3d> & vertices)
+@@ -22,6 +26,26 @@ Tetrahedralization::Tetrahedralization(const std::vector<Point3d> & vertices)
      GEO::initialize();
      GEO::Delaunay_var tetrahedralization = GEO::Delaunay::create(3, "BDEL");
      tetrahedralization->set_stores_neighbors(true);
@@ -5780,10 +5901,10 @@ index bd5e932..1e5b724 100644
 +    // generator, so the same points came out as the same tetrahedra numbered differently on every
 +    // run, and every per-cell weight and the mesh that follows moved with them. Resetting the
 +    // generator fixes the insertion order. CHESHIRE_TETRA_RANDOM=1 restores geogram's own state.
-+    if (std::getenv("CHESHIRE_TETRA_RANDOM") == nullptr)
++    if (!::cheshire::env::flag("CHESHIRE_TETRA_RANDOM"))
 +    {
 +        GEO::Numeric::random_reset();
-+        if (std::getenv("CHESHIRE_TETRA_SINGLE_THREAD") != nullptr)
++        if (::cheshire::env::flag("CHESHIRE_TETRA_SINGLE_THREAD"))
 +            GEO::Process::enable_multithreading(false);
 +    }
 +    // a checksum of the points handed to geogram, in order
@@ -5799,7 +5920,7 @@ index bd5e932..1e5b724 100644
      tetrahedralization->set_vertices(_vertices.size(), _vertices.front().m);
  
      //Copy information
-@@ -42,6 +65,9 @@ Tetrahedralization::Tetrahedralization(const std::vector<Point3d> & vertices)
+@@ -42,6 +66,9 @@ Tetrahedralization::Tetrahedralization(const std::vector<Point3d> & vertices)
          c.adjacent[3] = tetrahedralization->cell_adjacent(ci, 3);
      }
  
@@ -5809,13 +5930,13 @@ index bd5e932..1e5b724 100644
      //Remove geogram data
      tetrahedralization.reset();
  
-@@ -50,6 +76,56 @@ Tetrahedralization::Tetrahedralization(const std::vector<Point3d> & vertices)
+@@ -50,6 +77,56 @@ Tetrahedralization::Tetrahedralization(const std::vector<Point3d> & vertices)
  
  void Tetrahedralization::updateVertexToCellsCache(const size_t verticesCount)
  {
 +    // cheshire: cells are visited in ascending order and each cell lists a vertex once, so
 +    // counting then appending gives exactly the ascending, duplicate-free lists the map of sets did
-+    if (std::getenv("CHESHIRE_MESH_OLD_NEIGHBOURS") == nullptr)
++    if (!::cheshire::env::flag("CHESHIRE_MESH_OLD_NEIGHBOURS"))
 +    {
 +        _neighboringCellsPerVertex.clear();
 +        _neighboringCellsPerVertex.resize(verticesCount);
@@ -5839,7 +5960,7 @@ index bd5e932..1e5b724 100644
 +                    continue;
 +                _neighboringCellsPerVertex[vi].push_back(ci);
 +            }
-+        if (std::getenv("CHESHIRE_GPU_VOTE_LOG") != nullptr)
++        if (::cheshire::env::flag("CHESHIRE_GPU_VOTE_LOG"))
 +        {
 +            // build upstream's table as well and compare list for list
 +            std::map<VertexIndex, std::set<CellIndex>> tmp;
@@ -5888,10 +6009,18 @@ index 1907d8f..26ce5fd 100644
      jetColorMap.cpp
      remap.cpp
 diff --git a/src/aliceVision/image/imageAlgo.cpp b/src/aliceVision/image/imageAlgo.cpp
-index d6b69fb..19e45a5 100644
+index d6b69fb..1ab5241 100644
 --- a/src/aliceVision/image/imageAlgo.cpp
 +++ b/src/aliceVision/image/imageAlgo.cpp
-@@ -13,6 +13,14 @@
+@@ -4,6 +4,7 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include "imageAlgo.hpp"
+ 
+ #include <aliceVision/image/Image.hpp>
+@@ -13,6 +14,14 @@
  #include <OpenImageIO/imageio.h>
  #include <OpenImageIO/imagebuf.h>
  #include <OpenImageIO/imagebufalgo.h>
@@ -5906,7 +6035,7 @@ index d6b69fb..19e45a5 100644
  
  #include <Eigen/Eigen>
  
-@@ -228,10 +236,42 @@ void resizeImage(oiio::TypeDesc typeDesc,
+@@ -228,10 +237,39 @@ void resizeImage(oiio::TypeDesc typeDesc,
                   const std::string& filter,
                   float filterSize)
  {
@@ -5915,10 +6044,7 @@ index d6b69fb..19e45a5 100644
 +    // values, 18x less CPU on a 6000x3376 RGBA image, and rows in parallel unless the caller
 +    // already is. Anything else (a named filter, an upscale, other types) stays with OpenImageIO.
 +    // CHESHIRE_RESIZE_EXACT=0 restores the OpenImageIO call.
-+    static const bool cheshireExact = [] {
-+        const char* v = std::getenv("CHESHIRE_RESIZE_EXACT");
-+        return v == nullptr || std::string(v) != "0";
-+    }();
++    static const bool cheshireExact = ::cheshire::env::flag("CHESHIRE_RESIZE_EXACT", true);
 +    if (cheshireExact && typeDesc == oiio::TypeDesc::FLOAT && filter.empty() && filterSize == 0.0f && outWidth <= inWidth &&
 +        outHeight <= inHeight && (nchannels == 1 || nchannels == 3 || nchannels == 4))
 +    {
@@ -5950,7 +6076,7 @@ index d6b69fb..19e45a5 100644
  }
  
  void resizeImage(int downscale,
-@@ -548,6 +588,20 @@ void convolveImage(oiio::TypeDesc typeDesc,
+@@ -548,6 +586,20 @@ void convolveImage(oiio::TypeDesc typeDesc,
      oiio::ImageBufAlgo::convolve(outBuf, inBuf, K);
  }
  
@@ -6000,18 +6126,20 @@ index 1f29fe2..7055c2a 100644
                     image::Image<float>& outBuffer,
                     const std::string& kernel = "gaussian",
 diff --git a/src/aliceVision/image/io.cpp b/src/aliceVision/image/io.cpp
-index 8c5e1d3..6cc35cd 100644
+index 8c5e1d3..4b2f0a2 100644
 --- a/src/aliceVision/image/io.cpp
 +++ b/src/aliceVision/image/io.cpp
-@@ -7,6 +7,7 @@
+@@ -6,7 +6,9 @@
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
  
  
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
  #include <aliceVision/image/io.hpp>
 +#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 5v
  
  #include <aliceVision/image/Image.hpp>
  #include <aliceVision/image/colorspace.hpp>
-@@ -21,6 +22,19 @@
+@@ -21,6 +23,19 @@
  #include <OpenImageIO/imagebufalgo.h>
  #include <OpenImageIO/color.h>
  #include <OpenImageIO/imagecache.h>
@@ -6031,7 +6159,7 @@ index 8c5e1d3..6cc35cd 100644
  
  #include <boost/algorithm/string.hpp>
  
-@@ -601,6 +615,228 @@ bool isRawFormat(const std::string& path)
+@@ -601,6 +616,222 @@ bool isRawFormat(const std::string& path)
      return (imgFormat.compare("raw") == 0);
  }
  
@@ -6052,19 +6180,13 @@ index 8c5e1d3..6cc35cd 100644
 +
 +bool cheshireReadDirectEnabled()
 +{
-+    static const bool on = [] {
-+        const char* e = std::getenv("CHESHIRE_READ_DIRECT");
-+        return !(e && std::string(e) == "0");
-+    }();
++    static const bool on = ::cheshire::env::flag("CHESHIRE_READ_DIRECT", true);
 +    return on;
 +}
 +
 +bool cheshireReadDirectCheck()
 +{
-+    static const bool on = [] {
-+        const char* e = std::getenv("CHESHIRE_READ_DIRECT_CHECK");
-+        return e && std::string(e) == "1";
-+    }();
++    static const bool on = ::cheshire::env::flag("CHESHIRE_READ_DIRECT_CHECK");
 +    return on;
 +}
 +
@@ -6260,7 +6382,7 @@ index 8c5e1d3..6cc35cd 100644
  template<typename T>
  void readImage(const std::string& path, oiio::TypeDesc format, int nchannels, Image<T>& image, const ImageReadOptions& imageReadOptions)
  {
-@@ -612,6 +848,48 @@ void readImage(const std::string& path, oiio::TypeDesc format, int nchannels, Im
+@@ -612,6 +843,48 @@ void readImage(const std::string& path, oiio::TypeDesc format, int nchannels, Im
      if (nchannels == 2)
          ALICEVISION_THROW_ERROR("Load of 2 channels is not supported. Image file: '" + path + "'.")
  
@@ -6451,26 +6573,27 @@ index ed90dd3..b10258e 100644
 +    target_compile_definitions(aliceVision_mesh PRIVATE ALICEVISION_HAVE_GPU_TEX=1)
 +endif()
 diff --git a/src/aliceVision/mesh/Mesh.cpp b/src/aliceVision/mesh/Mesh.cpp
-index 235a4ce..bfb1f1e 100644
+index 235a4ce..7477e82 100644
 --- a/src/aliceVision/mesh/Mesh.cpp
 +++ b/src/aliceVision/mesh/Mesh.cpp
-@@ -4,6 +4,9 @@
+@@ -4,6 +4,10 @@
  // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
 +#include <cstdio>  // cheshire
 +#include <cstdlib>
 +#include <cstring>
  #include "Mesh.hpp"
  #include <aliceVision/system/Logger.hpp>
  #include <aliceVision/utils/filesIO.hpp>
-@@ -92,6 +95,53 @@ void Mesh::save(const std::string& filepath)
+@@ -92,6 +96,53 @@ void Mesh::save(const std::string& filepath)
  
      ALICEVISION_LOG_INFO("Saving " << fileTypeStr << " mesh file using Assimp.");
  
 +    // cheshire: OBJ straight to the file (see scripts/apply_hip_patch.py, step 4n)
 +    static thread_local bool cheshireForceAssimp = false;
-+    if (fileType == EFileType::OBJ && !cheshireForceAssimp && std::getenv("CHESHIRE_OBJ_ASSIMP") == nullptr)
++    if (fileType == EFileType::OBJ && !cheshireForceAssimp && !::cheshire::env::flag("CHESHIRE_OBJ_ASSIMP"))
 +    {
 +        ALICEVISION_LOG_INFO("Saving obj mesh file (cheshire direct writer): " << pts.size() << " vertices, " << tris.size() << " faces.");
 +        FILE* f = std::fopen(filepath.c_str(), "wb");
@@ -6506,7 +6629,7 @@ index 235a4ce..bfb1f1e 100644
 +        }
 +        flush();
 +        std::fclose(f);
-+        if (std::getenv("CHESHIRE_OBJ_CHECK") == nullptr)
++        if (!::cheshire::env::flag("CHESHIRE_OBJ_CHECK"))
 +            return;
 +        ALICEVISION_LOG_INFO("cheshire: CHESHIRE_OBJ_CHECK: also writing " << filepath << ".assimp.obj through Assimp");
 +        cheshireForceAssimp = true;
@@ -6519,13 +6642,14 @@ index 235a4ce..bfb1f1e 100644
      // create scene and root node
      aiScene scene;
 diff --git a/src/aliceVision/mesh/MeshClean.cpp b/src/aliceVision/mesh/MeshClean.cpp
-index b0b5910..3e06b0f 100644
+index b0b5910..6dee8e0 100644
 --- a/src/aliceVision/mesh/MeshClean.cpp
 +++ b/src/aliceVision/mesh/MeshClean.cpp
-@@ -4,12 +4,32 @@
+@@ -4,12 +4,33 @@
  // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
 +#include <cstdlib>  // cheshire
 +#include <chrono>
 +#include <algorithm>  // cheshire (step 6i)
@@ -6555,7 +6679,7 @@ index b0b5910..3e06b0f 100644
  MeshClean::path::path(MeshClean* mesh, int ptId)
    : meshClean(mesh),
      _ptId(ptId)
-@@ -260,7 +280,7 @@ void MeshClean::path::deployTriangle(int triId)
+@@ -260,7 +281,7 @@ void MeshClean::path::deployTriangle(int triId)
  int MeshClean::path::deployTriangles(StaticVector<int>& trisIds, bool isBoundaryPt)
  {
      // add new pt to pts
@@ -6564,7 +6688,7 @@ index b0b5910..3e06b0f 100644
      meshClean->pts.push_back(meshClean->pts[_ptId]);
      int newPtId = meshClean->pts.size() - 1;
  
-@@ -271,11 +291,11 @@ int MeshClean::path::deployTriangles(StaticVector<int>& trisIds, bool isBoundary
+@@ -271,11 +292,11 @@ int MeshClean::path::deployTriangles(StaticVector<int>& trisIds, bool isBoundary
      }
      meshClean->newPtsOldPtId.push_back(origPtId);
  
@@ -6578,7 +6702,7 @@ index b0b5910..3e06b0f 100644
      StaticVector<int> newPtNeighTrisSortedAsc;
      newPtNeighTrisSortedAsc.reserve(trisIds.size());
      for (int i = 0; i < trisIds.size(); i++)
-@@ -303,10 +323,10 @@ int MeshClean::path::deployTriangles(StaticVector<int>& trisIds, bool isBoundary
+@@ -303,10 +324,10 @@ int MeshClean::path::deployTriangles(StaticVector<int>& trisIds, bool isBoundary
          meshClean->changeTriPtId(trisIds[i], _ptId, newPtId);
      }
  
@@ -6593,7 +6717,7 @@ index b0b5910..3e06b0f 100644
  
      int i0 = meshClean->edgesNeigTris.size();
  
-@@ -367,7 +387,7 @@ void MeshClean::path::deployPath(StaticVector<MeshClean::path::pathPart>& path)
+@@ -367,7 +388,7 @@ void MeshClean::path::deployPath(StaticVector<MeshClean::path::pathPart>& path)
      }
      int newPtId = deployTriangles(trisIds, (!isClodePath(path)));
  
@@ -6602,7 +6726,7 @@ index b0b5910..3e06b0f 100644
      meshClean->ptsNeighPtsOrdered.push_back({});
      updatePtNeighPtsOrderedByPath(newPtId, path);
  }
-@@ -471,7 +491,7 @@ int MeshClean::path::deployAll()
+@@ -471,7 +492,7 @@ int MeshClean::path::deployAll()
      if (ptNeighTrisSortedAscToProcess.size() > 0)
      {
          int newPtId = deployTriangles(ptNeighTrisSortedAscToProcess, true);
@@ -6611,7 +6735,7 @@ index b0b5910..3e06b0f 100644
          meshClean->ptsNeighPtsOrdered.push_back({});
          clearPointNeighbors(newPtId);
          ptNeighTrisSortedAscToProcess.resize(0);
-@@ -633,82 +653,224 @@ void MeshClean::init()
+@@ -633,82 +654,223 @@ void MeshClean::init()
  {
      deallocateCleaningAttributes();
  
@@ -6849,8 +6973,7 @@ index b0b5910..3e06b0f 100644
 +    };
  
 -        mvsUtils::printfEstimate(i, edgesNeigTris.size(), t1);
-+    const char* cheshireSetupEnv = std::getenv("CHESHIRE_MESHCLEAN_SETUP");
-+    const bool cheshireCounting = !(cheshireSetupEnv != nullptr && *cheshireSetupEnv == '0');
++    const bool cheshireCounting = ::cheshire::env::flag("CHESHIRE_MESHCLEAN_SETUP", true);
 +    const auto cheshireT0 = std::chrono::steady_clock::now();
 +    if (cheshireCounting)
 +        countingSetup();
@@ -6858,7 +6981,7 @@ index b0b5910..3e06b0f 100644
 +        upstreamSetup();
 +    const double cheshireSetupMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cheshireT0).count();
 +    ALICEVISION_LOG_INFO("cheshire: MeshClean setup" << (cheshireCounting ? " (counting)" : "") << ": " << cheshireSetupMs << " ms");
-+    if (cheshireCounting && std::getenv("CHESHIRE_MESHCLEAN_CHECK") != nullptr)
++    if (cheshireCounting && ::cheshire::env::flag("CHESHIRE_MESHCLEAN_CHECK"))
 +    {
 +        const StaticVector<StaticVector<int>> fastTris = ptsNeighTrisSortedAsc;
 +        const StaticVector<Voxel> fastEdges = edgesNeigTris, fastX = edgesXStat, fastXY = edgesXYStat;
@@ -6893,7 +7016,7 @@ index b0b5910..3e06b0f 100644
  }
  
  void MeshClean::testPtsNeighTrisSortedAsc()
-@@ -868,17 +1030,275 @@ int MeshClean::cleanMesh()
+@@ -868,17 +1030,274 @@ int MeshClean::cleanMesh()
      return pts.size() - nv;
  }
  
@@ -6985,7 +7108,7 @@ index b0b5910..3e06b0f 100644
 -    for (int iter = 0; (iter < maxIters) && (nupd > 0); ++iter)
 +    // cheshire: the consistency tests only log at debug level and never change the mesh; they are
 +    // 14 full passes over the mesh per call. CHESHIRE_MESHCLEAN_TESTS=1 keeps them.
-+    const bool cheshireTests = std::getenv("CHESHIRE_MESHCLEAN_TESTS") != nullptr;
++    const bool cheshireTests = ::cheshire::env::flag("CHESHIRE_MESHCLEAN_TESTS");
 +    if (cheshireTests)
      {
 -        nupd = cleanMesh();
@@ -7006,9 +7129,8 @@ index b0b5910..3e06b0f 100644
 +    // the previous one: the others' inputs have not changed, so their pass would write the same
 +    // values again. CHESHIRE_MESHCLEAN_PRESCREEN=0 runs upstream's pass on every point;
 +    // CHESHIRE_MESHCLEAN_CHECK=1 runs both from the same state and compares every structure.
-+    const char* cheshirePrescreenEnv = std::getenv("CHESHIRE_MESHCLEAN_PRESCREEN");
-+    const bool cheshirePrescreen = cheshirePrescreenEnv == nullptr || std::string(cheshirePrescreenEnv) != "0";
-+    const bool cheshireCheck = cheshirePrescreen && std::getenv("CHESHIRE_MESHCLEAN_CHECK") != nullptr;
++    const bool cheshirePrescreen = ::cheshire::env::flag("CHESHIRE_MESHCLEAN_PRESCREEN", true);
++    const bool cheshireCheck = cheshirePrescreen && ::cheshire::env::flag("CHESHIRE_MESHCLEAN_CHECK");
 +    std::unique_ptr<CheshireCleanState> cheshireBefore;
 +    if (cheshireCheck)
 +    {
@@ -7176,12 +7298,14 @@ index b0b5910..3e06b0f 100644
  
      return nupd;
 diff --git a/src/aliceVision/mesh/Texturing.cpp b/src/aliceVision/mesh/Texturing.cpp
-index 76bf7e5..3e34cc6 100644
+index 76bf7e5..7b4ea86 100644
 --- a/src/aliceVision/mesh/Texturing.cpp
 +++ b/src/aliceVision/mesh/Texturing.cpp
-@@ -5,6 +5,18 @@
+@@ -4,7 +4,20 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
  #include "Texturing.hpp"
 +#include <cstdlib>  // cheshire
 +#include <thread>  // cheshire (step 6e)
@@ -7198,7 +7322,7 @@ index 76bf7e5..3e34cc6 100644
  #include "geoMesh.hpp"
  #include "UVAtlas.hpp"
  
-@@ -463,7 +475,57 @@ void Texturing::generateTextures(const mvsUtils::MultiViewParams& mp,
+@@ -463,7 +476,56 @@ void Texturing::generateTextures(const mvsUtils::MultiViewParams& mp,
          nbAtlasMax -= 1;
      nbAtlasMax = std::max(1, nbAtlasMax);  // if not enough memory, do it one by one
  
@@ -7239,8 +7363,7 @@ index 76bf7e5..3e34cc6 100644
 +    if (imageType != mvsUtils::EFileType::normalMap && gpu::texAvailable())
 +    {
 +        int cheshireDepth = std::max(1, int(std::thread::hardware_concurrency()) - 1);
-+        if (const char* e = std::getenv("CHESHIRE_TEX_READAHEAD"))
-+            cheshireDepth = std::max(1, std::atoi(e));
++        cheshireDepth = std::max(1, int(::cheshire::env::integer("CHESHIRE_TEX_READAHEAD", cheshireDepth)));
 +        if (imageCache.getCacheSize() < cheshireDepth + 1 && availableRam > 4096 &&
 +            std::size_t(availableRam - 4096) > std::size_t(cheshireDepth + 1) * imageMaxMemSize)
 +            imageCache.setCacheSize(cheshireDepth + 1);
@@ -7265,7 +7388,7 @@ index 76bf7e5..3e34cc6 100644
 +        // cheshire: contiguous triangle ranges scored in parallel into their own lists, merged in order below
 +        const std::size_t nbAtlasTris = _atlases[atlasID].size();
 +        int nbParts = std::max(1, std::min(256, (int)(nbAtlasTris / 2048)));
-+        if (const char* pe = std::getenv("CHESHIRE_TEX_PARTS")) nbParts = std::max(1, std::atoi(pe));   // 1: the sequential loop
++        nbParts = std::max(1, int(::cheshire::env::integer("CHESHIRE_TEX_PARTS", nbParts)));   // 1: the sequential loop
 +        std::vector<std::vector<std::map<AtlasIndex, std::vector<ScorePerTriangle>>>> partialContributions(
 +          nbParts, std::vector<std::map<AtlasIndex, std::vector<ScorePerTriangle>>>(mp.ncams));
 +#pragma omp parallel for schedule(static)
@@ -7292,7 +7415,7 @@ index 76bf7e5..3e34cc6 100644
 +                        dst[band].insert(dst[band].end(), perAtlas.second[band].begin(), perAtlas.second[band].end());
 +                }
 +    }
-+    if (std::getenv("CHESHIRE_GPU_TEX_LOG") != nullptr)
++    if (::cheshire::env::flag("CHESHIRE_GPU_TEX_LOG"))
 +    {
 +        // order-sensitive checksum of every (camera, atlas, band) list, to compare CHESHIRE_TEX_PARTS=1 against the default
 +        std::uint64_t h = 1469598103934665603ull; std::size_t n = 0;
@@ -7313,7 +7436,7 @@ index 76bf7e5..3e34cc6 100644
 +    // cheshire: per camera, upload the image; pyramid, rasterisation and the final fuse on the GPU
 +    if (imageType != mvsUtils::EFileType::normalMap && gpu::texAvailable())
 +    {
-+        const bool log = std::getenv("CHESHIRE_GPU_TEX_LOG") != nullptr;
++        const bool log = ::cheshire::env::flag("CHESHIRE_GPU_TEX_LOG");
 +        gpu::Texturer tex;
 +        bool ok = tex.init((int)atlasIDs.size(), texParams.textureSide, texParams.nbBand, texParams.multiBandDownscale, mp.getMaxImageWidth(), mp.getMaxImageHeight());
 +        if (ok)
@@ -7416,7 +7539,7 @@ index 76bf7e5..3e34cc6 100644
 +            // cheshire: the downscale too (step 5j): OIIO's lanczos3 resize transcribed on the device
 +            image::Image<image::RGBfColor> cheshireSmall;
 +            float* cheshireSmallPtr = nullptr;
-+            if (texParams.downscale > 1 && std::getenv("CHESHIRE_GPU_RESIZE") == nullptr)
++            if (texParams.downscale > 1 && ::cheshire::env::flag("CHESHIRE_GPU_RESIZE", true))   // =0: the host resize
 +            {
 +                const int smallSide = int(texParams.textureSide) / int(texParams.downscale);   // not 'small': windows.h defines it
 +                cheshireSmall.resize(smallSide, smallSide);
@@ -7463,7 +7586,7 @@ index 76bf7e5..3e34cc6 100644
 +        {
 +            // cheshire: the device produced it (scripts/apply_hip_patch.py, step 5j)
 +            ALICEVISION_LOG_INFO("  - Downscaling texture (" << texParams.downscale << "x) done on the GPU.");
-+            if (std::getenv("CHESHIRE_GPU_RESIZE_CHECK") != nullptr)
++            if (::cheshire::env::flag("CHESHIRE_GPU_RESIZE_CHECK"))
 +            {
 +                image::Image<image::RGBfColor> hostResized;
 +                imageAlgo::resizeImage(texParams.downscale, atlasTexture.img, hostResized);
@@ -7494,7 +7617,7 @@ index 76bf7e5..3e34cc6 100644
  
 +    // cheshire: OBJ and MTL straight to the files (scripts/apply_hip_patch.py, step 5e)
 +    std::string cheshireAssimpPath = filepath;
-+    if (meshFileType == EFileType::OBJ && std::getenv("CHESHIRE_OBJ_ASSIMP") == nullptr && !_atlases.empty()
++    if (meshFileType == EFileType::OBJ && !::cheshire::env::flag("CHESHIRE_OBJ_ASSIMP") && !_atlases.empty()
 +        && material.getTextures(Material::TextureType::NORMAL).empty()
 +        && material.getTextures(Material::TextureType::BUMP).empty()
 +        && material.getTextures(Material::TextureType::DISPLACEMENT).empty())
@@ -7548,7 +7671,7 @@ index 76bf7e5..3e34cc6 100644
 +            std::fprintf(m, "\n");
 +        }
 +        std::fclose(m);
-+        if (std::getenv("CHESHIRE_OBJ_CHECK") == nullptr)
++        if (!::cheshire::env::flag("CHESHIRE_OBJ_CHECK"))
 +        {
 +            ALICEVISION_LOG_INFO("Mesh saved.");
 +            return;
@@ -7802,11 +7925,14 @@ index c0a3ab3..1cbe627 100644
      {
          // do nothing, no normalization in this case
 diff --git a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
-index 298c9d2..8880d5d 100644
+index 298c9d2..9b31e8f 100644
 --- a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
 +++ b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
-@@ -8,6 +8,8 @@
+@@ -6,8 +6,11 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
  #include "Fundamental7PSolver.hpp"
  #include <aliceVision/numeric/polynomial.hpp>
 +#include <cstdlib>  // cheshire: CHESHIRE_QR_NULLSPACE
@@ -7814,7 +7940,7 @@ index 298c9d2..8880d5d 100644
  #include <aliceVision/multiview/epipolarEquation.hpp>
  #include <aliceVision/numeric/algebra.hpp>
  namespace aliceVision {
-@@ -37,8 +39,20 @@ void Fundamental7PSolver::solve(const Mat& x1, const Mat& x2, std::vector<robust
+@@ -37,8 +40,20 @@ void Fundamental7PSolver::solve(const Mat& x1, const Mat& x2, std::vector<robust
          // Eigen::JacobiSVD<Mat9> svdA(A);
          // ALICEVISION_LOG_DEBUG("Its singular values are:\n" << svdA.singularValues());
  
@@ -7824,7 +7950,7 @@ index 298c9d2..8880d5d 100644
 +        // exactly two-dimensional - a Householder QR of the transpose gives a basis for it
 +        // without an iterative SVD. A different basis of the same nullspace spans the same
 +        // pencil, so det(F1 + a*F2) = 0 has the same solutions to rounding.
-+        static const bool cheshireQrNullspace = (std::getenv("CHESHIRE_QR_NULLSPACE") != nullptr);
++        static const bool cheshireQrNullspace = ::cheshire::env::flag("CHESHIRE_QR_NULLSPACE");
 +        static const bool cheshireQrAnnounced = []() {  // once per process, both paths (docs/04 marker rule)
 +            std::fprintf(stderr, cheshireQrNullspace ? "[cheshire] 7-point nullspace: Householder QR (CHESHIRE_QR_NULLSPACE=1)\n"
 +                                                     : "[cheshire] 7-point nullspace: SVD (default; CHESHIRE_QR_NULLSPACE=1 for QR)\n");
@@ -8006,10 +8132,18 @@ index 8849153..dd4e886 100644
      ~ImagesCache() = default;
  
 diff --git a/src/aliceVision/mvsUtils/fileIO.cpp b/src/aliceVision/mvsUtils/fileIO.cpp
-index 0403b03..254e95b 100644
+index 0403b03..eec2160 100644
 --- a/src/aliceVision/mvsUtils/fileIO.cpp
 +++ b/src/aliceVision/mvsUtils/fileIO.cpp
-@@ -11,6 +11,9 @@
+@@ -4,6 +4,7 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include "fileIO.hpp"
+ #include <aliceVision/system/Logger.hpp>
+ #include <aliceVision/image/Image.hpp>
+@@ -11,6 +12,9 @@
  #include <aliceVision/image/io.hpp>
  #include <aliceVision/mvsUtils/common.hpp>
  #include <aliceVision/mvsUtils/MultiViewParams.hpp>
@@ -8019,7 +8153,7 @@ index 0403b03..254e95b 100644
  
  namespace aliceVision {
  namespace mvsUtils {
-@@ -382,9 +385,48 @@ Matrix3x4 load3x4MatrixFromFile(std::istream& in)
+@@ -382,9 +386,45 @@ Matrix3x4 load3x4MatrixFromFile(std::istream& in)
      return m;
  }
  
@@ -8044,10 +8178,7 @@ index 0403b03..254e95b 100644
 +
 +inline bool cheshireLoadProfileOn()
 +{
-+    static const bool on = [] {
-+        const char* v = std::getenv("CHESHIRE_LOAD_PROFILE");
-+        return v != nullptr && std::string(v) == "1";
-+    }();
++    static const bool on = ::cheshire::env::flag("CHESHIRE_LOAD_PROFILE");
 +    return on;
 +}
 +
@@ -8068,7 +8199,7 @@ index 0403b03..254e95b 100644
      // check image size
      auto checkImageSize = [&path, &mp, camId, &img]() {
          if ((mp.getOriginalWidth(camId) != img.width()) || (mp.getOriginalHeight(camId) != img.height()))
-@@ -402,14 +444,17 @@ void loadImage(const std::string& path, const MultiViewParams& mp, int camId, Im
+@@ -402,14 +442,17 @@ void loadImage(const std::string& path, const MultiViewParams& mp, int camId, Im
      {
          image::readImage(path, img, colorspace);
          checkImageSize();
@@ -8086,7 +8217,7 @@ index 0403b03..254e95b 100644
  
          float exposureCompensation = metadata.get_float("AliceVision:EVComp", -1);
  
-@@ -428,21 +473,29 @@ void loadImage(const std::string& path, const MultiViewParams& mp, int camId, Im
+@@ -428,21 +471,29 @@ void loadImage(const std::string& path, const MultiViewParams& mp, int camId, Im
                  img(i)[1] *= exposureCompensation;
                  img(i)[2] *= exposureCompensation;
              }
@@ -8177,10 +8308,15 @@ index b2047a8..e7542af 100644
  inline double Nullspace2(const TMat& A, TVec1& x1, TVec2& x2)
  {
 diff --git a/src/aliceVision/robustEstimation/ACRansac.hpp b/src/aliceVision/robustEstimation/ACRansac.hpp
-index bb91d4e..1043533 100644
+index bb91d4e..7590c1d 100644
 --- a/src/aliceVision/robustEstimation/ACRansac.hpp
 +++ b/src/aliceVision/robustEstimation/ACRansac.hpp
-@@ -12,6 +12,11 @@
+@@ -8,10 +8,16 @@
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
+ #pragma once
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ 
  #include <aliceVision/robustEstimation/randSampling.hpp>
  #include <aliceVision/system/Logger.hpp>
  
@@ -8192,7 +8328,7 @@ index bb91d4e..1043533 100644
  #include <algorithm>
  #include <cmath>
  #include <iostream>
-@@ -79,12 +84,96 @@ void makelogcombi(std::size_t k, std::size_t n, std::vector<Type>& vec_logc_k, s
+@@ -79,12 +85,96 @@ void makelogcombi(std::size_t k, std::size_t n, std::vector<Type>& vec_logc_k, s
   */
  using ErrorIndex = std::pair<double, size_t>;
  
@@ -8218,7 +8354,7 @@ index bb91d4e..1043533 100644
 +    std::atomic<long long> n{0};
 +    ~CheshireAcrDeferred()
 +    {
-+        if (std::getenv("CHESHIRE_ACR_NANLOG") && n.load())
++        if (::cheshire::env::flag("CHESHIRE_ACR_NANLOG") && n.load())
 +            std::fprintf(stderr, "[cheshire acransac] %lld residual arrays deferred to std::sort\n", n.load());
 +    }
 +};
@@ -8290,7 +8426,7 @@ index bb91d4e..1043533 100644
                            double loge0,
                            double maxThreshold,
                            const std::vector<float>& logc_n,
-@@ -94,9 +183,9 @@ inline ErrorIndex bestNFA(int startIndex,  // number of point required for estim
+@@ -94,9 +184,9 @@ inline ErrorIndex bestNFA(int startIndex,  // number of point required for estim
      ErrorIndex bestIndex(std::numeric_limits<double>::infinity(), startIndex);
      const size_t n = e.size();
  
@@ -8302,7 +8438,7 @@ index bb91d4e..1043533 100644
          double residual = sqrt(squaredResidual) + std::numeric_limits<float>::epsilon();
  
          const double logalpha = logalpha0 + errorVectorDimension * log10(residual);
-@@ -161,8 +250,11 @@ std::pair<double, double> ACRANSAC(const Kernel& kernel,
+@@ -161,8 +251,11 @@ std::pair<double, double> ACRANSAC(const Kernel& kernel,
                                    ? std::numeric_limits<double>::infinity()
                                    : precision * precision * kernel.thresholdNormalizer() * kernel.thresholdNormalizer();
  
@@ -8311,11 +8447,11 @@ index bb91d4e..1043533 100644
      std::vector<double> vec_residuals_(nData);
 +    // cheshire: residual bits, sorted for every model; see cheshireRadixSortResiduals
 +    std::vector<std::uint64_t> vec_keys(nData), vec_keysScratch;
-+    const bool cheshirePairSort = (std::getenv("CHESHIRE_ACR_PAIRSORT") != nullptr);
++    const bool cheshirePairSort = ::cheshire::env::flag("CHESHIRE_ACR_PAIRSORT");
  
      // Possible sampling indices [0,..,nData] (will change in the optimization phase)
      std::vector<size_t> vec_index(nData);
-@@ -215,20 +307,40 @@ std::pair<double, double> ACRANSAC(const Kernel& kernel,
+@@ -215,20 +308,40 @@ std::pair<double, double> ACRANSAC(const Kernel& kernel,
              }
              if (bACRansacMode)
              {
@@ -8393,20 +8529,21 @@ index 9500f70..b12c078 100644
          numAddedEdges += addIntrinsicEdgesToTheGraph(sfmData, addedViewsId);
      }
 diff --git a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
-index bd0bf27..c2e23a9 100644
+index bd0bf27..eb5691a 100644
 --- a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
 +++ b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
-@@ -5,6 +5,9 @@
+@@ -5,6 +5,10 @@
  // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
 +#include <unordered_map>  // cheshire: step 5q
 +#include <chrono>  // cheshire: step 5o
 +#include <cstdlib>  // cheshire: CHESHIRE_BA_PROFILE
  #include <aliceVision/config.hpp>
  #include <aliceVision/alicevision_omp.hpp>
  #include <aliceVision/system/Logger.hpp>
-@@ -12,6 +15,7 @@
+@@ -12,6 +16,7 @@
  #include <aliceVision/sfm/bundle/costfunctions/constraint2d.hpp>
  #include <aliceVision/sfm/bundle/costfunctions/constraintPoint.hpp>
  #include <aliceVision/sfm/bundle/costfunctions/projection.hpp>
@@ -8414,7 +8551,7 @@ index bd0bf27..c2e23a9 100644
  #include <aliceVision/sfm/bundle/costfunctions/projectionMesh.hpp>
  #include <aliceVision/sfm/bundle/costfunctions/rotationPrior.hpp>
  #include <aliceVision/sfm/bundle/costfunctions/temporalConstraint.hpp>
-@@ -207,7 +211,7 @@ void BundleAdjustmentCeres::setSolverOptions(ceres::Solver::Options& solverOptio
+@@ -207,7 +212,7 @@ void BundleAdjustmentCeres::setSolverOptions(ceres::Solver::Options& solverOptio
      solverOptions.minimizer_progress_to_stdout = _ceresOptions.verbose;
      solverOptions.logging_type = ceres::SILENT;
      solverOptions.update_state_every_iteration = true;
@@ -8423,7 +8560,7 @@ index bd0bf27..c2e23a9 100644
      solverOptions.max_num_iterations = _ceresOptions.maxNumIterations;
      solverOptions.max_num_consecutive_invalid_steps = 10;
      /*solverOptions.function_tolerance = 1e-12;
-@@ -215,7 +219,7 @@ void BundleAdjustmentCeres::setSolverOptions(ceres::Solver::Options& solverOptio
+@@ -215,7 +220,7 @@ void BundleAdjustmentCeres::setSolverOptions(ceres::Solver::Options& solverOptio
      solverOptions.parameter_tolerance = 1e-12;*/
  
  #if CERES_VERSION_MAJOR < 2
@@ -8432,7 +8569,7 @@ index bd0bf27..c2e23a9 100644
  #endif
  
      if (_ceresOptions.useParametersOrdering)
-@@ -387,11 +391,19 @@ void BundleAdjustmentCeres::addIntrinsicsToProblem(const sfmData::SfMData& sfmDa
+@@ -387,11 +392,19 @@ void BundleAdjustmentCeres::addIntrinsicsToProblem(const sfmData::SfMData& sfmDa
          }
  
          //Create a copy of the intrinsics to enable rollback
@@ -8453,7 +8590,7 @@ index bd0bf27..c2e23a9 100644
          double* intrinsicBlockPtr = intrinsicBlock.data();
          problem.AddParameterBlock(intrinsicBlockPtr, intrinsicBlock.size());
  
-@@ -500,7 +512,14 @@ void BundleAdjustmentCeres::addIntrinsicsToProblem(const sfmData::SfMData& sfmDa
+@@ -500,7 +513,14 @@ void BundleAdjustmentCeres::addIntrinsicsToProblem(const sfmData::SfMData& sfmDa
              {
                  //Create data block for intrinsics inside ceres
                  std::vector<double>& distortionBlock = _distortionsBlocks[intrinsicId];
@@ -8469,7 +8606,7 @@ index bd0bf27..c2e23a9 100644
                  double* distortionBlockPtr = distortionBlock.data();
                  problem.AddParameterBlock(distortionBlockPtr, distortionBlock.size());
  
-@@ -522,6 +541,19 @@ void BundleAdjustmentCeres::addIntrinsicsToProblem(const sfmData::SfMData& sfmDa
+@@ -522,6 +542,19 @@ void BundleAdjustmentCeres::addIntrinsicsToProblem(const sfmData::SfMData& sfmDa
  
  void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmData, ERefineOptions refineOptions, ceres::Problem& problem, std::vector<ceres::ResidualBlockId>& blockIds)
  {
@@ -8489,7 +8626,7 @@ index bd0bf27..c2e23a9 100644
      const bool refineStructure = refineOptions & REFINE_STRUCTURE;
  
      // set a LossFunction to be less penalized by false measurements.
-@@ -551,6 +583,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+@@ -551,6 +584,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
          //If the landmark has a referenceViewIndex set, then retrieve the reference pose
          int sizeLandmark = 3;
          double * referencePoseBlockPtr = nullptr;
@@ -8497,7 +8634,7 @@ index bd0bf27..c2e23a9 100644
  
  
          if (landmark.getReferenceViewIndex() != UndefinedIndexT)
-@@ -576,6 +609,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+@@ -576,6 +610,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
              landmarkBlock[2] = refX.z();
  
              referencePoseBlockPtr = _posesBlocks.at(refview.getPoseId()).data();
@@ -8505,7 +8642,7 @@ index bd0bf27..c2e23a9 100644
          }
  
          double* landmarkBlockPtr = landmarkBlock.data();
-@@ -585,48 +619,55 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+@@ -585,48 +620,55 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
  
          // add landmark parameter to the all parameters blocks pointers list
          _allParametersBlocks.push_back(landmarkBlockPtr);
@@ -8596,7 +8733,7 @@ index bd0bf27..c2e23a9 100644
  
              ceres::LossFunction* weightedLossFunction = lossFunction;
              if (observation.getWeight() != 1.0)
-@@ -636,10 +677,10 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+@@ -636,10 +678,10 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
  
              if (view.isPartOfRig() && !view.isPoseIndependant())
              {
@@ -8609,7 +8746,7 @@ index bd0bf27..c2e23a9 100644
  
                  std::vector<double*> params;
                  params.push_back(intrinsicBlockPtr);
-@@ -657,7 +698,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+@@ -657,7 +699,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
  
                  if (_ceresOptions.useParametersOrdering && !samePose)
                  {
@@ -8618,7 +8755,7 @@ index bd0bf27..c2e23a9 100644
                  }
  
                  ceres::CostFunction* costFunction = ProjectionMeshErrorFunctor::createCostFunction(intrinsic, observation, landmark.getPointFetcher(), samePose);
-@@ -677,15 +718,10 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+@@ -677,15 +719,10 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
              }
              else
              {
@@ -8637,7 +8774,7 @@ index bd0bf27..c2e23a9 100644
                  blockIds.push_back(blockId);
              }
  
-@@ -765,9 +801,9 @@ void BundleAdjustmentCeres::addSurveyPointsToProblem(const sfmData::SfMData& sfm
+@@ -765,9 +802,9 @@ void BundleAdjustmentCeres::addSurveyPointsToProblem(const sfmData::SfMData& sfm
          // apply a specific parameter ordering:
          if (_ceresOptions.useParametersOrdering)
          {
@@ -8650,7 +8787,7 @@ index bd0bf27..c2e23a9 100644
          }
  
  
-@@ -994,7 +1030,7 @@ void BundleAdjustmentCeres::addTemporalSmoothnessToProblem(const sfmData::SfMDat
+@@ -994,7 +1031,7 @@ void BundleAdjustmentCeres::addTemporalSmoothnessToProblem(const sfmData::SfMDat
          for (IndexT frameIdx = firstViewWithPose; frameIdx <= lastViewWithPose; frameIdx++)
          {
              poseBlockPtrs.push_back(_posesBlocks.at(poseIdsVec.at(frameIdx)).data());
@@ -8659,7 +8796,7 @@ index bd0bf27..c2e23a9 100644
          }
  
          double trajectoryLength = cameraTrajectoryLength(poseBlockPtrs);
-@@ -1065,6 +1101,17 @@ void BundleAdjustmentCeres::createProblem(const sfmData::SfMData& sfmData, ERefi
+@@ -1065,6 +1102,17 @@ void BundleAdjustmentCeres::createProblem(const sfmData::SfMData& sfmData, ERefi
      // clear previously computed data
      resetProblem();
  
@@ -8677,7 +8814,7 @@ index bd0bf27..c2e23a9 100644
      // ensure we are not using incompatible options
      // REFINEINTRINSICS_OPTICALCENTER_ALWAYS and REFINEINTRINSICS_OPTICALCENTER_IF_ENOUGH_DATA cannot be used at the same time
      assert(!((refineOptions & REFINE_INTRINSICS_OPTICALOFFSET_ALWAYS) && (refineOptions & REFINE_INTRINSICS_OPTICALOFFSET_IF_ENOUGH_DATA)));
-@@ -1106,6 +1153,10 @@ void BundleAdjustmentCeres::resetProblem()
+@@ -1106,6 +1154,10 @@ void BundleAdjustmentCeres::resetProblem()
      _intrinsicObjects.clear();
      _distortionsBlocks.clear();
      _linearSolverOrdering.Clear();
@@ -8688,7 +8825,7 @@ index bd0bf27..c2e23a9 100644
  }
  
  void BundleAdjustmentCeres::updateFromSolution(sfmData::SfMData& sfmData, ERefineOptions refineOptions) const
-@@ -1197,7 +1248,11 @@ void BundleAdjustmentCeres::updateFromSolution(sfmData::SfMData& sfmData, ERefin
+@@ -1197,7 +1249,11 @@ void BundleAdjustmentCeres::updateFromSolution(sfmData::SfMData& sfmData, ERefin
      {
          for (const auto& [idLandmark, block] : _landmarksBlocks)
          {
@@ -8701,7 +8838,7 @@ index bd0bf27..c2e23a9 100644
  
              std::array<double, 3> lblock = block;
  
-@@ -1309,13 +1364,45 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1309,13 +1365,45 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      ceres::Problem::Options problemOptions;
      problemOptions.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
      problemOptions.evaluation_callback = this;
@@ -8710,8 +8847,8 @@ index bd0bf27..c2e23a9 100644
 +    problemOptions.disable_all_safety_checks = true;  // cheshire (step 5q): the problem is well-formed by construction
 +    // cheshire (step 5o): the phases around Ceres' Solve, printed with CHESHIRE_BA_PROFILE=1. The
 +    // guard is declared before the Problem so its destructor runs after the Problem's and times it.
-+    static const bool cheshireBaProfile = std::getenv("CHESHIRE_BA_PROFILE") != nullptr;
-+    static const bool cheshireBaLogCost = std::getenv("CHESHIRE_BA_LOG_COST") != nullptr;
++    static const bool cheshireBaProfile = ::cheshire::env::flag("CHESHIRE_BA_PROFILE");   // ::, not sfm::cheshire
++    static const bool cheshireBaLogCost = ::cheshire::env::flag("CHESHIRE_BA_LOG_COST");
 +    using cheshireAdjustClock = std::chrono::steady_clock;
 +    struct CheshireDestroyTimer
 +    {
@@ -8751,7 +8888,7 @@ index bd0bf27..c2e23a9 100644
      problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
      ALICEVISION_LOG_INFO("landmarksBlocks cost : " << cost);
  
-@@ -1325,6 +1412,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1325,6 +1413,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
          problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
          ALICEVISION_LOG_INFO("temporalConstraintBlocks cost : " << cost);
      }
@@ -8760,7 +8897,7 @@ index bd0bf27..c2e23a9 100644
  
      // configure a Bundle Adjustment engine and run it
      // make Ceres automatically detect the bundle structure.
-@@ -1337,8 +1426,27 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1337,8 +1427,27 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
  
      // solve BA
      ceres::Solver::Summary summary;
@@ -8773,7 +8910,7 @@ index bd0bf27..c2e23a9 100644
 +        ALICEVISION_LOG_INFO("cheshire: BA check (" << cheshire::baJacobiansName(cheshire::baJacobiansMode()) << " against " << cheshire::baCheckReferenceName() << "): " << cheshire::baCheckReport());
 +    // cheshire: Ceres' own time split, one line per solve (scripts/apply_hip_patch.py, step 5i)
 +    {
-+        static const bool cheshireBaProfile = std::getenv("CHESHIRE_BA_PROFILE") != nullptr;
++        static const bool cheshireBaProfile = ::cheshire::env::flag("CHESHIRE_BA_PROFILE");   // ::, not sfm::cheshire
 +        if (cheshireBaProfile)
 +            ALICEVISION_LOG_INFO("cheshire: BA profile: total " << summary.total_time_in_seconds << " s = residuals "
 +                                 << summary.residual_evaluation_time_in_seconds << " + jacobians " << summary.jacobian_evaluation_time_in_seconds
@@ -8788,7 +8925,7 @@ index bd0bf27..c2e23a9 100644
      ALICEVISION_LOG_INFO("landmarksBlockIds : " << landmarksBlockIds.size());
      evaluateOptions.residual_blocks = landmarksBlockIds;
      problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
-@@ -1350,6 +1458,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1350,6 +1459,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
          problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
          ALICEVISION_LOG_INFO("temporalConstraintBlocks cost : " << cost);
      }
@@ -8797,7 +8934,7 @@ index bd0bf27..c2e23a9 100644
  
      // print summary
      if (_ceresOptions.summary)
-@@ -1365,6 +1475,7 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1365,6 +1476,7 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      }
  
      // update input sfmData with the solution
@@ -8805,7 +8942,7 @@ index bd0bf27..c2e23a9 100644
      updateFromSolution(sfmData, refineOptions);
  
      // Info from surveys
-@@ -1378,6 +1489,16 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1378,6 +1490,16 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      _statistics.RMSEinitial = std::sqrt(summary.initial_cost / summary.num_residuals);
      _statistics.RMSEfinal = std::sqrt(summary.final_cost / summary.num_residuals);
  
@@ -8822,7 +8959,7 @@ index bd0bf27..c2e23a9 100644
      ALICEVISION_LOG_INFO("BundleAdjustmentCeres::adjust end");
  
      return true;
-@@ -1411,3 +1532,5 @@ void BundleAdjustmentCeres::PrepareForEvaluation(bool evaluate_jacobians, bool n
+@@ -1411,3 +1533,5 @@ void BundleAdjustmentCeres::PrepareForEvaluation(bool evaluate_jacobians, bool n
  
  }  // namespace sfm
  }  // namespace aliceVision
@@ -8989,20 +9126,21 @@ index 1f23958..5491985 100644
  
          if (N == 0)
 diff --git a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
-index 097f8c9..6b7c84c 100644
+index 097f8c9..62206e5 100644
 --- a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 +++ b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
-@@ -5,6 +5,9 @@
+@@ -5,6 +5,10 @@
  // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
 +#include <string>  // cheshire: step 5k
 +#include <iterator>  // cheshire: step 5k
 +#include <cstdlib>  // cheshire: step 5k
  #include <aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.hpp>
  #include <aliceVision/sfm/pipeline/RelativePoseInfo.hpp>
  #include <aliceVision/sfm/utils/statistics.hpp>
-@@ -32,6 +35,7 @@
+@@ -32,6 +36,7 @@
  #include <aliceVision/track/TracksBuilder.hpp>
  #include <aliceVision/track/tracksUtils.hpp>
  #include <aliceVision/utils/filesIO.hpp>
@@ -9010,15 +9148,12 @@ index 097f8c9..6b7c84c 100644
  
  #include <dependencies/htmlDoc/htmlDoc.hpp>
  
-@@ -452,6 +456,15 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+@@ -452,6 +457,12 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
      aliceVision::system::Timer timer;
      std::size_t nbValidPoses = 0;
      std::size_t globalIteration = 0;
 +    // cheshire: see the block after the resection loop (scripts/apply_hip_patch.py, step 5k)
-+    static const bool cheshirePendingBA = [] {
-+        const char* v = std::getenv("CHESHIRE_SFM_PENDING_BA");
-+        return v == nullptr || std::string(v) != "0";
-+    }();
++    static const bool cheshirePendingBA = ::cheshire::env::flag("CHESHIRE_SFM_PENDING_BA", true);   // ::, not sfm::cheshire
 +    if (cheshirePendingBA)
 +        ALICEVISION_LOG_INFO("cheshire: incremental SfM: a resection pass that ends without a bundle adjustment gets one before the next pass (CHESHIRE_SFM_PENDING_BA=0 restores upstream)");
 +    else
@@ -9026,7 +9161,7 @@ index 097f8c9..6b7c84c 100644
  
      do
      {
-@@ -544,6 +557,31 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+@@ -544,6 +555,31 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
              ++_resectionId;
          }
  
@@ -9058,7 +9193,7 @@ index 097f8c9..6b7c84c 100644
          if (_params.rig.useRigConstraint && !_sfmData.getRigs().empty())
          {
              ALICEVISION_LOG_INFO("Rig(s) calibration start");
-@@ -740,7 +778,14 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+@@ -740,7 +776,14 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
          }
      }
  
@@ -9074,7 +9209,7 @@ index 097f8c9..6b7c84c 100644
  
      // give the local strategy graph is local strategy is enable
      if (!enableLocalStrategy)
-@@ -771,10 +816,24 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+@@ -771,10 +814,24 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
              statistics.show();
          }
  
@@ -9101,7 +9236,7 @@ index 097f8c9..6b7c84c 100644
  
          for (IndexT v : removedViewsIdIteration)
              newReconstructedViews.erase(v);
-@@ -1010,7 +1069,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
+@@ -1010,7 +1067,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
  
      // Sort by the image score
      std::sort(out_connectedViews.begin(), out_connectedViews.end(), [](const ViewConnectionScore& t1, const ViewConnectionScore& t2) {
@@ -9111,7 +9246,7 @@ index 097f8c9..6b7c84c 100644
      });
      return !out_connectedViews.empty();
  }
-@@ -1545,9 +1605,12 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
+@@ -1545,9 +1603,12 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
      // C. Do the resectioning: compute the camera pose.
      ALICEVISION_LOG_INFO("[" << _sfmData.getValidViews().size() + 1 << "/" << _sfmData.getViews().size() << "] Robust Resection of view: " << viewId);
  
@@ -9125,7 +9260,7 @@ index 097f8c9..6b7c84c 100644
                                                          resectionData,
                                                          resectionData.pose,
                                                          _params.localizerEstimator);
-@@ -1842,7 +1905,10 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+@@ -1842,7 +1903,10 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
              Vec4 X_homogeneous = Vec4::Zero();
              std::vector<std::size_t> inliersIndex;
  
@@ -9176,10 +9311,18 @@ index 27e3ec0..027ba01 100644
  #define ALICEVISION_DEPTHMAP_BACKEND_SYCL() @ALICEVISION_DEPTHMAP_BACKEND_SYCL@
  
 diff --git a/src/software/pipeline/main_depthMapEstimation.cpp b/src/software/pipeline/main_depthMapEstimation.cpp
-index 2daf481..7f21a84 100644
+index 2daf481..87ed00f 100644
 --- a/src/software/pipeline/main_depthMapEstimation.cpp
 +++ b/src/software/pipeline/main_depthMapEstimation.cpp
-@@ -24,6 +24,9 @@
+@@ -3,6 +3,7 @@
+ // This Source Code Form is subject to the terms of the Mozilla Public License,
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include <aliceVision/config.hpp>
+ #include <aliceVision/system/Logger.hpp>
+ #include <aliceVision/cmdline/cmdline.hpp>
+@@ -24,6 +25,9 @@
  #endif
  
  #include <boost/program_options.hpp>
@@ -9189,7 +9332,7 @@ index 2daf481..7f21a84 100644
  
  // These constants define the current software version.
  // They must be updated when the command line is changed.
-@@ -53,6 +56,51 @@ int computeDownscale(const mvsUtils::MultiViewParams& mp, int scale, int maxWidt
+@@ -53,6 +57,50 @@ int computeDownscale(const mvsUtils::MultiViewParams& mp, int scale, int maxWidt
      return downscale;
  }
  
@@ -9204,8 +9347,7 @@ index 2daf481..7f21a84 100644
 +{
 +    std::vector<int> order(mp.ncams);
 +    std::iota(order.begin(), order.end(), 0);
-+    const char* env = std::getenv("CHESHIRE_DEPTHMAP_ORDER");
-+    if ((env != nullptr && std::string(env) == "0") || mp.ncams < 3)
++    if (!::cheshire::env::flag("CHESHIRE_DEPTHMAP_ORDER", true) || mp.ncams < 3)
 +        return order;
 +    std::vector<char> visited(mp.ncams, 0);
 +    order.clear();
@@ -9377,19 +9519,20 @@ index 4fe193b..a271a2f 100644
                      fuseCut::Mesher mesher(mp, pc, tetrahedralization, gfiller.getCellsStatus());
                      mesher.graphCutPostProcessing(&hexah[0]);
 diff --git a/src/software/pipeline/main_prepareDenseScene.cpp b/src/software/pipeline/main_prepareDenseScene.cpp
-index a37cb29..f0a9027 100644
+index a37cb29..056a4f2 100644
 --- a/src/software/pipeline/main_prepareDenseScene.cpp
 +++ b/src/software/pipeline/main_prepareDenseScene.cpp
-@@ -4,6 +4,8 @@
+@@ -4,6 +4,9 @@
  // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
 +#include <cstdlib>  // cheshire
 +#include <algorithm>
  #include <aliceVision/sfmData/SfMData.hpp>
  #include <aliceVision/alicevision_omp.hpp>
  #include <aliceVision/sfmDataIO/sfmDataIO.hpp>
-@@ -17,6 +19,28 @@
+@@ -17,6 +20,28 @@
  #include <aliceVision/config.hpp>
  #include <aliceVision/sfmDataIO/viewIO.hpp>
  #include <aliceVision/camera/cameraUndistortImage.hpp>
@@ -9401,7 +9544,7 @@ index a37cb29..f0a9027 100644
 +// cheshire: per-phase seconds summed over threads (scripts/apply_hip_patch.py, step 5g)
 +struct CheshirePdsProfile
 +{
-+    bool on = std::getenv("CHESHIRE_PDS_PROFILE") != nullptr;
++    bool on = ::cheshire::env::flag("CHESHIRE_PDS_PROFILE");
 +    std::atomic<long long> readUs{0}, prepUs{0}, undistortUs{0}, writeUs{0}, views{0};
 +    ~CheshirePdsProfile()
 +    {
@@ -9418,7 +9561,7 @@ index a37cb29..f0a9027 100644
  
  #include <boost/program_options.hpp>
  
-@@ -45,6 +69,34 @@ using namespace aliceVision::sfmDataIO;
+@@ -45,6 +70,32 @@ using namespace aliceVision::sfmDataIO;
  namespace po = boost::program_options;
  namespace fs = std::filesystem;
  
@@ -9432,9 +9575,7 @@ index a37cb29..f0a9027 100644
 +static image::ImageWriteOptions cheshirePdsWriteOptions()
 +{
 +    static const image::ImageWriteOptions options = [] {
-+        std::string method = "zip:1";
-+        if (const char* v = std::getenv("CHESHIRE_PDS_EXR_COMPRESSION"))
-+            method = v;
++        const std::string method = ::cheshire::env::text("CHESHIRE_PDS_EXR_COMPRESSION", "zip:1");
 +        image::ImageWriteOptions o;
 +        // cheshire (step 6f): "method:level". ZIP at level 1 writes a 6000x3376 half RGBA image in 0.95 s
 +        // against 1.45 s at OpenEXR's default level 4, for a file 1.7 % larger, the same read time and
@@ -9453,7 +9594,7 @@ index a37cb29..f0a9027 100644
  template<class ImageT, class MaskFuncT>
  void process(const std::string& dstColorImage,
               const IntrinsicBase* cam,
-@@ -55,7 +107,9 @@ void process(const std::string& dstColorImage,
+@@ -55,7 +106,9 @@ void process(const std::string& dstColorImage,
               MaskFuncT&& maskFunc)
  {
      ImageT image, image_ud;
@@ -9463,7 +9604,7 @@ index a37cb29..f0a9027 100644
  
      // exposure correction
      if (evCorrection)
-@@ -70,6 +124,7 @@ void process(const std::string& dstColorImage,
+@@ -70,6 +123,7 @@ void process(const std::string& dstColorImage,
  
      // mask
      maskFunc(image);
@@ -9471,7 +9612,7 @@ index a37cb29..f0a9027 100644
  
      // undistort
      if (cam->isValid() && cam->hasDistortion())
-@@ -78,11 +133,14 @@ void process(const std::string& dstColorImage,
+@@ -78,11 +132,14 @@ void process(const std::string& dstColorImage,
          using Pix = typename ImageT::Tpixel;
          Pix pixZero(Pix::Zero());
          UndistortImage(image, cam, image_ud, pixZero);
@@ -9488,19 +9629,19 @@ index a37cb29..f0a9027 100644
      }
  }
  
-@@ -132,7 +190,10 @@ bool prepareDenseScene(const SfMData& sfmData,
+@@ -132,7 +189,10 @@ bool prepareDenseScene(const SfMData& sfmData,
      const double medianCameraExposure = sfmData.getMedianCameraExposureSetting().getExposure();
      ALICEVISION_LOG_INFO("Median Camera Exposure: " << medianCameraExposure << ", Median EV: " << std::log2(1.0 / medianCameraExposure));
  
 -#pragma omp parallel for num_threads(3)
 +    // cheshire: one image per thread on every core (upstream: three threads); CHESHIRE_PDS_THREADS overrides
 +    int cheshirePdsThreads = omp_get_max_threads();
-+    if (const char* e = std::getenv("CHESHIRE_PDS_THREADS")) cheshirePdsThreads = std::max(1, std::atoi(e));
++    cheshirePdsThreads = std::max(1, int(::cheshire::env::integer("CHESHIRE_PDS_THREADS", cheshirePdsThreads)));
 +#pragma omp parallel for num_threads(cheshirePdsThreads)
      for (int i = 0; i < viewIds.size(); ++i)
      {
          auto itView = viewIds.begin();
-@@ -335,7 +396,7 @@ int aliceVision_main(int argc, char* argv[])
+@@ -335,7 +395,7 @@ int aliceVision_main(int argc, char* argv[])
           "Correct exposure value.");
      // clang-format on
  

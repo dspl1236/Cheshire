@@ -43,16 +43,13 @@ namespace cheshire {
 
 inline bool localPassesEnabled()
 {
-    static const bool on = [] {
-        const char* v = std::getenv("CHESHIRE_SFM_LOCAL_PASSES");
-        return v != nullptr && std::string(v) == "1";
-    }();
+    static const bool on = ::cheshire::env::flag("CHESHIRE_SFM_LOCAL_PASSES");
     return on;
 }
 
 inline bool sfmProfileEnabled()
 {
-    static const bool on = std::getenv("CHESHIRE_SFM_PROFILE") != nullptr;
+    static const bool on = ::cheshire::env::flag("CHESHIRE_SFM_PROFILE");
     return on;
 }
 

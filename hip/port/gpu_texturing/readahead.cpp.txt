@@ -7,8 +7,7 @@
     if (imageType != mvsUtils::EFileType::normalMap && gpu::texAvailable())
     {
         int cheshireDepth = std::max(1, int(std::thread::hardware_concurrency()) - 1);
-        if (const char* e = std::getenv("CHESHIRE_TEX_READAHEAD"))
-            cheshireDepth = std::max(1, std::atoi(e));
+        cheshireDepth = std::max(1, int(::cheshire::env::integer("CHESHIRE_TEX_READAHEAD", cheshireDepth)));
         if (imageCache.getCacheSize() < cheshireDepth + 1 && availableRam > 4096 &&
             std::size_t(availableRam - 4096) > std::size_t(cheshireDepth + 1) * imageMaxMemSize)
             imageCache.setCacheSize(cheshireDepth + 1);

@@ -12,6 +12,7 @@
 #include "texturingGPU.hpp"
 #include <cuda_runtime.h>
 #include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
+#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
 #include <cfloat>
 #include <chrono>
 #include <cmath>
@@ -551,7 +552,7 @@ bool texAvailable()
     std::lock_guard<std::mutex> g(g_mutex);
     if (g_checked) return g_available;
     g_checked = true;
-    if (const char* e = std::getenv("CHESHIRE_GPU_TEX")) if (e[0] == '0') { std::fprintf(stderr, "[cheshire] texturing: disabled by CHESHIRE_GPU_TEX=0, CPU\n"); return g_available = false; }
+    if (!::cheshire::env::flag("CHESHIRE_GPU_TEX", true)) { std::fprintf(stderr, "[cheshire] texturing: disabled by CHESHIRE_GPU_TEX=0, CPU\n"); return g_available = false; }
     int n = 0;
     if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1) { std::fprintf(stderr, "[cheshire] texturing: no GPU device, CPU\n"); return g_available = false; }
     cudaDeviceProp p{};
@@ -699,7 +700,7 @@ bool Texturer::finish(int slot, float* rgb, float* count, int padding, int downs
     bool ok = cudaGetLastError() == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess;
     if (ok && padding > 0) {
         const int S = int(p->texSide);
-        static const bool check = std::getenv("CHESHIRE_GPU_PAD_CHECK") != nullptr;
+        static const bool check = ::cheshire::env::flag("CHESHIRE_GPU_PAD_CHECK");
         std::vector<float> refRgb; std::vector<int> refPc;
         if (check) {   // the un-padded atlas, for the host reference below
             refRgb.resize(n * 3); refPc.resize(n);

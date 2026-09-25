@@ -2,6 +2,7 @@
 // Copied into src/aliceVision/depthMap/cuda/imageProcessing/ by scripts/apply_hip_patch.py (step 6d).
 #pragma once
 
+#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
 #include <aliceVision/depthMap/cuda/host/memory.hpp>
 
 #include <cstddef>
@@ -18,8 +19,7 @@ inline bool cheshireDeviceDownscaleEnabled()
     static const bool on = [] {
         // on by default since its gate passed (byte-identical depth maps on mini6 and the 884-view
         // chunk); CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK=1 compares every image with the host path
-        const char* v = std::getenv("CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE");
-        return v == nullptr || std::string(v) != "0";
+        return ::cheshire::env::flag("CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE", true);
     }();
     return on;
 }

@@ -9,6 +9,7 @@
 // checked bit-identical on the depth maps and textures, docs/04).
 
 #include <aliceVision/image/cheshireExr.hpp>
+#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
 #include <aliceVision/system/Logger.hpp>
 #include <aliceVision/alicevision_omp.hpp>
 #if !ALICEVISION_IS_DEFINED(ALICEVISION_HAVE_OPENMP)
@@ -45,19 +46,13 @@ namespace {
 
 bool cheshireExrDirectEnabled()
 {
-    static const bool on = [] {
-        const char* v = std::getenv("CHESHIRE_EXR_DIRECT");
-        return v == nullptr || std::string(v) != "0";
-    }();
+    static const bool on = ::cheshire::env::flag("CHESHIRE_EXR_DIRECT", true);
     return on;
 }
 
 bool cheshireExrProfile()
 {
-    static const bool on = [] {
-        const char* v = std::getenv("CHESHIRE_EXR_PROFILE");
-        return v != nullptr && std::string(v) == "1";
-    }();
+    static const bool on = ::cheshire::env::flag("CHESHIRE_EXR_PROFILE");
     return on;
 }
 
@@ -105,8 +100,7 @@ bool cheshireReadExr(const std::string& path, int nchannels, bool requireLinearM
         static std::once_flag once;
         std::call_once(once, [] {
             int threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
-            if (const char* v = std::getenv("CHESHIRE_EXR_THREADS"))
-                threads = std::max(0, std::atoi(v));
+            threads = static_cast<int>(std::max(0LL, ::cheshire::env::integer("CHESHIRE_EXR_THREADS", threads)));
             Imf::setGlobalThreadCount(threads);
             ALICEVISION_LOG_INFO("cheshire: EXR files read through OpenEXR directly (one-channel, RGB and RGBA half or float, linear; " << threads
                                  << " pool threads for a lone read, inline inside a parallel loop or a read-ahead thread; CHESHIRE_EXR_DIRECT=0 for OpenImageIO)");

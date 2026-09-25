@@ -10,6 +10,7 @@
 
 #include <aliceVision/depthMap/cuda/host/divUp.hpp>
 #include <aliceVision/depthMap/cuda/device/buffer.cuh>
+#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
 #include <aliceVision/image/Image.hpp>
 #include <aliceVision/image/imageAlgo.hpp>
 #include <aliceVision/image/cheshireResize.hpp>
@@ -237,7 +238,7 @@ void cuda_cheshireDownscaleToCudaRGBA(const float* in_hostRGBA, int inWidth, int
     CHECK_CUDA_ERROR();
     CHECK_CUDA_RETURN_ERROR(cudaDeviceSynchronize());
 
-    static const bool checkFloats = std::getenv("CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK") != nullptr;
+    static const bool checkFloats = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK");
     std::vector<float> devFloats;
     if (checkFloats)
     {
@@ -257,7 +258,7 @@ void cuda_cheshireDownscaleToCudaRGBA(const float* in_hostRGBA, int inWidth, int
     // CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK=1: where does the device result part from the host path?
     // (a) the resize computed here (this translation unit's taps) vs the image library's resizeImage,
     // (b) the device halves vs this translation unit's host conversion of (a)'s float result.
-    static const bool check = std::getenv("CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK") != nullptr;
+    static const bool check = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK");
     if (check)
     {
         const std::size_t n = std::size_t(outWidth) * outHeight * 4;

@@ -78,6 +78,7 @@ __device__ inline T cheshire_tex2DLod(hipTextureObject_t handle, float u, float 
 #include <unordered_map>
 #include <vector>
 #include <cheshire/bridge.h>
+#include "env.h"
 
 namespace cheshire { namespace mip {
 
@@ -96,10 +97,9 @@ struct Registry {
     std::unordered_map<void*, TexRec> texs;      // fake texture handle (device TexSet*) -> level textures
     Storage storage = Storage::Linear;   // same speed as arrays, and the bridge can account for it
     Registry() {
-        if (const char* s = std::getenv("CHESHIRE_MIPMAP_STORAGE")) {
-            if (s[0] == 'l' || s[0] == 'L') storage = Storage::Linear;
-            else if (s[0] == 'a' || s[0] == 'A') storage = Storage::Array;
-        }
+        const std::string s = ::cheshire::env::text("CHESHIRE_MIPMAP_STORAGE");
+        if (s[0] == 'l' || s[0] == 'L') storage = Storage::Linear;   // s[0] is '\0' when unset or empty
+        else if (s[0] == 'a' || s[0] == 'A') storage = Storage::Array;
     }
 };
 inline Registry& reg() { static Registry r; return r; }
@@ -144,7 +144,7 @@ inline hipError_t mallocMipmappedArray(hipMipmappedArray_t* out, const hipChanne
         rec.levels.push_back(lv);
         w /= 2; h /= 2;
     }
-    if (std::getenv("CHESHIRE_BRIDGE_LOG"))
+    if (::cheshire::env::flag("CHESHIRE_BRIDGE_LOG"))
         std::fprintf(stderr, "[cheshire] mip: %zux%zu, %u levels, %zu B/texel, storage=%s\n", rec.w, rec.h, levels, rec.elemBytes, rec.st == Storage::Linear ? "linear" : "array");
     void* handle = rec.levels[0];  // the level-0 record doubles as the fake mipmap handle
     { std::lock_guard<std::mutex> g(reg().m);

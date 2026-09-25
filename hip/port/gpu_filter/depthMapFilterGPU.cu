@@ -12,6 +12,7 @@
 #include "depthMapFilterGPU.hpp"
 #include <cuda_runtime.h>
 #include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
+#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -210,7 +211,7 @@ bool available()
     std::lock_guard<std::mutex> g(g_mutex);
     if (g_checked) return g_available;
     g_checked = true;
-    if (const char* e = std::getenv("CHESHIRE_GPU_FILTER")) if (e[0] == '0') { std::fprintf(stderr, "[cheshire] depth map filter: disabled by CHESHIRE_GPU_FILTER=0, CPU\n"); return g_available = false; }
+    if (!::cheshire::env::flag("CHESHIRE_GPU_FILTER", true)) { std::fprintf(stderr, "[cheshire] depth map filter: disabled by CHESHIRE_GPU_FILTER=0, CPU\n"); return g_available = false; }
     int n = 0;
     if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1) { std::fprintf(stderr, "[cheshire] depth map filter: no GPU device, CPU\n"); return g_available = false; }
     cudaDeviceProp p{};
@@ -266,7 +267,7 @@ bool GroupFilter::accumulate(const float* tcDepth, const CamGeom& tc, float pixT
     // "neighbours that agree". Meshroom's consistency thresholds were tuned against that, so the
     // default replicates it (measured: first neighbour identical, then CPU counts only grow).
     // CHESHIRE_GPU_FILTER_STRICT=1 clears the buffer per camera, which is what the code meant.
-    static const bool strict = [] { const char* e = std::getenv("CHESHIRE_GPU_FILTER_STRICT"); return e && e[0] == '1'; }();
+    static const bool strict = ::cheshire::env::flag("CHESHIRE_GPU_FILTER_STRICT");
     if (strict && cudaMemset(m.pts, 0, n * 4) != cudaSuccess) return false;
     const dim3 block(16, 16), grid((tc.w + 15) / 16, (tc.h + 15) / 16);
     voteKernel<<<grid, block>>>(m.tcDepth, tc, m.rc, m.rcDepth, m.rcSim, pixToleranceFactor, pixSizeBall, pixSizeBallWSP, m.pts);

@@ -25,6 +25,7 @@
 // SfM itself keep their threads, since the points above make them order-independent.
 #pragma once
 
+#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
 #include <aliceVision/types.hpp>
 
 #include <cstddef>
@@ -43,19 +44,13 @@ namespace cheshire {
 
 inline bool sfmDeterministic()
 {
-    static const bool on = [] {
-        const char* v = std::getenv("CHESHIRE_SFM_DETERMINISTIC");
-        return v != nullptr && std::string(v) != "0";
-    }();
+    static const bool on = ::cheshire::env::flag("CHESHIRE_SFM_DETERMINISTIC");
     return on;
 }
 
 inline bool taskSeedEnabled()
 {
-    static const bool on = [] {
-        const char* v = std::getenv("CHESHIRE_SFM_TASK_SEED");
-        return v == nullptr || std::string(v) != "0";
-    }();
+    static const bool on = ::cheshire::env::flag("CHESHIRE_SFM_TASK_SEED", true);
     return on;
 }
 
@@ -63,10 +58,7 @@ inline bool taskSeedEnabled()
 // deterministic mode, else what the caller asked for.
 inline unsigned baThreads(unsigned requested)
 {
-    static const long forced = [] {
-        const char* v = std::getenv("CHESHIRE_BA_THREADS");
-        return v != nullptr ? std::strtol(v, nullptr, 10) : 0L;
-    }();
+    static const long forced = static_cast<long>(::cheshire::env::integer("CHESHIRE_BA_THREADS", 0));
     if (forced > 0)
         return static_cast<unsigned>(forced);
     if (sfmDeterministic())

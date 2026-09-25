@@ -137,9 +137,8 @@ int MeshClean::cleanMesh(int maxIters)
     // the previous one: the others' inputs have not changed, so their pass would write the same
     // values again. CHESHIRE_MESHCLEAN_PRESCREEN=0 runs upstream's pass on every point;
     // CHESHIRE_MESHCLEAN_CHECK=1 runs both from the same state and compares every structure.
-    const char* cheshirePrescreenEnv = std::getenv("CHESHIRE_MESHCLEAN_PRESCREEN");
-    const bool cheshirePrescreen = cheshirePrescreenEnv == nullptr || std::string(cheshirePrescreenEnv) != "0";
-    const bool cheshireCheck = cheshirePrescreen && std::getenv("CHESHIRE_MESHCLEAN_CHECK") != nullptr;
+    const bool cheshirePrescreen = ::cheshire::env::flag("CHESHIRE_MESHCLEAN_PRESCREEN", true);
+    const bool cheshireCheck = cheshirePrescreen && ::cheshire::env::flag("CHESHIRE_MESHCLEAN_CHECK");
     std::unique_ptr<CheshireCleanState> cheshireBefore;
     if (cheshireCheck)
     {

@@ -12,6 +12,7 @@
 #include "gpuMatcher.hpp"
 #include <cuda_runtime.h>
 #include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
+#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -262,7 +263,7 @@ std::mutex g_mutex;
 // CHESHIRE_GPU_MATCHER_LOG=1: cumulative time inside build()/search2() (uploads, kernel, downloads)
 // printed at exit, to split the matcher's share of "Regions Matching" from the CPU work around it.
 struct Profile {
-    bool on = std::getenv("CHESHIRE_GPU_MATCHER_LOG") != nullptr;
+    bool on = ::cheshire::env::flag("CHESHIRE_GPU_MATCHER_LOG");
     double buildSec = 0, searchSec = 0; size_t builds = 0, searches = 0, queries = 0;
     ~Profile() {
         if (on) std::fprintf(stderr, "[cheshire] matcher profile: %zu builds %.2f s, %zu searches %.2f s (%zu query descriptors)\n",
@@ -289,9 +290,7 @@ bool available()
     std::lock_guard<std::mutex> g(g_mutex);
     if (g_checked) return g_available;
     g_checked = true;
-    if (const char* e = std::getenv("CHESHIRE_GPU_MATCHER")) {
-        if (e[0] == '0') { logOnce("GPU brute-force disabled by CHESHIRE_GPU_MATCHER=0"); return g_available = false; }
-    }
+    if (!::cheshire::env::flag("CHESHIRE_GPU_MATCHER", true)) { logOnce("GPU brute-force disabled by CHESHIRE_GPU_MATCHER=0"); return g_available = false; }
     int n = 0;
     if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1) { logOnce("no GPU device, CPU matcher"); return g_available = false; }
     cudaDeviceProp p{};
@@ -367,7 +366,7 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
         if (m.dim == 128) knn2_f32<128><<<grid, block>>>((const float*)m.db, m.rows, (const float*)m.q, nbQuery, m.idx, m.dist);
         else              knn2_f32<64><<<grid, block>>>((const float*)m.db, m.rows, (const float*)m.q, nbQuery, m.idx, m.dist);
     } else {
-        static const bool sliced = std::getenv("CHESHIRE_MATCHER_SLICED") != nullptr;
+        static const bool sliced = ::cheshire::env::flag("CHESHIRE_MATCHER_SLICED");
         if (!sliced) {
             if (m.dim == 128) knn2_u8<128><<<grid, block>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);
             else              knn2_u8<64><<<grid, block>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);

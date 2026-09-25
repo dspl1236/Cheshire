@@ -18,16 +18,14 @@
 #pragma once
 #include <cuda_runtime.h>
 #include <cstdlib>
+#include "env.h"
 
 namespace cheshire {
 namespace managed {
 
 inline bool enabled()
 {
-    static const bool on = [] {
-        const char* e = std::getenv("CHESHIRE_CUDA_MANAGED");
-        return e && e[0] == '1';
-    }();
+    static const bool on = ::cheshire::env::flag("CHESHIRE_CUDA_MANAGED");
     return on;
 }
 

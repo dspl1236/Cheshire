@@ -3,10 +3,7 @@
     // values, 18x less CPU on a 6000x3376 RGBA image, and rows in parallel unless the caller
     // already is. Anything else (a named filter, an upscale, other types) stays with OpenImageIO.
     // CHESHIRE_RESIZE_EXACT=0 restores the OpenImageIO call.
-    static const bool cheshireExact = [] {
-        const char* v = std::getenv("CHESHIRE_RESIZE_EXACT");
-        return v == nullptr || std::string(v) != "0";
-    }();
+    static const bool cheshireExact = ::cheshire::env::flag("CHESHIRE_RESIZE_EXACT", true);
     if (cheshireExact && typeDesc == oiio::TypeDesc::FLOAT && filter.empty() && filterSize == 0.0f && outWidth <= inWidth &&
         outHeight <= inHeight && (nchannels == 1 || nchannels == 3 || nchannels == 4))
     {

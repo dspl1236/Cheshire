@@ -11,6 +11,7 @@
 #pragma once
 
 #include <aliceVision/system/Logger.hpp>
+#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
 #ifdef ALICEVISION_HAVE_GPU_FILTER
 #include "aliceVision/fuseCut/gpu/maxflowGPU.hpp"  // cheshire: the cut on the GPU
 #endif
@@ -24,6 +25,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -88,7 +90,7 @@ class MaxFlow_CSR
                 ALICEVISION_LOG_INFO("# vertices: " << V << ", edges: " << E << " (CSR, GPU cut)");
                 std::vector<std::uint8_t> sinkSide;
                 cheshire::maxflow::Stats st;
-                const bool log = std::getenv("CHESHIRE_GPU_VOTE_LOG") != nullptr;
+                const bool log = ::cheshire::env::flag("CHESHIRE_GPU_VOTE_LOG");
                 if (cheshire::maxflow::minCut(g, sinkSide, st, log ? 2 : 0))
                 {
                     _color.assign(V, boost::black_color);
@@ -238,8 +240,9 @@ class MaxFlow_CSR
         // (hip/tests/maxflow): "CHMF", V, E, S, T (uint64), rowstart (uint64 x V+1), target
         // (uint32 x E), capacity (float x E), partner (uint32 x E); compute() appends the flow
         // value (float) and the colours (uint8 x V: 0 white, 1 gray, 2 black)
-        if (const char* dumpPath = std::getenv("CHESHIRE_MAXFLOW_DUMP"))
+        if (::cheshire::env::isSet("CHESHIRE_MAXFLOW_DUMP"))
         {
+            const std::string dumpPath = ::cheshire::env::text("CHESHIRE_MAXFLOW_DUMP");
             std::ofstream f(dumpPath, std::ios::binary);
             const std::uint64_t hdr[4] = {std::uint64_t(V), std::uint64_t(E), std::uint64_t(_S), std::uint64_t(_T)};
             f.write("CHMF", 4);
@@ -260,8 +263,8 @@ class MaxFlow_CSR
 
     void dumpResult(ValueType flow) const
     {
-        const char* dumpPath = std::getenv("CHESHIRE_MAXFLOW_DUMP");
-        if (!dumpPath) return;
+        if (!::cheshire::env::isSet("CHESHIRE_MAXFLOW_DUMP")) return;
+        const std::string dumpPath = ::cheshire::env::text("CHESHIRE_MAXFLOW_DUMP");
         std::ofstream f(dumpPath, std::ios::binary | std::ios::app);
         f.write(reinterpret_cast<const char*>(&flow), sizeof(flow));
         std::vector<std::uint8_t> c(_color.size());

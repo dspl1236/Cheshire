@@ -8,9 +8,7 @@
 static image::ImageWriteOptions cheshirePdsWriteOptions()
 {
     static const image::ImageWriteOptions options = [] {
-        std::string method = "zip:1";
-        if (const char* v = std::getenv("CHESHIRE_PDS_EXR_COMPRESSION"))
-            method = v;
+        const std::string method = ::cheshire::env::text("CHESHIRE_PDS_EXR_COMPRESSION", "zip:1");
         image::ImageWriteOptions o;
         // cheshire (step 6f): "method:level". ZIP at level 1 writes a 6000x3376 half RGBA image in 0.95 s
         // against 1.45 s at OpenEXR's default level 4, for a file 1.7 % larger, the same read time and

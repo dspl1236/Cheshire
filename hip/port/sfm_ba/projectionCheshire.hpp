@@ -46,6 +46,7 @@
 #include <aliceVision/camera/Pinhole.hpp>
 #include <aliceVision/camera/IntrinsicScaleOffsetDisto.hpp>
 #include <aliceVision/camera/cameraCommon.hpp>
+#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
 #include <aliceVision/system/Logger.hpp>
 
 #include <ceres/ceres.h>
@@ -76,10 +77,7 @@ enum class BaJacobians
 inline BaJacobians baJacobiansMode()
 {
     static const BaJacobians mode = [] {
-        const char* v = std::getenv("CHESHIRE_BA_JACOBIANS");
-        if (v == nullptr)
-            return BaJacobians::Analytic;
-        const std::string s(v);
+        const std::string s = ::cheshire::env::text("CHESHIRE_BA_JACOBIANS", "analytic");
         if (s == "autodiff")
             return BaJacobians::Autodiff;
         if (s == "stride")
@@ -104,7 +102,7 @@ inline const char* baJacobiansName(BaJacobians m)
 
 inline bool baCheckEnabled()
 {
-    static const bool on = std::getenv("CHESHIRE_BA_CHECK") != nullptr;
+    static const bool on = ::cheshire::env::flag("CHESHIRE_BA_CHECK");
     return on;
 }
 
@@ -173,10 +171,7 @@ inline bool intrinsicHasDistortion(const std::shared_ptr<camera::IntrinsicBase>&
 
 inline bool fusedProjectionEnabled()
 {
-    static const bool on = [] {
-        const char* v = std::getenv("CHESHIRE_BA_FUSED_PROJECTION");
-        return v == nullptr || std::string(v) != "0";
-    }();
+    static const bool on = ::cheshire::env::flag("CHESHIRE_BA_FUSED_PROJECTION", true);
     return on;
 }
 
