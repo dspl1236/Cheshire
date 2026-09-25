@@ -27,7 +27,9 @@ clock and process CPU (user + system of the node's process), median of --reps ru
 
 The config names the install and the three command lines, with {images} and {out} where the image
 folder and the output folder go; take the arguments from the nodes of the Meshroom cache being tested
-(the node's log starts with its command line). Paths may use forward slashes on Windows.
+(the node's log starts with its command line). Paths may use forward slashes on Windows. Cheshire's
+DepthMap binary does not take --sgmFilteringAxes (its paired Meshroom node drops it); remove it if the
+cache's command line has it.
 
     {
       "out": "D:/cheshire/data/out/layout-test",
