@@ -296,9 +296,13 @@ L items can slide.
   than the host, so the loader now leaves files with fewer than 1024 chunks to the host
   (`CHESHIRE_DEPTHMAP_GPU_EXR_MIN_CHUNKS`) and the switch can never slow a load. Per megapixel the
   GPU on ZIPS is twice a CPU thread on the RX 9070 box (118 against 55 MP/s) and level with the CPU
-  on bench-pc's RX 5500 XT. Held, not merged, until the deciding test: one False Door chunk as ZIP
-  through the host against ZIPS through the GPU, with ZIPS's write and Texturing read costs; a win
-  adds a ZIPS output option to PrepareDenseScene and merges this, a loss parks it. The check mode's
+  on bench-pc's RX 5500 XT. **Deciding test on the RX 9070 box (2026-09-25,
+  `scripts/exr_layout_test.py`, a 48-view False Door chunk): a wash.** Everything was exact: 96 of 96
+  maps byte-identical four ways, 104 of 104 images identical under the check. Writing ZIPS cost the
+  same time and 6.3 % more disk. The GPU path saved 4 s of loads and 24 s of CPU per chunk (329
+  against 334 s, about 1.5 %), because loads are only about 3 % of that node on 12 threads. Held,
+  not merged, until the same test runs on house-pc's 4-thread i3; a win there adds a ZIPS output
+  option to PrepareDenseScene and merges this, a loss parks it. The check mode's
   heap corruption on Windows is fixed, and so is the GPU check's throughput mode, which counted
   failed decodes (an out-of-memory at 8 threads on the RX 5500 XT printed 25.5 images/s and PASS).
 - **CheshireJPG for the reads** (L). The GPU JPEG codec exists (docs/19): a baseline decoder and

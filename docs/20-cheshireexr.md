@@ -197,6 +197,33 @@ gfx1030 against the pinned AliceVision, and `apply_hip_patch.py` applies and re-
   leaked instead of freed, the RX 9070 run gave 6 of 6 images identical and 12 of 12 maps
   byte-identical, so the check itself was right.
 
+**The deciding test on the RX 9070 box, 2026-09-25** (`scripts/exr_layout_test.py`, b0a53ff; one
+48-view False Door chunk, 3 runs each, dspl1236/Cheshire#2). Texturing was left out: one pass takes
+about 97 minutes there.
+
+- **Exact everywhere.** The 833 undistorted images had identical pixels in both layouts. The 96
+  maps were byte-identical in all four runs. The check found 104 of 104 images identical to the host
+  path, and the chunk threshold kept every ZIP file off the device.
+- **Writing ZIPS costs nothing but disk.** PrepareDenseScene took 290 s against 287 s (3025 against
+  3067 s of CPU), for 61.3 GB against 57.7 GB (+6.3 %).
+- **DepthMap gains little:**
+
+| run | wall | CPU | image loads (sum of batches) | decode |
+|---|---|---|---|---|
+| ZIP, host path (today) | 349.3 s | 439.0 s | 12.1 s | 7.2 s |
+| ZIPS, host path | 333.6 s | 424.6 s | 11.3 s | 7.1 s |
+| ZIPS, device path | 328.8 s | 401.0 s | 7.2 s | 6.4 s |
+| ZIP, device path switched on (all handed to the host) | 338.5 s | 434.6 s | 13.0 s | 8.1 s |
+
+  Against the host path on the same ZIPS files, the device path saves 4 s of loads and 24 s of CPU,
+  about 1.5 % of the node. The ZIP-host figure is inflated by a cold first run (its runs were 379,
+  348 and 329 s), so the host paths are level. After steps 5t-5z, loads are about 3 % of this node
+  on a 12-thread box, which leaves a decoder little to win.
+
+On this box it is a wash: exact, harmless while off, a small gain for 6.3 % more disk. It stays
+unmerged until the same test runs on house-pc's 4-thread i3, where the host decode is a larger share
+of the node and the CPU it frees is worth more.
+
 ## Build and run
 
 ```
@@ -219,11 +246,12 @@ per thread; any failed decode fails the run.
 
 ## Next
 
-1. **The deciding test for ZIPS:** one False Door chunk with identical pixels, once as ZIP level 1
-   through the host path and once as ZIPS through the device path, including what ZIPS costs
-   PrepareDenseScene to write and Texturing to read. If ZIPS with the GPU wins overall, PrepareDenseScene
-   gets a ZIPS output option and this merges; if not, it is parked, since with the chunk threshold it
-   never runs on ZIP output. `scripts/exr_layout_test.py <config.json> --reps 3 --check` runs it:
+1. **The deciding test on house-pc** (done on the RX 9070 box, above: a wash). One False Door chunk
+   with identical pixels, once as ZIP level 1 through the host path and once as ZIPS through the
+   device path, including what ZIPS costs PrepareDenseScene to write and, if the DepthMap numbers
+   justify its 97 minutes, one Texturing pass per layout. If ZIPS with the GPU wins overall there,
+   PrepareDenseScene gets a ZIPS output option and this merges; if not, it is parked, since with the
+   chunk threshold it never runs on ZIP output. `scripts/exr_layout_test.py <config.json> --reps 3 --check` runs it:
    PrepareDenseScene with `CHESHIRE_PDS_EXR_COMPRESSION=zip:1` and `zips:1` (the write cost, and
    the two outputs checked pixel-identical), DepthMap on one chunk as zip-host, zips-host, zips-gpu
    and zip-gpu (maps compared, and zip-gpu must decode nothing on the device), then Texturing on each
@@ -232,7 +260,6 @@ per thread; any failed decode fails the run.
    (see the script's docstring).
 2. **`cheshireexr_gpu_check` on house-pc's RX 6750 XT**, and the house-pc load profiles
    (`CHESHIRE_LOAD_PROFILE=1`, `CHESHIRE_EXR_PROFILE=1`).
-3. **Re-run the step 6m check on a card** with the fixed `CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1`.
-4. **Then** put it in front of `cheshireReadExr` behind a switch, and hold the result to the
+3. **Then** put it in front of `cheshireReadExr` behind a switch, and hold the result to the
    existing gates: DepthMap's chunks byte-identical, Texturing's output within its run-to-run band.
    The texturing node uploads its images too and could take the step 6m route.
