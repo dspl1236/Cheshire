@@ -91,6 +91,7 @@ struct Stats {
 };
 struct Budget {
     size_t vramCap = 0, vramUsed = 0, hostCap = 0, hostUsed = 0;
+    size_t imageReserveLeft = 0;  // the planner's image reserve not yet taken by images (held back from other classes)
     bool enabled = false, imagesMaySpill = false;
     int planner = 1;
 };
@@ -333,6 +334,10 @@ inline Budget budget() {
     b.enabled = s.enabled;
     b.vramCap = s.vramCap; b.vramUsed = s.stats.vramBytes;
     b.hostCap = s.hostCap; b.hostUsed = s.stats.hostBytes;
+    {
+        const size_t liveImages = s.stats.cls[int(Class::Image)].vramBytes;
+        b.imageReserveLeft = s.reserve > liveImages ? s.reserve - liveImages : 0;
+    }
     b.imagesMaySpill = s.enabled && !s.vramOnly[int(Class::Image)] && s.hostCap > 0;
     b.planner = s.enabled ? s.planner : 0;
     if (b.vramCap == ~size_t(0)) {   // no cap: report what the device says

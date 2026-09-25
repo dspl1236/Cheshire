@@ -1,0 +1,40 @@
+cmake_minimum_required(VERSION 3.21)
+# CheshireEXR as a library (docs/20-cheshireexr.md). Usable on its own (cmake -S hip/port/cheshireexr)
+# or through add_subdirectory.
+#   CheshireEXR: static library, public header exrCodec.hpp
+# CHESHIREEXR_GPU selects the device language, HIP (default) or CUDA.
+project(CheshireEXR LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CHESHIREEXR_GPU HIP CACHE STRING "HIP or CUDA")
+set(CHESHIREEXR_COMPAT ${CMAKE_CURRENT_SOURCE_DIR}/../../compat/include)
+set(CHESHIREEXR_SHARED ${CMAKE_CURRENT_SOURCE_DIR}/../cheshiregpu)
+
+if(CHESHIREEXR_GPU STREQUAL "CUDA")
+  enable_language(CUDA)
+  set(CMAKE_CUDA_STANDARD 17)
+  set_source_files_properties(exrGPU.cu PROPERTIES LANGUAGE CUDA)
+  add_library(CheshireEXR STATIC exrGPU.cu exrHost.cpp)
+else()
+  enable_language(HIP)
+  set(CMAKE_HIP_STANDARD 17)
+  if(NOT CMAKE_HIP_ARCHITECTURES)
+    set(CMAKE_HIP_ARCHITECTURES gfx1201 gfx1030 gfx1010)
+  endif()
+  find_package(hip REQUIRED)
+  set_source_files_properties(exrGPU.cu PROPERTIES LANGUAGE HIP)
+  add_library(CheshireEXR STATIC exrGPU.cu exrHost.cpp)
+  target_include_directories(CheshireEXR PRIVATE ${CHESHIREEXR_COMPAT})
+  if(CMAKE_HIP_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    target_compile_options(CheshireEXR PRIVATE "$<$<COMPILE_LANGUAGE:HIP>:/FI${CHESHIREEXR_COMPAT}/cheshire/cuda_to_hip.h>")
+  else()
+    target_compile_options(CheshireEXR PRIVATE "$<$<COMPILE_LANGUAGE:HIP>:-include${CHESHIREEXR_COMPAT}/cheshire/cuda_to_hip.h>")
+  endif()
+  # hip::host only: hip::device would compile exrHost.cpp as HIP too (see cheshirejpg/CMakeLists.txt)
+  target_link_libraries(CheshireEXR PUBLIC hip::host)
+endif()
+target_include_directories(CheshireEXR PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} PRIVATE ${CHESHIREEXR_SHARED})
+# Position-independent, as CheshireJPG: the library links into PIE executables (Ubuntu's gcc default)
+# and into AliceVision's shared libraries; without it the device-compiled object fails to link on
+# Linux (R_X86_64_32S against .text).
+set_target_properties(CheshireEXR PROPERTIES POSITION_INDEPENDENT_CODE ON)

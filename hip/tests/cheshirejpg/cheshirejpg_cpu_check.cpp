@@ -12,9 +12,9 @@
 // a decode that reports Ok must equal libjpeg's output. Run it again with JSIMD_FORCENONE=1 to
 // check against libjpeg-turbo's C paths as well as its SIMD ones.
 #include "checkCommon.hpp"
+#include "asyncBackend.hpp"
+#include "cpuBackend.hpp"
 #include "deferredRuntime.hpp"
-#include "jpegAsyncBackend.hpp"
-#include "jpegCpuBackend.hpp"
 #include "jpegPipeline.hpp"
 
 #include <chrono>
@@ -461,12 +461,12 @@ int main(int argc, char** argv)
                 std::getenv("JSIMD_FORCENONE") ? std::getenv("JSIMD_FORCENONE") : "(unset)");
 
     // host: every stage as a plain loop, in order. async: the GPU backend's own code
-    // (jpegAsyncBackend.hpp) over a runtime that runs queued work only when the stream is waited on.
+    // (cheshiregpu/asyncBackend.hpp) over a runtime that runs queued work only when the stream is waited on.
     int rc = 0;
     if (which == "both" || which == "host")
-        rc |= runChecks<CpuBackend>("host", testimages, large, extra);
+        rc |= runChecks<cheshire::gpu::CpuBackend>("host", testimages, large, extra);
     if (which == "both" || which == "async")
-        rc |= runChecks<AsyncBackend<check::DeferredRuntime>>("async (deferred)", testimages, large, extra);
+        rc |= runChecks<cheshire::gpu::AsyncBackend<check::DeferredRuntime>>("async (deferred)", testimages, large, extra);
     std::printf("%s\n", rc ? "FAIL" : "PASS");
     return rc;
 }

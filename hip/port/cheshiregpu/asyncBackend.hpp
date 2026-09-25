@@ -1,6 +1,7 @@
-// CheshireJPG: the backend for a device that runs work asynchronously on a stream.
+// Cheshire GPU codecs (CheshireJPG, CheshireEXR): the backend for a device that runs work
+// asynchronously on a stream.
 //
-// jpegPipeline.hpp needs a backend whose upload() may return before the transfer has run, while
+// The codec pipelines (cheshirejpg/jpegPipeline.hpp, cheshireexr/exrPipeline.hpp) need a backend whose upload() may return before the transfer has run, while
 // the caller reuses its buffer at once, and whose download() returns with the data there. On a
 // GPU both are asynchronous copies on the Codec's own stream, through a pinned staging area:
 //
@@ -12,10 +13,11 @@
 // Kernels, copies and memsets all go on the one stream, so they run in the order issued.
 //
 // The class is a template over the runtime so that exactly this code is also tested without a
-// GPU. jpegGPU.cu instantiates it with the CUDA/HIP runtime. The host check (hip/tests/cheshirejpg)
-// instantiates it with a runtime that queues every operation and runs the queue only when the
-// stream is waited on. A read of the staging area before its transfer had run would then show up
-// as output that differs from libjpeg's.
+// GPU. cudaRuntime.cuh is the CUDA/HIP runtime the codecs' .cu files instantiate it with. The host
+// checks (hip/tests/cheshirejpg, hip/tests/cheshireexr) instantiate it with
+// hip/tests/cheshiregpu/deferredRuntime.hpp, which queues every operation and runs the queue only
+// when the stream is waited on. A read of the staging area before its transfer had run would then
+// show up as output that differs from the reference library's.
 //
 // Runtime interface (each call returns false on failure, and error() then describes it):
 //   bool streamCreate(); void streamDestroy(); bool streamSync();
@@ -35,7 +37,7 @@
 #include <cstring>
 
 namespace cheshire {
-namespace jpeg {
+namespace gpu {
 
 template <class Runtime>
 class AsyncBackend
@@ -56,6 +58,7 @@ class AsyncBackend
     }
 
     Runtime& runtime() { return rt_; }
+    const Runtime& runtime() const { return rt_; }
 
     // Start of a decode or encode: clear an earlier failure, create the stream on first use, and
     // make sure nothing from an earlier call (which may have stopped early) is still in flight.
@@ -108,6 +111,22 @@ class AsyncBackend
             std::memcpy(h, s, n);
         used_ = 0;  // the stream is idle: every slice is free again
     }
+    // Like download, but hands the staged bytes to consume(const uint8_t*) instead of copying
+    // them out, so a caller that transforms the data (half to float, say) reads pinned memory once.
+    template <class F>
+    void downloadVia(const void* d, size_t n, F&& consume)
+    {
+        if (failed_ || n == 0)
+            return;
+        uint8_t* s = stage(n);
+        if (!s)
+            return;
+        check(rt_.copyToHost(s, d, n), "download");
+        sync();
+        if (!failed_)
+            consume(static_cast<const uint8_t*>(s));
+        used_ = 0;
+    }
     void zero(void* d, size_t n)
     {
         if (!failed_ && n)
@@ -120,13 +139,21 @@ class AsyncBackend
             check(rt_.launch(n, f), "kernel launch");
     }
     bool ok() const { return !failed_; }
+    // Wait for everything queued so far; true if it all succeeded. For results that stay on the
+    // device: once this returns they are complete, whatever stream reads them next.
+    bool finish()
+    {
+        sync();
+        used_ = 0;
+        return !failed_;
+    }
 
   private:
     void check(bool good, const char* what)
     {
         if (!good && !failed_)
         {
-            std::fprintf(stderr, "[cheshire] CheshireJPG: %s failed: %s\n", what, rt_.error());
+            std::fprintf(stderr, "[cheshire] GPU codec: %s failed: %s\n", what, rt_.error());
             failed_ = true;
         }
     }
@@ -173,5 +200,5 @@ class AsyncBackend
     size_t used_ = 0;
 };
 
-}  // namespace jpeg
+}  // namespace gpu
 }  // namespace cheshire

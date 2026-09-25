@@ -12,7 +12,7 @@ find_package(JPEG REQUIRED)  # libjpeg-turbo is the reference
 set(JPEG_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../port/cheshirejpg)
 
 add_executable(cheshirejpg_cpu_check cheshirejpg_cpu_check.cpp ${JPEG_SRC}/jpegHost.cpp)
-target_include_directories(cheshirejpg_cpu_check PRIVATE ${JPEG_SRC})
+target_include_directories(cheshirejpg_cpu_check PRIVATE ${JPEG_SRC} ${JPEG_SRC}/../cheshiregpu ${CMAKE_CURRENT_SOURCE_DIR}/../cheshiregpu)
 target_link_libraries(cheshirejpg_cpu_check PRIVATE JPEG::JPEG)
 
 if(NOT CHESHIREJPG_GPU STREQUAL "OFF")

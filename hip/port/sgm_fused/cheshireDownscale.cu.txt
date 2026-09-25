@@ -150,6 +150,37 @@ __global__ void cheshireDownscale_kernel(const float4* in_d,
 #endif
 }
 
+void cuda_cheshireDownscaleDeviceToCudaRGBA(const float4* in_d,
+                                            std::size_t inPitch,
+                                            int inWidth,
+                                            int inHeight,
+                                            CudaDeviceMemoryPitched<CudaRGBA, 2>& out_dmp,
+                                            cudaStream_t stream)
+{
+    // cheshire (step 6m): the same kernel on an image that is already on the device (CheshireEXR's
+    // output), queued on the decoder's stream
+    const int outWidth = int(out_dmp.getSize().x());
+    const int outHeight = int(out_dmp.getSize().y());
+    const auto taps = tapsFor(inWidth, inHeight, outWidth, outHeight);
+    const dim3 block(32, 4, 1);
+    const dim3 grid(divUp(outWidth, block.x), divUp(outHeight, block.y), 1);
+    cheshireDownscale_kernel<<<grid, block, 0, stream>>>(in_d,
+                                                         (unsigned int)inPitch,
+                                                         taps.first.begin,
+                                                         taps.first.idx,
+                                                         taps.first.w,
+                                                         taps.second.begin,
+                                                         taps.second.idx,
+                                                         taps.second.w,
+                                                         out_dmp.getBuffer(),
+                                                         (unsigned int)out_dmp.getPitch(),
+                                                         (unsigned int)outWidth,
+                                                         (unsigned int)outHeight,
+                                                         nullptr);
+    CHECK_CUDA_ERROR();
+    CHECK_CUDA_RETURN_ERROR(cudaStreamSynchronize(stream));
+}
+
 void cuda_cheshireDownscaleToCudaRGBA(const float* in_hostRGBA, int inWidth, int inHeight, CudaDeviceMemoryPitched<CudaRGBA, 2>& out_dmp)
 {
     const int outWidth = int(out_dmp.getSize().x());
@@ -205,9 +236,21 @@ void cuda_cheshireDownscaleToCudaRGBA(const float* in_hostRGBA, int inWidth, int
         const std::size_t n = std::size_t(outWidth) * outHeight * 4;
         std::vector<float> here(n);
         image::cheshire::resizeExact<4>(in_hostRGBA, inWidth, inHeight, here.data(), outWidth, outHeight, false);
-        image::Image<image::RGBAfColor> full(inWidth, inHeight, false), lib;
+        // Both images are allocated here, at their final sizes: this translation unit is compiled
+        // without the image library's /arch:AVX2, so Eigen's aligned allocator differs between the
+        // two, and a block the library allocated and this unit freed corrupted the heap on Windows
+        // (dspl1236/Cheshire#2). resizeImage resizes lib to the size it already has, which Eigen does
+        // without reallocating; if it ever did reallocate, the block is left alone rather than freed.
+        image::Image<image::RGBAfColor> full(inWidth, inHeight, false), lib(outWidth, outHeight, false);
         std::memcpy(full.data(), in_hostRGBA, std::size_t(inWidth) * inHeight * 4 * sizeof(float));
+        const void* libBlock = lib.data();
         imageAlgo::resizeImage(inWidth / outWidth, full, lib);
+        if (lib.data() != libBlock)
+        {
+            std::fprintf(stderr, "[cheshire] CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK: resizeImage reallocated; that block is leaked\n");
+            (new image::Image<image::RGBAfColor>())->swap(lib);  // never freed in this unit
+            return;
+        }
         std::size_t floatDiff = 0;
         const float* libf = reinterpret_cast<const float*>(lib.data());
         for (std::size_t i = 0; i < n; ++i)

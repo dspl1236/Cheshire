@@ -40,7 +40,7 @@ else()
   # LANGUAGE HIP and gets its device compilation from that.
   target_link_libraries(CheshireJPG PUBLIC hip::host)
 endif()
-target_include_directories(CheshireJPG PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(CheshireJPG PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../cheshiregpu)
 # Position-independent: the library links into PIE executables (Ubuntu's gcc default) and later into
 # AliceVision's shared libraries. Without it the device-compiled object failed to link on Linux
 # (R_X86_64_32S against .text, "recompile with -fPIE").

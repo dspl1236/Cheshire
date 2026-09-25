@@ -269,6 +269,29 @@ L items can slide.
   colorconvert's own per-row scratch lines from the 8-bit pixels and applies the same processor:
   107/107 EXRs byte-identical, read 139 to 67 thread-seconds, the node 28.1 to 19.1 s on the RX 9070
   box (`CHESHIRE_READ_DIRECT=0` restores upstream). House-pc numbers with the next Linux bundle.
+- **CheshireEXR for the reads** (L). A GPU decoder for PrepareDenseScene's EXRs, output identical to
+  OpenEXR's (docs/20): ZIP/ZIPS/RLE/NONE scanline files, one thread per chunk inflating with zlib's
+  checks, bit-identical floats on 261 generated files (every half bit pattern, 6000x3376 RGBA) and
+  no mutated file decoded differently, checked on the host. Not yet run on a card. First decide
+  whether it is the lever: profile a house-pc Texturing pass and DepthMap chunk
+  (`CHESHIRE_LOAD_PROFILE=1`, `CHESHIRE_EXR_PROFILE=1`); on the RX 9070 box Texturing is disk-bound
+  and a decoder cannot help there. Then `cheshireexr_gpu_check`, and a switch in front of
+  `cheshireReadExr`. **Step 6m (2026-09-24):** DepthMap's loads decoded into device memory,
+  `CHESHIRE_DEPTHMAP_GPU_EXR=1`, off by default: CheshireEXR's output feeds 6d's downscale kernel on
+  the decoder's stream and the mipmap is filled from there, so the CPU inflate, the host copy and the
+  324 MB upload per image go. Files outside the direct reader's scope and a VRAM budget too small
+  for a decoder fall back to the host path. **RX 9070:** exact everywhere (101 of 101 files in
+  `cheshireexr_gpu_check`; depth maps byte-identical, 12 of 12 on mini6 and 96 of 96 on a 48-view
+  False Door chunk). Speed follows the chunk count: on ZIPS (3376 chunks) that chunk's loads dropped
+  from 30.5 to 9.4 s, but on ZIP level 1, what PrepareDenseScene writes now, it is about 5x slower
+  than the host, so the loader now leaves files with fewer than 1024 chunks to the host
+  (`CHESHIRE_DEPTHMAP_GPU_EXR_MIN_CHUNKS`) and the switch can never slow a load. Per megapixel the
+  GPU on ZIPS is twice a CPU thread on the RX 9070 box (118 against 55 MP/s) and level with the CPU
+  on bench-pc's RX 5500 XT. Held, not merged, until the deciding test: one False Door chunk as ZIP
+  through the host against ZIPS through the GPU, with ZIPS's write and Texturing read costs; a win
+  adds a ZIPS output option to PrepareDenseScene and merges this, a loss parks it. The check mode's
+  heap corruption on Windows is fixed, and so is the GPU check's throughput mode, which counted
+  failed decodes (an out-of-memory at 8 threads on the RX 5500 XT printed 25.5 images/s and PASS).
 - **CheshireJPG for the reads** (L). The GPU JPEG codec exists (docs/19): a baseline decoder and
   encoder in HIP compute kernels, not VCN, so Windows and RDNA1 are covered, identical to
   libjpeg-turbo on 88 of 89 camera files (the 89th is damaged and handed back) and on 833

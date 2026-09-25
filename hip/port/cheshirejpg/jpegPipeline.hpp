@@ -3,8 +3,8 @@
 // A backend provides begin (called at the start of every decode and encode), alloc/release,
 // upload/download, zero, and forEach(n, functor). upload may return before the copy has run but
 // must let the caller reuse its buffer at once; download returns with the data there. The GPU
-// backend (jpegAsyncBackend.hpp over jpegGPU.cu's runtime) queues everything on the Codec's
-// stream and launches one thread per index; the CPU backend (jpegCpuBackend.hpp) loops.
+// backend (cheshiregpu/asyncBackend.hpp over cudaRuntime.cuh) queues everything on the Codec's
+// stream and launches one thread per index; the CPU backend (cheshiregpu/cpuBackend.hpp) loops.
 // Both run the functors of jpegStages.hpp in exactly this order, which is what lets the host check
 // in hip/tests/cheshirejpg vouch for the device path's arithmetic and control flow without a GPU.
 #pragma once

@@ -1,10 +1,11 @@
-// CheshireJPG check: a runtime for AsyncBackend that makes asynchrony visible on the host.
+// Cheshire GPU codec checks: a runtime for cheshire::gpu::AsyncBackend that makes asynchrony
+// visible on the host. Used by hip/tests/cheshirejpg and hip/tests/cheshireexr.
 //
 // Every copy, memset and kernel is queued and runs only when the stream is waited on, in the order
 // issued - the latest a real stream is allowed to run it. So a staging slice overwritten before its
-// transfer ran, or host code that reads a result without a download, produces wrong output, and the
-// comparison with libjpeg in cheshirejpg_cpu_check reports it. Fresh allocations are filled with
-// garbage, as nothing promises that cudaMalloc returns zeros either.
+// transfer ran, or host code that reads a result without a download, produces wrong output, and
+// the comparison with the reference library in the host checks reports it. Fresh allocations are
+// filled with garbage, as nothing promises that cudaMalloc returns zeros either.
 #pragma once
 
 #include <cstdlib>

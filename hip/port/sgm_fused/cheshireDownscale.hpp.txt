@@ -4,6 +4,7 @@
 
 #include <aliceVision/depthMap/cuda/host/memory.hpp>
 
+#include <cstddef>
 #include <cstdlib>
 #include <string>
 
@@ -37,6 +38,17 @@ inline bool cheshireDeviceDownscaleEnabled()
  * @param[out] out_dmp the downscaled CudaRGBA image, sized inWidth / downscale x inHeight / downscale
  */
 void cuda_cheshireDownscaleToCudaRGBA(const float* in_hostRGBA, int inWidth, int inHeight, CudaDeviceMemoryPitched<CudaRGBA, 2>& out_dmp);
+
+/**
+ * @brief cheshire (step 6m): the same downscale and conversion from a full-resolution float RGBA image
+ * already on the device (in_d, inPitch bytes per row), queued on the given stream and waited for.
+ */
+void cuda_cheshireDownscaleDeviceToCudaRGBA(const float4* in_d,
+                                            std::size_t inPitch,
+                                            int inWidth,
+                                            int inHeight,
+                                            CudaDeviceMemoryPitched<CudaRGBA, 2>& out_dmp,
+                                            cudaStream_t stream);
 
 }  // namespace depthMap
 }  // namespace aliceVision

@@ -317,7 +317,7 @@ index 25b80d4..84dba54 100644
          aliceVision_gpu
          aliceVision_sfmData
 diff --git a/src/aliceVision/depthMap/DepthMapEstimator.cpp b/src/aliceVision/depthMap/DepthMapEstimator.cpp
-index 187e8f5..967606a 100644
+index 187e8f5..e908b79 100644
 --- a/src/aliceVision/depthMap/DepthMapEstimator.cpp
 +++ b/src/aliceVision/depthMap/DepthMapEstimator.cpp
 @@ -5,6 +5,10 @@
@@ -331,15 +331,19 @@ index 187e8f5..967606a 100644
  
  #include <aliceVision/system/Logger.hpp>
  #include <aliceVision/system/Timer.hpp>
-@@ -19,6 +23,7 @@
+@@ -19,6 +23,11 @@
  #include <aliceVision/depthMap/cuda/host/utils.hpp>
  #include <aliceVision/depthMap/cuda/host/patchPattern.hpp>
  #include <aliceVision/depthMap/cuda/host/DeviceCache.hpp>
 +#include <aliceVision/depthMap/cuda/imageProcessing/cheshireDownscale.hpp>  // cheshire (step 6d)
++#if defined(CHESHIRE_HIP)
++#include <aliceVision/depthMap/cuda/imageProcessing/cheshireDeviceExr.hpp>  // cheshire (step 6m)
++#include <memory>
++#endif
  #include <aliceVision/depthMap/cuda/host/DeviceStreamManager.hpp>
  #include <aliceVision/depthMap/cuda/planeSweeping/deviceDepthSimilarityMap.hpp>
  
-@@ -109,6 +114,68 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
+@@ -109,6 +118,68 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
      const double rcMinCostMB = rcCamsCostMB + tileCostMB;
      const double rcMaxCostMB = rcCamsCostMB + nbTilesPerCamera * tileCostMB;
  
@@ -408,7 +412,7 @@ index 187e8f5..967606a 100644
      // available device memory
      double deviceMemoryMB;
      {
-@@ -126,6 +193,7 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
+@@ -126,6 +197,7 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
          const double remainingMemoryMB = deviceMemoryMB - (nbSimultaneousFullRc * rcMaxCostMB);
          nbRemainingTiles = static_cast<int>(std::max(0.0, remainingMemoryMB - rcCamsCostMB) / tileCostMB);
      }
@@ -416,7 +420,7 @@ index 187e8f5..967606a 100644
  
      // check that we do not need more constant camera parameters than the ones in device constant memory
      if (ALICEVISION_DEVICE_MAX_CONSTANT_CAMERA_PARAM_SETS < ((nbSimultaneousFullRc + ((nbRemainingTiles > 0) ? 1 : 0)) * rcCamParams))
-@@ -230,6 +298,15 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -230,6 +302,15 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
      // initialize RAM image cache
      // note: maybe move it as class member in order to share it across multiple GPUs
      mvsUtils::ImagesCache<image::Image<image::RGBAfColor>> ic(_mp, image::EImageColorSpace::LINEAR);
@@ -432,7 +436,7 @@ index 187e8f5..967606a 100644
  
      // build tile list order by R camera
      std::vector<Tile> tiles;
-@@ -331,6 +408,69 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -331,6 +412,112 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          const int firstTileIndex = b * nbTilesPerBatch;
          const int lastTileIndex = std::min((b + 1) * nbTilesPerBatch, static_cast<int>(tiles.size()));
  
@@ -480,29 +484,72 @@ index 187e8f5..967606a 100644
 +                    newCams.push_back(cam);
 +            }
 +            const int hostSlots = std::max(1, ic.getCacheSize());
++            int groupSize = hostSlots;
++#if defined(CHESHIRE_HIP)
++            // cheshire (step 6m): with CHESHIRE_DEPTHMAP_GPU_EXR=1 the EXRs are decoded on the device
++            // (CheshireEXR) and downscaled there, and the mipmap is filled from that buffer: no CPU
++            // decode, no host copy, no upload of the image. A camera the loader hands back (not a file
++            // it takes, not enough VRAM, a decode error) goes through the image cache as before.
++            std::unique_ptr<CheshireDeviceExrLoader> exrLoader;
++            if (!newCams.empty() && ic.isFullResolution() && cheshireDeviceExrEnabled())
++            {
++                exrLoader.reset(new CheshireDeviceExrLoader(_mp.getMaxImageWidth(), _mp.getMaxImageHeight(), _mp.getProcessDownscale()));
++                if (exrLoader->active())
++                    groupSize = std::min(hostSlots, exrLoader->groupSize());
++                else
++                    exrLoader.reset();
++            }
++            std::vector<std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>>> onDevice(static_cast<std::size_t>(groupSize));
++#endif
 +            const auto tLoad0 = std::chrono::steady_clock::now();
 +            double decodeSeconds = 0.0;
-+            for (std::size_t g = 0; g < newCams.size(); g += static_cast<std::size_t>(hostSlots))
++            for (std::size_t g = 0; g < newCams.size(); g += static_cast<std::size_t>(groupSize))
 +            {
-+                const int nbGroup = static_cast<int>(std::min<std::size_t>(static_cast<std::size_t>(hostSlots), newCams.size() - g));
++                const int nbGroup = static_cast<int>(std::min<std::size_t>(static_cast<std::size_t>(groupSize), newCams.size() - g));
 +                const auto tDecode0 = std::chrono::steady_clock::now();
 +#pragma omp parallel for schedule(dynamic)
 +                for (int k = 0; k < nbGroup; ++k)
++                {
++#if defined(CHESHIRE_HIP)
++                    if (exrLoader)
++                    {
++                        const int cam = newCams[g + k];
++                        onDevice[k] = exrLoader->load(ic.getImagePath(cam), _mp.getOriginalWidth(cam), _mp.getOriginalHeight(cam));
++                        if (onDevice[k])
++                            continue;
++                    }
++#endif
 +                    ic.refreshImage_sync(newCams[g + k]);
++                }
 +                decodeSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - tDecode0).count();
 +                for (int k = 0; k < nbGroup; ++k)
++                {
++#if defined(CHESHIRE_HIP)
++                    if (onDevice[k])
++                    {
++                        deviceCache.addMipmapImageFromDevice(newCams[g + k], minMipmapDownscale, maxMipmapDownscale, std::move(onDevice[k]), _mp);
++                        continue;
++                    }
++#endif
 +                    deviceCache.addMipmapImage(newCams[g + k], minMipmapDownscale, maxMipmapDownscale, ic, _mp);
++                }
 +            }
 +            ALICEVISION_LOG_INFO("cheshire: depth map batch " << (b + 1) << "/" << nbBatches << ": " << batchCams.size() << " cameras, " << newCams.size()
 +                                                              << " decoded and uploaded (" << nbResident << " already on the device), decode " << decodeSeconds
 +                                                              << " s, load " << std::chrono::duration<double>(std::chrono::steady_clock::now() - tLoad0).count()
 +                                                              << " s");
++#if defined(CHESHIRE_HIP)
++            if (exrLoader)
++                ALICEVISION_LOG_INFO("cheshire: depth map batch " << (b + 1) << "/" << nbBatches << ": " << exrLoader->decoded()
++                                                                  << " decoded on the device (CheshireEXR), " << exrLoader->handedBack() << " by the host path (" << exrLoader->fewChunks() << " with too few chunks)"
++                                                                  << (exrLoader->checkMismatches() ? ", CHECK MISMATCHES: " + std::to_string(exrLoader->checkMismatches()) : std::string()));
++#endif
 +        }
 +
          // load tile R and corresponding T cameras in device cache
          for (int i = firstTileIndex; i < lastTileIndex; ++i)
          {
-@@ -375,7 +515,10 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -375,7 +562,10 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          for (int i = firstTileIndex; i < lastTileIndex; ++i)
          {
              Tile& tile = tiles.at(i);
@@ -514,7 +561,7 @@ index 187e8f5..967606a 100644
              const int streamIndex = tile.id % nbStreams;
  
              // do not compute empty ROI
-@@ -446,18 +589,22 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -446,18 +636,22 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          // wait for tiles batch computation
          cudaDeviceSynchronize();
  
@@ -654,10 +701,10 @@ index 0564791..d2e3efc 100644
  
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h b/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h
 new file mode 100644
-index 0000000..dbd7efe
+index 0000000..4f0f6cb
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h
-@@ -0,0 +1,421 @@
+@@ -0,0 +1,426 @@
 +// Cheshire memory bridge v2: VRAM first, mapped system RAM when VRAM is short, and the
 +// choice of *what* spills made by buffer class instead of by arrival order.
 +//
@@ -751,6 +798,7 @@ index 0000000..dbd7efe
 +};
 +struct Budget {
 +    size_t vramCap = 0, vramUsed = 0, hostCap = 0, hostUsed = 0;
++    size_t imageReserveLeft = 0;  // the planner's image reserve not yet taken by images (held back from other classes)
 +    bool enabled = false, imagesMaySpill = false;
 +    int planner = 1;
 +};
@@ -993,6 +1041,10 @@ index 0000000..dbd7efe
 +    b.enabled = s.enabled;
 +    b.vramCap = s.vramCap; b.vramUsed = s.stats.vramBytes;
 +    b.hostCap = s.hostCap; b.hostUsed = s.stats.hostBytes;
++    {
++        const size_t liveImages = s.stats.cls[int(Class::Image)].vramBytes;
++        b.imageReserveLeft = s.reserve > liveImages ? s.reserve - liveImages : 0;
++    }
 +    b.imagesMaySpill = s.enabled && !s.vramOnly[int(Class::Image)] && s.hostCap > 0;
 +    b.planner = s.enabled ? s.planner : 0;
 +    if (b.vramCap == ~size_t(0)) {   // no cap: report what the device says
@@ -1844,6 +1896,1814 @@ index 0000000..d5bcb15
 +}
 +
 +}}  // namespace cheshire::mip
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/ATTRIBUTION.md b/src/aliceVision/depthMap/cuda/hip/cheshireexr/ATTRIBUTION.md
+new file mode 100644
+index 0000000..4974c63
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/ATTRIBUTION.md
+@@ -0,0 +1,49 @@
++# Attribution: OpenEXR, Imath and puff
++
++CheshireEXR, the GPU EXR decoder in this directory, is new code written for Cheshire. It is not a
++fork of OpenEXR or of zlib, and none of their source files are included here. Its output has to be
++identical to OpenEXR's, so it reproduces behaviour from the projects below. Each part is listed with
++its origin and what was changed, and the licences are included.
++
++| Cheshire code | reproduces | from | licence |
++|---|---|---|---|
++| `exrTypes.hpp` `unpredict` | the predictor OpenEXR undoes after ZIP and RLE decompression (`reconstruct()`) | OpenEXR, `src/lib/OpenEXRCore/internal_zip.c` (v3.1.5) | BSD-3-Clause, Copyright (c) Contributors to the OpenEXR Project. [LICENSE.OpenEXR.md](LICENSE.OpenEXR.md) |
++| `exrTypes.hpp` `interleavedSource`, `exrStages.hpp` `ConvertPixels` | the byte reordering after decompression (`interleave()`), here read in place rather than applied as a pass | same file | same |
++| `exrTypes.hpp` `rleDecode` | OpenEXR's run-length format | OpenEXR, `internal_rle.c` | same |
++| `exrHost.cpp` | the file layout: header, channel list order, lines per chunk per compression, the chunk offset table and chunk leaders, the "packed size equals unpacked size means stored raw" rule | the OpenEXR file format specification and OpenEXR's `chunk.c` and `decoding.c` | same |
++| `exrTypes.hpp` `halfToFloatBits` | half to float, bit for bit, NaN payloads included | Imath, `imath_half_to_float()` in `half.h` (v3.1.9) | BSD-3-Clause, Copyright Contributors to the OpenEXR Project. [LICENSE.Imath.md](LICENSE.Imath.md) |
++| `exrTypes.hpp` `huffDecode` (the slow path) | the canonical Huffman decoding loop | puff.c, Mark Adler (zlib `contrib/puff`) | zlib licence, below |
++| `exrTypes.hpp` `buildHuff`, `zlibInflate` | inflate per RFC 1950 and RFC 1951, rejecting exactly what zlib's `inflate()` rejects: over-subscribed and incomplete codes (zlib's `inflate_table()` rules), invalid symbols, distances before the start, stored-block length, the adler32 trailer | RFC 1950, RFC 1951, zlib's behaviour | written from the RFCs; no zlib source used |
++
++How they were changed: every routine was rewritten as a C++ function that runs on both the host and
++a GPU (`__host__ __device__`), one chunk or one sample at a time. OpenEXR's SIMD variants are
++replaced by their scalar definitions, and the interleave is folded into the per-pixel read.
++Buffering, threading, error reporting and memory management are removed.
++
++## puff.c notice (zlib licence)
++
++```
++Copyright (C) 2002-2013 Mark Adler, all rights reserved
++version 2.3, 21 Jan 2013
++
++This software is provided 'as-is', without any express or implied
++warranty.  In no event will the author be held liable for any damages
++arising from the use of this software.
++
++Permission is granted to anyone to use this software for any purpose,
++including commercial applications, and to alter it and redistribute it
++freely, subject to the following restrictions:
++
++1. The origin of this software must not be misrepresented; you must not
++   claim that you wrote the original software. If you use this software
++   in a product, an acknowledgment in the product documentation would be
++   appreciated but is not required.
++2. Altered source versions must be plainly marked as such, and must not be
++   misrepresented as being the original software.
++3. This notice may not be removed or altered from any source distribution.
++
++Mark Adler    madler@alumni.caltech.edu
++```
++
++The Cheshire code is licensed under the MPL-2.0 (see the repository's LICENSE and NOTICE). The
++OpenEXR Project and Mark Adler do not endorse this software, and it is not affiliated with them.
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/LICENSE.Imath.md b/src/aliceVision/depthMap/cuda/hip/cheshireexr/LICENSE.Imath.md
+new file mode 100644
+index 0000000..dacc461
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/LICENSE.Imath.md
+@@ -0,0 +1,11 @@
++Copyright Contributors to the OpenEXR Project. All rights reserved.
++
++Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
++
++1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
++
++2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
++
++3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
++
++THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/LICENSE.OpenEXR.md b/src/aliceVision/depthMap/cuda/hip/cheshireexr/LICENSE.OpenEXR.md
+new file mode 100644
+index 0000000..b2a016e
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/LICENSE.OpenEXR.md
+@@ -0,0 +1,11 @@
++Copyright (c) Contributors to the OpenEXR Project. All rights reserved.
++
++Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
++
++1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
++
++2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
++
++3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
++
++THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/asyncBackend.hpp b/src/aliceVision/depthMap/cuda/hip/cheshireexr/asyncBackend.hpp
+new file mode 100644
+index 0000000..d8a1812
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/asyncBackend.hpp
+@@ -0,0 +1,204 @@
++// Cheshire GPU codecs (CheshireJPG, CheshireEXR): the backend for a device that runs work
++// asynchronously on a stream.
++//
++// The codec pipelines (cheshirejpg/jpegPipeline.hpp, cheshireexr/exrPipeline.hpp) need a backend whose upload() may return before the transfer has run, while
++// the caller reuses its buffer at once, and whose download() returns with the data there. On a
++// GPU both are asynchronous copies on the Codec's own stream, through a pinned staging area:
++//
++//   upload:   copy into a fresh slice of the staging area, queue the transfer to the device.
++//   download: queue the transfer into a slice, wait for the stream, copy out.
++//
++// A slice is only handed out again after a wait on the stream: when the area is full, and after
++// every download. So no queued transfer can read staging memory that has since been overwritten.
++// Kernels, copies and memsets all go on the one stream, so they run in the order issued.
++//
++// The class is a template over the runtime so that exactly this code is also tested without a
++// GPU. cudaRuntime.cuh is the CUDA/HIP runtime the codecs' .cu files instantiate it with. The host
++// checks (hip/tests/cheshirejpg, hip/tests/cheshireexr) instantiate it with
++// hip/tests/cheshiregpu/deferredRuntime.hpp, which queues every operation and runs the queue only
++// when the stream is waited on. A read of the staging area before its transfer had run would then
++// show up as output that differs from the reference library's.
++//
++// Runtime interface (each call returns false on failure, and error() then describes it):
++//   bool streamCreate(); void streamDestroy(); bool streamSync();
++//   bool deviceAlloc(void**, size_t); void deviceFree(void*);
++//   bool hostAlloc(void**, size_t);   void hostFree(void*);      // pinned
++//   bool copyToDevice(void* d, const void* h, size_t);            // async on the stream
++//   bool copyToHost(void* h, const void* d, size_t);              // async on the stream
++//   bool zero(void* d, size_t);                                   // async on the stream
++//   template <class F> bool launch(size_t n, const F& f);         // f(i) for i < n, on the stream
++//   const char* error();
++#pragma once
++
++#include <algorithm>
++#include <cstddef>
++#include <cstdint>
++#include <cstdio>
++#include <cstring>
++
++namespace cheshire {
++namespace gpu {
++
++template <class Runtime>
++class AsyncBackend
++{
++  public:
++    AsyncBackend() = default;
++    AsyncBackend(const AsyncBackend&) = delete;
++    AsyncBackend& operator=(const AsyncBackend&) = delete;
++
++    ~AsyncBackend()
++    {
++        if (hasStream_)
++            (void)rt_.streamSync();
++        if (stage_)
++            rt_.hostFree(stage_);
++        if (hasStream_)
++            rt_.streamDestroy();
++    }
++
++    Runtime& runtime() { return rt_; }
++    const Runtime& runtime() const { return rt_; }
++
++    // Start of a decode or encode: clear an earlier failure, create the stream on first use, and
++    // make sure nothing from an earlier call (which may have stopped early) is still in flight.
++    bool begin()
++    {
++        failed_ = false;
++        if (!hasStream_)
++        {
++            hasStream_ = rt_.streamCreate();
++            check(hasStream_, "stream create");
++        }
++        sync();
++        used_ = 0;
++        return !failed_;
++    }
++
++    void* alloc(size_t bytes)
++    {
++        void* p = nullptr;
++        check(rt_.deviceAlloc(&p, bytes), "device alloc");
++        return failed_ ? nullptr : p;
++    }
++    void release(void* p)
++    {
++        if (!p)
++            return;
++        sync();  // queued work may still use the buffer
++        rt_.deviceFree(p);
++    }
++    void upload(void* d, const void* h, size_t n)
++    {
++        if (failed_ || n == 0)
++            return;
++        uint8_t* s = stage(n);
++        if (!s)
++            return;
++        std::memcpy(s, h, n);
++        check(rt_.copyToDevice(d, s, n), "upload");
++    }
++    void download(void* h, const void* d, size_t n)
++    {
++        if (failed_ || n == 0)
++            return;
++        uint8_t* s = stage(n);
++        if (!s)
++            return;
++        check(rt_.copyToHost(s, d, n), "download");
++        sync();
++        if (!failed_)
++            std::memcpy(h, s, n);
++        used_ = 0;  // the stream is idle: every slice is free again
++    }
++    // Like download, but hands the staged bytes to consume(const uint8_t*) instead of copying
++    // them out, so a caller that transforms the data (half to float, say) reads pinned memory once.
++    template <class F>
++    void downloadVia(const void* d, size_t n, F&& consume)
++    {
++        if (failed_ || n == 0)
++            return;
++        uint8_t* s = stage(n);
++        if (!s)
++            return;
++        check(rt_.copyToHost(s, d, n), "download");
++        sync();
++        if (!failed_)
++            consume(static_cast<const uint8_t*>(s));
++        used_ = 0;
++    }
++    void zero(void* d, size_t n)
++    {
++        if (!failed_ && n)
++            check(rt_.zero(d, n), "memset");
++    }
++    template <class F>
++    void forEach(size_t n, const F& f)
++    {
++        if (!failed_ && n)
++            check(rt_.launch(n, f), "kernel launch");
++    }
++    bool ok() const { return !failed_; }
++    // Wait for everything queued so far; true if it all succeeded. For results that stay on the
++    // device: once this returns they are complete, whatever stream reads them next.
++    bool finish()
++    {
++        sync();
++        used_ = 0;
++        return !failed_;
++    }
++
++  private:
++    void check(bool good, const char* what)
++    {
++        if (!good && !failed_)
++        {
++            std::fprintf(stderr, "[cheshire] GPU codec: %s failed: %s\n", what, rt_.error());
++            failed_ = true;
++        }
++    }
++    void sync()
++    {
++        if (hasStream_)
++            check(rt_.streamSync(), "stream synchronize");
++    }
++    // A slice of n bytes of pinned memory that no queued transfer uses.
++    uint8_t* stage(size_t n)
++    {
++        const size_t need = (n + 255) & ~(size_t)255;
++        if (used_ + need > cap_)
++        {
++            sync();  // every transfer through the area has completed
++            used_ = 0;
++            if (need > cap_)
++            {
++                if (stage_)
++                    rt_.hostFree(stage_);
++                stage_ = nullptr;
++                cap_ = 0;
++                const size_t want = (std::max)(need, (size_t)8 << 20);
++                void* p = nullptr;
++                check(rt_.hostAlloc(&p, want), "pinned host alloc");
++                if (failed_)
++                    return nullptr;
++                stage_ = static_cast<uint8_t*>(p);
++                cap_ = want;
++            }
++        }
++        if (failed_)
++            return nullptr;
++        uint8_t* p = stage_ + used_;
++        used_ += need;
++        return p;
++    }
++
++    Runtime rt_;
++    bool hasStream_ = false;
++    bool failed_ = false;
++    uint8_t* stage_ = nullptr;  // pinned
++    size_t cap_ = 0;
++    size_t used_ = 0;
++};
++
++}  // namespace gpu
++}  // namespace cheshire
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/cudaRuntime.cuh b/src/aliceVision/depthMap/cuda/hip/cheshireexr/cudaRuntime.cuh
+new file mode 100644
+index 0000000..45ddbff
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/cudaRuntime.cuh
+@@ -0,0 +1,68 @@
++// Cheshire GPU codecs: the CUDA/HIP runtime cheshire::gpu::AsyncBackend drives - one non-blocking
++// stream, CUDA names (HIP through Cheshire's compat header, whose copy and memset wrappers also
++// order transfers of spilled buffers), and the one kernel every codec stage runs as:
++// forEachKernel<F> calls f(i) for i < n, one thread per index. Include only from a .cu file.
++#pragma once
++
++#include <cuda_runtime.h>
++
++#include <cstddef>
++
++namespace cheshire {
++namespace gpu {
++
++namespace {
++
++template <class F>
++__global__ void forEachKernel(F f, size_t n)
++{
++    const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
++    if (i < n)
++        f(i);
++}
++
++class CudaRuntime
++{
++  public:
++    bool streamCreate() { return ok(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking)); }
++    void streamDestroy() { (void)cudaStreamDestroy(stream_); }
++    bool streamSync() { return ok(cudaStreamSynchronize(stream_)); }
++    bool deviceAlloc(void** p, size_t n) { return ok(cudaMalloc(p, n)); }
++    void deviceFree(void* p) { (void)cudaFree(p); }
++    bool hostAlloc(void** p, size_t n) { return ok(cudaHostAlloc(p, n, cudaHostAllocDefault)); }
++    void hostFree(void* p) { (void)cudaFreeHost(p); }
++    bool copyToDevice(void* d, const void* h, size_t n)
++    {
++        return ok(cudaMemcpyAsync(d, h, n, cudaMemcpyHostToDevice, stream_));
++    }
++    bool copyToHost(void* h, const void* d, size_t n)
++    {
++        return ok(cudaMemcpyAsync(h, d, n, cudaMemcpyDeviceToHost, stream_));
++    }
++    bool zero(void* d, size_t n) { return ok(cudaMemsetAsync(d, 0, n, stream_)); }
++    template <class F>
++    bool launch(size_t n, const F& f)
++    {
++        const unsigned block = 256;
++        const size_t grid = (n + block - 1) / block;
++        forEachKernel<F><<<(unsigned)grid, block, 0, stream_>>>(f, n);
++        return ok(cudaGetLastError());
++    }
++    const char* error() const { return cudaGetErrorString(last_); }
++    cudaStream_t stream() const { return stream_; }
++
++  private:
++    bool ok(cudaError_t e)
++    {
++        if (e != cudaSuccess)
++            last_ = e;
++        return e == cudaSuccess;
++    }
++    cudaStream_t stream_ = nullptr;
++    cudaError_t last_ = cudaSuccess;
++};
++
++}  // namespace
++
++}  // namespace gpu
++}  // namespace cheshire
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp
+new file mode 100644
+index 0000000..13d6de2
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp
+@@ -0,0 +1,158 @@
++// CheshireEXR: an OpenEXR scanline decoder that runs on the GPU, with output identical to
++// OpenEXR's.
++//
++// Cheshire's nodes read the EXRs PrepareDenseScene writes - 6000x3376 half RGBA, ZIP or ZIPS, 73 MB
++// each - many times over: the depth-map node about ten per view, the texturing node every
++// contributing camera per pass (about 60 GB per pass at 884 views, docs/04). On a machine with few
++// cores the inflate is the CPU cost of each of those reads. This decoder inflates each chunk on the
++// device, one thread per chunk (an EXR ZIP chunk is 16 scanlines compressed on its own, so a file is
++// a few hundred independent jobs), and converts to float there.
++//
++// ZIP, ZIPS and RLE are lossless, so "identical" is not a tolerance: the floats are the ones
++// OpenEXR's Imf::InputFile writes into a FLOAT frame buffer, bit for bit, or the decode returns a
++// non-Ok status and the caller keeps its OpenEXR path. hip/tests/cheshireexr checks that.
++//
++// Scope, deliberately the same as Cheshire's direct EXR reader (image/cheshireExr.cpp, step 5v) so
++// this can sit in front of it: single-part scanline files, compression NONE, RLE, ZIPS or ZIP,
++// channels HALF or FLOAT without subsampling, the data window equal to the display window at the
++// origin, and either one channel or exactly R, G, B (and optionally A). Everything else - tiled,
++// multi-part, deep, PIZ, PXR24, B44, DWA, UINT channels - returns Status::Unsupported.
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <functional>
++#include <memory>
++#include <string>
++#include <utility>
++#include <vector>
++
++namespace cheshire {
++namespace exr {
++
++enum class Status
++{
++    Ok = 0,
++    NotExr,       // no EXR magic, or truncated before the chunk table
++    Unsupported,  // a valid EXR this decoder does not handle (see above)
++    Corrupt,      // a chunk OpenEXR would fail on; the caller's OpenEXR path decides
++    NoDevice,     // no GPU, or disabled by CHESHIRE_EXR_GPU=0
++    DeviceError,  // a runtime call failed
++    InvalidArgument,
++};
++
++const char* statusName(Status s);
++
++enum Compression : int
++{
++    kNone = 0,
++    kRle = 1,
++    kZips = 2,
++    kZip = 3,
++    kPiz = 4,
++    kPxr24 = 5,
++    kB44 = 6,
++    kB44a = 7,
++    kDwaa = 8,
++    kDwab = 9,
++};
++
++enum PixelType : int
++{
++    kUint = 0,
++    kHalf = 1,
++    kFloat = 2,
++};
++
++struct Channel
++{
++    std::string name;
++    int type = kHalf;
++    int xSampling = 1, ySampling = 1;
++};
++
++// What a caller needs before deciding to decode: the size, the channels (sorted by name, as
++// OpenEXR orders them) and the string attributes (AliceVision writes "AliceVision:ColorSpace").
++struct Header
++{
++    int width = 0, height = 0;
++    int dataMinX = 0, dataMinY = 0;
++    bool displayEqualsData = false;
++    int compression = kNone;
++    int lineOrder = 0;
++    bool tiled = false, multipart = false, deep = false;
++    std::vector<Channel> channels;
++    std::vector<std::pair<std::string, std::string>> strings;
++
++    const std::string* findString(const std::string& name) const;
++    // Chunks in the file: the height over the compression's lines per chunk (16 for ZIP, 1 for ZIPS,
++    // RLE and NONE). The decoder inflates one chunk per GPU thread, so this is its parallelism.
++    int chunkCount() const;
++};
++
++// Parses the header only (host, no device needed). NotExr for a file that is not an EXR.
++Status readHeader(const uint8_t* file, size_t size, Header& header);
++
++struct DecodeStats
++{
++    uint32_t chunks = 0;
++    uint32_t rawChunks = 0;       // stored uncompressed (packed size == unpacked size)
++    uint64_t packedBytes = 0;
++    uint64_t unpackedBytes = 0;
++};
++
++// A decode left in device memory (Codec::decodeToDevice): row-major, channels floats per pixel
++// (alpha last), rowBytes = width * channels * 4. The memory belongs to the Codec.
++struct DeviceImage
++{
++    const float* data = nullptr;
++    int width = 0, height = 0, channels = 0;
++    size_t rowBytes = 0;
++};
++
++// One codec instance owns its stream and device buffers and reuses them. Not thread-safe; use one
++// per thread.
++class Codec
++{
++  public:
++    Codec();
++    ~Codec();
++    Codec(const Codec&) = delete;
++    Codec& operator=(const Codec&) = delete;
++
++    // True if a device is present and CHESHIRE_EXR_GPU is not 0. Checked once per process.
++    static bool deviceAvailable();
++
++    // nchannels as Cheshire's direct reader takes it: 1 for a one-channel file (its only channel),
++    // 3 for R, G, B, 4 for R, G, B, A. allocate(width, height) is called once the file has decoded
++    // on the device and must return width * height * nchannels floats, row-major, alpha last; it is
++    // not called when the decode fails.
++    Status decode(const uint8_t* file,
++                  size_t size,
++                  int nchannels,
++                  const std::function<float*(int, int)>& allocate,
++                  DecodeStats* stats = nullptr);
++
++    // The same decode with the floats left on the device, for a caller that uses them there (the
++    // depth-map node uploads every image it reads). On Ok the pixels are complete, in memory owned by
++    // this Codec that stays valid until its next decode, trim() or destruction.
++    Status decodeToDevice(const uint8_t* file, size_t size, int nchannels, DeviceImage& out, DecodeStats* stats = nullptr);
++
++    // Copies a decodeToDevice result to host memory: img.rowBytes * img.height bytes.
++    Status download(const DeviceImage& img, float* dst);
++
++    // This Codec's stream (a cudaStream_t / hipStream_t), for work that reads a DeviceImage in order
++    // with the Codec's own. Null before the first decode.
++    void* stream() const;
++
++    // Frees the device buffers, which are otherwise kept for the next decode (a 6000x3376 RGBA file
++    // holds about 0.6 GB: the file, the inflated chunks and the floats).
++    void trim();
++
++  private:
++    struct Impl;
++    std::unique_ptr<Impl> impl_;
++};
++
++}  // namespace exr
++}  // namespace cheshire
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrGPU.cu b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrGPU.cu
+new file mode 100644
+index 0000000..07ff2bc
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrGPU.cu
+@@ -0,0 +1,93 @@
++// CheshireEXR: the device backend and the public Codec. CUDA dialect; the HIP build force-includes
++// cheshire/cuda_to_hip.h (allocations go through the memory bridge). Each Codec has its own stream
++// and pinned staging area (cheshiregpu/asyncBackend.hpp), as CheshireJPG's does.
++// CHESHIRE_EXR_GPU=0 disables.
++#include "asyncBackend.hpp"
++#include "cudaRuntime.cuh"
++#include "exrCodec.hpp"
++#include "exrPipeline.hpp"
++
++#include <cuda_runtime.h>
++
++#include <cstdio>
++#include <cstdlib>
++#include <mutex>
++
++namespace cheshire {
++namespace exr {
++
++namespace {
++
++using GpuBackend = gpu::AsyncBackend<gpu::CudaRuntime>;
++
++std::once_flag g_once;
++bool g_available = false;
++
++void probe()
++{
++    if (const char* e = std::getenv("CHESHIRE_EXR_GPU"))
++        if (e[0] == '0')
++        {
++            std::fprintf(stderr, "[cheshire] CheshireEXR: disabled by CHESHIRE_EXR_GPU=0\n");
++            return;
++        }
++    int n = 0;
++    if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1)
++    {
++        std::fprintf(stderr, "[cheshire] CheshireEXR: no GPU device\n");
++        return;
++    }
++    g_available = true;
++}
++
++}  // namespace
++
++struct Codec::Impl
++{
++    GpuBackend backend;
++    Pipeline<GpuBackend> pipeline{backend};
++};
++
++Codec::Codec()
++  : impl_(new Impl)
++{}
++
++Codec::~Codec() = default;
++
++bool Codec::deviceAvailable()
++{
++    std::call_once(g_once, probe);
++    return g_available;
++}
++
++Status Codec::decode(const uint8_t* file,
++                     size_t size,
++                     int nchannels,
++                     const std::function<float*(int, int)>& allocate,
++                     DecodeStats* stats)
++{
++    if (!file || !allocate)
++        return Status::InvalidArgument;
++    if (!deviceAvailable())
++        return Status::NoDevice;
++    return impl_->pipeline.decode(file, size, nchannels, allocate, stats);
++}
++
++Status Codec::decodeToDevice(const uint8_t* file, size_t size, int nchannels, DeviceImage& out, DecodeStats* stats)
++{
++    out = DeviceImage{};
++    if (!file)
++        return Status::InvalidArgument;
++    if (!deviceAvailable())
++        return Status::NoDevice;
++    return impl_->pipeline.decodeToDevice(file, size, nchannels, out, stats);
++}
++
++Status Codec::download(const DeviceImage& img, float* dst) { return impl_->pipeline.download(img, dst); }
++
++void* Codec::stream() const { return impl_->backend.runtime().stream(); }
++
++void Codec::trim() { impl_->pipeline.trim(); }
++
++}  // namespace exr
++}  // namespace cheshire
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrHost.cpp b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrHost.cpp
+new file mode 100644
+index 0000000..363f7b8
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrHost.cpp
+@@ -0,0 +1,331 @@
++// CheshireEXR: see exrHost.hpp. File layout per the OpenEXR file format specification: magic and
++// version, attributes until an empty name, the chunk offset table (one uint64 per chunk), then per
++// chunk an int32 scanline, an int32 packed size and the packed bytes.
++#include "exrHost.hpp"
++
++#include <algorithm>
++#include <cstring>
++
++namespace cheshire {
++namespace exr {
++
++namespace {
++
++struct Reader
++{
++    const uint8_t* d;
++    size_t n;
++    size_t i = 0;
++    bool fail = false;
++
++    bool has(size_t k) const { return !fail && i + k <= n; }
++    uint32_t u8()
++    {
++        if (!has(1))
++        {
++            fail = true;
++            return 0;
++        }
++        return d[i++];
++    }
++    int32_t i32()
++    {
++        if (!has(4))
++        {
++            fail = true;
++            return 0;
++        }
++        const uint32_t v = (uint32_t)d[i] | ((uint32_t)d[i + 1] << 8) | ((uint32_t)d[i + 2] << 16) | ((uint32_t)d[i + 3] << 24);
++        i += 4;
++        return (int32_t)v;
++    }
++    uint64_t u64()
++    {
++        const uint64_t lo = (uint32_t)i32();
++        const uint64_t hi = (uint32_t)i32();
++        return lo | (hi << 32);
++    }
++    // A NUL-terminated name of at most 255 bytes (long names allow 255, short 31).
++    bool name(std::string& s)
++    {
++        s.clear();
++        for (;;)
++        {
++            if (!has(1) || s.size() > 255)
++            {
++                fail = true;
++                return false;
++            }
++            const char c = (char)d[i++];
++            if (!c)
++                return true;
++            s.push_back(c);
++        }
++    }
++};
++
++}  // namespace
++
++const char* statusName(Status s)
++{
++    switch (s)
++    {
++        case Status::Ok: return "ok";
++        case Status::NotExr: return "not an EXR";
++        case Status::Unsupported: return "unsupported EXR";
++        case Status::Corrupt: return "corrupt EXR";
++        case Status::NoDevice: return "no GPU device";
++        case Status::DeviceError: return "GPU runtime error";
++        case Status::InvalidArgument: return "invalid argument";
++    }
++    return "?";
++}
++
++const std::string* Header::findString(const std::string& name) const
++{
++    for (const auto& kv : strings)
++        if (kv.first == name)
++            return &kv.second;
++    return nullptr;
++}
++
++int linesPerChunk(int compression)
++{
++    switch (compression)
++    {
++        case kNone:
++        case kRle:
++        case kZips: return 1;
++        case kZip:
++        case kPxr24: return 16;
++        case kPiz:
++        case kB44:
++        case kB44a:
++        case kDwaa: return 32;
++        case kDwab: return 256;
++    }
++    return 0;
++}
++
++namespace {
++
++// Reads everything up to the chunk offset table; r is left at the table.
++Status parseHeader(Reader& r, Header& h)
++{
++    h = Header();
++    if (r.n < 8 || r.d[0] != 0x76 || r.d[1] != 0x2f || r.d[2] != 0x31 || r.d[3] != 0x01)
++        return Status::NotExr;
++    r.i = 4;
++    const uint32_t version = (uint32_t)r.i32();
++    if ((version & 0xff) != 2)
++        return Status::Unsupported;
++    h.tiled = (version & 0x200) != 0;
++    h.deep = (version & 0x800) != 0;
++    h.multipart = (version & 0x1000) != 0;
++    if (h.multipart)
++        return Status::Unsupported;  // the header layout differs; nothing here writes one
++
++    bool haveChannels = false, haveCompression = false, haveData = false, haveDisplay = false;
++    int dw[4] = {0, 0, 0, 0}, dsp[4] = {0, 0, 0, 0};
++    std::string name, type;
++    for (;;)
++    {
++        if (!r.name(name))
++            return Status::NotExr;
++        if (name.empty())
++            break;
++        if (!r.name(type))
++            return Status::NotExr;
++        const int32_t len = r.i32();
++        if (r.fail || len < 0 || !r.has((size_t)len))
++            return Status::NotExr;
++        const size_t end = r.i + (size_t)len;
++        if (name == "channels" && type == "chlist")
++        {
++            haveChannels = true;
++            while (r.i < end)
++            {
++                Channel c;
++                if (!r.name(c.name))
++                    return Status::Corrupt;
++                if (c.name.empty())
++                    break;
++                c.type = r.i32();
++                r.u8();  // pLinear
++                r.u8();
++                r.u8();
++                r.u8();  // reserved
++                c.xSampling = r.i32();
++                c.ySampling = r.i32();
++                if (r.fail || r.i > end)
++                    return Status::Corrupt;
++                h.channels.push_back(c);
++            }
++        }
++        else if (name == "compression" && type == "compression" && len == 1)
++        {
++            haveCompression = true;
++            h.compression = (int)r.u8();
++        }
++        else if (name == "dataWindow" && type == "box2i" && len == 16)
++        {
++            haveData = true;
++            for (int k = 0; k < 4; ++k)
++                dw[k] = r.i32();
++        }
++        else if (name == "displayWindow" && type == "box2i" && len == 16)
++        {
++            haveDisplay = true;
++            for (int k = 0; k < 4; ++k)
++                dsp[k] = r.i32();
++        }
++        else if (name == "lineOrder" && type == "lineOrder" && len == 1)
++            h.lineOrder = (int)r.u8();
++        else if (type == "string")
++            h.strings.emplace_back(name, std::string((const char*)r.d + r.i, (size_t)len));
++        r.i = end;
++    }
++    if (r.fail || !haveChannels || !haveCompression || !haveData || !haveDisplay)
++        return Status::NotExr;
++    // OpenEXR keeps channels in a map ordered by name; chunks store them in that order
++    std::sort(h.channels.begin(), h.channels.end(),
++              [](const Channel& a, const Channel& b) { return std::strcmp(a.name.c_str(), b.name.c_str()) < 0; });
++    const int64_t w = (int64_t)dw[2] - dw[0] + 1, ht = (int64_t)dw[3] - dw[1] + 1;
++    if (w < 1 || ht < 1 || w > (1 << 24) || ht > (1 << 24))
++        return Status::Corrupt;
++    h.width = (int)w;
++    h.height = (int)ht;
++    h.dataMinX = dw[0];
++    h.dataMinY = dw[1];
++    h.displayEqualsData = std::memcmp(dw, dsp, sizeof(dw)) == 0;
++    return Status::Ok;
++}
++
++}  // namespace
++
++int Header::chunkCount() const
++{
++    const int lines = linesPerChunk(compression);
++    return lines > 0 ? (height + lines - 1) / lines : 0;
++}
++
++Status readHeader(const uint8_t* file, size_t size, Header& header)
++{
++    if (!file)
++        return Status::InvalidArgument;
++    Reader r{file, size};
++    return parseHeader(r, header);
++}
++
++Status makePlan(const uint8_t* file, size_t size, int nchannels, Plan& p)
++{
++    if (!file || (nchannels != 1 && nchannels != 3 && nchannels != 4))
++        return Status::InvalidArgument;
++    p = Plan();
++    Reader r{file, size};
++    Status st = parseHeader(r, p.header);
++    if (st != Status::Ok)
++        return st;
++    const Header& h = p.header;
++    if (h.tiled || h.deep || !h.displayEqualsData || h.dataMinX != 0 || h.dataMinY != 0)
++        return Status::Unsupported;
++    if (h.compression != kNone && h.compression != kRle && h.compression != kZips && h.compression != kZip)
++        return Status::Unsupported;
++    const int nch = (int)h.channels.size();
++    if (nch < 1 || nch > kMaxChannels)
++        return Status::Unsupported;
++    for (const Channel& c : h.channels)
++        if ((c.type != kHalf && c.type != kFloat) || c.xSampling != 1 || c.ySampling != 1)
++            return Status::Unsupported;
++
++    // the channel selection Cheshire's direct reader makes
++    ExrGeom& g = p.geom;
++    std::memset(&g, 0, sizeof(g));
++    g.nOut = nchannels;
++    if (nchannels == 1)
++    {
++        if (nch != 1)
++            return Status::Unsupported;
++        g.outChannel[0] = 0;
++    }
++    else
++    {
++        const char* want[4] = {"R", "G", "B", "A"};
++        int found[4] = {-1, -1, -1, -1};
++        for (int k = 0; k < 4; ++k)
++            for (int c = 0; c < nch; ++c)
++                if (h.channels[c].name == want[k])
++                    found[k] = c;
++        const bool hasA = found[3] >= 0;
++        if (found[0] < 0 || found[1] < 0 || found[2] < 0 || nch != (hasA ? 4 : 3) || (nchannels == 4 && !hasA))
++            return Status::Unsupported;
++        for (int k = 0; k < nchannels; ++k)
++            g.outChannel[k] = found[k];
++    }
++
++    g.width = h.width;
++    g.height = h.height;
++    g.linesPerChunk = linesPerChunk(h.compression);
++    uint32_t off = 0;
++    for (int c = 0; c < nch; ++c)
++    {
++        g.chanSize[c] = h.channels[c].type == kHalf ? 2 : 4;
++        g.chanOffset[c] = off;
++        off += (uint32_t)g.chanSize[c] * (uint32_t)g.width;
++    }
++    g.lineBytes = off;
++    g.numChunks = (uint32_t)((h.height + g.linesPerChunk - 1) / g.linesPerChunk);
++    if ((uint64_t)g.lineBytes * g.linesPerChunk > 0x7fffffffu)
++        return Status::Unsupported;
++
++    // the offset table, then each chunk's leader
++    if (!r.has((size_t)g.numChunks * 8))
++        return Status::NotExr;
++    std::vector<uint64_t> offsets(g.numChunks);
++    for (uint32_t k = 0; k < g.numChunks; ++k)
++        offsets[k] = r.u64();
++    p.chunks.assign(g.numChunks, ChunkInfo{});
++    std::vector<uint8_t> seen(g.numChunks, 0);
++    uint64_t scratch = 0;
++    for (uint32_t k = 0; k < g.numChunks; ++k)
++    {
++        const uint64_t at = offsets[k];
++        if (at < r.i || at > size || size - at < 8)
++            return Status::Corrupt;  // OpenEXR would try to reconstruct the table; leave that to it
++        Reader cr{file, size, (size_t)at};
++        const int32_t y = cr.i32();
++        const int32_t packed = cr.i32();
++        if (y < 0 || y >= h.height || y % g.linesPerChunk != 0)
++            return Status::Corrupt;
++        const uint32_t idx = (uint32_t)(y / g.linesPerChunk);
++        const uint32_t lines = (uint32_t)std::min(g.linesPerChunk, h.height - y);
++        const uint32_t unpacked = lines * g.lineBytes;
++        if (seen[idx] || packed < 0 || (uint32_t)packed > unpacked || (uint64_t)packed > size - at - 8)
++            return Status::Corrupt;
++        seen[idx] = 1;
++        ChunkInfo& c = p.chunks[idx];
++        c.fileOffset = at + 8;
++        c.packed = (uint32_t)packed;
++        c.unpacked = unpacked;
++        c.lines = lines;
++        if ((uint32_t)packed == unpacked)
++            c.mode = kModeRaw;
++        else if (h.compression == kNone)
++            return Status::Corrupt;
++        else
++        {
++            c.mode = h.compression == kRle ? kModeRle : kModeZip;
++            c.scratchOffset = scratch;
++            scratch += unpacked;
++        }
++        p.stats.packedBytes += (uint32_t)packed;
++        p.stats.unpackedBytes += unpacked;
++        p.stats.rawChunks += c.mode == kModeRaw;
++    }
++    p.scratchBytes = scratch;
++    p.stats.chunks = g.numChunks;
++    return Status::Ok;
++}
++
++}  // namespace exr
++}  // namespace cheshire
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrHost.hpp b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrHost.hpp
+new file mode 100644
+index 0000000..dbb6316
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrHost.hpp
+@@ -0,0 +1,29 @@
++// CheshireEXR: host-side parsing - the header, the chunk offset table and each chunk's leader - into
++// the tables the stages read. Plain C++.
++#pragma once
++
++#include "exrCodec.hpp"
++#include "exrStages.hpp"
++
++#include <vector>
++
++namespace cheshire {
++namespace exr {
++
++int linesPerChunk(int compression);
++
++// The decode plan for one file and one request (nchannels as Codec::decode takes it): geometry,
++// one ChunkInfo per chunk in scanline order, and the scratch the compressed chunks need.
++struct Plan
++{
++    Header header;
++    ExrGeom geom;
++    std::vector<ChunkInfo> chunks;
++    uint64_t scratchBytes = 0;
++    DecodeStats stats;
++};
++
++Status makePlan(const uint8_t* file, size_t size, int nchannels, Plan& plan);
++
++}  // namespace exr
++}  // namespace cheshire
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrPipeline.hpp b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrPipeline.hpp
+new file mode 100644
+index 0000000..422bf13
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrPipeline.hpp
+@@ -0,0 +1,184 @@
++// CheshireEXR: the decode sequence, written once over a backend (cheshiregpu/asyncBackend.hpp on
++// the device, cheshiregpu/cpuBackend.hpp in the host check).
++#pragma once
++
++#include "exrCodec.hpp"
++#include "exrHost.hpp"
++#include "exrStages.hpp"
++
++#include <cstring>
++
++namespace cheshire {
++namespace exr {
++
++template <class Backend>
++class Pipeline
++{
++  public:
++    explicit Pipeline(Backend& b)
++      : b_(b)
++    {}
++
++    ~Pipeline()
++    {
++        for (Slot& s : slots_)
++            b_.release(s.p);
++    }
++
++    Pipeline(const Pipeline&) = delete;
++    Pipeline& operator=(const Pipeline&) = delete;
++
++    Status decode(const uint8_t* file,
++                  size_t size,
++                  int nchannels,
++                  const std::function<float*(int, int)>& allocate,
++                  DecodeStats* stats)
++    {
++        Plan p;
++        const float* dOut = nullptr;
++        Status st = run(file, size, nchannels, p, dOut);
++        if (st != Status::Ok)
++            return st;
++        const ExrGeom& g = p.geom;
++        float* dst = allocate(g.width, g.height);
++        if (!dst)
++            return Status::InvalidArgument;
++        downloadPieces(dst, dOut, (size_t)g.width * g.height * (size_t)g.nOut * sizeof(float));
++        if (!b_.ok())
++            return Status::DeviceError;
++        if (stats)
++            *stats = p.stats;
++        return Status::Ok;
++    }
++
++    // The same decode, with the floats left in device memory: out describes this pipeline's output
++    // buffer, complete when this returns, and valid until the next decode or trim().
++    Status decodeToDevice(const uint8_t* file, size_t size, int nchannels, DeviceImage& out, DecodeStats* stats)
++    {
++        out = DeviceImage{};
++        Plan p;
++        const float* dOut = nullptr;
++        Status st = run(file, size, nchannels, p, dOut);
++        if (st != Status::Ok)
++            return st;
++        if (!b_.finish())
++            return Status::DeviceError;
++        const ExrGeom& g = p.geom;
++        out.data = dOut;
++        out.width = g.width;
++        out.height = g.height;
++        out.channels = g.nOut;
++        out.rowBytes = (size_t)g.width * (size_t)g.nOut * sizeof(float);
++        if (stats)
++            *stats = p.stats;
++        return Status::Ok;
++    }
++
++    // A decodeToDevice result copied to host memory (rowBytes * height bytes).
++    Status download(const DeviceImage& img, float* dst)
++    {
++        if (!img.data || !dst)
++            return Status::InvalidArgument;
++        downloadPieces(dst, img.data, img.rowBytes * (size_t)img.height);
++        return b_.ok() ? Status::Ok : Status::DeviceError;
++    }
++
++    // Frees the device buffers (they are kept between decodes and only grow otherwise).
++    void trim()
++    {
++        for (Slot& s : slots_)
++        {
++            b_.release(s.p);
++            s = Slot{};
++        }
++    }
++
++  private:
++    // Everything up to and including ConvertPixels: on Ok, the floats are queued into dOut.
++    Status run(const uint8_t* file, size_t size, int nchannels, Plan& p, const float*& dOutResult)
++    {
++        if (!b_.begin())
++            return Status::DeviceError;
++        Status st = makePlan(file, size, nchannels, p);
++        if (st != Status::Ok)
++            return st;
++        const ExrGeom& g = p.geom;
++
++        uint8_t* dFile = get<uint8_t>(kFile, size);
++        ChunkInfo* dChunks = get<ChunkInfo>(kChunks, p.chunks.size());
++        uint8_t* dScratch = get<uint8_t>(kScratch, p.scratchBytes);
++        uint32_t* dFlag = get<uint32_t>(kFlag, 1);
++        const size_t pixels = (size_t)g.width * g.height;
++        float* dOut = get<float>(kOut, pixels * (size_t)g.nOut);
++        if (!b_.ok())
++            return Status::DeviceError;
++
++        uploadPieces(dFile, file, size);
++        b_.upload(dChunks, p.chunks.data(), p.chunks.size() * sizeof(ChunkInfo));
++        b_.zero(dFlag, sizeof(uint32_t));
++        b_.forEach(p.chunks.size(), InflateChunks{g, dFile, dChunks, dScratch, dFlag});
++        uint32_t bad = 0;
++        b_.download(&bad, dFlag, sizeof(uint32_t));
++        if (!b_.ok())
++            return Status::DeviceError;
++        if (bad)
++            return Status::Corrupt;
++        b_.forEach(pixels, ConvertPixels{g, dFile, dChunks, dScratch, dOut});
++        if (!b_.ok())
++            return Status::DeviceError;
++        dOutResult = dOut;
++        return Status::Ok;
++    }
++
++    // Large transfers go in pieces, so the pinned staging area stays at one piece (16 MB) per
++    // Codec rather than the size of a decoded image (324 MB for 6000x3376 RGBA floats); a
++    // dozen decoding threads would otherwise pin gigabytes.
++    static constexpr size_t kPiece = (size_t)16 << 20;
++
++    void uploadPieces(void* d, const void* h, size_t n)
++    {
++        for (size_t off = 0; off < n; off += kPiece)
++            b_.upload(static_cast<uint8_t*>(d) + off, static_cast<const uint8_t*>(h) + off, n - off < kPiece ? n - off : kPiece);
++    }
++    void downloadPieces(void* h, const void* d, size_t n)
++    {
++        for (size_t off = 0; off < n; off += kPiece)
++            b_.download(static_cast<uint8_t*>(h) + off, static_cast<const uint8_t*>(d) + off, n - off < kPiece ? n - off : kPiece);
++    }
++
++    enum SlotId
++    {
++        kFile,
++        kChunks,
++        kScratch,
++        kFlag,
++        kOut,
++        kSlotCount
++    };
++
++    struct Slot
++    {
++        void* p = nullptr;
++        size_t cap = 0;
++    };
++
++    template <class T>
++    T* get(SlotId id, size_t count)
++    {
++        const size_t bytes = (count ? count : 1) * sizeof(T);
++        Slot& s = slots_[id];
++        if (s.cap < bytes)
++        {
++            b_.release(s.p);
++            s.p = b_.alloc(bytes);
++            s.cap = s.p ? bytes : 0;
++        }
++        return static_cast<T*>(s.p);
++    }
++
++    Backend& b_;
++    Slot slots_[kSlotCount];
++};
++
++}  // namespace exr
++}  // namespace cheshire
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrStages.hpp b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrStages.hpp
+new file mode 100644
+index 0000000..dc7a951
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrStages.hpp
+@@ -0,0 +1,117 @@
++// CheshireEXR: the decode stages as functors over plain structs, run as kernels by the device
++// backend and as loops by the host backend (cheshiregpu/), like CheshireJPG's.
++//
++//   InflateChunks  one thread per chunk: inflate (ZIP, ZIPS) or run-length decode (RLE) into the
++//                  chunk's scratch slice, check it the way zlib and OpenEXR do, undo the predictor.
++//                  Chunks stored raw (packed size == unpacked size) need nothing.
++//   ConvertPixels  one thread per pixel: for each requested channel, gather its bytes from the
++//                  chunk - through the byte interleave for compressed chunks - and write the float.
++//
++// The interleave (internal_zip.c interleave()) is never materialised: output byte k of a chunk is
++// read straight from where the reordering would have put it.
++#pragma once
++
++#include "exrTypes.hpp"
++
++namespace cheshire {
++namespace exr {
++
++constexpr int kMaxChannels = 4;
++
++enum ChunkMode : uint32_t
++{
++    kModeRaw = 0,
++    kModeZip = 1,
++    kModeRle = 2,
++};
++
++struct ChunkInfo
++{
++    uint64_t fileOffset;     // first byte of the chunk's pixel data in the file
++    uint64_t scratchOffset;  // where its decompressed bytes go (compressed chunks only)
++    uint32_t packed, unpacked;
++    uint32_t mode;
++    uint32_t lines;
++};
++
++struct ExrGeom
++{
++    int width, height;
++    int linesPerChunk;
++    uint32_t numChunks;
++    uint32_t lineBytes;  // one scanline of every channel
++    int nOut;            // floats per output pixel
++    int outChannel[kMaxChannels];  // index into the sorted channel list, per output channel
++    uint32_t chanOffset[kMaxChannels];  // byte offset of each channel within a scanline
++    int chanSize[kMaxChannels];         // 2 (half) or 4 (float)
++};
++
++struct InflateChunks
++{
++    ExrGeom g;
++    const uint8_t* file;
++    const ChunkInfo* chunks;
++    uint8_t* scratch;
++    uint32_t* error;  // set to 1 + the chunk index of a failing chunk (any one)
++
++    CHESHIRE_EXR_HD void operator()(size_t i) const
++    {
++        const ChunkInfo c = chunks[i];
++        if (c.mode == kModeRaw)
++            return;
++        uint8_t* dst = scratch + c.scratchOffset;
++        bool ok;
++        if (c.mode == kModeZip)
++        {
++            InflateState s;
++            ok = zlibInflate(file + c.fileOffset, c.packed, dst, c.unpacked, s) == kInflateOk;
++        }
++        else
++            ok = rleDecode(file + c.fileOffset, c.packed, dst, c.unpacked);
++        if (!ok)
++        {
++            *error = (uint32_t)i + 1;
++            return;
++        }
++        unpredict(dst, c.unpacked);
++    }
++};
++
++struct ConvertPixels
++{
++    ExrGeom g;
++    const uint8_t* file;
++    const ChunkInfo* chunks;
++    const uint8_t* scratch;
++    float* out;
++
++    CHESHIRE_EXR_HD void operator()(size_t i) const
++    {
++        const int x = (int)(i % (size_t)g.width);
++        const int y = (int)(i / (size_t)g.width);
++        const ChunkInfo& c = chunks[y / g.linesPerChunk];
++        const uint32_t line = (uint32_t)(y % g.linesPerChunk);
++        const bool interleaved = c.mode != kModeRaw;
++        const uint8_t* base = interleaved ? scratch + c.scratchOffset : file + c.fileOffset;
++        float* o = out + i * (size_t)g.nOut;
++        for (int k = 0; k < g.nOut; ++k)
++        {
++            const int ch = g.outChannel[k];
++            const int size = g.chanSize[ch];
++            const uint32_t at = line * g.lineBytes + g.chanOffset[ch] + (uint32_t)x * (uint32_t)size;
++            uint32_t v = 0;
++            for (int b = 0; b < size; ++b)
++            {
++                const uint32_t src = interleaved ? interleavedSource(at + b, c.unpacked) : at + b;
++                v |= (uint32_t)base[src] << (8 * b);  // little-endian in the file
++            }
++            const uint32_t bits = size == 2 ? halfToFloatBits((uint16_t)v) : v;
++            float f;
++            __builtin_memcpy(&f, &bits, 4);
++            o[k] = f;
++        }
++    }
++};
++
++}  // namespace exr
++}  // namespace cheshire
+diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrTypes.hpp b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrTypes.hpp
+new file mode 100644
+index 0000000..4cc24b9
+--- /dev/null
++++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrTypes.hpp
+@@ -0,0 +1,481 @@
++// CheshireEXR: the per-chunk and per-sample arithmetic, shared by the device kernels and the host
++// check.
++//
++// EXR's ZIP, ZIPS and RLE compressions are lossless, so the bar is simple: the floats a decode
++// produces are the ones OpenEXR produces, bit for bit, or the decode reports the file and the
++// caller keeps OpenEXR. What has to be reproduced exactly:
++//   - zlib's inflate (RFC 1950/1951), including every check zlib makes, so that a stream zlib
++//     rejects is rejected here too rather than decoded into something OpenEXR would never return:
++//     header, block types, over-subscribed and incomplete codes, invalid symbols, distances
++//     reaching before the start, the stored-block length check, the adler32 trailer;
++//   - OpenEXR's run-length decoding (internal_rle.c / ImfRleCompressor.cpp);
++//   - the predictor and byte reordering both apply after decompression (internal_zip.c
++//     reconstruct() and interleave());
++//   - half to float as Imath converts it (imath_half_to_float's table, which the formula below
++//     reproduces bit for bit, NaN payloads included).
++//
++// No device-only intrinsics beyond a count-leading-zeros: every function compiles as plain C++,
++// so the host check runs the code the kernels run.
++//
++// Parts of this file reproduce behaviour of OpenEXR and Imath (BSD-3-Clause, Contributors to the
++// OpenEXR Project) and the decoding loop of Mark Adler's puff.c (zlib licence); ATTRIBUTION.md
++// lists which parts, what was changed, and the licences.
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++
++#if defined(__CUDACC__) || defined(__HIPCC__)
++#define CHESHIRE_EXR_HD __host__ __device__
++#else
++#define CHESHIRE_EXR_HD
++#endif
++
++#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
++#define CHESHIRE_EXR_DEVICE_PASS 1
++#endif
++
++namespace cheshire {
++namespace exr {
++
++// ---------------------------------------------------------------------------------------------
++// Half to float, Imath's imath_half_to_float() without F16C: sign, then either a normal number
++// rebiased, infinity/NaN with the payload kept, or a denormal normalised.
++
++CHESHIRE_EXR_HD inline uint32_t clz32(uint32_t x)
++{
++#if defined(CHESHIRE_EXR_DEVICE_PASS)
++    return (uint32_t)__clz((int)x);
++#else
++    return x ? (uint32_t)__builtin_clz(x) : 32u;
++#endif
++}
++
++CHESHIRE_EXR_HD inline uint32_t halfToFloatBits(uint16_t h)
++{
++    const uint32_t hexpmant = ((uint32_t)h << 17) >> 4;
++    uint32_t v = ((uint32_t)(h >> 15)) << 31;
++    if (hexpmant >= 0x00800000u)
++    {
++        v |= hexpmant;
++        if (hexpmant < 0x0f800000u)
++            v += 0x38000000u;
++        else
++            v |= 0x7f800000u;
++    }
++    else if (hexpmant != 0)
++    {
++        const uint32_t lc = clz32(hexpmant) - 8;
++        v |= 0x38800000u;
++        v |= hexpmant << lc;
++        v -= lc << 23;
++    }
++    return v;
++}
++
++// ---------------------------------------------------------------------------------------------
++// Inflate. One call decodes one zlib stream (an EXR chunk) into dst, which must be exactly the
++// chunk's unpacked size: zlib's uncompress() into OpenEXR's buffer fails when the stream is longer,
++// and OpenEXR rejects the chunk when it is shorter.
++
++enum InflateError : int
++{
++    kInflateOk = 0,
++    kInflateHeader,        // bad zlib header, or a preset dictionary
++    kInflateBlockType,     // block type 3
++    kInflateStored,        // stored block LEN != ~NLEN
++    kInflateTables,        // bad code-length counts or code
++    kInflateCode,          // invalid symbol
++    kInflateDistance,      // distance before the start of the output
++    kInflateOverflow,      // more output than the chunk holds
++    kInflateTruncated,     // ran past the end of the input
++    kInflateShort,         // stream ended before filling the chunk
++    kInflateChecksum,      // adler32 mismatch
++};
++
++constexpr int kMaxBits = 15;
++constexpr int kFastBits = 9;
++
++// A canonical Huffman code (RFC 1951 3.2.2): counts per length, symbols in code order, and a
++// lookup of the first kFastBits input bits - entries (length << 9) | symbol, 0 for longer codes.
++struct HuffTable
++{
++    uint16_t count[kMaxBits + 1];
++    uint16_t symbol[320];
++    uint16_t fast[1 << kFastBits];
++};
++
++// kind: 0 = code-length code, 1 = literal/length, 2 = distance. Returns false where zlib's
++// inflate_table() fails: an over-subscribed set, or an incomplete one other than a single code of
++// length 1 (lengths and distances only). A code with no symbols at all is accepted, as zlib does;
++// decoding with it then fails.
++CHESHIRE_EXR_HD inline bool buildHuff(HuffTable& h, const uint8_t* lengths, int n, int kind)
++{
++    for (int l = 0; l <= kMaxBits; ++l)
++        h.count[l] = 0;
++    for (int s = 0; s < n; ++s)
++        h.count[lengths[s]]++;
++    int maxLen = 0;
++    for (int l = kMaxBits; l >= 1; --l)
++        if (h.count[l])
++        {
++            maxLen = l;
++            break;
++        }
++    for (int i = 0; i < (1 << kFastBits); ++i)
++        h.fast[i] = 0;
++    if (maxLen == 0)
++        return kind != 0;
++    int left = 1;
++    for (int l = 1; l <= kMaxBits; ++l)
++    {
++        left <<= 1;
++        left -= h.count[l];
++        if (left < 0)
++            return false;  // over-subscribed
++    }
++    if (left > 0 && (kind == 0 || maxLen != 1))
++        return false;  // incomplete
++    uint16_t offs[kMaxBits + 2];
++    offs[1] = 0;
++    for (int l = 1; l < kMaxBits; ++l)
++        offs[l + 1] = offs[l] + h.count[l];
++    for (int s = 0; s < n; ++s)
++        if (lengths[s])
++            h.symbol[offs[lengths[s]]++] = (uint16_t)s;
++    // fast table: canonical codes, bit-reversed because deflate sends them MSB first
++    int code = 0, idx = 0;
++    for (int l = 1; l <= kFastBits; ++l)
++    {
++        for (int k = 0; k < h.count[l]; ++k, ++code, ++idx)
++        {
++            int rev = 0;
++            for (int b = 0; b < l; ++b)
++                rev |= ((code >> b) & 1) << (l - 1 - b);
++            for (int fill = rev; fill < (1 << kFastBits); fill += 1 << l)
++                h.fast[fill] = (uint16_t)((l << 9) | h.symbol[idx]);
++        }
++        code <<= 1;
++    }
++    return true;
++}
++
++struct BitReader
++{
++    const uint8_t* p;
++    const uint8_t* end;
++    uint64_t buf;
++    int cnt;
++    uint64_t consumed;  // bits taken from the stream
++    uint64_t total;     // bits in the stream
++
++    CHESHIRE_EXR_HD void init(const uint8_t* src, uint32_t len)
++    {
++        p = src;
++        end = src + len;
++        buf = 0;
++        cnt = 0;
++        consumed = 0;
++        total = (uint64_t)len * 8;
++    }
++    // Makes n bits visible; past the end they read as zero (overruns are caught by consumed).
++    CHESHIRE_EXR_HD void need(int n)
++    {
++        while (cnt < n)
++        {
++            const uint64_t byte = p < end ? *p++ : 0;
++            buf |= byte << cnt;
++            cnt += 8;
++        }
++    }
++    CHESHIRE_EXR_HD uint32_t peek(int n)
++    {
++        need(n);
++        return (uint32_t)(buf & ((1ull << n) - 1));
++    }
++    CHESHIRE_EXR_HD void drop(int n)
++    {
++        buf >>= n;
++        cnt -= n;
++        consumed += (uint64_t)n;
++    }
++    CHESHIRE_EXR_HD uint32_t bits(int n)
++    {
++        if (n == 0)
++            return 0;
++        const uint32_t v = peek(n);
++        drop(n);
++        return v;
++    }
++    CHESHIRE_EXR_HD void alignByte() { drop(cnt & 7); }
++    CHESHIRE_EXR_HD bool overrun() const { return consumed > total; }
++};
++
++// Returns the symbol, or -1 for a code the table does not contain.
++CHESHIRE_EXR_HD inline int huffDecode(const HuffTable& h, BitReader& br)
++{
++    const uint32_t look = br.peek(kMaxBits);
++    const uint16_t f = h.fast[look & ((1u << kFastBits) - 1)];
++    if (f)
++    {
++        br.drop(f >> 9);
++        return f & 511;
++    }
++    // canonical decode, one bit at a time (puff.c)
++    int code = 0, first = 0, index = 0;
++    for (int len = 1; len <= kMaxBits; ++len)
++    {
++        code |= (int)((look >> (len - 1)) & 1);
++        const int count = h.count[len];
++        if (code - count < first)
++        {
++            br.drop(len);
++            return h.symbol[index + (code - first)];
++        }
++        index += count;
++        first += count;
++        first <<= 1;
++        code <<= 1;
++    }
++    return -1;
++}
++
++// Scratch for one inflate call: the three tables and the code lengths. About 3.8 KB; one per
++// thread on the device.
++struct InflateState
++{
++    HuffTable lit, dist, lens;
++    uint8_t lengths[320];
++};
++
++CHESHIRE_EXR_HD inline void fixedTables(InflateState& s)
++{
++    for (int i = 0; i < 144; ++i)
++        s.lengths[i] = 8;
++    for (int i = 144; i < 256; ++i)
++        s.lengths[i] = 9;
++    for (int i = 256; i < 280; ++i)
++        s.lengths[i] = 7;
++    for (int i = 280; i < 288; ++i)
++        s.lengths[i] = 8;
++    buildHuff(s.lit, s.lengths, 288, 1);
++    // all 32 five-bit distance codes, as zlib builds them; 30 and 31 are rejected when used
++    for (int i = 0; i < 32; ++i)
++        s.lengths[i] = 5;
++    buildHuff(s.dist, s.lengths, 32, 2);
++}
++
++CHESHIRE_EXR_HD inline int dynamicTables(InflateState& s, BitReader& br)
++{
++    const int nlen = (int)br.bits(5) + 257;
++    const int ndist = (int)br.bits(5) + 1;
++    const int ncode = (int)br.bits(4) + 4;
++    if (nlen > 286 || ndist > 30)
++        return kInflateTables;
++    const uint8_t order[19] = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
++    uint8_t cl[19];
++    for (int i = 0; i < 19; ++i)
++        cl[i] = 0;
++    for (int i = 0; i < ncode; ++i)
++        cl[order[i]] = (uint8_t)br.bits(3);
++    if (!buildHuff(s.lens, cl, 19, 0))
++        return kInflateTables;
++    int idx = 0;
++    while (idx < nlen + ndist)
++    {
++        const int sym = huffDecode(s.lens, br);
++        if (sym < 0)
++            return kInflateTables;
++        if (sym < 16)
++        {
++            s.lengths[idx++] = (uint8_t)sym;
++            continue;
++        }
++        int len = 0, rep;
++        if (sym == 16)
++        {
++            if (idx == 0)
++                return kInflateTables;  // repeat with no previous length
++            len = s.lengths[idx - 1];
++            rep = 3 + (int)br.bits(2);
++        }
++        else if (sym == 17)
++            rep = 3 + (int)br.bits(3);
++        else
++            rep = 11 + (int)br.bits(7);
++        if (idx + rep > nlen + ndist)
++            return kInflateTables;
++        while (rep--)
++            s.lengths[idx++] = (uint8_t)len;
++    }
++    if (s.lengths[256] == 0)
++        return kInflateTables;  // no end-of-block code
++    if (!buildHuff(s.lit, s.lengths, nlen, 1))
++        return kInflateTables;
++    if (!buildHuff(s.dist, s.lengths + nlen, ndist, 2))
++        return kInflateTables;
++    return kInflateOk;
++}
++
++CHESHIRE_EXR_HD inline uint32_t adler32(const uint8_t* d, uint32_t n)
++{
++    uint32_t a = 1, b = 0;
++    while (n)
++    {
++        const uint32_t k = n < 5552 ? n : 5552;  // zlib's NMAX: no overflow before the modulo
++        for (uint32_t i = 0; i < k; ++i)
++        {
++            a += d[i];
++            b += a;
++        }
++        a %= 65521u;
++        b %= 65521u;
++        d += k;
++        n -= k;
++    }
++    return (b << 16) | a;
++}
++
++CHESHIRE_EXR_HD inline int zlibInflate(const uint8_t* src, uint32_t srcLen, uint8_t* dst, uint32_t dstLen, InflateState& s)
++{
++    const uint16_t lbase[29] = {3,  4,  5,  6,  7,  8,  9,  10, 11,  13,  15,  17,  19,  23, 27,
++                                31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258};
++    const uint8_t lext[29] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
++    const uint16_t dbase[30] = {1,   2,   3,   4,   5,   7,    9,    13,   17,   25,   33,   49,   65,    97,    129,
++                                193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577};
++    const uint8_t dext[30] = {0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13};
++
++    if (srcLen < 2)
++        return kInflateTruncated;
++    const uint32_t cmf = src[0], flg = src[1];
++    if ((cmf & 15) != 8 || (cmf >> 4) > 7 || ((cmf << 8) | flg) % 31 != 0 || (flg & 0x20))
++        return kInflateHeader;
++    BitReader br;
++    br.init(src + 2, srcLen - 2);
++    uint32_t out = 0;
++    int last = 0;
++    do
++    {
++        last = (int)br.bits(1);
++        const int type = (int)br.bits(2);
++        if (type == 0)
++        {
++            br.alignByte();
++            const uint32_t len = br.bits(16);
++            const uint32_t nlen = br.bits(16);
++            if (len != (~nlen & 0xffffu))
++                return kInflateStored;
++            if (br.overrun())
++                return kInflateTruncated;
++            if (out + len > dstLen)
++                return kInflateOverflow;
++            for (uint32_t i = 0; i < len; ++i)
++                dst[out++] = (uint8_t)br.bits(8);
++        }
++        else if (type == 1 || type == 2)
++        {
++            if (type == 1)
++                fixedTables(s);
++            else
++            {
++                const int e = dynamicTables(s, br);
++                if (e != kInflateOk)
++                    return br.overrun() ? kInflateTruncated : e;
++            }
++            for (;;)
++            {
++                int sym = huffDecode(s.lit, br);
++                if (sym < 0)
++                    return br.overrun() ? kInflateTruncated : kInflateCode;
++                if (sym < 256)
++                {
++                    if (out >= dstLen)
++                        return kInflateOverflow;
++                    dst[out++] = (uint8_t)sym;
++                    continue;
++                }
++                if (sym == 256)
++                    break;
++                sym -= 257;
++                if (sym >= 29)
++                    return kInflateCode;  // 286, 287
++                const uint32_t len = lbase[sym] + br.bits(lext[sym]);
++                const int dsym = huffDecode(s.dist, br);
++                if (dsym < 0)
++                    return br.overrun() ? kInflateTruncated : kInflateCode;
++                if (dsym >= 30)
++                    return kInflateCode;  // 30, 31
++                const uint32_t dist = dbase[dsym] + br.bits(dext[dsym]);
++                if (dist > out)
++                    return kInflateDistance;
++                if (out + len > dstLen)
++                    return kInflateOverflow;
++                for (uint32_t i = 0; i < len; ++i, ++out)
++                    dst[out] = dst[out - dist];
++                if (br.overrun())
++                    return kInflateTruncated;
++            }
++        }
++        else
++            return kInflateBlockType;
++        if (br.overrun())
++            return kInflateTruncated;
++    } while (!last);
++    if (out != dstLen)
++        return kInflateShort;
++    br.alignByte();
++    uint32_t want = 0;
++    for (int i = 0; i < 4; ++i)
++        want = (want << 8) | br.bits(8);
++    if (br.overrun())
++        return kInflateTruncated;
++    if (want != adler32(dst, out))
++        return kInflateChecksum;
++    return kInflateOk;
++}
++
++// OpenEXR's RLE: a negative count byte -n is followed by n literal bytes, a non-negative count c by
++// one byte repeated c + 1 times. The output must be exactly the chunk's unpacked size.
++CHESHIRE_EXR_HD inline bool rleDecode(const uint8_t* src, uint32_t srcLen, uint8_t* dst, uint32_t dstLen)
++{
++    uint32_t in = 0, out = 0;
++    while (in < srcLen)
++    {
++        const int c = (int)(int8_t)src[in++];
++        if (c < 0)
++        {
++            const uint32_t n = (uint32_t)(-c);
++            if (in + n > srcLen || out + n > dstLen)
++                return false;
++            for (uint32_t i = 0; i < n; ++i)
++                dst[out++] = src[in++];
++        }
++        else
++        {
++            const uint32_t n = (uint32_t)c + 1;
++            if (in + 1 > srcLen || out + n > dstLen)
++                return false;
++            const uint8_t v = src[in++];
++            for (uint32_t i = 0; i < n; ++i)
++                dst[out++] = v;
++        }
++    }
++    return out == dstLen;
++}
++
++// internal_zip.c reconstruct(): t[i] = t[i-1] + t[i] - 128, in place, first byte unchanged.
++CHESHIRE_EXR_HD inline void unpredict(uint8_t* t, uint32_t n)
++{
++    for (uint32_t i = 1; i < n; ++i)
++        t[i] = (uint8_t)((int)t[i - 1] + (int)t[i] - 128);
++}
++
++// internal_zip.c interleave(): output byte k of a chunk of n bytes is the (k/2)th byte of the first
++// half ((n + 1) / 2 bytes) for even k, of the second half for odd k.
++CHESHIRE_EXR_HD inline uint32_t interleavedSource(uint32_t k, uint32_t n)
++{
++    return (k & 1) ? (n + 1) / 2 + (k >> 1) : (k >> 1);
++}
++
++}  // namespace exr
++}  // namespace cheshire
 diff --git a/src/aliceVision/depthMap/cuda/hip/cuda_fp16.h b/src/aliceVision/depthMap/cuda/hip/cuda_fp16.h
 new file mode 100644
 index 0000000..06d2a95
@@ -1864,10 +3724,10 @@ index 0000000..fc9c490
 +#include <cheshire/cuda_to_hip.h>
 diff --git a/src/aliceVision/depthMap/cuda/hip/depthmap_device_unity.hip b/src/aliceVision/depthMap/cuda/hip/depthmap_device_unity.hip
 new file mode 100644
-index 0000000..784f75d
+index 0000000..af9fa55
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/depthmap_device_unity.hip
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,25 @@
 +// Cheshire: single device translation unit for AliceVision's depthMap CUDA sources.
 +// Windows HIP (ROCm 7.2.1) cannot do relocatable device code (-fgpu-rdc: the
 +// clang-offload-bundler/llvm-objcopy step fails on COFF objects), and the kernels
@@ -1885,6 +3745,11 @@ index 0000000..784f75d
 +// host-side shadow variables are TU-local too, so these must live in the same TU.
 +#include <aliceVision/depthMap/cuda/host/DeviceCache.cpp>
 +#include <aliceVision/depthMap/cuda/host/patchPattern.cpp>
++// Cheshire step 6m: CheshireEXR (hip/port/cheshireexr, copied under cuda/hip/cheshireexr) and the
++// loader that decodes the depth-map node's images with it
++#include <aliceVision/depthMap/cuda/hip/cheshireexr/exrHost.cpp>
++#include <aliceVision/depthMap/cuda/hip/cheshireexr/exrGPU.cu>
++#include <aliceVision/depthMap/cuda/imageProcessing/cheshireDeviceExr.cu>
 +// Cheshire step 6d: last, because it (and the resize header it includes) turns fp contraction off
 +// for the rest of the translation unit.
 +#include <aliceVision/depthMap/cuda/imageProcessing/cheshireDownscale.cu>
@@ -1898,7 +3763,7 @@ index 0000000..e7182a6
 +#pragma once
 +#include <cheshire/cuda_to_hip.h>
 diff --git a/src/aliceVision/depthMap/cuda/host/DeviceCache.cpp b/src/aliceVision/depthMap/cuda/host/DeviceCache.cpp
-index 32f0bd4..c51abc9 100644
+index 32f0bd4..def591d 100644
 --- a/src/aliceVision/depthMap/cuda/host/DeviceCache.cpp
 +++ b/src/aliceVision/depthMap/cuda/host/DeviceCache.cpp
 @@ -7,6 +7,7 @@
@@ -1930,10 +3795,30 @@ index 32f0bd4..c51abc9 100644
      // allocate the full size host-sided image buffer
      CudaSize<2> imgSize(img->width(), img->height());
      CudaHostMemoryHeap<CudaRGBA, 2> img_hmh(imgSize);
-@@ -280,6 +295,12 @@ void DeviceCache::addMipmapImage(int camId,
+@@ -280,6 +295,32 @@ void DeviceCache::addMipmapImage(int camId,
      deviceMipmapImage.fill(img_hmh, minDownscale, maxDownscale);
  }
  
++void DeviceCache::addMipmapImageFromDevice(int camId,
++                                           int minDownscale,
++                                           int maxDownscale,
++                                           std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> img_dmpPtr,
++                                           const mvsUtils::MultiViewParams& mp)
++{
++    // cheshire (step 6m): addMipmapImage from the LRU insertion on, with the image from the device
++    SingleDeviceCache& currentDeviceCache = getCurrentDeviceCache();
++    const IndexT viewId = mp.getViewId(camId);
++    int deviceMipmapId;
++    const bool newInsertion = currentDeviceCache.mipmapCache.insert(camId, &deviceMipmapId);
++    if (!newInsertion)
++    {
++        ALICEVISION_LOG_TRACE("Add mipmap image on device cache: already on cache (id: " << camId << ", view id: " << viewId << ").");
++        return;
++    }
++    ALICEVISION_LOG_TRACE("Add mipmap image on device cache from the device (id: " << camId << ", view id: " << viewId << ").");
++    currentDeviceCache.mipmaps.at(deviceMipmapId)->fillFromDevice(std::move(img_dmpPtr), minDownscale, maxDownscale);
++}
++
 +bool DeviceCache::hasMipmapImage(int camId)
 +{
 +    // cheshire: a lookup only; LRUCache::getIndex does not touch the recency list
@@ -1944,10 +3829,10 @@ index 32f0bd4..c51abc9 100644
  {
      // get current device cache
 diff --git a/src/aliceVision/depthMap/cuda/host/DeviceCache.hpp b/src/aliceVision/depthMap/cuda/host/DeviceCache.hpp
-index 32d0d45..43106e3 100644
+index 32d0d45..752cedb 100644
 --- a/src/aliceVision/depthMap/cuda/host/DeviceCache.hpp
 +++ b/src/aliceVision/depthMap/cuda/host/DeviceCache.hpp
-@@ -69,6 +69,11 @@ class DeviceCache
+@@ -69,6 +69,21 @@ class DeviceCache
       * @param[in,out] imageCache the image cache to get host-side data
       * @param[in] mp the multi-view parameters
       */
@@ -1955,6 +3840,16 @@ index 32d0d45..43106e3 100644
 +     * @brief cheshire: does the current device's mipmap cache hold this camera? No LRU update.
 +     */
 +    bool hasMipmapImage(int camId);
++
++    /**
++     * @brief cheshire (step 6m): addMipmapImage for an image already on the device, downscaled and
++     * converted as addMipmapImage does (imageProcessing/cheshireDeviceExr.cu); the buffer is consumed.
++     */
++    void addMipmapImageFromDevice(int camId,
++                                  int minDownscale,
++                                  int maxDownscale,
++                                  std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> img_dmpPtr,
++                                  const mvsUtils::MultiViewParams& mp);
 +
      void addCameraParams(int camId, int downscale, const mvsUtils::MultiViewParams& mp);
  
@@ -5930,7 +7825,7 @@ index c7e42f4..3502463 100644
  
  template<typename Image>
 diff --git a/src/aliceVision/mvsUtils/ImagesCache.hpp b/src/aliceVision/mvsUtils/ImagesCache.hpp
-index 8849153..c0f931a 100644
+index 8849153..dd4e886 100644
 --- a/src/aliceVision/mvsUtils/ImagesCache.hpp
 +++ b/src/aliceVision/mvsUtils/ImagesCache.hpp
 @@ -49,6 +49,8 @@ class ImagesCache
@@ -5942,7 +7837,7 @@ index 8849153..c0f931a 100644
      std::vector<std::string> _imagesNames;
  
      std::list<std::future<void>> _asyncObjects;
-@@ -66,6 +68,11 @@ class ImagesCache
+@@ -66,6 +68,13 @@ class ImagesCache
  
      void initIC(std::vector<std::string>& imagesNames);
      void setCacheSize(int nbPreload);
@@ -5951,6 +7846,8 @@ index 8849153..c0f931a 100644
 +    /// resizes the cache so it holds the same megabytes as before. Call before the first load.
 +    void setFullResolution(bool on);
 +    bool isFullResolution() const { return _fullResolution; }
++    /// cheshire (step 6m): the file a camera's image is read from (the depth-map node decodes it on the device)
++    const std::string& getImagePath(int camId) const { return _imagesNames.at(camId); }
      void setCorrectEV(const ECorrectEV correctEV) { _correctEV = correctEV; }
      ~ImagesCache() = default;
  
