@@ -223,7 +223,13 @@ per thread; any failed decode fails the run.
    through the host path and once as ZIPS through the device path, including what ZIPS costs
    PrepareDenseScene to write and Texturing to read. If ZIPS with the GPU wins overall, PrepareDenseScene
    gets a ZIPS output option and this merges; if not, it is parked, since with the chunk threshold it
-   never runs on ZIP output.
+   never runs on ZIP output. `scripts/exr_layout_test.py <config.json> --reps 3 --check` runs it:
+   PrepareDenseScene with `CHESHIRE_PDS_EXR_COMPRESSION=zip:1` and `zips:1` (the write cost, and
+   the two outputs checked pixel-identical), DepthMap on one chunk as zip-host, zips-host, zips-gpu
+   and zip-gpu (maps compared, and zip-gpu must decode nothing on the device), then Texturing on each
+   layout. It writes `exr_layout_test.md` with wall and process CPU times and the load, decode and
+   EXR-read totals from the logs. The config holds the three command lines from the Meshroom cache
+   (see the script's docstring).
 2. **`cheshireexr_gpu_check` on house-pc's RX 6750 XT**, and the house-pc load profiles
    (`CHESHIRE_LOAD_PROFILE=1`, `CHESHIRE_EXR_PROFILE=1`).
 3. **Re-run the step 6m check on a card** with the fixed `CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1`.
