@@ -54,6 +54,18 @@ bool directExrPath(const std::string& path)
     return ext == ".exr";
 }
 
+// the first maxBytes of the file (all of it if shorter)
+bool readFilePrefix(const std::string& path, std::size_t maxBytes, std::vector<uint8_t>& out)
+{
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (f == nullptr)
+        return false;
+    out.resize(maxBytes);
+    out.resize(std::fread(out.data(), 1, maxBytes, f));
+    std::fclose(f);
+    return !out.empty();
+}
+
 bool readWholeFile(const std::string& path, std::vector<uint8_t>& out)
 {
     std::FILE* f = std::fopen(path.c_str(), "rb");
@@ -178,10 +190,34 @@ std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> CheshireDeviceExrLoader::l
     {
         CHECK_CUDA_RETURN_ERROR(cudaSetDevice(_device));  // an OpenMP worker, not the thread that owns the device
 
+        // The header first, from the file's first 64 KB (AliceVision's metadata makes a header a few KB;
+        // a longer one is parsed from the whole file). A file handed back costs this read, not 73 MB.
         std::vector<uint8_t> file;
         Header header;
-        if (!readWholeFile(path, file) || readHeader(file.data(), file.size(), header) != Status::Ok)
+        constexpr std::size_t kHeaderRead = std::size_t(64) << 10;
+        Status hs = readFilePrefix(path, kHeaderRead, file) ? readHeader(file.data(), file.size(), header) : Status::NotExr;
+        bool whole = file.size() < kHeaderRead;  // the prefix is the whole file
+        if (hs == Status::NotExr && !whole)
         {
+            whole = readWholeFile(path, file);
+            hs = whole ? readHeader(file.data(), file.size(), header) : Status::NotExr;
+        }
+        if (hs != Status::Ok)
+        {
+            ++_handedBack;
+            return nullptr;
+        }
+        // CHESHIRE_DEPTHMAP_GPU_EXR_MIN_CHUNKS (default 1024): one GPU thread inflates each chunk, so
+        // a file with few chunks decodes slower on the device than on the host. On the RX 9070 and
+        // RX 5500 XT a ZIP file (16 scanlines per chunk; 142 chunks at 4032x2268) ran at a fifth of
+        // OpenEXR's rate, and ZIPS (one scanline per chunk) ahead of it. Such files stay on the host
+        // path, so turning CHESHIRE_DEPTHMAP_GPU_EXR on never slows a load down; 0 takes every file.
+        static const int minChunks = envInt("CHESHIRE_DEPTHMAP_GPU_EXR_MIN_CHUNKS", 1024, 0);
+        if (header.chunkCount() < minChunks)
+        {
+            noteOnce("few chunks", path + " has " + std::to_string(header.chunkCount()) + " chunks, under CHESHIRE_DEPTHMAP_GPU_EXR_MIN_CHUNKS=" +
+                                     std::to_string(minChunks) + " (ZIP; ZIPS has one per scanline), and is faster on the host (the first of its kind)");
+            ++_fewChunks;
             ++_handedBack;
             return nullptr;
         }
@@ -189,6 +225,12 @@ std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> CheshireDeviceExrLoader::l
         if ((colorSpace != nullptr && *colorSpace != "linear") || header.width != width || header.height != height)
         {
             // a conversion OpenImageIO would do, or a size the host path reports as an error
+            ++_handedBack;
+            return nullptr;
+        }
+
+        if (!whole && !readWholeFile(path, file))
+        {
             ++_handedBack;
             return nullptr;
         }

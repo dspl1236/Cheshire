@@ -317,7 +317,7 @@ index 25b80d4..84dba54 100644
          aliceVision_gpu
          aliceVision_sfmData
 diff --git a/src/aliceVision/depthMap/DepthMapEstimator.cpp b/src/aliceVision/depthMap/DepthMapEstimator.cpp
-index 187e8f5..c54b071 100644
+index 187e8f5..e908b79 100644
 --- a/src/aliceVision/depthMap/DepthMapEstimator.cpp
 +++ b/src/aliceVision/depthMap/DepthMapEstimator.cpp
 @@ -5,6 +5,10 @@
@@ -541,7 +541,7 @@ index 187e8f5..c54b071 100644
 +#if defined(CHESHIRE_HIP)
 +            if (exrLoader)
 +                ALICEVISION_LOG_INFO("cheshire: depth map batch " << (b + 1) << "/" << nbBatches << ": " << exrLoader->decoded()
-+                                                                  << " decoded on the device (CheshireEXR), " << exrLoader->handedBack() << " by the host path"
++                                                                  << " decoded on the device (CheshireEXR), " << exrLoader->handedBack() << " by the host path (" << exrLoader->fewChunks() << " with too few chunks)"
 +                                                                  << (exrLoader->checkMismatches() ? ", CHECK MISMATCHES: " + std::to_string(exrLoader->checkMismatches()) : std::string()));
 +#endif
 +        }
@@ -2271,10 +2271,10 @@ index 0000000..45ddbff
 +}  // namespace cheshire
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp
 new file mode 100644
-index 0000000..ece9643
+index 0000000..13d6de2
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,158 @@
 +// CheshireEXR: an OpenEXR scanline decoder that runs on the GPU, with output identical to
 +// OpenEXR's.
 +//
@@ -2362,6 +2362,9 @@ index 0000000..ece9643
 +    std::vector<std::pair<std::string, std::string>> strings;
 +
 +    const std::string* findString(const std::string& name) const;
++    // Chunks in the file: the height over the compression's lines per chunk (16 for ZIP, 1 for ZIPS,
++    // RLE and NONE). The decoder inflates one chunk per GPU thread, so this is its parallelism.
++    int chunkCount() const;
 +};
 +
 +// Parses the header only (host, no device needed). NotExr for a file that is not an EXR.
@@ -2531,10 +2534,10 @@ index 0000000..07ff2bc
 +}  // namespace cheshire
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrHost.cpp b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrHost.cpp
 new file mode 100644
-index 0000000..679fb0d
+index 0000000..363f7b8
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrHost.cpp
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,331 @@
 +// CheshireEXR: see exrHost.hpp. File layout per the OpenEXR file format specification: magic and
 +// version, attributes until an empty name, the chunk offset table (one uint64 per chunk), then per
 +// chunk an int32 scanline, an int32 packed size and the packed bytes.
@@ -2739,6 +2742,12 @@ index 0000000..679fb0d
 +}
 +
 +}  // namespace
++
++int Header::chunkCount() const
++{
++    const int lines = linesPerChunk(compression);
++    return lines > 0 ? (height + lines - 1) / lines : 0;
++}
 +
 +Status readHeader(const uint8_t* file, size_t size, Header& header)
 +{

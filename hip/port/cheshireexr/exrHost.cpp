@@ -203,6 +203,12 @@ Status parseHeader(Reader& r, Header& h)
 
 }  // namespace
 
+int Header::chunkCount() const
+{
+    const int lines = linesPerChunk(compression);
+    return lines > 0 ? (height + lines - 1) / lines : 0;
+}
+
 Status readHeader(const uint8_t* file, size_t size, Header& header)
 {
     if (!file)

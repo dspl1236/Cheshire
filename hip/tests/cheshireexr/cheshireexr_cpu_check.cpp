@@ -104,6 +104,18 @@ bool checkFile(Pipe& pipe, const std::string& path, int nch, const std::string& 
         ++t.fail;
         return false;
     }
+    // Header::chunkCount (what the depth-map loader's chunk threshold reads) against the chunk table
+    {
+        Header hd;
+        Plan plan;
+        if (readHeader(file.data(), file.size(), hd) != Status::Ok || makePlan(file.data(), file.size(), nch, plan) != Status::Ok ||
+            hd.chunkCount() != (int)plan.chunks.size())
+        {
+            std::printf("FAIL %s nch%d: Header::chunkCount %d, chunk table %zu\n", name.c_str(), nch, hd.chunkCount(), plan.chunks.size());
+            ++t.fail;
+            return false;
+        }
+    }
     const exrcheck::RefRead ref = exrcheck::refRead(path, nch);
     if (!ref.ok || ref.width != w || ref.height != h || std::memcmp(ref.pixels.data(), px.data(), px.size() * 4) != 0)
     {

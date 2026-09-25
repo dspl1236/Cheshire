@@ -8,14 +8,16 @@
 // CheshireEXR (read the file, decode, floats in host memory), CheshireEXR to device (the same with the
 // floats left on the device, what the depth-map node uses; checked against decode first) against OpenEXR's Imf::InputFile on
 // the calling thread (how the depth-map and texturing read-ahead threads read) and with its thread
-// pool (a lone read). --threads: images per second with one Codec per thread against OpenEXR on as
-// many threads, each thread decoding every file --reps times.
+// pool (a lone read). --threads: images and megapixels per second with one Codec per thread against
+// OpenEXR on as many threads, each thread decoding every file --reps times. Only successful decodes
+// are counted, and a failed one (a GPU out of memory at a high thread count, say) fails the run.
 #include "exrCheckCommon.hpp"
 #include "exrCodec.hpp"
 
 #include <OpenEXR/ImfThreading.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -188,15 +190,23 @@ int main(int argc, char** argv)
             ++fails;
             continue;
         }
-        const double g = medianMs(reps, [&] { gpuDecode(codec, path, nch, ours); });
+        // every timed decode must succeed, or its time is not a decode's time
+        int timingFails = 0;
+        const double g = medianMs(reps, [&] { timingFails += gpuDecode(codec, path, nch, ours) != Status::Ok; });
         // what the depth-map node pays: read the file, decode, floats left on the device
         const double gd = medianMs(reps, [&] {
             const std::vector<uint8_t> f = exrcheck::readFile(path);
             DeviceImage di;
-            codec.decodeToDevice(f.data(), f.size(), nch, di);
+            timingFails += codec.decodeToDevice(f.data(), f.size(), nch, di) != Status::Ok;
         });
-        const double c1 = medianMs(reps, [&] { exrcheck::refRead(path, nch, 0); });
-        const double cp = medianMs(reps, [&] { exrcheck::refRead(path, nch, hw); });
+        const double c1 = medianMs(reps, [&] { timingFails += !exrcheck::refRead(path, nch, 0).ok; });
+        const double cp = medianMs(reps, [&] { timingFails += !exrcheck::refRead(path, nch, hw).ok; });
+        if (timingFails)
+        {
+            std::printf("%-44s FAIL: %d of the timed decodes failed\n", label.c_str(), timingFails);
+            ++fails;
+            continue;
+        }
         char size[32];
         std::snprintf(size, sizeof(size), "%dx%d", ref.width, ref.height);
         std::printf("%-44s %10s %7u | %8.1fms %8.1fms %10.1fms %10.1fms\n", label.c_str(), size, st.chunks, g, gd, c1, cp);
@@ -204,11 +214,41 @@ int main(int argc, char** argv)
 
     if (!threadCounts.empty() && !fails)
     {
-        std::printf("\nthroughput, %zu files x %d reps per thread, images/s\n%8s %12s %14s\n", files.size(), reps, "threads",
-                    "CheshireEXR", "OpenEXR (1t)");
+        // Per file, outside the timed loops: the channels to request and the pixel count. Images/s
+        // is only comparable between files of one size; megapixels/s is comparable across sizes.
+        struct FileInfo
+        {
+            std::string path;
+            int nch = 3;
+            uint64_t pixels = 0;
+        };
+        std::vector<FileInfo> infos;
+        for (const std::string& path : files)
+        {
+            const std::vector<uint8_t> f = exrcheck::readFile(path);
+            Header h;
+            FileInfo fi;
+            fi.path = path;
+            if (readHeader(f.data(), f.size(), h) == Status::Ok)
+            {
+                fi.nch = h.channels.size() == 1 ? 1 : (h.channels.size() == 4 ? 4 : 3);
+                fi.pixels = (uint64_t)h.width * (uint64_t)h.height;
+            }
+            infos.push_back(fi);
+        }
+        std::printf("\nthroughput, %zu files x %d reps per thread; only successful decodes count, and any failure fails the run\n"
+                    "%8s %12s %10s %14s %10s\n",
+                    files.size(), reps, "threads", "CheshireEXR", "MP/s", "OpenEXR (1t)", "MP/s");
         for (int t : threadCounts)
         {
+            struct Result
+            {
+                double imagesPerSecond = 0, megapixelsPerSecond = 0;
+                long failed = 0, total = 0;
+            };
             auto run = [&](bool gpu) {
+                std::atomic<long> ok{0}, failed{0};
+                std::atomic<uint64_t> pixels{0};
                 const auto t0 = Clock::now();
                 std::vector<std::thread> pool;
                 for (int k = 0; k < t; ++k)
@@ -216,22 +256,37 @@ int main(int argc, char** argv)
                         Codec local;  // one Codec per thread
                         std::vector<float> out;
                         for (int r = 0; r < reps; ++r)
-                            for (const std::string& path : files)
+                            for (const FileInfo& fi : infos)
                             {
-                                const int nch = channelsFor(path);
-                                if (gpu)
-                                    gpuDecode(local, path, nch, out);
+                                const bool good = gpu ? gpuDecode(local, fi.path, fi.nch, out) == Status::Ok : exrcheck::refRead(fi.path, fi.nch, 0).ok;
+                                if (good)
+                                {
+                                    ++ok;
+                                    pixels += fi.pixels;
+                                }
                                 else
-                                    exrcheck::refRead(path, nch, 0);
+                                    ++failed;
                             }
                     });
                 for (auto& th : pool)
                     th.join();
-                return (double)t * reps * files.size() / std::chrono::duration<double>(Clock::now() - t0).count();
+                const double s = std::chrono::duration<double>(Clock::now() - t0).count();
+                Result res;
+                res.imagesPerSecond = ok.load() / s;
+                res.megapixelsPerSecond = pixels.load() / s / 1e6;
+                res.failed = failed.load();
+                res.total = ok.load() + failed.load();
+                return res;
             };
-            const double g = run(true);
-            const double c = run(false);
-            std::printf("%8d %12.1f %14.1f\n", t, g, c);
+            const Result g = run(true);
+            const Result c = run(false);
+            std::printf("%8d %12.1f %10.1f %14.1f %10.1f\n", t, g.imagesPerSecond, g.megapixelsPerSecond, c.imagesPerSecond, c.megapixelsPerSecond);
+            if (g.failed || c.failed)
+            {
+                std::printf("         FAIL: %ld of %ld CheshireEXR and %ld of %ld OpenEXR decodes failed at %d threads\n", g.failed, g.total,
+                            c.failed, c.total, t);
+                ++fails;
+            }
         }
     }
     std::printf("%d cases, %d failed\n%s\n", cases, fails, fails ? "FAIL" : "PASS");

@@ -85,6 +85,9 @@ struct Header
     std::vector<std::pair<std::string, std::string>> strings;
 
     const std::string* findString(const std::string& name) const;
+    // Chunks in the file: the height over the compression's lines per chunk (16 for ZIP, 1 for ZIPS,
+    // RLE and NONE). The decoder inflates one chunk per GPU thread, so this is its parallelism.
+    int chunkCount() const;
 };
 
 // Parses the header only (host, no device needed). NotExr for a file that is not an EXR.

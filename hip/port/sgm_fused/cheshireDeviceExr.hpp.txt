@@ -42,6 +42,8 @@ bool cheshireDeviceExrEnabled();
  * memory bridge's VRAM budget and frees their buffers when destroyed, so none of this memory is held
  * while the batch's tiles run. load() may be called from several threads at once.
  *
+ * CHESHIRE_DEPTHMAP_GPU_EXR_MIN_CHUNKS (default 1024): files with fewer chunks (ZIP, 16 scanlines per
+ * chunk) stay on the host path, where they decode faster; 0 takes them all.
  * CHESHIRE_DEPTHMAP_GPU_EXR_CODECS (default 2) decoders at most; CHESHIRE_DEPTHMAP_GPU_EXR_GROUP
  * (default 8) images decoded before they are handed to the device cache;
  * CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1 compares every image with the host path, texel for texel.
@@ -65,6 +67,8 @@ class CheshireDeviceExrLoader
 
     int decoded() const { return _decoded.load(); }
     int handedBack() const { return _handedBack.load(); }
+    /// of those handed back, the files with fewer chunks than CHESHIRE_DEPTHMAP_GPU_EXR_MIN_CHUNKS
+    int fewChunks() const { return _fewChunks.load(); }
     int checkMismatches() const { return _checkMismatches.load(); }
 
   private:
@@ -79,7 +83,7 @@ class CheshireDeviceExrLoader
     std::condition_variable _idleChanged;
     std::vector<std::unique_ptr<cheshire::exr::Codec>> _codecs;
     std::vector<cheshire::exr::Codec*> _idle;
-    std::atomic<int> _decoded{0}, _handedBack{0}, _checkMismatches{0};
+    std::atomic<int> _decoded{0}, _handedBack{0}, _fewChunks{0}, _checkMismatches{0};
 };
 
 }  // namespace depthMap
