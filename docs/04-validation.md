@@ -2160,3 +2160,27 @@ order of a double sum over two different edge sets); the gate's verdict is that,
 stays in the line for information. On the same 41-view cache: 2 cells, values 218,447,937.91999644
 and 218,447,937.91999739 (equal, relative difference 4.4e-15); mini6 `verify`: 0 cells, values
 identical. The cut itself is unchanged.
+
+## The 0.3.4 release gate (2026-09-25)
+
+Each package as downloaded, paired into Meshroom 2023.3 by the gate harness
+(`scripts/verify_end_to_end.py`): the 12-configuration mini6 matrix, then the 41-view monstree set
+with `base` and `verify`. Times are the harness's per-configuration wall clock; the RX 9070 runs
+shared the box with the Windows CUDA build, so theirs are not comparable with the others.
+
+| package | card | mini6 | 41 base | 41 verify | max-flow check (41 verify) | direct read check |
+|---|---|---|---|---|---|---|
+| Windows AMD (unified zip) | RX 9070, rocm7.2 gfx12-generic | 12/12 at 7/7 | 332 s | 534 s | 0 of 11,779,311 cells, cut 218,659,035.18347341 both ways | 41 of 41 |
+| Windows AMD (unified zip) | RX 5500 XT, hip6.2 gfx1012 | 12/12 at 7/7 | 988 s | 1432 s | 0 of 11,870,467 cells, cut 220,779,488.50049472 both ways | 41 of 41 |
+| Linux HIP | RX 6750 XT | 12/12 at 7/7 | 551 s | 861 s | 0 of 11,832,140 cells, cut 219,354,958.61730957 both ways | 41 of 41 |
+| Windows CUDA | GTX 1080 Ti | 12/12 at 7/7 | 793 s | 1252 s | 0 of 11,839,067 cells, cut 221,608,285.68726414 both ways | 41 of 41 |
+| Linux CUDA | GTX 1050 Ti (4 GB) | 12/12 at 7/7 | 1216 s | 1506 s | 0 of 11,823,103 cells, cut 219,195,886.31766492 both ways | 41 of 41 |
+
+Every configuration reached 7 of 7 ports with the paired SfM node, and every self-check the
+`verify` and `texcheck` configurations assert passed. On the Linux CUDA package, the 41-view depth
+and similarity maps from `scripts/linux/run-depthmap.sh` are byte-identical to the Meshroom CUDA
+11.3 reference (`ref-cuda113`, from a GTX 1080 Ti): 82 of 82 files, on the GTX 1050 Ti. bench-pc did
+not reboot during either of its gates (last boot 2026-09-22 before the AMD one, then the card swap
+for the CUDA one). The Windows AMD, Linux HIP and Linux CUDA packages are built at a152325, the
+Windows CUDA package at 303bd69 (step 6l's comparator named outside an OpenMP loop for MSVC, C3014;
+no change in behaviour).
