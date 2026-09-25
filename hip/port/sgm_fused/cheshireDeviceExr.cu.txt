@@ -328,15 +328,15 @@ std::shared_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> CheshireDeviceExrLoader::l
         }
         else if (check)
         {
-            CudaDeviceMemoryPitched<CudaRGBA, 2> ref(out->getSize());
-            cuda_cheshireDownscaleToCudaRGBA(hostFloats.data(), hostWidth, hostHeight, ref);
+            // the reference is computed on the host, so the check adds no device memory (dspl1236/Cheshire#3)
             const std::size_t w = out->getSize().x(), h = out->getSize().y(), rowBytes = w * sizeof(CudaRGBA);
-            std::vector<unsigned char> a(rowBytes * h), r(rowBytes * h);
+            std::vector<CudaRGBA> ref;
+            cheshireDownscaleOnHostToCudaRGBA(hostFloats.data(), hostWidth, hostHeight, int(w), int(h), ref);
+            std::vector<unsigned char> a(rowBytes * h);
             CHECK_CUDA_RETURN_ERROR(cudaMemcpy2D(a.data(), rowBytes, out->getBuffer(), out->getPitch(), rowBytes, h, cudaMemcpyDeviceToHost));
-            CHECK_CUDA_RETURN_ERROR(cudaMemcpy2D(r.data(), rowBytes, ref.getBuffer(), ref.getPitch(), rowBytes, h, cudaMemcpyDeviceToHost));
             std::size_t diff = 0;
             for (std::size_t p = 0; p < w * h; ++p)
-                if (std::memcmp(&a[p * sizeof(CudaRGBA)], &r[p * sizeof(CudaRGBA)], sizeof(CudaRGBA)) != 0)
+                if (std::memcmp(&a[p * sizeof(CudaRGBA)], &ref[p], sizeof(CudaRGBA)) != 0)
                     ++diff;
             if (diff != 0)
             {

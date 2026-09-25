@@ -281,6 +281,11 @@ with no ZIPS output option.
   side; a failed host parse points at the host's copy of the file.
 - `scripts/exr_layout_test.py` sums the per-image lines into a device-path table and reports the
   `Corrupt` count, the host parses and the retries.
+- `CHESHIRE_DEPTHMAP_GPU_EXR_CHECK=1` computes its reference on the host: the host path's downscale
+  (`resizeExact`) and conversion, under step 6d's `fp contract(off)`. It used to upload every checked
+  image at full resolution for 6d's device downscale, 309 MB each at 6000x3376, which is what filled
+  the RX 5500 XT to the bridge's cap and caused the 72 spills. A check run now has the same device
+  memory picture as a run without it. To reproduce the old conditions, use 7bee71a.
 
 ## Build and run
 
