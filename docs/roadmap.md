@@ -300,9 +300,10 @@ L items can slide.
   `scripts/exr_layout_test.py`, a 48-view False Door chunk): a wash.** Everything was exact: 96 of 96
   maps byte-identical four ways, 104 of 104 images identical under the check. Writing ZIPS cost the
   same time and 6.3 % more disk. The GPU path saved 4 s of loads and 24 s of CPU per chunk (329
-  against 334 s, about 1.5 %), because loads are only about 3 % of that node on 12 threads. Held,
-  not merged, until the same test runs on house-pc's 4-thread i3; a win there adds a ZIPS output
-  option to PrepareDenseScene and merges this, a loss parks it. The check mode's
+  against 334 s, about 1.5 %), because loads are only about 3 % of that node on 12 threads. Merged
+  into main off by default on 2026-09-25 (the fold-in before the full hardware round), so the s10
+  Linux bundle carries it; the same test on house-pc's 4-thread i3 decides whether a ZIPS output
+  option joins PrepareDenseScene's documented settings or the switch stays an experiment. The check mode's
   heap corruption on Windows is fixed, and so is the GPU check's throughput mode, which counted
   failed decodes (an out-of-memory at 8 threads on the RX 5500 XT printed 25.5 images/s and PASS).
 - **CheshireJPG for the reads** (L). The GPU JPEG codec exists (docs/19): a baseline decoder and
