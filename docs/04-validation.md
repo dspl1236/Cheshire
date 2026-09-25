@@ -2174,7 +2174,7 @@ shared the box with the Windows CUDA build, so theirs are not comparable with th
 | Windows AMD (unified zip) | RX 5500 XT, hip6.2 gfx1012 | 12/12 at 7/7 | 988 s | 1432 s | 0 of 11,870,467 cells, cut 220,779,488.50049472 both ways | 41 of 41 |
 | Linux HIP | RX 6750 XT | 12/12 at 7/7 | 551 s | 861 s | 0 of 11,832,140 cells, cut 219,354,958.61730957 both ways | 41 of 41 |
 | Windows CUDA | GTX 1080 Ti | 12/12 at 7/7 | 793 s | 1252 s | 0 of 11,839,067 cells, cut 221,608,285.68726414 both ways | 41 of 41 |
-| Linux CUDA | GTX 1050 Ti (4 GB) | 12/12 at 7/7 | 1216 s | running | - | - |
+| Linux CUDA | GTX 1050 Ti (4 GB) | 12/12 at 7/7 | 1216 s | 1506 s | 0 of 11,823,103 cells, cut 219,195,886.31766492 both ways | 41 of 41 |
 
 Every configuration reached 7 of 7 ports with the paired SfM node, and every self-check the
 `verify` and `texcheck` configurations assert passed. On the Linux CUDA package, the 41-view depth
