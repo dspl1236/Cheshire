@@ -15,6 +15,7 @@ if(CHESHIREEXR_GPU STREQUAL "CUDA")
   set(CMAKE_CUDA_STANDARD 17)
   set_source_files_properties(exrGPU.cu PROPERTIES LANGUAGE CUDA)
   add_library(CheshireEXR STATIC exrGPU.cu exrHost.cpp)
+  target_include_directories(CheshireEXR PRIVATE ${CHESHIREEXR_COMPAT})  # cheshire/env.h
 else()
   enable_language(HIP)
   set(CMAKE_HIP_STANDARD 17)

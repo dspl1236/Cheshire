@@ -279,7 +279,7 @@ codec.encode(img.pixels.data(), img.width, img.height, img.channels, img.width *
              {90, cheshire::jpeg::Subsampling::S420, 0}, jpeg);
 ```
 
-`CHESHIRE_JPG=0` disables the device path (`Status::NoDevice`).
+`CHESHIRE_JPG=0` (or `false`, `off`, `no`, read through `cheshire/env.h`) disables the device path (`Status::NoDevice`).
 
 ## Scope
 

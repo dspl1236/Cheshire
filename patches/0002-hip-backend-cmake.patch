@@ -2371,7 +2371,7 @@ index 0000000..45ddbff
 +}  // namespace cheshire
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp
 new file mode 100644
-index 0000000..7bf1a0e
+index 0000000..f2ab240
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrCodec.hpp
 @@ -0,0 +1,176 @@
@@ -2413,7 +2413,7 @@ index 0000000..7bf1a0e
 +    NotExr,       // no EXR magic, or truncated before the chunk table
 +    Unsupported,  // a valid EXR this decoder does not handle (see above)
 +    Corrupt,      // a chunk OpenEXR would fail on; the caller's OpenEXR path decides
-+    NoDevice,     // no GPU, or disabled by CHESHIRE_EXR_GPU=0
++    NoDevice,     // no GPU, or disabled by CHESHIRE_EXR_GPU=0 (or false, off, no)
 +    DeviceError,  // a runtime call failed
 +    InvalidArgument,
 +};
@@ -2510,7 +2510,7 @@ index 0000000..7bf1a0e
 +    Codec(const Codec&) = delete;
 +    Codec& operator=(const Codec&) = delete;
 +
-+    // True if a device is present and CHESHIRE_EXR_GPU is not 0. Checked once per process.
++    // True if a device is present and CHESHIRE_EXR_GPU does not switch it off (cheshire/env.h). Checked once per process.
 +    static bool deviceAvailable();
 +
 +    // nchannels as Cheshire's direct reader takes it: 1 for a one-channel file (its only channel),
@@ -2553,20 +2553,22 @@ index 0000000..7bf1a0e
 +}  // namespace cheshire
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrGPU.cu b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrGPU.cu
 new file mode 100644
-index 0000000..bbae886
+index 0000000..f1ee8ac
 --- /dev/null
 +++ b/src/aliceVision/depthMap/cuda/hip/cheshireexr/exrGPU.cu
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,101 @@
 +// CheshireEXR: the device backend and the public Codec. CUDA dialect; the HIP build force-includes
 +// cheshire/cuda_to_hip.h (allocations go through the memory bridge). Each Codec has its own stream
 +// and pinned staging area (cheshiregpu/asyncBackend.hpp), as CheshireJPG's does.
-+// CHESHIRE_EXR_GPU=0 disables.
++// CHESHIRE_EXR_GPU=0 (or false, off, no) disables; read through cheshire/env.h like every CHESHIRE_* switch.
 +#include "asyncBackend.hpp"
 +#include "cudaRuntime.cuh"
 +#include "exrCodec.hpp"
 +#include "exrPipeline.hpp"
 +
 +#include <cuda_runtime.h>
++
++#include <cheshire/env.h>  // hip/compat/include; in AliceVision, next to bridge.h
 +
 +#include <cstdio>
 +#include <cstdlib>
@@ -2584,12 +2586,11 @@ index 0000000..bbae886
 +
 +void probe()
 +{
-+    if (const char* e = std::getenv("CHESHIRE_EXR_GPU"))
-+        if (e[0] == '0')
-+        {
-+            std::fprintf(stderr, "[cheshire] CheshireEXR: disabled by CHESHIRE_EXR_GPU=0\n");
-+            return;
-+        }
++    if (!::cheshire::env::flag("CHESHIRE_EXR_GPU", true))
++    {
++        std::fprintf(stderr, "[cheshire] CheshireEXR: disabled by CHESHIRE_EXR_GPU\n");
++        return;
++    }
 +    int n = 0;
 +    if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1)
 +    {

@@ -34,7 +34,7 @@ enum class Status
     NotJpeg,      // no SOI, or truncated before the first scan
     Unsupported,  // valid JPEG this codec does not handle (see above)
     Corrupt,      // damaged stream; libjpeg would decode it with warnings
-    NoDevice,     // no GPU, or disabled by CHESHIRE_JPG=0
+    NoDevice,     // no GPU, or disabled by CHESHIRE_JPG=0 (or false, off, no)
     DeviceError,  // a runtime call failed
     InvalidArgument,
 };
@@ -84,7 +84,7 @@ class Codec
     Codec(const Codec&) = delete;
     Codec& operator=(const Codec&) = delete;
 
-    // True if a device is present and CHESHIRE_JPG is not 0. Checked once per process.
+    // True if a device is present and CHESHIRE_JPG does not switch it off (cheshire/env.h). Checked once per process.
     static bool deviceAvailable();
 
     Status decode(const uint8_t* jpeg, size_t size, Image& out, DecodeStats* stats = nullptr);
