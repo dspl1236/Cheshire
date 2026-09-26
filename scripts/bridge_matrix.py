@@ -48,7 +48,11 @@ def cuda_agreement(out: Path) -> str:
 
 
 def identity(baseline: Path, out: Path) -> tuple[bool, float]:
-    p = subprocess.run([str(PY), str(ROOT / "scripts/compare_depthmaps.py"), str(baseline), str(out)], capture_output=True, text=True)
+    """Bit-identical when compare_depthmaps' exact mode passes (every decoded depth and sim pixel equal).
+    Until 2026-09-26 this read the table's rounded columns, which print 0.0000 for anything under 5e-5,
+    so a small real difference could be reported as identical. The float returned is the worst of mask
+    disagreement, mean and p95 relative depth error, for the report."""
+    p = subprocess.run([str(PY), str(ROOT / "scripts/compare_depthmaps.py"), str(baseline), str(out), "--mode", "exact"], capture_output=True, text=True)
     worst = 0.0; views = 0
     for line in p.stdout.splitlines():
         parts = line.split()
@@ -56,7 +60,7 @@ def identity(baseline: Path, out: Path) -> tuple[bool, float]:
             views += 1
             agree, meanrel, p95 = float(parts[3]), float(parts[4]), float(parts[6])
             worst = max(worst, 1.0 - agree, meanrel, p95)
-    return (views > 0 and worst == 0.0), worst
+    return (views > 0 and p.returncode == 0), worst
 
 
 def main():
