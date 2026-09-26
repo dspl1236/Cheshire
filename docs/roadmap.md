@@ -449,10 +449,16 @@ What carries over:
 
 Plan, loosely, since the release date is not known:
 
-1. **Detect** (S-M). Pairing and the launcher assume 2023.3's node set. Make them read the Meshroom
-   version and the node versions they would replace. A package then pairs only with the node
-   versions it was built for, and says so instead of silently running a mismatched binary.
-   Worth doing before anything else: it is the guard for whichever way this goes.
+1. **Detect** (S-M). **Done 2026-09-26** at the level that fails loudly: before a node is paired,
+   both pairing scripts compare the options Meshroom's own binary takes with the package's (both
+   `--help` texts, no GPU), minus the one option the launcher drops (DepthMap's
+   `--sgmFilteringAxes`). A node whose Meshroom binary takes an option the package lacks stays
+   Meshroom's, and the script names the option (`scripts/windows/meshroom-pair-check.ps1`,
+   `compatible()` in `scripts/linux/meshroom-pair.sh`, `--check` there to only report). Checked
+   against Meshroom 2023.3 on Windows (bench package, all 8 nodes pair) and Linux (house-pc, all 8);
+   removing the dropped-option allowance refuses DepthMap on both. Not covered: an option that keeps
+   its name and changes meaning. A node-version table read from Meshroom's node descriptions
+   would cover that, if the next release turns out to need it.
 2. **Scout** (M). Read the new nodes on `develop` (TracksBuilding, RelativePoseEstimating,
    SfMBootStrapping, SfMExpanding, IntrinsicsTransforming, ExportImages) for their hot paths. Find
    what they share with the legacy nodes (BA, image reads, track building), and time the

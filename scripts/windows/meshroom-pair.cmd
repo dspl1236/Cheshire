@@ -23,7 +23,12 @@ rem A package without aliceVision_featureMatching.exe (v0.2.4 and older) pairs D
 rem FeatureExtraction is paired when the package carries GPU SIFT (popsift.dll). With such a
 rem package, leave Meshroom's forceCpuExtraction unticked; an older package has no GPU SIFT and the
 rem node must keep forceCpuExtraction=True.
+rem
+rem Before each node is paired, meshroom-pair-check.ps1 (beside this script) compares the options
+rem Meshroom's own binary takes with the package's: a Meshroom newer than the package passes options
+rem the package does not know, and the node is then left to Meshroom instead of failing mid-job.
 setlocal
+set HERE=%~dp0
 set MR=%~1
 set PKG=%~2
 if "%PKG%"=="" ( echo usage: %~nx0 ^<Meshroom dir^> ^<Cheshire package dir^> ^| --unpair & exit /b 1 )
@@ -56,28 +61,28 @@ if not defined BUNDLE (
   set "ALICEVISION_ROOT=%PKG%"
 )
 
-call :pair aliceVision_depthMapEstimation
+call :pairif aliceVision_depthMapEstimation sgmFilteringAxes
 rem only a package with the GPU matcher understands Meshroom 2023.3's --rangeStart/--rangeSize; older
 rem packages carry the plain CPU featureMatching, which must not be put in Meshroom's way
 call :gate aliceVision_featureMatching "--rangeStart" FMOK
-if defined FMOK ( call :pair aliceVision_featureMatching ) else ( echo package's aliceVision_featureMatching has no GPU matcher ^(pre-v0.2.5^): DepthMap paired only )
+if defined FMOK ( call :pairif aliceVision_featureMatching ) else ( echo package's aliceVision_featureMatching has no GPU matcher ^(pre-v0.2.5^): DepthMap paired only )
 rem DepthMapFilter (v0.2.6+): the package's depthMapFiltering carries the GPU vote pass; older packages
 rem carry the plain CPU one, which is harmless but pointless, so gate on the newer help text
 call :gate aliceVision_depthMapFiltering "CHESHIRE_GPU_FILTER" DFOK
-if defined DFOK ( call :pair aliceVision_depthMapFiltering ) else ( echo package's aliceVision_depthMapFiltering has no GPU pass ^(pre-v0.2.6^): not paired )
+if defined DFOK ( call :pairif aliceVision_depthMapFiltering ) else ( echo package's aliceVision_depthMapFiltering has no GPU pass ^(pre-v0.2.6^): not paired )
 rem Meshing (v0.2.7+): the package's meshing carries the GPU graph-weight votes; gate on its help text
 call :gate aliceVision_meshing "CHESHIRE_GPU_VOTE" MSOK
-if defined MSOK ( call :pair aliceVision_meshing ) else ( echo package's aliceVision_meshing has no GPU votes ^(pre-v0.2.7^): not paired )
+if defined MSOK ( call :pairif aliceVision_meshing ) else ( echo package's aliceVision_meshing has no GPU votes ^(pre-v0.2.7^): not paired )
 rem Texturing (v0.2.8+): the package's texturing carries the GPU pyramid + rasterisation; gate on its help text
 call :gate aliceVision_texturing "CHESHIRE_GPU_TEX" TXOK
-if defined TXOK ( call :pair aliceVision_texturing ) else ( echo package's aliceVision_texturing has no GPU pass ^(pre-v0.2.8^): not paired )
+if defined TXOK ( call :pairif aliceVision_texturing ) else ( echo package's aliceVision_texturing has no GPU pass ^(pre-v0.2.8^): not paired )
 rem PrepareDenseScene (v0.2.9+): the package's prepareDenseScene runs its image loop on every core; gate on its help text
 call :gate aliceVision_prepareDenseScene "CHESHIRE_PDS_THREADS" PDOK
-if defined PDOK ( call :pair aliceVision_prepareDenseScene ) else ( echo package's aliceVision_prepareDenseScene is upstream's ^(pre-v0.2.9^): not paired )
+if defined PDOK ( call :pairif aliceVision_prepareDenseScene ) else ( echo package's aliceVision_prepareDenseScene is upstream's ^(pre-v0.2.9^): not paired )
 rem StructureFromMotion (v0.3.3+): the package's incrementalSfM finishes a resection pass with the bundle
 rem adjustment upstream skips, the crash of Meshroom #2344 on large sets (docs\04); gate on its help text
 call :gate aliceVision_incrementalSfM "CHESHIRE_SFM_PENDING_BA" SFOK
-if defined SFOK ( call :pair aliceVision_incrementalSfM ) else ( echo package's aliceVision_incrementalSfM is upstream's ^(pre-v0.3.3^): not paired )
+if defined SFOK ( call :pairif aliceVision_incrementalSfM ) else ( echo package's aliceVision_incrementalSfM is upstream's ^(pre-v0.3.3^): not paired )
 rem GPU SIFT (v0.2.13+, docs\14-gpu-sift.md): gate on popsift.dll being in the package, since
 rem without it this node would move CPU SIFT from one build to another for nothing. Note the
 rem describer falls back to the CPU silently when no GPU is visible, so a paired node that
@@ -89,7 +94,7 @@ if defined HAVE (
   rem in a bundle popsift is per GPU target, under gpu\<family>\<target>\
   for /d %%F in ("%PKG%\gpu\*") do for /d %%T in ("%%~fF\*") do if exist "%%~fT\popsift.dll" set FEOK=1
 )
-if defined FEOK ( call :pair aliceVision_featureExtraction ) else ( echo package has no GPU SIFT ^(no popsift.dll^): featureExtraction not paired )
+if defined FEOK ( call :pairif aliceVision_featureExtraction ) else ( echo package has no GPU SIFT ^(no popsift.dll^): featureExtraction not paired )
 rem The DepthMap node in blocks of 48 views instead of 12 (docs/04, 0.3.4 "the depth-map node was loading
 rem images"): each chunk is a process that loads the SfM data, probes the device and starts cold. The
 rem package carries share\cheshire\meshroom-overrides\DepthMap.py, which loads Meshroom's compiled node
@@ -127,6 +132,16 @@ if defined BUNDLE (
 "%PKG%\bin\%~1.exe" --help > "%TEMP%\cheshire-gate.txt" 2>&1
 findstr /c:"%~2" "%TEMP%\cheshire-gate.txt" >nul 2>&1 && set "%~3=1"
 del /q "%TEMP%\cheshire-gate.txt" 2>nul
+exit /b 0
+
+:pairif
+rem :pairif <node> [option the launcher drops, without dashes]: pair unless the package's binary lacks an option Meshroom's takes
+set COMPAT=1
+if exist "%HERE%meshroom-pair-check.ps1" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%meshroom-pair-check.ps1" "%MR%" "%PKG%" %1 %2
+  if errorlevel 1 set COMPAT=
+)
+if defined COMPAT ( call :pair %1 ) else ( echo %1: not paired, Meshroom keeps its own binary )
 exit /b 0
 
 :pair

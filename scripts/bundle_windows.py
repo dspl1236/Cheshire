@@ -206,7 +206,7 @@ def main(argv):
     else: print('WARNING: build/cheshire-detect.exe missing (run scripts\\windows\\build-launcher.cmd)')
     launcher = here.parent / 'build' / 'meshroom-pair-launcher.exe'
     if launcher.exists(): shutil.copy2(launcher, stage / 'meshroom-pair-launcher.exe')
-    for extra in ('windows/meshroom-pair.cmd', 'windows/cheshire-run.cmd'):
+    for extra in ('windows/meshroom-pair.cmd', 'windows/meshroom-pair-check.ps1', 'windows/cheshire-run.cmd'):
         src = here / extra
         if src.exists(): shutil.copy2(src, stage / src.name)
 

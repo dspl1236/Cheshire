@@ -116,6 +116,8 @@ print(f"copied {len(copied)} DLLs: {' '.join(sorted(copied))[:600]}")
 shutil.copy2(Path(__file__).with_name('run-depthmap-standalone.cmd'), stage / 'run-depthmap-standalone.cmd')
 # Meshroom pairing: the pair script plus the launcher it installs (built by scripts/windows/build-launcher.cmd)
 shutil.copy2(Path(__file__).parent / 'windows' / 'meshroom-pair.cmd', stage / 'meshroom-pair.cmd')
+# and the compatibility check it runs before each node (Meshroom's options against the package's)
+shutil.copy2(Path(__file__).parent / 'windows' / 'meshroom-pair-check.ps1', stage / 'meshroom-pair-check.ps1')
 launcher = Path(__file__).parent.parent / 'build' / 'meshroom-pair-launcher.exe'
 if launcher.exists(): shutil.copy2(launcher, stage / 'meshroom-pair-launcher.exe')
 else: print('WARNING: build/meshroom-pair-launcher.exe missing (run scripts/windows/build-launcher.cmd); zip has no pairing launcher')

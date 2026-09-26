@@ -14,7 +14,12 @@
 # side; the body has paired seven since v0.2.9.)
 #
 #   meshroom-pair.sh <Meshroom dir> [<cheshire bundle dir>]      # default bundle: ~/apps/cheshire/bundle
+#   meshroom-pair.sh <Meshroom dir> <cheshire bundle dir> --check  # only report compatibility, change nothing
 #   meshroom-pair.sh <Meshroom dir> --unpair
+#
+# Before a node is paired, the options Meshroom's own binary takes are compared with the bundle's
+# (compatible() below): a Meshroom newer than the bundle passes options the bundle does not know, and
+# that node is then left to Meshroom instead of failing mid-job.
 #
 # The Meshroom 2023.3 DepthMap node's command line is accepted by the newer AliceVision the HIP
 # build is based on except --sgmFilteringAxes, which upstream removed (YX is the only behaviour
@@ -46,10 +51,37 @@ if [ "${2:-}" = "--unpair" ]; then
   exit 0
 fi
 BUNDLE="${2:-$HOME/apps/cheshire/bundle}"
+CHECK_ONLY=0
+[ "${3:-}" = "--check" ] && CHECK_ONLY=1
 [ -x "$BUNDLE/bin/aliceVision_depthMapEstimation" ] || { echo "no HIP aliceVision_depthMapEstimation in $BUNDLE/bin"; exit 1; }
+
+# The options Meshroom's own binary takes must all be taken by the bundle's, except the one the
+# wrapper drops (DepthMap's --sgmFilteringAxes): a Meshroom node passes options its node description
+# knows, which are options Meshroom's binary takes, and a bundle older than that Meshroom would fail
+# mid-job with "unrecognised option". Reads both --help texts, which needs no GPU. Returns 0 when
+# compatible, or when it cannot tell (Meshroom's binary lists no options); 1 with the missing
+# options printed. Options that kept their names but changed meaning are past what this can see.
+compatible() {  # name  [option the wrapper drops]
+  local name="$1" drop="${2:-}" own="$BIN/$1" mr ours missing
+  [ -e "$BIN/$1.cuda" ] && own="$BIN/$1.cuda"   # once paired, Meshroom's own binary is <name>.cuda
+  mr=$(ALICEVISION_ROOT="$MESHROOM/aliceVision" LD_LIBRARY_PATH="$MESHROOM/aliceVision/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$own" --help 2>&1 || true)
+  ours=$(ALICEVISION_ROOT="$BUNDLE" LD_LIBRARY_PATH="$BUNDLE/lib" "$BUNDLE/bin/$1" --help 2>&1 || true)
+  mr=$(grep -o -- ' --[A-Za-z][A-Za-z0-9_.]*' <<<"$mr" | LC_ALL=C sort -u || true)
+  ours=$(grep -o -- ' --[A-Za-z][A-Za-z0-9_.]*' <<<"$ours" | LC_ALL=C sort -u || true)
+  if [ -z "$mr" ]; then echo "$1: Meshroom's binary listed no options, compatibility not checked"; return 0; fi
+  missing=$(LC_ALL=C comm -23 <(printf '%s\n' "$mr") <(printf '%s\n' "$ours") | grep -vxF -- " $drop" | tr '\n' ' ' || true)
+  if [ -n "${missing// /}" ]; then
+    echo "$1: Meshroom's binary takes options this bundle's does not:$missing(a newer Meshroom than the bundle was built for?)"
+    return 1
+  fi
+  [ "$CHECK_ONLY" = 1 ] && echo "$1: compatible ($(wc -l <<<"$mr") options)"
+  return 0
+}
 
 pair() {  # name  drop-option
   local name="$1" drop="${2:-}" target="$BIN/$1"
+  if ! compatible "$name" "$drop"; then echo "$name: not paired, Meshroom keeps its own binary"; return 0; fi
+  [ "$CHECK_ONLY" = 1 ] && return 0
   if [ ! -e "$target.cuda" ]; then mv "$target" "$target.cuda"; fi
   cat > "$target" <<EOF
 #!/bin/bash
@@ -172,7 +204,9 @@ fi
 # caches stay valid. Python prefers the .py beside the .pyc, so copying it in is the whole install.
 NODES="$MESHROOM/lib/meshroom/nodes/aliceVision"
 OVERRIDE="$BUNDLE/share/cheshire/meshroom-overrides/DepthMap.py"
-if [ -f "$OVERRIDE" ] && [ -f "$NODES/DepthMap.pyc" ]; then
+if [ "$CHECK_ONLY" = 1 ]; then
+  echo "--check: nothing changed"
+elif [ -f "$OVERRIDE" ] && [ -f "$NODES/DepthMap.pyc" ]; then
   cp -f "$OVERRIDE" "$NODES/DepthMap.py" && echo "installed the DepthMap node override: blocks of 48 views (CHESHIRE_DEPTHMAP_BLOCK=0 for Meshroom's 12)"
 elif [ -f "$OVERRIDE" ]; then
   echo "no compiled DepthMap node at $NODES: node override not installed"

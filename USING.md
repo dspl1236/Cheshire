@@ -41,6 +41,7 @@ cheshire-alicevision-windows-x64\
     cheshire-run.cmd              run a node, or ask which payload your card gets
     cheshire-detect.exe           the card probe, on its own
     meshroom-pair.cmd             pair it with Meshroom
+    meshroom-pair-check.ps1       used by the pairing: can this package stand in for your Meshroom's nodes?
     meshroom-pair-launcher.exe    installed by the pairing; not run directly
     common\  fam\  gpu\           the payloads - nothing to do in here
 ```
@@ -77,6 +78,12 @@ That swaps the node binaries Cheshire accelerates and keeps Meshroom's originals
 `meshroom-pair.cmd C:\Meshroom-2023.3.0 --unpair` puts everything back. Meshroom itself is
 unchanged; run it as you always do.
 
+Before it swaps a node, the pairing checks that the package's binary takes every option Meshroom's
+own binary takes (from both `--help` texts; no GPU needed). This package is built for Meshroom
+2023.3. A newer Meshroom whose nodes pass options this package does not know gets a line like
+`aliceVision_meshing: Meshroom's binary takes options this package's does not: --newOption`, and
+that node stays Meshroom's own instead of failing halfway through a job.
+
 **Driver:** an RX 7000/9000 card needs **Adrenalin 26.2.2 or newer**, because that half of the
 package carries the HIP 7.2 runtime and older drivers refuse it. RX 5000/6000 cards use the runtime
 your driver already ships and have no such floor.
@@ -92,7 +99,9 @@ sudo usermod -aG render $USER     # log out and back in
 ls -l /dev/kfd                    # should exist
 ```
 
-`scripts/linux/meshroom-pair.sh` does the same pairing as the Windows script.
+`scripts/linux/meshroom-pair.sh` does the same pairing as the Windows script, with the same
+compatibility check. `meshroom-pair.sh <Meshroom dir> <bundle dir> --check` only reports which nodes
+would pair, and changes nothing.
 
 ## 3. Check it is actually using the GPU
 
