@@ -81,7 +81,7 @@ SILENT_PORTS = None  # 0.3.2: no port is silent on either path any more
 # All fire inside Meshing. The tedge check's SUMS are not asserted - they differ by an ulp of
 # summation order (docs/09) - only its cell counts, which must be equal.
 SELF_CHECK_ENV = {
-    "CHESHIRE_FILTER_CHECK": "1", "CHESHIRE_MAXFLOW_CHECK": "1", "CHESHIRE_GPU_VIS_CHECK": "1", "CHESHIRE_DENSE_SFM_CHECK": "1", "CHESHIRE_GPU_MATCHER_CHECK": "1",
+    "CHESHIRE_FILTER_CHECK": "1", "CHESHIRE_MAXFLOW_CHECK": "1", "CHESHIRE_GPU_VIS_CHECK": "1", "CHESHIRE_DENSE_SFM_CHECK": "1", "CHESHIRE_GPU_MATCHER_CHECK": "1", "CHESHIRE_GPU_FILTER_CHECK": "1",
     "CHESHIRE_SEGMENT_CHECK": "1", "CHESHIRE_GPU_TEDGE_CHECK": "1", "CHESHIRE_GPU_VOTE_LOG": "1",
     "CHESHIRE_MESHCLEAN_CHECK": "1", "CHESHIRE_READ_DIRECT_CHECK": "1",
 }
@@ -90,6 +90,8 @@ SELF_CHECK_VERDICTS = {
     "PrepareDenseScene": [r"direct 8-bit read check: (\d+) of \1 images identical to OpenImageIO's path"],
     # The GPU matcher against upstream's brute force on a sample of every search (uint8 descriptors).
     "FeatureMatching": [r"GPU matcher check: ([1-9]\d*) of \1 sampled queries identical to upstream's brute force"],
+    # The depth-map filter's vote pass against the CPU pass, every camera, printed at exit.
+    "DepthMapFilter": [r"depth map filter check: ([1-9]\d*) of \1 cameras identical to the CPU vote pass"],
     "Meshing": [
         r"filterByPixSize check: identical to single-threaded upstream on all",
         # The float flow totals of the two algorithms are never equal and are documented as junk

@@ -2565,3 +2565,21 @@ method:
 What it is for, the 444-photo survey (80 m caught every real pair with 9 % of the exhaustive
 matching), is not run yet: that photo set is no longer on house-pc.
 
+## 0.3.5: in-process checks for the last two unchecked GPU ports (2026-09-26)
+
+**The matcher** (`CHESHIRE_GPU_MATCHER_CHECK=1`). Evenly spaced queries of every search (64 per
+search) are answered again by upstream's `ArrayMatcher_bruteForce`. The check compares both
+distances, and the nearest row unless the two nearest are tied: upstream's partial sort leaves
+tied rows in no particular order, and a tie fails Lowe's ratio test anyway. mini6 on the RX 9070:
+975 of 975 sampled queries identical, with 0 rows and 0 distances different.
+
+**The depth-map filter's vote pass** (`CHESHIRE_GPU_FILTER_CHECK=1`). Upstream's CPU vote loop runs
+again into its own buffers and the modal counts are compared pixel by pixel, per camera. The
+buffers are not cleared between cameras, which is upstream's quirk, or are cleared under
+`CHESHIRE_GPU_FILTER_STRICT=1`, as the GPU then does. mini6: 6 of 6 cameras identical (0 of
+18,289,152 pixels) in both modes. The two modes' filtered depth maps differ by 3,462,453 pixels, so
+the check agreed with two different results, each against its own reference.
+
+Both are in the gate's `verify` configuration, with verdicts for FeatureMatching and
+DepthMapFilter. Every GPU port now has an in-process check against its CPU reference.
+

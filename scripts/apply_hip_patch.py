@@ -629,7 +629,18 @@ endif()
         shutil.copy2(ROOT / "hip" / "port" / "gpu_filter" / f, gf_dst / f)
     fu = AV / "src/aliceVision/fuseCut/Fuser.cpp"
     patch(fu, '#include <aliceVision/mvsUtils/mapIO.hpp>' + NL,
-          '#ifdef ALICEVISION_HAVE_GPU_FILTER' + NL + '#include "aliceVision/fuseCut/gpu/depthMapFilterGPU.hpp"  // cheshire' + NL + '#endif' + NL)
+          '#ifdef ALICEVISION_HAVE_GPU_FILTER' + NL + '#include "aliceVision/fuseCut/gpu/depthMapFilterGPU.hpp"  // cheshire' + NL
+          + '#include <atomic>' + NL + '#include <cstdio>' + NL
+          # CHESHIRE_GPU_FILTER_CHECK: the per-camera verdicts, summed over the node's parallel loop and printed at exit
+          + 'namespace {' + NL
+          + 'struct CheshireFilterCheck' + NL + '{' + NL
+          + '    std::atomic<long long> cameras{0}, identical{0}, pixels{0}, differing{0};' + NL
+          + '    ~CheshireFilterCheck()' + NL + '    {' + NL
+          + '        if (cameras.load() > 0)' + NL
+          + '            std::fprintf(stderr, "[cheshire] depth map filter check: %lld of %lld cameras identical to the CPU vote pass (%lld of %lld pixels differ)\\n",' + NL
+          + '                         identical.load(), cameras.load(), differing.load(), pixels.load());' + NL
+          + '    }' + NL + '} g_cheshireFilterCheck;' + NL + '}  // namespace' + NL
+          + '#endif' + NL)
     patch(fu, "    StaticVector<int> tcams = _mp.findNearestCamsFromLandmarks(rc, nNearestCams);" + NL,
           """
 #ifdef ALICEVISION_HAVE_GPU_FILTER
@@ -691,6 +702,52 @@ endif()
         }
         if (ok && gf.result(numOfModalsMap.data()))
         {
+            if (::cheshire::env::flag("CHESHIRE_GPU_FILTER_CHECK"))
+            {
+                // cheshire: the CPU vote pass below, run again into its own buffers (not cleared between
+                // cameras, as upstream's; cleared under CHESHIRE_GPU_FILTER_STRICT, as the GPU then does),
+                // and its modal counts compared with the GPU's pixel by pixel
+                const bool strict = ::cheshire::env::flag("CHESHIRE_GPU_FILTER_STRICT");
+                image::Image<unsigned char> cpuModals(w, h, true, 0);
+                StaticVector<int> cpuPts;
+                cpuPts.reserve(w * h);
+                cpuPts.resize_with(w * h, 0);
+                for (int c = 0; c < tcams.size(); c++)
+                {
+                    cpuPts.resize_with(w * h, 0);
+                    if (strict)
+                        for (int i = 0; i < w * h; i++)
+                            cpuPts[i] = 0;
+                    const int tc = tcams[c];
+                    image::Image<float> tcdepthMap;
+                    mvsUtils::readMap(tc, _mp, mvsUtils::EFileType::depthMap, tcdepthMap);
+                    if (tcdepthMap.height() > 0 && tcdepthMap.width() > 0)
+                    {
+                        for (int y = 0; y < tcdepthMap.height(); ++y)
+                            for (int x = 0; x < tcdepthMap.width(); ++x)
+                            {
+                                const float depth = tcdepthMap(y, x);
+                                if (depth > 0.0f)
+                                {
+                                    Point3d p = _mp.CArr[tc] + (_mp.iCamArr[tc] * Point2d((float)x, (float)y)).normalize() * depth;
+                                    updateInSurr(pixToleranceFactor, pixSizeBall, pixSizeBallWSP, p, rc, tc, &cpuPts, depthMap, simMap, 1);
+                                }
+                            }
+                        for (int i = 0; i < w * h; i++)
+                            cpuModals(i) += static_cast<int>(cpuPts[i] > 0);
+                    }
+                }
+                long long differing = 0;
+                for (int i = 0; i < w * h; i++)
+                    differing += cpuModals(i) != numOfModalsMap(i) ? 1 : 0;
+                g_cheshireFilterCheck.cameras += 1;
+                g_cheshireFilterCheck.identical += differing == 0 ? 1 : 0;
+                g_cheshireFilterCheck.pixels += (long long)w * h;
+                g_cheshireFilterCheck.differing += differing;
+                if (differing != 0)
+                    ALICEVISION_LOG_WARNING("cheshire: depth map filter check: camera " << rc << ": " << differing << " of " << w * h
+                                                                                         << " pixels differ from the CPU vote pass");
+            }
             image::writeImageWithFloat(
               getFileNameFromIndex(_mp, rc, mvsUtils::EFileType::nmodMap),
               numOfModalsMap,

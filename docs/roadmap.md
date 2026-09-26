@@ -414,7 +414,7 @@ the earlier proposal.
   2. Add an opt-in mode in `aliceVision_imageMatching` with a fallback for views without GPS, paired
      as the ninth binary.
   3. Validate on views placed and on pair count (about 5-8k against 98,346).
-- **GPU matcher self-check** (S, or M with the filter check). **Matcher part done 2026-09-26** (`CHESHIRE_GPU_MATCHER_CHECK`, in the gate's verify configuration; mini6: 975 of 975 sampled queries identical to upstream's brute force). The DepthMapFilter check is still open. The matcher is the only port with no
+- **GPU matcher self-check** (S, or M with the filter check). **Matcher part done 2026-09-26** (`CHESHIRE_GPU_MATCHER_CHECK`, in the gate's verify configuration; mini6: 975 of 975 sampled queries identical to upstream's brute force). DepthMapFilter part done the same day (`CHESHIRE_GPU_FILTER_CHECK`: 6 of 6 cameras identical in both buffer modes). The matcher is the only port with no
   `*_CHECK` (`hip/port/gpu_matcher/gpuMatcher.cu:265-370`). Add a sampled CPU comparison, which can
   be exact because uint8 distances are integers. The DepthMapFilter vote pass has no check either
   (`scripts/apply_hip_patch.py:637-655`).
