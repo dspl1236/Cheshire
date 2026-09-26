@@ -83,21 +83,57 @@ class Index
                                const Camera& cam, bool fmaBackproject, double* outQueries, double* outPixSize,
                                std::uint32_t* outIndex, double* outDist2, bool fma);
 
+    // ---- Device votes (cheshire step 6t) ----------------------------------------------------------
+    // The pass's vertices live on the device: coords (nbVertices * 3 doubles, the pass-start
+    // coordinates the votes move), nrc, sim (simScorePrepare) and scoreV (sim * pixSize^2 as
+    // floats). Allocates everything the per-camera pipeline needs for up to maxQueries queries; false
+    // (nothing kept) when a buffer cannot be had. treeFrames() must fit the stack for the pass to run
+    // here, since an overflowed query cannot be answered in order later.
+    bool votesBegin(std::size_t nbVertices, const double* coords, const int* nrc, const float* sim, const float* scoreV,
+                    float voteMargin, float contributeMargin, std::size_t maxQueries);
+    // Words of the voted-vertex bitmap (bit v of word v / 32), the size of backprojectQueryVoteAsync's outBitmap.
+    std::size_t votesBitmapWords() const { return (_votesN + 31) / 32; }
+    // backprojectQueryAsync's pipeline, then on the device: every query's vote and contribute decision
+    // (the host's float/double expressions), the voted vertices' bits, the contributions grouped by
+    // vertex and each vertex's folded in query order. Downloads
+    // the bitmap (pinned, votesBitmapWords() words) and the camera's vote and contribution counts
+    // (pinned, 3 values: votes, contributions, and indices found out of range, which must be 0 for the
+    // camera to count). The out* query buffers are downloaded too when given (CHECK), else nullptr.
+    bool backprojectQueryVoteAsync(const float* depth, int w, int h, const std::uint64_t* rowStart, std::size_t nbQueries, const Camera& cam,
+                                   bool fmaBackproject, bool fma, std::uint32_t* outBitmap, unsigned long long* outCounts, double* outQueries,
+                                   double* outPixSize, std::uint32_t* outIndex, double* outDist2);
+    // Waits, then downloads the moved coordinates and nrc (the host copies stay untouched before).
+    bool votesEnd(double* coords, int* nrc);
+    // The device's fold of count (x, n, q) triples, x = (x * n + q) / (n + 1) per component, for the
+    // probe that compares it with the host's before a pass uses it. x and q: 3 doubles each.
+    bool foldProbe(const double* x, const int* n, const double* q, std::size_t count, double* out);
+    // The deepest path's inner nodes (the frames a query needs), -1 when build() could not tell.
+    int treeFrames() const { return _treeFrames; }
+
     // Waits for the query in flight; returns false on a device error. overflowed() then tells
     // how many of its answers are UINT32_MAX.
     bool wait();
     std::size_t overflowed() const { return _overflowed; }
+
+    // the kernel build() chose (step 6s): points in leaf order (CHESHIRE_GPU_KNN_LAYOUT=0 keeps the
+    // original order and 96-frame stack), and the stack frames per query
+    bool leafOrder() const { return _leafOrder; }
+    int stackFrames() const { return _stack; }
 
     // device-side timing of the queries so far, milliseconds
     double msUpload() const { return _msUpload; }
     double msBackproject() const { return _msBackproject; }
     double msKernel() const { return _msKernel; }
     double msDownload() const { return _msDownload; }
+    double msVotes() const { return _msVotes; }  // decide, sort and fold (device votes)
 
     void release();
 
   private:
-    void* _points = nullptr;
+    // enqueues the knn kernel build() chose over the queries in the device buffer
+    bool launchKnn(std::size_t nbQueries, bool fma);
+
+    void* _points = nullptr;  // leaf order when _leafOrder
     void* _nodes = nullptr;
     void* _perm = nullptr;
     void* _queries = nullptr;
@@ -109,14 +145,37 @@ class Index
     void* _rowStart = nullptr;
     void* _pixSize = nullptr;
     void* _stream = nullptr;
-    void* _events[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    void* _events[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     std::size_t _queryCapacity = 0;
     std::size_t _bpPixelCapacity = 0;
     std::size_t _bpRowCapacity = 0;
     std::size_t _overflowed = 0;
     bool _inFlight = false;
     bool _bpInFlight = false;
-    double _msUpload = 0, _msBackproject = 0, _msKernel = 0, _msDownload = 0;
+    bool _leafOrder = false;
+    int _stack = 96;
+    int _treeFrames = -1;
+    // device votes (step 6t)
+    void* _vCoords = nullptr;
+    void* _vNrc = nullptr;
+    void* _vSim = nullptr;
+    void* _vScoreV = nullptr;
+    void* _vBitmap = nullptr;
+    void* _vKeys = nullptr;        // per query: its vertex when it contributes, else nbVertices
+    void* _vCnt = nullptr;         // per vertex (+1): this camera's contributions, back to 0 after the scatter
+    void* _vOffsets = nullptr;     // per vertex (+1): the first slot of its range, then the total
+    void* _vTileSums = nullptr;    // the scan's tile totals, then their prefix
+    void* _vSlots = nullptr;       // the contributions' queries, by vertex
+    void* _vSlotVertex = nullptr;  // and their vertex
+    void* _vCounts = nullptr;      // votes, contributions, out-of-range indices
+    std::size_t _votesN = 0;
+    std::size_t _vCapacity = 0;
+    std::size_t _vTiles = 0;
+    float _voteMargin = 0.0f;
+    float _contributeMargin = 0.0f;
+    void releaseVotes();
+    double _msUpload = 0, _msBackproject = 0, _msKernel = 0, _msDownload = 0, _msVotes = 0;
+    bool _votesInFlight = false;
     double _lo[3] = {0, 0, 0};
     double _hi[3] = {0, 0, 0};
 };

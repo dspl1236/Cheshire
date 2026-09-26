@@ -63,6 +63,16 @@ double cheshireVisMs(std::chrono::steady_clock::time_point t)
 // The pass number (1, 2, ...) of the current createVerticesWithVisibilities call, for the log tags.
 int g_cheshireVisPass = 0;
 
+// step 6t: set while a pass whose device votes failed is rerun with host votes
+bool g_cheshireVisForceHostVotes = false;
+
+// the lowest set bit's index (de Bruijn; no intrinsic, so the same on every compiler)
+inline int cheshireLowBit(std::uint32_t x)
+{
+    static const int table[32] = {0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8, 31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9};
+    return table[((x & (0u - x)) * 0x077CB531u) >> 27];
+}
+
 // A digest of a pass's result: every vertex's coordinate bits, nrc, cameras in order and pixSize
 // bits. FNV-1a 64 over fixed chunks of vertices, then over the chunk hashes in order, so it can be
 // computed in parallel and does not depend on the thread count.
@@ -150,6 +160,20 @@ struct CheshireQuerySlot
     double* nnDistp = nullptr;
     double* psp = nullptr;
     std::uint64_t* rowsp = nullptr;
+    std::uint32_t* bitmap = nullptr;        // step 6t: the voted vertices of this camera (device votes)
+    unsigned long long* counts = nullptr;   // and its vote, contribution and out-of-range counts
+    std::size_t bitmapWords = 0;
+
+    bool reserveVotes(std::size_t words)
+    {
+        if (words <= bitmapWords && counts != nullptr) return true;
+        cheshire::knn::hostFree(bitmap);
+        cheshire::knn::hostFree(counts);
+        bitmap = (std::uint32_t*)cheshire::knn::hostAlloc(words * sizeof(std::uint32_t));
+        counts = (unsigned long long*)cheshire::knn::hostAlloc(3 * sizeof(unsigned long long));
+        bitmapWords = (bitmap != nullptr && counts != nullptr) ? words : 0;
+        return bitmapWords == words;
+    }
 
     void free()
     {
@@ -159,6 +183,11 @@ struct CheshireQuerySlot
         cheshire::knn::hostFree(ps);
         cheshire::knn::hostFree(depth);
         cheshire::knn::hostFree(rows);
+        cheshire::knn::hostFree(bitmap);
+        cheshire::knn::hostFree(counts);
+        bitmap = nullptr;
+        counts = nullptr;
+        bitmapWords = 0;
         q = nullptr;
         nn = nullptr;
         nnDist = nullptr;
@@ -374,8 +403,19 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
         return "upstream, the GPU knn index was not built";
     }
     const double msIndex = cheshireVisMs(tStart);
+    // step 6s: which knn kernel runs, announced once per process on every path
+    static bool layoutAnnounced = false;
+    if (!layoutAnnounced)
+    {
+        layoutAnnounced = true;
+        if (index.leafOrder())
+            ALICEVISION_LOG_INFO("cheshire: visibility knn kernel: points in leaf order, " << index.stackFrames() << "-frame stack (CHESHIRE_GPU_KNN_LAYOUT=0 for the original layout)");
+        else
+            ALICEVISION_LOG_INFO("cheshire: visibility knn kernel: original layout, " << index.stackFrames() << "-frame stack");
+    }
     if (logIt)
-        ALICEVISION_LOG_INFO("cheshire: GPU knn index: " << snapshot.size() << " points, " << nodes.size() << " nodes, depth " << treeDepth << ", tree " << msTree << " ms, index " << msIndex << " ms");
+        ALICEVISION_LOG_INFO("cheshire: GPU knn index: " << snapshot.size() << " points, " << nodes.size() << " nodes, depth " << treeDepth << ", tree " << msTree << " ms, index " << msIndex
+                             << " ms, " << (index.leafOrder() ? "leaf order, " : "original layout, ") << index.stackFrames() << "-frame stack");
 
     // nanoflann's answer on the host, from the same snapshot tree
     auto hostSearch = [&](const double* q, std::uint32_t& idx, double& d) {
@@ -399,6 +439,8 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
         launch(c);
 
     double msLoad = 0, msPrep = 0, msWait = 0, msVotes = 0, msCheck = 0;
+    double msDecide = 0, msScan = 0, msScatter = 0, msApply = 0;  // the bucketed votes' phases, for LOG
+    std::size_t nbAppended = 0;  // camera-list appends (a vote whose camera the list did not hold yet)
     std::size_t nbQueries = 0, nbIdxDiff = 0, nbDistDiff = 0, nbHost = 0, nbVotes = 0, nbContrib = 0, nbNaN = 0;
     std::size_t refVotes = 0, refContrib = 0;  // CHECK: the reference's totals
     std::size_t nbBpChecked = 0, nbBpQDiff = 0, nbBpPsDiff = 0, nbBpDevice = 0, nbBpDumped = 0;  // step 6k
@@ -530,6 +572,91 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
 #pragma omp parallel for
     for (long long v = 0; v < (long long)nbVertices; ++v)
         scoreV[v] = simScorePrepare[v] * pixSizePrepare[v] * pixSizePrepare[v];
+
+    // step 6t: the votes on the device. The vertices' coordinates, nrc, sim and scoreV go to the
+    // device for the pass; per camera it decides every query, folds the contributions in query order
+    // and returns the voted vertices as a bitmap, from which the host appends the camera to each list
+    // (one camera behind, while the device works on the next). The host's coordinates and nrc are
+    // untouched until the pass ends and the device's are downloaded. Before that, the device's fold
+    // is compared with this build's on 4096 triples: a host compiler that fused `x * n + q` would
+    // differ, and the pass then votes on the host. Anything that fails mid-pass (a device error, an
+    // overflowed query, a map larger than announced, CHESHIRE_GPU_VIS_VOTES_FAIL_AT=c) truncates the
+    // camera lists to their pass-start sizes and reruns the pass with host votes.
+    const bool votesWanted = ::cheshire::env::flag("CHESHIRE_GPU_VIS_VOTES", false) && !g_cheshireVisForceHostVotes;
+    const long long votesFailAt = ::cheshire::env::integer("CHESHIRE_GPU_VIS_VOTES_FAIL_AT", -1);
+    bool deviceVotes = false;
+    std::string votesRefused;
+    std::vector<int> camsStart;  // the lists' pass-start sizes, for the recovery
+    if (votesWanted)
+    {
+        if (!deviceBp)
+            votesRefused = "the device does not build this pass's queries";
+        else if (index.treeFrames() < 0 || index.treeFrames() > index.stackFrames())
+            votesRefused = "the tree needs " + std::to_string(index.treeFrames()) + " stack frames, the knn kernel has " + std::to_string(index.stackFrames());
+        else
+        {
+            // the probe: coordinates of the pass, nrc 0..63
+            constexpr std::size_t nProbe = 4096;
+            std::vector<double> px(3 * nProbe), pq(3 * nProbe), pout(3 * nProbe), phost(3 * nProbe);
+            std::vector<int> pn(nProbe);
+            for (std::size_t i = 0; i < nProbe; ++i)
+            {
+                const Point3d& a = verticesCoordsPrepare[(i * 2654435761ull) % nbVertices];
+                const Point3d& b = verticesCoordsPrepare[(i * 40503ull + 7) % nbVertices];
+                pn[i] = (int)(i % 64);
+                Point3d vc(a.x, a.y, a.z);
+                const Point3d pb(b.x, b.y, b.z);
+                vc = (vc * (double)pn[i] + pb) / double(pn[i] + 1);
+                for (int d = 0; d < 3; ++d)
+                {
+                    px[3 * i + d] = a.m[d];
+                    pq[3 * i + d] = b.m[d];
+                    phost[3 * i + d] = vc.m[d];
+                }
+            }
+            if (!index.foldProbe(px.data(), pn.data(), pq.data(), nProbe, pout.data()))
+                votesRefused = "the fold probe did not run";
+            else if (std::memcmp(pout.data(), phost.data(), pout.size() * sizeof(double)) != 0)
+            {
+                std::size_t diff = 0;
+                for (std::size_t i = 0; i < pout.size(); ++i)
+                    diff += std::memcmp(&pout[i], &phost[i], sizeof(double)) != 0;
+                votesRefused = "the device's fold differs from this build's on " + std::to_string(diff) + " of " + std::to_string(pout.size()) + " probe values";
+            }
+            else
+            {
+                std::vector<int> nrc0(nbVertices);
+#pragma omp parallel for
+                for (long long v = 0; v < (long long)nbVertices; ++v)
+                    nrc0[v] = verticesAttrPrepare[v].nrc;
+                if (!index.votesBegin(nbVertices, reinterpret_cast<const double*>(verticesCoordsPrepare.data()), nrc0.data(), simScorePrepare.data(),
+                                      scoreV.data(), voteMarginFactor, contributeMarginFactor, maxPix)
+                    || !slots[0].reserveVotes(index.votesBitmapWords()) || !slots[1].reserveVotes(index.votesBitmapWords()))
+                    votesRefused = "the device buffers for the pass could not be allocated";
+                else
+                {
+                    deviceVotes = true;
+                    camsStart.resize(nbVertices);
+#pragma omp parallel for
+                    for (long long v = 0; v < (long long)nbVertices; ++v)
+                        camsStart[v] = verticesAttrPrepare[v].cams.size();
+                }
+            }
+        }
+    }
+    static bool votesAnnounced = false;
+    if (!votesAnnounced)
+    {
+        votesAnnounced = true;
+        if (deviceVotes)
+            ALICEVISION_LOG_INFO("cheshire: visibility votes on the GPU (CHESHIRE_GPU_VIS_VOTES=0 for host votes)");
+        else if (!votesWanted && !g_cheshireVisForceHostVotes)
+            ALICEVISION_LOG_INFO("cheshire: visibility votes on the host (CHESHIRE_GPU_VIS_VOTES=1 for the GPU)");
+    }
+    if (votesWanted && !deviceVotes)
+        ALICEVISION_LOG_WARNING("cheshire: visibility votes: " << votesRefused << ", host votes (pass " << pass << ")");
+    std::string votesFailed;         // set when the device votes fail mid-pass
+    bool votesDeviceError = false;  // and the device itself failed: the rerun does not touch it again
     // cheshireVotesOrdered: one answered camera's votes, in pixel order, each vertex owned by one
     // thread. This is the definition every votes path is checked against: applied to the real
     // vertices with the device's answers, and under CHECK to the shadows with the host's own answers.
@@ -591,6 +718,7 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
                                      const double* pixSizeQ, std::vector<Point3d>& coords, std::vector<GC_vertexInfo>& attrs,
                                      std::size_t& votesOut, std::size_t& contribOut) {
         const long long nChunks = (long long)((nq + kChunk - 1) / kChunk);
+        auto tPhase = Clock::now();
         decision.assign(nq, 0);
         bucketCount.assign((std::size_t)nChunks * nbBuckets, 0);
 #pragma omp parallel for schedule(dynamic)
@@ -614,6 +742,8 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
                 }
             }
         }
+        msDecide += cheshireVisMs(tPhase);
+        tPhase = Clock::now();
         // bucket-major exclusive scan; bucketCount becomes each (chunk, bucket)'s first slot
         bucketStart.assign(nbBuckets + 1, 0);
         std::uint32_t run = 0;
@@ -629,6 +759,8 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
             }
         }
         bucketStart[nbBuckets] = run;
+        msScan += cheshireVisMs(tPhase);
+        tPhase = Clock::now();
         order.resize(run);
 #pragma omp parallel for schedule(dynamic)
         for (long long ch = 0; ch < nChunks; ++ch)
@@ -639,8 +771,10 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
                 if (decision[k] & 1)
                     order[cur[nn[k] >> kBucketShift]++] = (std::uint32_t)k;
         }
-        std::size_t total = run, contrib = 0;
-#pragma omp parallel for schedule(dynamic) reduction(+ : contrib)
+        msScatter += cheshireVisMs(tPhase);
+        tPhase = Clock::now();
+        std::size_t total = run, contrib = 0, appended = 0;
+#pragma omp parallel for schedule(dynamic) reduction(+ : contrib, appended)
         for (long long b = 0; b < (long long)nbBuckets; ++b)
         {
             for (std::uint32_t i = bucketStart[b]; i < bucketStart[b + 1]; ++i)
@@ -648,7 +782,8 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
                 const std::uint32_t k = order[i];
                 const std::size_t v = nn[k];
                 GC_vertexInfo& va = attrs[v];
-                va.cams.push_back_distinct(c);
+                if (va.cams.push_back_distinct(c) == -1)
+                    ++appended;
                 if (decision[k] & 2)
                 {
                     Point3d& vc = coords[v];
@@ -659,6 +794,8 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
                 }
             }
         }
+        msApply += cheshireVisMs(tPhase);
+        nbAppended += appended;
         votesOut += total;
         contribOut += contrib;
     };
@@ -671,7 +808,14 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
     auto enqueue = [&](CheshireQuerySlot& s) {
         if (s.empty || s.onHost || deviceDead) return;
         bool queued = false;
-        if (s.bpDevice)
+        if (s.bpDevice && deviceVotes)
+        {
+            // step 6t; under CHECK the queries and answers come back too, for the reference
+            const cheshire::knn::Camera camera = cheshireKnnCamera(mp, s.cam);
+            queued = index.backprojectQueryVoteAsync(s.depth, s.w, s.h, s.rowsp, s.nq, camera, bpFma, fma, s.bitmap, s.counts, check ? s.qp : nullptr,
+                                                     check ? s.psp : nullptr, check ? s.nnp : nullptr, check ? s.nnDistp : nullptr);
+        }
+        else if (s.bpDevice)
         {
             const cheshire::knn::Camera camera = cheshireKnnCamera(mp, s.cam);
             queued = index.backprojectQueryAsync(s.depth, s.w, s.h, s.rowsp, s.nq, camera, bpFma, s.qp, s.psp, s.nnp, s.nnDistp, fma);
@@ -715,6 +859,22 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
             enqueue(next);
         if (cur.empty)
             continue;
+        if (deviceVotes)
+        {
+            if (!answered || !cur.bpDevice)
+            {
+                votesFailed = "camera " + std::to_string(c) + (answered ? " was answered on the host" : " was not answered by the device");
+                votesDeviceError = !answered;
+            }
+            else if (cur.counts[2] != 0)
+                votesFailed = std::to_string(cur.counts[2]) + " out-of-range indices in the device votes of camera " + std::to_string(c);
+            else if (index.overflowed() > 0)
+                votesFailed = std::to_string(index.overflowed()) + " queries of camera " + std::to_string(c) + " overflowed the knn stack";
+            else if (c == votesFailAt)
+                votesFailed = "fault injected at camera " + std::to_string(c) + " (CHESHIRE_GPU_VIS_VOTES_FAIL_AT)";
+            if (!votesFailed.empty())
+                break;
+        }
         if (!answered)
         {
             if (cur.bpDevice)
@@ -840,7 +1000,29 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
             msCheck += cheshireVisMs(t1);
         }
         t1 = Clock::now();
-        if (bucketedVotes)
+        if (deviceVotes)
+        {
+            // the device folded this camera's contributions; append the camera to each voted list
+            const std::uint32_t* bm = cur.bitmap;
+            const long long words = (long long)index.votesBitmapWords();
+            std::size_t appended = 0;
+#pragma omp parallel for schedule(dynamic, 1024) reduction(+ : appended)
+            for (long long wi = 0; wi < words; ++wi)
+            {
+                std::uint32_t bits = bm[wi];
+                while (bits != 0)
+                {
+                    const std::size_t v = (std::size_t)wi * 32 + (std::size_t)cheshireLowBit(bits);
+                    bits &= bits - 1;
+                    if (verticesAttrPrepare[v].cams.push_back_distinct(cur.cam) == -1)
+                        ++appended;
+                }
+            }
+            nbAppended += appended;
+            nbVotes += (std::size_t)cur.counts[0];
+            nbContrib += (std::size_t)cur.counts[1];
+        }
+        else if (bucketedVotes)
             cheshireVotesBucketed(cur.cam, cur.nq, cur.nnp, cur.nnDistp, cur.qp, cur.psp, verticesCoordsPrepare, verticesAttrPrepare,
                                   nbVotes, nbContrib);
         else
@@ -850,7 +1032,44 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
         nbQueries += cur.nq;
     }
     index.wait();
-    const double msDevUp = index.msUpload(), msDevBp = index.msBackproject(), msDevKernel = index.msKernel(), msDevDown = index.msDownload();
+    if (deviceVotes && votesFailed.empty())
+    {
+        std::vector<int> nrc1(nbVertices);
+        if (index.votesEnd(reinterpret_cast<double*>(verticesCoordsPrepare.data()), nrc1.data()))
+        {
+#pragma omp parallel for
+            for (long long v = 0; v < (long long)nbVertices; ++v)
+                verticesAttrPrepare[v].nrc = nrc1[v];
+        }
+        else
+        {
+            votesFailed = "the pass's coordinates could not be downloaded";
+            votesDeviceError = true;
+        }
+    }
+    if (!votesFailed.empty())
+    {
+        // nothing of the device's pass reached the host but the camera lists' appends: undo those and
+        // run the pass again with host votes (the host's coordinates and nrc were never written)
+        ALICEVISION_LOG_WARNING("cheshire: visibility votes on the GPU failed (" << votesFailed << "); pass " << pass << (votesDeviceError ? " again on the CPU (upstream), the device is not used again" : " again with host votes"));
+#pragma omp parallel for
+        for (long long v = 0; v < (long long)nbVertices; ++v)
+            verticesAttrPrepare[v].cams.resize(camsStart[v]);
+        index.release();
+        if (votesDeviceError)
+        {
+            // a device that failed is not used again for this pass: upstream's CPU pass
+            createVerticesWithVisibilitiesUpstream(cams, verticesCoordsPrepare, pixSizePrepare, simScorePrepare, verticesAttrPrepare, mp, simFactor,
+                                                   voteMarginFactor, contributeMarginFactor, simGaussianSize);
+            return "upstream, the device failed during GPU votes";
+        }
+        g_cheshireVisForceHostVotes = true;
+        const char* path = createVerticesWithVisibilitiesGPU(cams, verticesCoordsPrepare, pixSizePrepare, simScorePrepare, verticesAttrPrepare, mp, simFactor,
+                                                             voteMarginFactor, contributeMarginFactor, simGaussianSize);
+        g_cheshireVisForceHostVotes = false;
+        return path;
+    }
+    const double msDevUp = index.msUpload(), msDevBp = index.msBackproject(), msDevKernel = index.msKernel(), msDevDown = index.msDownload(), msDevVotes = index.msVotes();
     index.release();
 
 // compute pixSize
@@ -866,7 +1085,15 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
                              << " contributions, " << nbHost << " answered on the host, " << nbBpDevice << " built on the device, " << nbNaN
                              << " NaN depths; index " << msIndex << " ms, maps " << msLoad << " ms, " << (deviceBp ? "count and stage " : "backproject ")
                              << msPrep << " ms, device wait " << msWait << " ms (device: upload " << msDevUp << ", backproject " << msDevBp
-                             << ", kernel " << msDevKernel << ", download " << msDevDown << " ms), votes " << msVotes << " ms, check " << msCheck
+                             << ", kernel " << msDevKernel << ", download " << msDevDown << " ms), votes " << msVotes << " ms"
+                             << (deviceVotes ? " (camera-list appends from the device's bitmaps: " + std::to_string(nbAppended) + "; device decide, sort and fold "
+                                                   + std::to_string((long long)msDevVotes) + " ms)"
+                                             : std::string())
+                             << (bucketedVotes && !deviceVotes ? " (decide " + std::to_string((long long)msDecide) + ", scan " + std::to_string((long long)msScan) + ", scatter "
+                                                     + std::to_string((long long)msScatter) + ", apply " + std::to_string((long long)msApply) + "; "
+                                                     + std::to_string(nbAppended) + " camera-list appends)"
+                                               : std::string())
+                             << ", check " << msCheck
                              << " ms, total " << cheshireVisMs(tStart) << " ms");
     if (check && nbBpChecked > 0)
     {
@@ -916,16 +1143,18 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
         }
         const bool sizes = shadowAttrs.size() == verticesAttrPrepare.size() && shadowCoords.size() == verticesCoordsPrepare.size();
         if (dAny == 0 && sizes && refVotes == nbVotes && refContrib == nbContrib)
-            ALICEVISION_LOG_INFO("cheshire: visibility votes check (pass " << pass << ", " << (bucketedVotes ? "bucketed host votes" : "host votes") << "): identical to the ordered host reference on all "
+            ALICEVISION_LOG_INFO("cheshire: visibility votes check (pass " << pass << ", " << (deviceVotes ? "GPU votes" : (bucketedVotes ? "bucketed host votes" : "host votes")) << "): identical to the ordered host reference on all "
                                  << nv << " vertices (coordinates, nrc, camera lists in order, pixSize); " << nbQueries << " queries, " << nbVotes
                                  << " votes, " << nbContrib << " contributions");
         else
-            ALICEVISION_LOG_WARNING("cheshire: visibility votes check (pass " << pass << ", " << (bucketedVotes ? "bucketed host votes" : "host votes") << "): " << dAny << " of " << nv
+            ALICEVISION_LOG_WARNING("cheshire: visibility votes check (pass " << pass << ", " << (deviceVotes ? "GPU votes" : (bucketedVotes ? "bucketed host votes" : "host votes")) << "): " << dAny << " of " << nv
                                     << " vertices differ: coordinates " << dCoord << ", nrc " << dNrc << ", cams " << (dCams + dOrder) << " (order only "
                                     << dOrder << "), pixSize " << dPix << "; votes " << nbVotes << " vs " << refVotes << ", contributions "
                                     << nbContrib << " vs " << refContrib << (sizes ? "" : "; vertex counts differ"));
     }
     ALICEVISION_LOG_INFO("Visibilities created.");
+    if (deviceVotes)
+        return "GPU backprojection, knn and votes";
     if (nbBpDevice > 0)
         return bucketedVotes ? "GPU backprojection and knn, bucketed host votes" : "GPU backprojection and knn, host votes";
     return bucketedVotes ? "GPU knn, bucketed host votes" : "GPU knn, host votes";

@@ -18,9 +18,11 @@
 #include "knnGPU.hpp"
 #include <cuda_runtime.h>
 #include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
+#include <algorithm>
 #include <cfloat>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 namespace cheshire {
 namespace knn {
@@ -221,6 +223,450 @@ __global__ void knnKernel(const Node* __restrict__ nodes,
     }
 }
 
+// cheshire (step 6s): the same walk with a smaller memory footprint. knnKernel's frames are 40 bytes
+// and its stack is 96 frames whatever the tree, in private (scratch) memory, and every leaf point is
+// read through the permutation, a random 24-byte gather per point. Here:
+// - the points are stored in leaf order (slot i holds point perm[i]), so a leaf is one contiguous
+//   run; the answer is perm[slot], read once per query;
+// - a frame is 24 bytes: the other child, the split axis and the phase share one int, and the cut
+//   distance is replaced by the distance it displaced (dst) once the frame is revisited, the only
+//   value phase 1 needs;
+// - the stack holds DEPTH frames, the smallest of 40/64/96 that covers the tree (Index::build);
+// - the three axis distances are registers selected by the axis, not an indexed private array.
+// Same points in the same order, same metric, same comparisons: the answers are knnKernel's, ties
+// included. CHESHIRE_GPU_KNN_LAYOUT=0 keeps knnKernel.
+struct PackedFrame
+{
+    double x;     // phase 0: the cut distance; phase 1: the axis distance it replaced
+    double mind;  // mindist when the node was entered
+    int packed;   // other child << 3 | axis << 1 | phase
+};
+
+__device__ __forceinline__ double axisGet(double a0, double a1, double a2, int i)
+{
+    return i == 0 ? a0 : (i == 1 ? a1 : a2);
+}
+
+__device__ __forceinline__ void axisSet(double& a0, double& a1, double& a2, int i, double v)
+{
+    if (i == 0)
+        a0 = v;
+    else if (i == 1)
+        a1 = v;
+    else
+        a2 = v;
+}
+
+// computeInitialDistances for one axis, in nanoflann's order: below the box, then above it
+__device__ __forceinline__ void initialAxis(double v, double lo, double hi, double& dist, double& mind)
+{
+    if (v < lo)
+    {
+        dist = sqdiff(v, lo);
+        mind = dAdd(mind, dist);
+    }
+    if (v > hi)
+    {
+        dist = sqdiff(v, hi);
+        mind = dAdd(mind, dist);
+    }
+}
+
+template<bool FMA, int DEPTH>
+__global__ void knnLeafKernel(const Node* __restrict__ nodes,
+                              const double* __restrict__ leafPts,
+                              const std::uint32_t* __restrict__ perm,
+                              const double* __restrict__ queries,
+                              std::uint32_t nbQueries,
+                              double lo0, double lo1, double lo2,
+                              double hi0, double hi1, double hi2,
+                              std::uint32_t* __restrict__ outIndex,
+                              double* __restrict__ outDist2,
+                              unsigned int* __restrict__ overflow)
+{
+    const std::uint32_t qi = blockIdx.x * blockDim.x + threadIdx.x;
+    if (qi >= nbQueries) return;
+
+    const double q0 = queries[3 * (std::size_t)qi];
+    const double q1 = queries[3 * (std::size_t)qi + 1];
+    const double q2 = queries[3 * (std::size_t)qi + 2];
+
+    double d0 = 0.0, d1 = 0.0, d2 = 0.0;
+    double mind = 0.0;
+    initialAxis(q0, lo0, hi0, d0, mind);
+    initialAxis(q1, lo1, hi1, d1, mind);
+    initialAxis(q2, lo2, hi2, d2, mind);
+
+    double best = DBL_MAX;
+    std::uint32_t bestSlot = 0xFFFFFFFFu;
+
+    PackedFrame st[DEPTH];
+    int sp = 0;
+    int node = 0;
+    bool failed = false;
+
+    while (true)
+    {
+        const Node n = nodes[node];
+        if (n.child1 < 0)
+        {
+            for (std::uint32_t i = n.a; i < n.b; ++i)
+            {
+                const double d = metric<FMA>(leafPts, i, q0, q1, q2);
+                if (d < best)
+                {
+                    best = d;
+                    bestSlot = i;
+                }
+            }
+            bool descend = false;
+            while (sp > 0)
+            {
+                PackedFrame& f = st[sp - 1];
+                const int idx = (f.packed >> 1) & 3;
+                if ((f.packed & 1) == 0)
+                {
+                    const double dst = axisGet(d0, d1, d2, idx);
+                    const double cut = f.x;
+                    const double m = dSub(dAdd(f.mind, cut), dst);
+                    axisSet(d0, d1, d2, idx, cut);
+                    if (m <= best)
+                    {
+                        f.packed |= 1;
+                        f.x = dst;
+                        node = f.packed >> 3;
+                        mind = m;
+                        descend = true;
+                        break;
+                    }
+                    axisSet(d0, d1, d2, idx, dst);
+                    --sp;
+                }
+                else
+                {
+                    axisSet(d0, d1, d2, idx, f.x);
+                    --sp;
+                }
+            }
+            if (!descend) break;
+            continue;
+        }
+
+        const int idx = (int)n.a;
+        const double val = axisGet(q0, q1, q2, idx);
+        const double diff1 = dSub(val, n.lo);
+        const double diff2 = dSub(val, n.hi);
+        int bestChild, otherChild;
+        double cut;
+        if (dAdd(diff1, diff2) < 0.0)
+        {
+            bestChild = n.child1;
+            otherChild = n.child2;
+            cut = sqdiff(val, n.hi);
+        }
+        else
+        {
+            bestChild = n.child2;
+            otherChild = n.child1;
+            cut = sqdiff(val, n.lo);
+        }
+        if (sp == DEPTH)
+        {
+            failed = true;
+            break;
+        }
+        PackedFrame& f = st[sp++];
+        f.x = cut;
+        f.mind = mind;
+        f.packed = (otherChild << 3) | (idx << 1);
+        node = bestChild;
+    }
+
+    if (failed)
+    {
+        atomicAdd(overflow, 1u);
+        outIndex[qi] = 0xFFFFFFFFu;
+        outDist2[qi] = DBL_MAX;
+    }
+    else
+    {
+        outIndex[qi] = bestSlot == 0xFFFFFFFFu ? 0xFFFFFFFFu : perm[bestSlot];
+        outDist2[qi] = best;
+    }
+}
+
+// cheshire (step 6t): the votes on the device. PointCloud.cpp's votes, per query k with nearest
+// vertex v (skipped when v is not a vertex: an overflowed or NaN query):
+//   const float pixSizeScoreI = simScorePrepare[v] * pixSize * pixSize;  (float promoted, double
+//                                                                         products, rounded to float)
+//   const float pixSizeScoreV = scoreV[v];
+//   if (dist < voteMarginFactor * std::max(pixSizeScoreI, pixSizeScoreV))   (float product, compared in double)
+//       cams.push_back_distinct(c);
+//       if (dist < contributeMarginFactor * pixSizeScoreV)
+//           vc = (vc * (double)nrc + p) / double(nrc + 1); nrc += 1;
+// No sum is involved in a decision, so nothing can be contracted there; the fold is three separate
+// Point3d operators per component (x * n, + q, / (n + 1)), done here with the helpers above.
+//
+// A vote sets bit v of the camera's bitmap (the host appends the camera from it). A contribution
+// counts itself on its vertex; an exact integer scan of the counts gives each vertex a range of
+// slots, the contributions are scattered into their vertex's range (in any order), and one thread
+// per vertex puts its range in ascending query order and folds it: each vertex sees its
+// contributions in pixel order, as the host's ordered votes apply them. No library sort: rocPRIM
+// picks its kernel configuration from the device on the host side but from the compile target on
+// the device side, so a generic target (gfx12-generic) on a device it knows (gfx1201) launches one
+// configuration and runs another, which faults (2026-09-25). Anything out of range is counted in
+// counts[2] and never used; the host then reruns the pass with host votes.
+__device__ __forceinline__ float fMul(float a, float b) { return a * b; }
+
+constexpr int kVoteBlock = 256;
+constexpr int kScanBlock = 256;
+constexpr int kScanItems = 4;
+constexpr int kScanTile = kScanBlock * kScanItems;
+
+__global__ void decideKernel(const std::uint32_t* __restrict__ nn, const double* __restrict__ dist2, const double* __restrict__ pixSize,
+                             std::uint32_t nq, std::uint32_t nbVertices, const float* __restrict__ sim, const float* __restrict__ scoreV,
+                             float voteMargin, float contributeMargin, std::uint32_t* __restrict__ bitmap, std::uint32_t* __restrict__ keys,
+                             unsigned int* __restrict__ cnt, unsigned long long* __restrict__ counts)
+{
+    __shared__ unsigned int blockVotes, blockContrib;
+    if (threadIdx.x == 0)
+    {
+        blockVotes = 0;
+        blockContrib = 0;
+    }
+    __syncthreads();
+    const std::uint32_t k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k < nq)
+    {
+        const std::uint32_t v = nn[k];
+        std::uint32_t key = nbVertices;
+        if (v < nbVertices)
+        {
+            const double dist = dist2[k];
+            const double ps = pixSize[k];
+            const float scoreI = __double2float_rn(dMul(dMul((double)sim[v], ps), ps));
+            const float scoreV_ = scoreV[v];
+            const float m = (scoreI < scoreV_) ? scoreV_ : scoreI;  // std::max(a, b) is (a < b) ? b : a
+            if (dist < (double)fMul(voteMargin, m))
+            {
+                atomicOr(&bitmap[v >> 5], 1u << (v & 31u));
+                atomicAdd(&blockVotes, 1u);
+                if (dist < (double)fMul(contributeMargin, scoreV_))
+                {
+                    key = v;
+                    atomicAdd(&cnt[v], 1u);
+                    atomicAdd(&blockContrib, 1u);
+                }
+            }
+        }
+        keys[k] = key;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0)
+    {
+        if (blockVotes) atomicAdd(&counts[0], (unsigned long long)blockVotes);
+        if (blockContrib) atomicAdd(&counts[1], (unsigned long long)blockContrib);
+    }
+}
+
+// inclusive scan of s[0 .. kScanBlock) in shared memory (Hillis-Steele); every thread must call it
+__device__ __forceinline__ unsigned int blockInclusiveScan(unsigned int* s, unsigned int x)
+{
+    s[threadIdx.x] = x;
+    __syncthreads();
+    for (int off = 1; off < kScanBlock; off <<= 1)
+    {
+        const unsigned int t = ((int)threadIdx.x >= off) ? s[threadIdx.x - off] : 0u;
+        __syncthreads();
+        s[threadIdx.x] += t;
+        __syncthreads();
+    }
+    return s[threadIdx.x];
+}
+
+// the exclusive prefix of cnt[0 .. n) in three launches: tile totals, their prefix (one block), the tiles
+__global__ void scanTotalsKernel(const unsigned int* __restrict__ cnt, std::uint32_t n, unsigned int* __restrict__ tileSums)
+{
+    __shared__ unsigned int s[kScanBlock];
+    const std::size_t base = (std::size_t)blockIdx.x * kScanTile + (std::size_t)threadIdx.x * kScanItems;
+    unsigned int sum = 0;
+    for (int i = 0; i < kScanItems; ++i)
+        if (base + i < n) sum += cnt[base + i];
+    const unsigned int incl = blockInclusiveScan(s, sum);
+    if (threadIdx.x == kScanBlock - 1) tileSums[blockIdx.x] = incl;
+}
+
+__global__ void scanTileSumsKernel(unsigned int* __restrict__ tileSums, std::uint32_t nTiles)
+{
+    __shared__ unsigned int s[kScanBlock];
+    __shared__ unsigned int carry;
+    if (threadIdx.x == 0) carry = 0;
+    __syncthreads();
+    for (std::uint32_t base = 0; base < nTiles; base += kScanBlock)
+    {
+        const std::uint32_t i = base + threadIdx.x;
+        const unsigned int x = (i < nTiles) ? tileSums[i] : 0u;
+        const unsigned int incl = blockInclusiveScan(s, x);
+        const unsigned int total = s[kScanBlock - 1];
+        if (i < nTiles) tileSums[i] = carry + incl - x;
+        __syncthreads();
+        if (threadIdx.x == 0) carry += total;
+        __syncthreads();
+    }
+}
+
+__global__ void scanTilesKernel(const unsigned int* __restrict__ cnt, std::uint32_t n, const unsigned int* __restrict__ tileStarts,
+                                unsigned int* __restrict__ offsets)
+{
+    __shared__ unsigned int s[kScanBlock];
+    const std::size_t base = (std::size_t)blockIdx.x * kScanTile + (std::size_t)threadIdx.x * kScanItems;
+    unsigned int x[kScanItems];
+    unsigned int sum = 0;
+    for (int i = 0; i < kScanItems; ++i)
+    {
+        x[i] = (base + i < n) ? cnt[base + i] : 0u;
+        sum += x[i];
+    }
+    const unsigned int incl = blockInclusiveScan(s, sum);
+    unsigned int run = tileStarts[blockIdx.x] + incl - sum;
+    for (int i = 0; i < kScanItems; ++i)
+    {
+        if (base + i < n) offsets[base + i] = run;
+        run += x[i];
+    }
+}
+
+// each contribution into its vertex's range; cnt goes back to 0 for the next camera
+__global__ void scatterKernel(const std::uint32_t* __restrict__ keys, std::uint32_t nq, std::uint32_t nbVertices, const unsigned int* __restrict__ offsets,
+                              unsigned int* __restrict__ cnt, std::uint32_t* __restrict__ slots, std::uint32_t* __restrict__ slotVertex,
+                              unsigned long long* __restrict__ counts)
+{
+    const std::uint32_t k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= nq) return;
+    const std::uint32_t v = keys[k];
+    if (v >= nbVertices) return;
+    const unsigned int c = atomicSub(&cnt[v], 1u);
+    const unsigned int pos = offsets[v] + c - 1u;
+    if (c == 0u || pos >= nq || pos >= offsets[v + 1])
+    {
+        atomicAdd(&counts[2], 1ull);
+        return;
+    }
+    slots[pos] = k;
+    slotVertex[pos] = v;
+}
+
+__device__ void siftDown(std::uint32_t* a, unsigned int root, unsigned int n)
+{
+    while (true)
+    {
+        unsigned int child = 2u * root + 1u;
+        if (child >= n) return;
+        if (child + 1u < n && a[child] < a[child + 1u]) ++child;
+        if (a[root] >= a[child]) return;
+        const std::uint32_t t = a[root];
+        a[root] = a[child];
+        a[child] = t;
+        root = child;
+    }
+}
+
+// x = (x * n + q) / (n + 1) per component, as Point3d's operators: one product, one sum, one quotient
+__device__ __forceinline__ void foldOne(double& x, double& y, double& z, int n, double qx, double qy, double qz)
+{
+    const double dn = (double)n;
+    const double d1 = (double)(n + 1);
+    x = __ddiv_rn(dAdd(dMul(x, dn), qx), d1);
+    y = __ddiv_rn(dAdd(dMul(y, dn), qy), d1);
+    z = __ddiv_rn(dAdd(dMul(z, dn), qz), d1);
+}
+
+// the first slot of each vertex's range: sort the range by query (insertion, heapsort when long), fold it
+__global__ void foldRunsKernel(const unsigned int* __restrict__ offsets, std::uint32_t nbVertices, std::uint32_t* __restrict__ slots,
+                               const std::uint32_t* __restrict__ slotVertex, std::uint32_t nq, const double* __restrict__ q,
+                               double* __restrict__ coords, int* __restrict__ nrc, unsigned long long* __restrict__ counts)
+{
+    const std::uint32_t p = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int total = offsets[nbVertices];
+    if (p >= nq || p >= total) return;
+    const std::uint32_t v = slotVertex[p];
+    if (v >= nbVertices || offsets[v] != p) return;
+    const unsigned int end = offsets[v + 1];
+    if (end > total || end > nq || end <= p)
+    {
+        atomicAdd(&counts[2], 1ull);
+        return;
+    }
+    std::uint32_t* a = slots + p;
+    const unsigned int len = end - p;
+    if (len <= 32u)
+    {
+        for (unsigned int i = 1; i < len; ++i)
+        {
+            const std::uint32_t key = a[i];
+            unsigned int j = i;
+            while (j > 0 && a[j - 1] > key)
+            {
+                a[j] = a[j - 1];
+                --j;
+            }
+            a[j] = key;
+        }
+    }
+    else
+    {
+        for (unsigned int i = len / 2; i-- > 0;)
+            siftDown(a, i, len);
+        for (unsigned int e = len - 1; e > 0; --e)
+        {
+            const std::uint32_t t = a[0];
+            a[0] = a[e];
+            a[e] = t;
+            siftDown(a, 0, e);
+        }
+    }
+    double x = coords[3 * (std::size_t)v], y = coords[3 * (std::size_t)v + 1], z = coords[3 * (std::size_t)v + 2];
+    int n = nrc[v];
+    for (unsigned int i = 0; i < len; ++i)
+    {
+        const std::size_t k = a[i];
+        if (k >= nq)
+        {
+            atomicAdd(&counts[2], 1ull);
+            return;
+        }
+        foldOne(x, y, z, n, q[3 * k], q[3 * k + 1], q[3 * k + 2]);
+        n += 1;
+    }
+    coords[3 * (std::size_t)v] = x;
+    coords[3 * (std::size_t)v + 1] = y;
+    coords[3 * (std::size_t)v + 2] = z;
+    nrc[v] = n;
+}
+
+__global__ void foldProbeKernel(const double* __restrict__ x, const int* __restrict__ n, const double* __restrict__ q, std::uint32_t count,
+                                double* __restrict__ out)
+{
+    const std::uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    double a = x[3 * i], b = x[3 * i + 1], c = x[3 * i + 2];
+    foldOne(a, b, c, n[i], q[3 * i], q[3 * i + 1], q[3 * i + 2]);
+    out[3 * i] = a;
+    out[3 * i + 1] = b;
+    out[3 * i + 2] = c;
+}
+
+// the points in leaf order: slot i gets point perm[i]
+__global__ void gatherLeafOrder(const double* __restrict__ pts, const std::uint32_t* __restrict__ perm, std::size_t n, double* __restrict__ out)
+{
+    const std::size_t i = (std::size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const std::size_t id = perm[i];
+    out[3 * i] = pts[3 * id];
+    out[3 * i + 1] = pts[3 * id + 1];
+    out[3 * i + 2] = pts[3 * id + 2];
+}
+
 // cheshire (step 6k): the host's backprojection of one camera, operation by operation.
 // MultiViewParams::backproject(c, Point2d(x, y), depth) is CArr + (iCamArr * pix).normalize() * depth
 // and getCamPixelSize(p, c) projects p with camArr, moves one pixel right, backprojects that pixel's
@@ -394,11 +840,44 @@ bool Index::build(const double* points, std::size_t nbPoints, const Node* nodes,
     cudaStream_t s = nullptr;
     if (!ok(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking), "stream")) return false;
     _stream = s;
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < 6; ++i)
     {
         cudaEvent_t e = nullptr;
         if (!ok(cudaEventCreate(&e), "event")) return false;
         _events[i] = e;
+    }
+    // step 6s: the leaf-order kernel, unless switched off or the tree is too large for its packed
+    // frames (a node id takes 28 bits); its stack is the smallest of 40/64/96 frames that holds the
+    // deepest path (one frame per inner node). Children are flattened after their parent, so one
+    // forward pass gives every node's level; a tree that breaks that order gets the full stack.
+    _leafOrder = ::cheshire::env::flag("CHESHIRE_GPU_KNN_LAYOUT", true) && nbNodes < (std::size_t(1) << 28);
+    _stack = kMaxDepth;
+    _treeFrames = -1;
+    {
+        std::vector<int> level(nbNodes, 0);
+        level[0] = 1;
+        int deepest = 1;
+        bool ordered = true;
+        for (std::size_t i = 0; i < nbNodes && ordered; ++i)
+        {
+            if (nodes[i].child1 < 0) continue;
+            for (std::int32_t c : {nodes[i].child1, nodes[i].child2})
+            {
+                if (c <= (std::int32_t)i || (std::size_t)c >= nbNodes)
+                {
+                    ordered = false;
+                    break;
+                }
+                level[c] = level[i] + 1;
+                deepest = std::max(deepest, level[c]);
+            }
+        }
+        if (ordered)
+        {
+            _treeFrames = deepest - 1;
+            if (_leafOrder)
+                _stack = (deepest - 1 <= 40) ? 40 : ((deepest - 1 <= 64) ? 64 : kMaxDepth);
+        }
     }
     if (!ok(cheshire::devMalloc(&_points, nbPoints * 3 * sizeof(double)), "alloc points")) return false;
     if (!ok(cheshire::devMalloc(&_nodes, nbNodes * sizeof(Node)), "alloc nodes")) return false;
@@ -406,11 +885,82 @@ bool Index::build(const double* points, std::size_t nbPoints, const Node* nodes,
     if (!ok(cheshire::devMalloc(&_overflowCounter, sizeof(unsigned int)), "alloc counter")) return false;
     _overflowHost = hostAlloc(sizeof(unsigned int));
     if (_overflowHost == nullptr) return false;
+    if (!ok(cudaMemcpyAsync(_nodes, nodes, nbNodes * sizeof(Node), cudaMemcpyHostToDevice, s), "upload nodes")) return false;
+    if (!ok(cudaMemcpyAsync(_perm, perm, nbPoints * sizeof(std::uint32_t), cudaMemcpyHostToDevice, s), "upload perm")) return false;
+    if (_leafOrder)
+    {
+        // the points in their original order into a temporary, gathered into leaf order; done
+        // before the query buffers exist, so the temporary does not add to the pass's peak
+        void* original = nullptr;
+        if (!ok(cheshire::devMalloc(&original, nbPoints * 3 * sizeof(double)), "alloc points (original order)")) return false;
+        bool good = ok(cudaMemcpyAsync(original, points, nbPoints * 3 * sizeof(double), cudaMemcpyHostToDevice, s), "upload points");
+        if (good)
+        {
+            const unsigned int block = 256;
+            gatherLeafOrder<<<(unsigned int)((nbPoints + block - 1) / block), block, 0, s>>>((const double*)original, (const std::uint32_t*)_perm, nbPoints,
+                                                                                             (double*)_points);
+            good = ok(cudaGetLastError(), "launch gather");
+        }
+        good = ok(cudaStreamSynchronize(s), "gather") && good;
+        cheshire::devFree(original);
+        if (!good) return false;
+    }
+    else
+    {
+        if (!ok(cudaMemcpyAsync(_points, points, nbPoints * 3 * sizeof(double), cudaMemcpyHostToDevice, s), "upload points")) return false;
+        if (!ok(cudaStreamSynchronize(s), "upload")) return false;
+    }
     if (!reserve(maxQueries)) return false;
-    if (!ok(cudaMemcpy(_points, points, nbPoints * 3 * sizeof(double), cudaMemcpyHostToDevice), "upload points")) return false;
-    if (!ok(cudaMemcpy(_nodes, nodes, nbNodes * sizeof(Node), cudaMemcpyHostToDevice), "upload nodes")) return false;
-    if (!ok(cudaMemcpy(_perm, perm, nbPoints * sizeof(std::uint32_t), cudaMemcpyHostToDevice), "upload perm")) return false;
     return true;
+}
+
+namespace {
+struct KnnArgs
+{
+    const Node* nodes;
+    const double* pts;
+    const std::uint32_t* perm;
+    const double* queries;
+    std::uint32_t nbQueries;
+    double lo[3];
+    double hi[3];
+    std::uint32_t* outIndex;
+    double* outDist2;
+    unsigned int* overflow;
+};
+
+template<bool FMA>
+void launchFlat(unsigned int grid, unsigned int block, cudaStream_t s, const KnnArgs& a)
+{
+    knnKernel<FMA><<<grid, block, 0, s>>>(a.nodes, a.pts, a.perm, a.queries, a.nbQueries, a.lo[0], a.lo[1], a.lo[2], a.hi[0], a.hi[1], a.hi[2],
+                                          a.outIndex, a.outDist2, a.overflow);
+}
+
+template<bool FMA, int DEPTH>
+void launchLeaf(unsigned int grid, unsigned int block, cudaStream_t s, const KnnArgs& a)
+{
+    knnLeafKernel<FMA, DEPTH><<<grid, block, 0, s>>>(a.nodes, a.pts, a.perm, a.queries, a.nbQueries, a.lo[0], a.lo[1], a.lo[2], a.hi[0], a.hi[1],
+                                                     a.hi[2], a.outIndex, a.outDist2, a.overflow);
+}
+}  // namespace
+
+bool Index::launchKnn(std::size_t nbQueries, bool fma)
+{
+    cudaStream_t s = (cudaStream_t)_stream;
+    const KnnArgs a{(const Node*)_nodes, (const double*)_points, (const std::uint32_t*)_perm, (const double*)_queries, (std::uint32_t)nbQueries,
+                    {_lo[0], _lo[1], _lo[2]}, {_hi[0], _hi[1], _hi[2]}, (std::uint32_t*)_outIndex, (double*)_outDist,
+                    (unsigned int*)_overflowCounter};
+    const unsigned int block = 128;
+    const unsigned int grid = (unsigned int)((nbQueries + block - 1) / block);
+    if (!_leafOrder)
+        fma ? launchFlat<true>(grid, block, s, a) : launchFlat<false>(grid, block, s, a);
+    else if (_stack == 40)
+        fma ? launchLeaf<true, 40>(grid, block, s, a) : launchLeaf<false, 40>(grid, block, s, a);
+    else if (_stack == 64)
+        fma ? launchLeaf<true, 64>(grid, block, s, a) : launchLeaf<false, 64>(grid, block, s, a);
+    else
+        fma ? launchLeaf<true, kMaxDepth>(grid, block, s, a) : launchLeaf<false, kMaxDepth>(grid, block, s, a);
+    return ok(cudaGetLastError(), "launch");
 }
 
 bool Index::reserve(std::size_t maxQueries)
@@ -441,17 +991,7 @@ bool Index::queryAsync(const double* queries, std::size_t nbQueries, std::uint32
     if (!ok(cudaMemcpyAsync(_queries, queries, nbQueries * 3 * sizeof(double), cudaMemcpyHostToDevice, s), "upload queries")) return false;
     if (!ok(cudaMemsetAsync(_overflowCounter, 0, sizeof(unsigned int), s), "reset counter")) return false;
     if (!ok(cudaEventRecord(ev[1], s), "event 1")) return false;
-    const unsigned int block = 128;
-    const unsigned int grid = (unsigned int)((nbQueries + block - 1) / block);
-    if (fma)
-        knnKernel<true><<<grid, block, 0, s>>>((const Node*)_nodes, (const double*)_points, (const std::uint32_t*)_perm, (const double*)_queries,
-                                               (std::uint32_t)nbQueries, _lo[0], _lo[1], _lo[2], _hi[0], _hi[1], _hi[2],
-                                               (std::uint32_t*)_outIndex, (double*)_outDist, (unsigned int*)_overflowCounter);
-    else
-        knnKernel<false><<<grid, block, 0, s>>>((const Node*)_nodes, (const double*)_points, (const std::uint32_t*)_perm, (const double*)_queries,
-                                                (std::uint32_t)nbQueries, _lo[0], _lo[1], _lo[2], _hi[0], _hi[1], _hi[2],
-                                                (std::uint32_t*)_outIndex, (double*)_outDist, (unsigned int*)_overflowCounter);
-    if (!ok(cudaGetLastError(), "launch")) return false;
+    if (!launchKnn(nbQueries, fma)) return false;
     if (!ok(cudaEventRecord(ev[2], s), "event 2")) return false;
     if (!ok(cudaMemcpyAsync(outIndex, _outIndex, nbQueries * sizeof(std::uint32_t), cudaMemcpyDeviceToHost, s), "download index")) return false;
     if (!ok(cudaMemcpyAsync(outDist2, _outDist, nbQueries * sizeof(double), cudaMemcpyDeviceToHost, s), "download dist")) return false;
@@ -507,17 +1047,7 @@ bool Index::backprojectQueryAsync(const float* depth, int w, int h, const std::u
         backprojectKernel<false><<<(unsigned int)h, kBpBlock, 0, s>>>((const float*)_depth, w, h, (const std::uint64_t*)_rowStart, bc, (double*)_queries, (double*)_pixSize);
     if (!ok(cudaGetLastError(), "launch backprojection")) return false;
     if (!ok(cudaEventRecord(ev[4], s), "event 4")) return false;
-    const unsigned int block = 128;
-    const unsigned int grid = (unsigned int)((nbQueries + block - 1) / block);
-    if (fma)
-        knnKernel<true><<<grid, block, 0, s>>>((const Node*)_nodes, (const double*)_points, (const std::uint32_t*)_perm, (const double*)_queries,
-                                               (std::uint32_t)nbQueries, _lo[0], _lo[1], _lo[2], _hi[0], _hi[1], _hi[2],
-                                               (std::uint32_t*)_outIndex, (double*)_outDist, (unsigned int*)_overflowCounter);
-    else
-        knnKernel<false><<<grid, block, 0, s>>>((const Node*)_nodes, (const double*)_points, (const std::uint32_t*)_perm, (const double*)_queries,
-                                                (std::uint32_t)nbQueries, _lo[0], _lo[1], _lo[2], _hi[0], _hi[1], _hi[2],
-                                                (std::uint32_t*)_outIndex, (double*)_outDist, (unsigned int*)_overflowCounter);
-    if (!ok(cudaGetLastError(), "launch")) return false;
+    if (!launchKnn(nbQueries, fma)) return false;
     if (!ok(cudaEventRecord(ev[2], s), "event 2")) return false;
     if (!ok(cudaMemcpyAsync(outQueries, _queries, nbQueries * 3 * sizeof(double), cudaMemcpyDeviceToHost, s), "download queries")) return false;
     if (!ok(cudaMemcpyAsync(outPixSize, _pixSize, nbQueries * sizeof(double), cudaMemcpyDeviceToHost, s), "download pixel sizes")) return false;
@@ -536,7 +1066,9 @@ bool Index::wait()
     if (!_inFlight) return true;
     _inFlight = false;
     const bool bp = _bpInFlight;
+    const bool votes = _votesInFlight;
     _bpInFlight = false;
+    _votesInFlight = false;
     if (!ok(cudaStreamSynchronize((cudaStream_t)_stream), "sync")) return false;
     cudaEvent_t* ev = (cudaEvent_t*)_events;
     float ms = 0;
@@ -549,7 +1081,14 @@ bool Index::wait()
     }
     else if (cudaEventElapsedTime(&ms, ev[1], ev[2]) == cudaSuccess)
         _msKernel += ms;
-    if (cudaEventElapsedTime(&ms, ev[2], ev[3]) == cudaSuccess) _msDownload += ms;
+    if (votes)
+    {
+        // ev[5] closes the fold (step 6t): decide, sort and fold, then the downloads
+        if (cudaEventElapsedTime(&ms, ev[2], ev[5]) == cudaSuccess) _msVotes += ms;
+        if (cudaEventElapsedTime(&ms, ev[5], ev[3]) == cudaSuccess) _msDownload += ms;
+    }
+    else if (cudaEventElapsedTime(&ms, ev[2], ev[3]) == cudaSuccess)
+        _msDownload += ms;
     _overflowed = *(const unsigned int*)_overflowHost;
     return true;
 }
@@ -558,6 +1097,7 @@ void Index::release()
 {
     if (_stream) cudaStreamSynchronize((cudaStream_t)_stream);
     _inFlight = false;
+    releaseVotes();
     for (void** p : {&_points, &_nodes, &_perm, &_queries, &_outIndex, &_outDist, &_overflowCounter, &_depth, &_rowStart, &_pixSize})
     {
         if (*p) cheshire::devFree(*p);
@@ -565,7 +1105,7 @@ void Index::release()
     }
     hostFree(_overflowHost);
     _overflowHost = nullptr;
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < 6; ++i)
     {
         if (_events[i]) cudaEventDestroy((cudaEvent_t)_events[i]);
         _events[i] = nullptr;
@@ -577,6 +1117,168 @@ void Index::release()
     _bpRowCapacity = 0;
     _overflowed = 0;
     _bpInFlight = false;
+    _votesInFlight = false;
+    _treeFrames = -1;
+}
+
+// ---- device votes (step 6t) -----------------------------------------------------------------
+
+void Index::releaseVotes()
+{
+    for (void** p : {&_vCoords, &_vNrc, &_vSim, &_vScoreV, &_vBitmap, &_vKeys, &_vCnt, &_vOffsets, &_vTileSums, &_vSlots, &_vSlotVertex, &_vCounts})
+    {
+        if (*p) cheshire::devFree(*p);
+        *p = nullptr;
+    }
+    _votesN = 0;
+    _vCapacity = 0;
+    _vTiles = 0;
+}
+
+bool Index::votesBegin(std::size_t nbVertices, const double* coords, const int* nrc, const float* sim, const float* scoreV, float voteMargin,
+                       float contributeMargin, std::size_t maxQueries)
+{
+    if (_stream == nullptr || nbVertices == 0 || nbVertices >= 0xFFFFFFF0u || maxQueries == 0 || maxQueries > _queryCapacity
+        || _pixSize == nullptr)
+        return false;
+    if (!wait()) return false;
+    releaseVotes();
+    cudaStream_t s = (cudaStream_t)_stream;
+    const std::size_t words = (nbVertices + 31) / 32;
+    const std::size_t tiles = (nbVertices + 1 + kScanTile - 1) / kScanTile;  // the scan covers nbVertices + 1 counts
+    bool good = true;
+    good = good && ok(cheshire::devMalloc(&_vCoords, nbVertices * 3 * sizeof(double)), "alloc vote coordinates");
+    good = good && ok(cheshire::devMalloc(&_vNrc, nbVertices * sizeof(int)), "alloc vote nrc");
+    good = good && ok(cheshire::devMalloc(&_vSim, nbVertices * sizeof(float)), "alloc vote sim");
+    good = good && ok(cheshire::devMalloc(&_vScoreV, nbVertices * sizeof(float)), "alloc vote scores");
+    good = good && ok(cheshire::devMalloc(&_vBitmap, words * sizeof(std::uint32_t)), "alloc vote bitmap");
+    good = good && ok(cheshire::devMalloc(&_vKeys, maxQueries * sizeof(std::uint32_t)), "alloc vote keys");
+    good = good && ok(cheshire::devMalloc(&_vCnt, (nbVertices + 1) * sizeof(unsigned int)), "alloc vote counts per vertex");
+    good = good && ok(cheshire::devMalloc(&_vOffsets, (nbVertices + 1) * sizeof(unsigned int)), "alloc vote offsets");
+    good = good && ok(cheshire::devMalloc(&_vTileSums, tiles * sizeof(unsigned int)), "alloc vote scan");
+    good = good && ok(cheshire::devMalloc(&_vSlots, maxQueries * sizeof(std::uint32_t)), "alloc vote slots");
+    good = good && ok(cheshire::devMalloc(&_vSlotVertex, maxQueries * sizeof(std::uint32_t)), "alloc vote slot vertices");
+    good = good && ok(cheshire::devMalloc(&_vCounts, 3 * sizeof(unsigned long long)), "alloc vote counts");
+    good = good && ok(cudaMemcpyAsync(_vCoords, coords, nbVertices * 3 * sizeof(double), cudaMemcpyHostToDevice, s), "upload vote coordinates");
+    good = good && ok(cudaMemcpyAsync(_vNrc, nrc, nbVertices * sizeof(int), cudaMemcpyHostToDevice, s), "upload vote nrc");
+    good = good && ok(cudaMemcpyAsync(_vSim, sim, nbVertices * sizeof(float), cudaMemcpyHostToDevice, s), "upload vote sim");
+    good = good && ok(cudaMemcpyAsync(_vScoreV, scoreV, nbVertices * sizeof(float), cudaMemcpyHostToDevice, s), "upload vote scores");
+    good = good && ok(cudaMemsetAsync(_vBitmap, 0, words * sizeof(std::uint32_t), s), "clear vote bitmap");
+    good = good && ok(cudaMemsetAsync(_vCnt, 0, (nbVertices + 1) * sizeof(unsigned int), s), "clear vote counts per vertex");
+    good = good && ok(cudaStreamSynchronize(s), "vote upload");
+    if (!good)
+    {
+        releaseVotes();
+        return false;
+    }
+    _votesN = nbVertices;
+    _vCapacity = maxQueries;
+    _vTiles = tiles;
+    _voteMargin = voteMargin;
+    _contributeMargin = contributeMargin;
+    return true;
+}
+
+bool Index::backprojectQueryVoteAsync(const float* depth, int w, int h, const std::uint64_t* rowStart, std::size_t nbQueries, const Camera& cam,
+                                      bool fmaBackproject, bool fma, std::uint32_t* outBitmap, unsigned long long* outCounts, double* outQueries,
+                                      double* outPixSize, std::uint32_t* outIndex, double* outDist2)
+{
+    if (_points == nullptr || _inFlight || _votesN == 0 || w <= 0 || h <= 0) return false;
+    const std::size_t pixels = (std::size_t)w * (std::size_t)h;
+    if (nbQueries > _queryCapacity || nbQueries > _vCapacity || nbQueries > pixels || pixels > _bpPixelCapacity || (std::size_t)h + 1 > _bpRowCapacity)
+        return false;
+    cudaStream_t s = (cudaStream_t)_stream;
+    cudaEvent_t* ev = (cudaEvent_t*)_events;
+    const std::size_t words = votesBitmapWords();
+    if (nbQueries == 0)
+    {
+        // nothing voted: an empty bitmap and zero counts, as the host would have
+        for (std::size_t i = 0; i < words; ++i) outBitmap[i] = 0;
+        outCounts[0] = outCounts[1] = outCounts[2] = 0;
+        return true;
+    }
+    BpCam bc;
+    for (int i = 0; i < 3; ++i) bc.C[i] = cam.C[i];
+    for (int i = 0; i < 9; ++i) bc.iK[i] = cam.iK[i];
+    for (int i = 0; i < 12; ++i) bc.P[i] = cam.P[i];
+    if (!ok(cudaEventRecord(ev[0], s), "event 0")) return false;
+    if (!ok(cudaMemcpyAsync(_depth, depth, pixels * sizeof(float), cudaMemcpyHostToDevice, s), "upload depth")) return false;
+    if (!ok(cudaMemcpyAsync(_rowStart, rowStart, ((std::size_t)h + 1) * sizeof(std::uint64_t), cudaMemcpyHostToDevice, s), "upload row starts")) return false;
+    if (!ok(cudaMemsetAsync(_overflowCounter, 0, sizeof(unsigned int), s), "reset counter")) return false;
+    if (!ok(cudaMemsetAsync(_vCounts, 0, 3 * sizeof(unsigned long long), s), "reset vote counts")) return false;
+    if (!ok(cudaEventRecord(ev[1], s), "event 1")) return false;
+    if (fmaBackproject)
+        backprojectKernel<true><<<(unsigned int)h, kBpBlock, 0, s>>>((const float*)_depth, w, h, (const std::uint64_t*)_rowStart, bc, (double*)_queries, (double*)_pixSize);
+    else
+        backprojectKernel<false><<<(unsigned int)h, kBpBlock, 0, s>>>((const float*)_depth, w, h, (const std::uint64_t*)_rowStart, bc, (double*)_queries, (double*)_pixSize);
+    if (!ok(cudaGetLastError(), "launch backprojection")) return false;
+    if (!ok(cudaEventRecord(ev[4], s), "event 4")) return false;
+    if (!launchKnn(nbQueries, fma)) return false;
+    if (!ok(cudaEventRecord(ev[2], s), "event 2")) return false;
+    const unsigned int grid = (unsigned int)((nbQueries + kVoteBlock - 1) / kVoteBlock);
+    const std::uint32_t nv = (std::uint32_t)_votesN;
+    decideKernel<<<grid, kVoteBlock, 0, s>>>((const std::uint32_t*)_outIndex, (const double*)_outDist, (const double*)_pixSize, (std::uint32_t)nbQueries, nv,
+                                             (const float*)_vSim, (const float*)_vScoreV, _voteMargin, _contributeMargin, (std::uint32_t*)_vBitmap,
+                                             (std::uint32_t*)_vKeys, (unsigned int*)_vCnt, (unsigned long long*)_vCounts);
+    if (!ok(cudaGetLastError(), "launch decide")) return false;
+    scanTotalsKernel<<<(unsigned int)_vTiles, kScanBlock, 0, s>>>((const unsigned int*)_vCnt, nv + 1, (unsigned int*)_vTileSums);
+    scanTileSumsKernel<<<1, kScanBlock, 0, s>>>((unsigned int*)_vTileSums, (std::uint32_t)_vTiles);
+    scanTilesKernel<<<(unsigned int)_vTiles, kScanBlock, 0, s>>>((const unsigned int*)_vCnt, nv + 1, (const unsigned int*)_vTileSums, (unsigned int*)_vOffsets);
+    if (!ok(cudaGetLastError(), "launch scan")) return false;
+    scatterKernel<<<grid, kVoteBlock, 0, s>>>((const std::uint32_t*)_vKeys, (std::uint32_t)nbQueries, nv, (const unsigned int*)_vOffsets, (unsigned int*)_vCnt,
+                                              (std::uint32_t*)_vSlots, (std::uint32_t*)_vSlotVertex, (unsigned long long*)_vCounts);
+    foldRunsKernel<<<grid, kVoteBlock, 0, s>>>((const unsigned int*)_vOffsets, nv, (std::uint32_t*)_vSlots, (const std::uint32_t*)_vSlotVertex,
+                                               (std::uint32_t)nbQueries, (const double*)_queries, (double*)_vCoords, (int*)_vNrc,
+                                               (unsigned long long*)_vCounts);
+    if (!ok(cudaGetLastError(), "launch fold")) return false;
+    if (!ok(cudaEventRecord(ev[5], s), "event 5")) return false;
+    if (!ok(cudaMemcpyAsync(outBitmap, _vBitmap, words * sizeof(std::uint32_t), cudaMemcpyDeviceToHost, s), "download bitmap")) return false;
+    if (!ok(cudaMemsetAsync(_vBitmap, 0, words * sizeof(std::uint32_t), s), "clear vote bitmap")) return false;
+    if (!ok(cudaMemcpyAsync(outCounts, _vCounts, 3 * sizeof(unsigned long long), cudaMemcpyDeviceToHost, s), "download vote counts")) return false;
+    if (outQueries && !ok(cudaMemcpyAsync(outQueries, _queries, nbQueries * 3 * sizeof(double), cudaMemcpyDeviceToHost, s), "download queries")) return false;
+    if (outPixSize && !ok(cudaMemcpyAsync(outPixSize, _pixSize, nbQueries * sizeof(double), cudaMemcpyDeviceToHost, s), "download pixel sizes")) return false;
+    if (outIndex && !ok(cudaMemcpyAsync(outIndex, _outIndex, nbQueries * sizeof(std::uint32_t), cudaMemcpyDeviceToHost, s), "download index")) return false;
+    if (outDist2 && !ok(cudaMemcpyAsync(outDist2, _outDist, nbQueries * sizeof(double), cudaMemcpyDeviceToHost, s), "download dist")) return false;
+    if (!ok(cudaMemcpyAsync(_overflowHost, _overflowCounter, sizeof(unsigned int), cudaMemcpyDeviceToHost, s), "download counter")) return false;
+    if (!ok(cudaEventRecord(ev[3], s), "event 3")) return false;
+    _inFlight = true;
+    _bpInFlight = true;
+    _votesInFlight = true;
+    return true;
+}
+
+bool Index::votesEnd(double* coords, int* nrc)
+{
+    if (_votesN == 0) return false;
+    if (!wait()) return false;
+    cudaStream_t s = (cudaStream_t)_stream;
+    if (!ok(cudaMemcpyAsync(coords, _vCoords, _votesN * 3 * sizeof(double), cudaMemcpyDeviceToHost, s), "download vote coordinates")) return false;
+    if (!ok(cudaMemcpyAsync(nrc, _vNrc, _votesN * sizeof(int), cudaMemcpyDeviceToHost, s), "download vote nrc")) return false;
+    return ok(cudaStreamSynchronize(s), "vote download");
+}
+
+bool Index::foldProbe(const double* x, const int* n, const double* q, std::size_t count, double* out)
+{
+    if (_stream == nullptr || count == 0 || count > 0xFFFFFFu) return false;
+    if (!wait()) return false;
+    cudaStream_t s = (cudaStream_t)_stream;
+    void *dx = nullptr, *dn = nullptr, *dq = nullptr, *dout = nullptr;
+    bool good = ok(cheshire::devMalloc(&dx, count * 3 * sizeof(double)), "alloc probe") && ok(cheshire::devMalloc(&dn, count * sizeof(int)), "alloc probe")
+                && ok(cheshire::devMalloc(&dq, count * 3 * sizeof(double)), "alloc probe") && ok(cheshire::devMalloc(&dout, count * 3 * sizeof(double)), "alloc probe");
+    good = good && ok(cudaMemcpyAsync(dx, x, count * 3 * sizeof(double), cudaMemcpyHostToDevice, s), "upload probe")
+           && ok(cudaMemcpyAsync(dn, n, count * sizeof(int), cudaMemcpyHostToDevice, s), "upload probe")
+           && ok(cudaMemcpyAsync(dq, q, count * 3 * sizeof(double), cudaMemcpyHostToDevice, s), "upload probe");
+    if (good)
+    {
+        foldProbeKernel<<<(unsigned int)((count + kVoteBlock - 1) / kVoteBlock), kVoteBlock, 0, s>>>((const double*)dx, (const int*)dn, (const double*)dq,
+                                                                                                    (std::uint32_t)count, (double*)dout);
+        good = ok(cudaGetLastError(), "launch probe")
+               && ok(cudaMemcpyAsync(out, dout, count * 3 * sizeof(double), cudaMemcpyDeviceToHost, s), "download probe");
+    }
+    good = ok(cudaStreamSynchronize(s), "probe") && good;
+    for (void* p : {dx, dn, dq, dout})
+        if (p) cheshire::devFree(p);
+    return good;
 }
 
 }  // namespace knn
