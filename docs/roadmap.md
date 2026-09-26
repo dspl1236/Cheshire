@@ -303,7 +303,7 @@ L items can slide.
   against 334 s, about 1.5 %), because loads are only about 3 % of that node on 12 threads. Merged
   into main off by default on 2026-09-25 (the fold-in before the full hardware round), so the s10
   Linux bundle carries it. **Across three boxes** (DepthMap, device path against host): 1.5 %
-  faster on the RX 9070 box, 20 % slower on bench-pc (FX-8120 + RX 5500 XT), 8.5 % faster on house-pc
+  faster on the RX 9070 box, 1.9 % slower on bench-pc (FX-8120 + RX 5500 XT; 20 % before the decoder fix below), 8.5 % faster on house-pc
   (i3-4330 + RX 6750 XT, an engine bay A/B), all exact. It stays an off-by-default experiment with no ZIPS output
   option. Open on bench-pc: the in-node decode is 4-6x slower than standalone with no spills, and
   with the check on a good file came back `Corrupt` near the VRAM cap. With per-image timings and a
@@ -315,7 +315,9 @@ L items can slide.
   (host-side check): 132 of 132 identical, no spills, no `Corrupt`; the decode runs at standalone
   speed for the first batches and 10x slower once the device cache fills the card (likely WDDM
   placing reallocated buffers in system memory), so the decoders are now kept for the process,
-  allocated at the first batch, with per-batch free-VRAM logging. The check mode's
+  allocated at the first batch, with per-batch free-VRAM logging. Run 3 (2026-09-26) confirms it:
+  decode 0.21-0.46 s per image through all 24 batches, 54.6 s summed against 216-228 s, the node
+  837 s against 821 s on the host path (was 982 s), 96 of 96 maps identical. The check mode's
   heap corruption on Windows is fixed, and so is the GPU check's throughput mode, which counted
   failed decodes (an out-of-memory at 8 threads on the RX 5500 XT printed 25.5 images/s and PASS).
 - **CheshireJPG for the reads** (L). **In, off by default, 2026-09-25** (step 6r, `CHESHIRE_GPU_JPEG=1`; exact on the RX 9070 and the GTX 1080 Ti; remaining gates and timings in docs/notes/cheshirejpg-reads-plan.md). The GPU JPEG codec exists (docs/19): a baseline decoder and

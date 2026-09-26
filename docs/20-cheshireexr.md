@@ -244,12 +244,13 @@ The two jobs ran their own SfM, which is not deterministic by default, so their 
 compared byte for byte; each produced 107 depth maps.
 
 **Across the three boxes, DepthMap with the device path against the host path:** 1.5 % faster on
-the RX 9070 box (328.8 against 333.6 s on the same ZIPS files), 20 % slower on bench-pc, 8.5 % faster
-on house-pc. It helps where the CPU is weak and the card is
-strong, and hurts on an 8-thread CPU with a small RDNA1 card. It stays an off-by-default experiment,
-with no ZIPS output option.
+the RX 9070 box (328.8 against 333.6 s on the same ZIPS files), 1.9 % slower on bench-pc (837
+against 821 s, with the decoders kept for the process; 20 % slower before that fix, see below), 8.5 %
+faster on house-pc (measured before the fix). It helps where the CPU is weak and the card is
+strong, and is neutral on an 8-thread CPU with a small RDNA1 card. It stays an off-by-default
+experiment, with no ZIPS output option.
 
-**Two things on bench-pc are not understood yet:**
+**Two things on bench-pc were not understood at first (both are explained below):**
 
 - **In the node, the device decode is 4 to 6 times slower than on its own.** Standalone, a
   6000x3376 ZIPS file decodes to the device in 308 ms on the RX 5500 XT, so 132 images would take
@@ -312,12 +313,27 @@ it. If a later batch finds the camera images' reserve no longer fitting beside t
 their buffers and uses the host path. With `CHESHIRE_EXR_PROFILE=1` each batch logs the device's
 free memory (`hipMemGetInfo`) and the bridge's VRAM use at its start and after its loads.
 
+**bench-pc run 3 (08f540f on main e464554, decoders kept for the process, no check, 2026-09-26):**
+the late-batch slowdown is gone. The mean decode per image stays at 0.21-0.46 s from batch 1 to
+batch 24, where it had risen to 2-5 s from batch 7, so re-allocating the decoders every batch was
+the cause. 0 `Corrupt`, 0 spills, and 96 of 96 maps byte-identical to the host path's.
+
+| | before the fix (7bee71a, 6d0b48d) | decoders kept (08f540f) | host path, same build |
+|---|---|---|---|
+| DepthMap task | 982 s | 837 s | 821 s |
+| decode, summed over batches | 216-228 s | 54.6 s | 30.4 s |
+| loads, summed over batches | 223-236 s | 65.2 s | 92.0 s |
+
+The device path's loads are now faster than the host path's; the node is 16 s (1.9 %) slower
+overall, with 24 s more decode.
+
 **What the loader reports**, for the runs on bench-pc:
 
 - With `CHESHIRE_EXR_PROFILE=1` or `CHESHIRE_LOAD_PROFILE=1`, one line per image splits its time into
   reading the file, waiting for a decoder, the decode (marked when it is a new decoder's first,
-  which creates the decoder's stream, pinned staging and device buffers) and the downscale. A line
-  per batch gives the time taken to free the decoders.
+  which creates the decoder's stream, pinned staging and device buffers) and the downscale. Two
+  lines per batch give the device's free memory and the bridge's state at its start and after its
+  loads.
 - Every `Corrupt` is logged as a warning, not just the first, with the host's parse of the same
   bytes, the bridge's VRAM use and spilled bytes at that moment, and the result of one more decode
   with fresh device buffers. If the retry decodes cleanly (every zlib check passes), its result is
