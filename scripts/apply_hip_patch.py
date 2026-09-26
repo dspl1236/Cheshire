@@ -4724,12 +4724,12 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
     #     check ON with X=0). The sources call cheshire::env::*; this step adds the #include to every
     #     file of the tree that does, and for an .inc to the file that includes it, since an .inc is
     #     included inside a namespace. Then it refuses a tree that still reads a CHESHIRE_* variable
-    #     any other way. The codec libraries (cheshireexr, and cheshirejpg when it arrives) build on
-    #     their own outside AliceVision and keep their one probe.
+    #     any other way. The codec libraries (hip/port/cheshireexr, copied into the tree in 6m, and
+    #     hip/port/cheshirejpg, built from the checkout in 6r) include <cheshire/env.h>, which resolves
+    #     next to bridge.h in AliceVision and to hip/compat/include standalone; both are checked too.
     env_inc = "#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches"
     src_root = AV / "src"
     code_ext = {".cpp", ".hpp", ".h", ".cu", ".cuh", ".inc", ".hip"}
-    codec_dirs = ("/cheshireexr/", "/cheshirejpg/")
     env_dir = (AV / "src/aliceVision/depthMap/cuda/hip/cheshire").as_posix()
     tree_files = {p: p.read_text(encoding="utf-8", errors="surrogateescape")
                   for p in src_root.rglob("*") if p.is_file() and p.suffix in code_ext}
@@ -4774,8 +4774,10 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                 env_added.append(q.relative_to(AV).as_posix())
     raw_read = re.compile(r'getenv\s*\(\s*"CHESHIRE_')
     left = sorted(p.relative_to(AV).as_posix() for p, t in tree_files.items()
-                  if p.parent.as_posix() != env_dir and raw_read.search(t)
-                  and not any(d in "/" + p.relative_to(AV).as_posix() for d in codec_dirs))
+                  if p.parent.as_posix() != env_dir and raw_read.search(t))
+    left += sorted(p.relative_to(ROOT).as_posix() for d in ("cheshireexr", "cheshirejpg")
+                   for p in (ROOT / "hip/port" / d).iterdir()
+                   if p.suffix in code_ext and raw_read.search(p.read_text(encoding="utf-8")))
     if left:
         sys.exit("step 6q: CHESHIRE_* read outside cheshire/env.h in:\n  " + "\n  ".join(left))
     print(f"6q: cheshire/env.h included in {len(env_added)} files; no CHESHIRE_* read bypasses it")

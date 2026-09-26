@@ -1,13 +1,15 @@
 // CheshireEXR: the device backend and the public Codec. CUDA dialect; the HIP build force-includes
 // cheshire/cuda_to_hip.h (allocations go through the memory bridge). Each Codec has its own stream
 // and pinned staging area (cheshiregpu/asyncBackend.hpp), as CheshireJPG's does.
-// CHESHIRE_EXR_GPU=0 disables.
+// CHESHIRE_EXR_GPU=0 (or false, off, no) disables; read through cheshire/env.h like every CHESHIRE_* switch.
 #include "asyncBackend.hpp"
 #include "cudaRuntime.cuh"
 #include "exrCodec.hpp"
 #include "exrPipeline.hpp"
 
 #include <cuda_runtime.h>
+
+#include <cheshire/env.h>  // hip/compat/include; in AliceVision, next to bridge.h
 
 #include <cstdio>
 #include <cstdlib>
@@ -25,12 +27,11 @@ bool g_available = false;
 
 void probe()
 {
-    if (const char* e = std::getenv("CHESHIRE_EXR_GPU"))
-        if (e[0] == '0')
-        {
-            std::fprintf(stderr, "[cheshire] CheshireEXR: disabled by CHESHIRE_EXR_GPU=0\n");
-            return;
-        }
+    if (!::cheshire::env::flag("CHESHIRE_EXR_GPU", true))
+    {
+        std::fprintf(stderr, "[cheshire] CheshireEXR: disabled by CHESHIRE_EXR_GPU\n");
+        return;
+    }
     int n = 0;
     if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1)
     {

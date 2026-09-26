@@ -36,7 +36,7 @@ enum class Status
     NotExr,       // no EXR magic, or truncated before the chunk table
     Unsupported,  // a valid EXR this decoder does not handle (see above)
     Corrupt,      // a chunk OpenEXR would fail on; the caller's OpenEXR path decides
-    NoDevice,     // no GPU, or disabled by CHESHIRE_EXR_GPU=0
+    NoDevice,     // no GPU, or disabled by CHESHIRE_EXR_GPU=0 (or false, off, no)
     DeviceError,  // a runtime call failed
     InvalidArgument,
 };
@@ -133,7 +133,7 @@ class Codec
     Codec(const Codec&) = delete;
     Codec& operator=(const Codec&) = delete;
 
-    // True if a device is present and CHESHIRE_EXR_GPU is not 0. Checked once per process.
+    // True if a device is present and CHESHIRE_EXR_GPU does not switch it off (cheshire/env.h). Checked once per process.
     static bool deviceAvailable();
 
     // nchannels as Cheshire's direct reader takes it: 1 for a one-channel file (its only channel),

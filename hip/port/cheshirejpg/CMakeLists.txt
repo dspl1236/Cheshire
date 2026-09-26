@@ -17,6 +17,7 @@ if(CHESHIREJPG_GPU STREQUAL "CUDA")
   set(CMAKE_CUDA_STANDARD 17)
   set_source_files_properties(jpegGPU.cu PROPERTIES LANGUAGE CUDA)
   add_library(CheshireJPG STATIC jpegGPU.cu jpegHost.cpp)
+  target_include_directories(CheshireJPG PRIVATE ${CHESHIREJPG_COMPAT})  # cheshire/env.h
 else()
   enable_language(HIP)
   set(CMAKE_HIP_STANDARD 17)

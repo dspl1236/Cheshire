@@ -12,13 +12,15 @@
 // The staging area grows to the largest single transfer, typically the decoded image: about 36 MB
 // of pinned memory per Codec for 4032x3024 RGB.
 //
-// CHESHIRE_JPG=0 disables.
+// CHESHIRE_JPG=0 (or false, off, no) disables; read through cheshire/env.h like every CHESHIRE_* switch.
 #include "asyncBackend.hpp"
 #include "cudaRuntime.cuh"
 #include "jpegCodec.hpp"
 #include "jpegPipeline.hpp"
 
 #include <cuda_runtime.h>
+
+#include <cheshire/env.h>  // hip/compat/include; in AliceVision, next to bridge.h
 
 #include <cstdio>
 #include <cstdlib>
@@ -36,12 +38,11 @@ bool g_available = false;
 
 void probe()
 {
-    if (const char* e = std::getenv("CHESHIRE_JPG"))
-        if (e[0] == '0')
-        {
-            std::fprintf(stderr, "[cheshire] CheshireJPG: disabled by CHESHIRE_JPG=0\n");
-            return;
-        }
+    if (!::cheshire::env::flag("CHESHIRE_JPG", true))
+    {
+        std::fprintf(stderr, "[cheshire] CheshireJPG: disabled by CHESHIRE_JPG\n");
+        return;
+    }
     int n = 0;
     if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1)
     {
