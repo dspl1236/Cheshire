@@ -2473,3 +2473,16 @@ It is in the gate's `verify` configuration.
 | False Door, 884 views, RX 9070 box | 13.8 s to 3.3 s before the save (the function: 1.5 s building the landmarks on 12 threads, 0.4 s filling the map); the Meshing node 241.5 s to 228.8 s |
 
 `CHESHIRE_DENSE_SFM=0` runs upstream's function.
+
+**RX 5500 XT (bench-pc, Windows, HIP SDK 6.2, gfx1012, 8 GB; FX-8120), 41 views, package b035 from
+e99273e.** With every Meshing self-check on: backprojection and knn identical on all 88,366,419
+queries of each pass, votes identical to the ordered host reference on all 4,163,049 and 1,876,606
+vertices, and the dense point cloud identical on all 1,181,106 landmarks. Timing, alternating runs:
+
+| | device votes | host votes |
+|---|---|---|
+| passes | 21.2 + 15.5 s, 21.1 + 15.7 s | 21.2 + 16.4 s, 21.1 + 16.4 s |
+| Meshing node | 166.7 s, 165.4 s | 164.2 s, 165.0 s |
+
+Same digests (`f65c6a14...` in pass 1) either way. On this card the passes are device-bound, so the
+default costs nothing and gains under a second.
