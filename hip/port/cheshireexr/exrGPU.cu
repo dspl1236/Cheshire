@@ -89,5 +89,12 @@ void* Codec::stream() const { return impl_->backend.runtime().stream(); }
 
 void Codec::trim() { impl_->pipeline.trim(); }
 
+Diagnosis Codec::diagnose(const uint8_t* file, size_t size, int nchannels)
+{
+    Diagnosis d = impl_->pipeline.diagnose(file, size, nchannels);
+    d.runtimeError = cudaGetErrorString(cudaPeekAtLastError());
+    return d;
+}
+
 }  // namespace exr
 }  // namespace cheshire

@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 namespace aliceVision {
 namespace depthMap {
@@ -38,6 +39,12 @@ inline bool cheshireDeviceDownscaleEnabled()
  * @param[out] out_dmp the downscaled CudaRGBA image, sized inWidth / downscale x inHeight / downscale
  */
 void cuda_cheshireDownscaleToCudaRGBA(const float* in_hostRGBA, int inWidth, int inHeight, CudaDeviceMemoryPitched<CudaRGBA, 2>& out_dmp);
+
+/**
+ * @brief cheshire (step 6m): the same downscale and conversion on the host, into out (outWidth x
+ * outHeight texels, row-major): the reference of CHESHIRE_DEPTHMAP_GPU_EXR_CHECK.
+ */
+void cheshireDownscaleOnHostToCudaRGBA(const float* in_hostRGBA, int inWidth, int inHeight, int outWidth, int outHeight, std::vector<CudaRGBA>& out);
 
 /**
  * @brief cheshire (step 6m): the same downscale and conversion from a full-resolution float RGBA image

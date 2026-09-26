@@ -110,6 +110,19 @@ struct DeviceImage
     size_t rowBytes = 0;
 };
 
+// What Codec::diagnose found about the device copy of the last file this Codec decoded.
+struct Diagnosis
+{
+    bool ran = false;               // false: no file on the device, or a runtime call failed
+    size_t bytes = 0;               // the file's size
+    size_t copyMismatches = 0;      // bytes that differ in a plain download of the device copy
+    size_t firstCopyMismatch = 0;
+    size_t shaderMismatches = 0;    // bytes that differ after a kernel copied them to a new buffer
+    size_t firstShaderMismatch = 0;
+    bool chunkTableMatches = false;  // the chunk table on the device equals the host's
+    std::string runtimeError;       // the runtime's last error, as the runtime names it
+};
+
 // One codec instance owns its stream and device buffers and reuses them. Not thread-safe; use one
 // per thread.
 class Codec
@@ -144,6 +157,11 @@ class Codec
     // This Codec's stream (a cudaStream_t / hipStream_t), for work that reads a DeviceImage in order
     // with the Codec's own. Null before the first decode.
     void* stream() const;
+
+    // For a decode that came back Corrupt although the host parses the file: compares the device's
+    // copy of file (the last one this Codec uploaded, decoded with nchannels) with the host bytes, once as the copy engine
+    // wrote it and once as a kernel reads it, and the chunk table likewise. Slow; diagnostics only.
+    Diagnosis diagnose(const uint8_t* file, size_t size, int nchannels);
 
     // Frees the device buffers, which are otherwise kept for the next decode (a 6000x3376 RGBA file
     // holds about 0.6 GB: the file, the inflated chunks and the floats).

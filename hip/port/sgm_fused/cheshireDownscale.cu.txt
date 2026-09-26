@@ -151,6 +151,33 @@ __global__ void cheshireDownscale_kernel(const float4* in_d,
 #endif
 }
 
+void cheshireDownscaleOnHostToCudaRGBA(const float* in_hostRGBA, int inWidth, int inHeight, int outWidth, int outHeight, std::vector<CudaRGBA>& out)
+{
+    // cheshire (step 6m): the reference CHESHIRE_DEPTHMAP_GPU_EXR_CHECK compares against, on the host.
+    // The host path's downscale (image::cheshire::resizeExact, identical to OpenImageIO's lanczos3,
+    // step 5x) and DeviceCache::addMipmapImage's conversion, compiled here under this file's
+    // fp contract(off) like the checks of step 6d. No device memory: a check that uploaded each
+    // full-resolution image (309 MB at 6000x3376) filled an 8 GB card and changed what it measured.
+    std::vector<float> f(std::size_t(outWidth) * outHeight * 4);
+    image::cheshire::resizeExact<4>(in_hostRGBA, inWidth, inHeight, f.data(), outWidth, outHeight, false);
+    out.resize(std::size_t(outWidth) * outHeight);
+    for (std::size_t p = 0; p < out.size(); ++p)
+    {
+        CudaRGBA& h = out[p];
+#ifdef ALICEVISION_DEPTHMAP_TEXTURE_USE_HALF
+        h.x = __float2half(f[p * 4 + 0] * 255.0f);
+        h.y = __float2half(f[p * 4 + 1] * 255.0f);
+        h.z = __float2half(f[p * 4 + 2] * 255.0f);
+        h.w = __float2half(f[p * 4 + 3] * 255.0f);
+#else
+        h.x = f[p * 4 + 0] * 255.0f;
+        h.y = f[p * 4 + 1] * 255.0f;
+        h.z = f[p * 4 + 2] * 255.0f;
+        h.w = f[p * 4 + 3] * 255.0f;
+#endif
+    }
+}
+
 void cuda_cheshireDownscaleDeviceToCudaRGBA(const float4* in_d,
                                             std::size_t inPitch,
                                             int inWidth,

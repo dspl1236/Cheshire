@@ -302,8 +302,22 @@ L items can slide.
   same time and 6.3 % more disk. The GPU path saved 4 s of loads and 24 s of CPU per chunk (329
   against 334 s, about 1.5 %), because loads are only about 3 % of that node on 12 threads. Merged
   into main off by default on 2026-09-25 (the fold-in before the full hardware round), so the s10
-  Linux bundle carries it; the same test on house-pc's 4-thread i3 decides whether a ZIPS output
-  option joins PrepareDenseScene's documented settings or the switch stays an experiment. The check mode's
+  Linux bundle carries it. **Across three boxes** (DepthMap, device path against host): 1.5 %
+  faster on the RX 9070 box, 1.9 % slower on bench-pc (FX-8120 + RX 5500 XT; 20 % before the decoder fix below), 8.5 % faster on house-pc
+  (i3-4330 + RX 6750 XT, an engine bay A/B), all exact. It stays an off-by-default experiment with no ZIPS output
+  option. Open on bench-pc: the in-node decode is 4-6x slower than standalone with no spills, and
+  with the check on a good file came back `Corrupt` near the VRAM cap. With per-image timings and a
+  log line per `Corrupt`: after the check's first spill every device decode in the process failed,
+  fresh buffers and new decoders included (device- or runtime-wide, HIP 6.2 Windows gfx1012), and the
+  in-node cost is the file reads and the wait for two decoders, not decoder setup. The loader now
+  logs a device diagnosis (copy-engine vs kernel view of the uploaded file) and switches the device
+  decode off for the rest of a process that hits it; the check no longer uses device memory. Run 2
+  (host-side check): 132 of 132 identical, no spills, no `Corrupt`; the decode runs at standalone
+  speed for the first batches and 10x slower once the device cache fills the card (likely WDDM
+  placing reallocated buffers in system memory), so the decoders are now kept for the process,
+  allocated at the first batch, with per-batch free-VRAM logging. Run 3 (2026-09-26) confirms it:
+  decode 0.21-0.46 s per image through all 24 batches, 54.6 s summed against 216-228 s, the node
+  837 s against 821 s on the host path (was 982 s), 96 of 96 maps identical. The check mode's
   heap corruption on Windows is fixed, and so is the GPU check's throughput mode, which counted
   failed decodes (an out-of-memory at 8 threads on the RX 5500 XT printed 25.5 images/s and PASS).
 - **CheshireJPG for the reads** (L). **In, off by default, 2026-09-25** (step 6r, `CHESHIRE_GPU_JPEG=1`): exact on four cards and both backends, but no wall-clock gain on any box (docs/04), so it stays opt-in; FeatureExtraction's read only if a measurement puts the decode on that node's critical path. The GPU JPEG codec exists (docs/19): a baseline decoder and

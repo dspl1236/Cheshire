@@ -65,6 +65,11 @@ bool deviceAgrees(Pipe& pipe, const std::vector<uint8_t>& file, int nch, Status 
     // still queued on the deferred stream when decodeToDevice returns shows up as garbage
     if (std::memcmp(di.data, px.data(), px.size() * sizeof(float)) != 0)
         return false;
+    // Codec::diagnose on a good decode: the device copy of the file and the chunk table must match,
+    // read back by the copy path and through a kernel
+    const Diagnosis dg = pipe.diagnose(file.data(), file.size(), nch);
+    if (!dg.ran || dg.copyMismatches != 0 || dg.shaderMismatches != 0 || !dg.chunkTableMatches || dg.bytes != file.size())
+        return false;
     std::vector<float> out(px.size(), -1.0f);
     if (pipe.download(di, out.data()) != Status::Ok)
         return false;
