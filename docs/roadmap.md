@@ -1,6 +1,7 @@
 # Cheshire roadmap
 
-Written 2026-09-22, the day v0.3.3 shipped. Sizes are S, M, L or XL.
+Written 2026-09-22, the day v0.3.3 shipped. Sizes are S, M, L or XL. Updated 2026-09-26 with upstream's pipeline change (below, "Upstream's next
+pipeline").
 Every item was checked against the tree and git history (159 candidate items from the README,
 docs, validation log, memory notes and code; 32 turned out to be done already and are not listed).
 Line references are to the tree at the commit that added this file. Upstream paths without a
@@ -377,7 +378,8 @@ the earlier proposal.
   "until the quality measurement exists" (`README.md:403-412`). That measurement was done, and the
   QR path it concerns is the one above. The over-determined branch and the spherical solver stay on
   the SVD (see Not planned).
-- **Bundle adjustment on the device** (L; the first SfM work on the GPU). StructureFromMotion is
+- **Bundle adjustment on the device** (L; the first SfM work on the GPU; waits on the scouting step of
+  "Upstream's next pipeline" below, since StructureFromMotion is being replaced upstream). StructureFromMotion is
   the one heavy node that has never touched the GPU, and bundle adjustment is where its time goes:
   63 % of SfM on the engine bay (50.9 s of 92 s: Jacobians 25.1 s, linear solver 13.1 s, per-solve
   bookkeeping 11.0 s; `docs/04-validation.md:750-756`) and 733 s of the 1498 s False Door replay
@@ -420,6 +422,56 @@ the earlier proposal.
   applies the strict 98 % bar (`scripts/compare_depthmaps.py:67,71`). As a result
   `scripts/bridge_matrix.py:50-59` can report a sub-5e-5 difference as bit-identical. Add
   decoded-pixel counts and make PASS/FAIL selectable.
+
+## Upstream's next pipeline: detect, then pivot
+
+Added 2026-09-26. On discussion #2116 an AliceVision maintainer pointed out that StructureFromMotion,
+PrepareDenseScene "and a lot of others" will be replaced in the next release and may disappear in
+the one after. They pointed to the experimental pipelines. On AliceVision's `develop` the pipeline
+templates now live in the AliceVision repository (`meshroom/*.mg`), and `photogrammetry.mg` has a
+new chain beside `photogrammetryLegacy.mg`:
+
+| legacy (Meshroom 2023.3, Cheshire's base) | `develop`'s `photogrammetry.mg` |
+|---|---|
+| StructureFromMotion 3.3 | TracksBuilding 1.0, RelativePoseEstimating 3.0, SfMBootStrapping 4.1, SfMExpanding 2.1 (then SfMTransform, SfMColorizing) |
+| PrepareDenseScene 3.1 | IntrinsicsTransforming 1.0 and ExportImages 1.0 |
+| FeatureExtraction, FeatureMatching, ImageMatching, DepthMap, DepthMapFilter, Meshing, MeshFiltering, Texturing | the same nodes (Depthmap 5.1, DepthMapFilter 4.0, Meshing 7.0, Texturing 6.0 in both templates) |
+
+What carries over:
+
+- Almost all of the GPU work lives in nodes that stay: the matcher, depth maps, the depth-map
+  filter, Meshing (votes, max-flow, visibility, fusion) and Texturing.
+- The SfM work (the #2344 fix, reproducible SfM, BA construction) and the PrepareDenseScene work
+  (the direct 8-bit read's call site, CheshireJPG in the read) target nodes that go.
+- Parts may still carry over if the new nodes share the code underneath: the analytic BA
+  Jacobians if SfMExpanding runs the same `BundleAdjustmentCeres`, and the direct read if
+  ExportImages reads through `image::readImage`. Not checked yet.
+
+Plan, loosely, since the release date is not known:
+
+1. **Detect** (S-M). Pairing and the launcher assume 2023.3's node set. Make them read the Meshroom
+   version and the node versions they would replace. A package then pairs only with the node
+   versions it was built for, and says so instead of silently running a mismatched binary.
+   Worth doing before anything else: it is the guard for whichever way this goes.
+2. **Scout** (M). Read the new nodes on `develop` (TracksBuilding, RelativePoseEstimating,
+   SfMBootStrapping, SfMExpanding, IntrinsicsTransforming, ExportImages) for their hot paths. Find
+   what they share with the legacy nodes (BA, image reads, track building), and time the
+   experimental pipeline on the 41-view set and the engine bay against the legacy one. That
+   settles which SfM/PDS work is worth continuing on the legacy nodes.
+3. **Pivot** (L-XL) when a Meshroom release ships the new pipeline. Rebase the patch set onto that
+   AliceVision release (the generator's anchors, every step), carry the surviving ports first,
+   and keep a 2023.3 package line for as long as people use that release. Versioning then follows
+   the base: one package per supported Meshroom release, chosen by the detection in step 1.
+
+Effect on the open items: bundle adjustment on the device (0.3.5) waits for step 2 to show it
+still applies. GPS pairing, the QR default, the matcher self-check and everything in Meshing,
+DepthMap and Texturing are unaffected.
+
+**Functional tests upstream** (M). The maintainer would welcome our tests and evaluations cleaned up
+as functional tests. First candidate: the reconstruction-quality comparison
+(`scripts/quality_gate.py`: repeated runs, Welch t-test on landmarks and reprojection error, pose
+agreement after a similarity alignment). Asked on #2116 (2026-09-26) where they want such tests to
+live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 
 ## Cheshire Node (own milestone)
 
@@ -565,6 +617,8 @@ the earlier proposal.
 - AliceVision PR #2179 and PR #2181 have no reviews yet. Keep the fork until both close.
 - The #2344 SfM fix was posted with a PR offer (`docs/drafts/meshroom-2344-comment.md:93`), and
   nobody has replied.
+- Discussion #2116 (2026-09-26): asked where functional tests should live (see "Functional tests
+  upstream"). The maintainer prefers autodiff Jacobians upstream for now.
 - The HIP backend and planner PRs (L) are blocked on discussion #2175 or #2116. The planner still
   depends on `cheshire::bridge` (`scripts/apply_hip_patch.py:228-240`).
 
