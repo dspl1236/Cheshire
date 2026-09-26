@@ -2486,3 +2486,43 @@ vertices, and the dense point cloud identical on all 1,181,106 landmarks. Timing
 
 Same digests (`f65c6a14...` in pass 1) either way. On this card the passes are device-bound, so the
 default costs nothing and gains under a second.
+
+## 0.3.5: the EXR reader inflates with libdeflate where OpenEXR uses zlib (6v, 2026-09-26)
+
+The Linux bundle's OpenEXR is 3.1, which inflates ZIP and ZIPS chunks with zlib. OpenEXR 3.2 and
+later use libdeflate, as the Windows packages' 3.4 does. Upgrading the Linux OpenEXR would change
+the bytes of every EXR Cheshire writes, and file-level gates compare those. Only the read path
+needed to change, so the direct EXR reader (5v) now inflates the chunks itself:
+
+1. It takes each chunk's compressed bytes through `InputFile::rawPixelData`.
+2. It inflates them with libdeflate, the system's on Linux (already in the bundle through libtiff)
+   or vcpkg's `deflate.dll` on Windows.
+3. It undoes OpenEXR's byte predictor and interleave.
+4. It writes the lines into the float image, widening half to float exactly as a FLOAT slice does.
+
+Chunks stored uncompressed are copied as they are. The decode runs in batches on OpenEXR's own
+thread pool, so concurrent readers share it as their `readPixels` calls did. On any failure the
+file goes back to `readPixels`. Decompression has only one correct output, so the pixels are
+OpenEXR's. `CHESHIRE_EXR_DEFLATE_CHECK=1` reads every such file both ways and reports at exit:
+
+| where | files identical to `readPixels` |
+|---|---|
+| Windows, forced on, mini6 Meshing (ZIPS one-channel depth and similarity maps) | 24 of 24 |
+| Windows, forced on, mini6 DepthMap on PrepareDenseScene's ZIP (16-line) half RGBA | 6 of 6 |
+| Linux (house-pc, b035e), engine bay Meshing | 428 of 428 |
+
+It is on by default only with OpenEXR before 3.2, and `CHESHIRE_EXR_DEFLATE=0|1` overrides that. On
+the RX 9070 box (OpenEXR 3.4) it read slightly slower than OpenEXR's own inflate: 30.6 and 34.5 s
+of reading per 884-view pass, against 27.1 and 30.8 s. On house-pc (OpenEXR 3.1), False Door on
+`/data`, two pairs in opposite orders, all with the same digests:
+
+| house-pc, 884 views | libdeflate | OpenEXR 3.1 (zlib) |
+|---|---|---|
+| Meshing node | 442.3 s, 438.3 s | 468.1 s, 460.6 s |
+| depth-map load | 129.3 s, 128.3 s | 137.4 s, 142.5 s |
+| reading, summed over the maps, pass 1 / pass 2 | 135.5 / 156.8 s, 135.7 / 150.6 s | 167.8 / 178.4 s, 157.4 / 158.5 s |
+| visibility passes | 62.8 + 63.3 s, 62.6 + 60.4 s | 71.3 + 72.1 s, 68.0 + 64.6 s |
+
+About 24 s (5 %) of the node. The same reader serves DepthMap, DepthMapFilter and Texturing, so the
+Linux bundle's other EXR reads inflate this way too.
+
