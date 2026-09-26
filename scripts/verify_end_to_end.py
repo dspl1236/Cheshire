@@ -75,6 +75,10 @@ CPU_MARKERS = {
     "StructureFromMotion": GPU_MARKERS["StructureFromMotion"],
 }
 SILENT_PORTS = None  # 0.3.2: no port is silent on either path any more
+# Meshroom's own defaults: FeatureExtraction runs DSP-SIFT on the CPU (forceCpuExtraction defaults to
+# True), so its GPU lines cannot appear; the node must still be the paired binary. Every other port
+# is as in a GPU run.
+DEFAULT_MARKERS = dict(GPU_MARKERS, FeatureExtraction=[])
 
 # In-process self-checks: the port runs the CPU reference alongside itself and compares. These are
 # the strongest correctness tests the project has, and until 2026-09-20 no gate switched them on.
@@ -159,6 +163,10 @@ BINARY = {
 CONFIGS = {
     # Stock settings, to establish that the paired pipeline works at all.
     "base": dict(overrides=SIFT, env={}),
+    # Meshroom's defaults with nothing overridden: what a user who only pairs the package runs.
+    # DSP-SIFT on the CPU, then the GPU matcher on its descriptors and every later port. Also the
+    # parameter set of the upstream reference meshes the mesh quality gate compares against.
+    "defaults": dict(overrides=[], markers="defaults", env={}),
     # Many small tiles: the tiled path is where the memory bridge and the per-tile depth lists live,
     # and a 42-tile run behaves differently from a 1-tile one.
     "tiles": dict(overrides=SIFT + [
@@ -337,7 +345,7 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     # Any extension: Meshroom's Texturing writes texture_1001.exr by default, not .png, so globbing
     # for .png reported a perfectly good textured mesh as having no textures.
     tex = list((out / "out").glob("texture_*.*"))
-    markers = CPU_MARKERS if cfg.get("markers") == "cpu" else GPU_MARKERS
+    markers = {"cpu": CPU_MARKERS, "defaults": DEFAULT_MARKERS}.get(cfg.get("markers"), GPU_MARKERS)
 
     # Provenance first, then the port. A port marker alone is not proof the Cheshire binary ran:
     # Meshroom's own featureExtraction is a CUDA PopSIFT and prints the very same

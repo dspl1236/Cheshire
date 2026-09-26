@@ -369,17 +369,22 @@ the earlier proposal.
 - **QR nullspace default** (S). QR has shipped opt-in package-wide since v0.2.18 (f5bde79; first in
   the RDNA3/RDNA4 half of v0.2.17.1), after a ten-run study found -165 landmarks (p 0.0008) and
   +0.0024 RMSE (p 0.032) (`docs/17-svd-nullspace.md:126-127`). Flipping the default is the user's
-  decision and waits for the quality gate. Needed either way:
-  - fix `CHESHIRE_QR_NULLSPACE=0` turning QR on (`scripts/apply_hip_patch.py:2799`)
+  decision and waits for the quality gate. **The gate exists now and QR passes it** (engine bay,
+  n=10 per leg: landmarks -0.035 %, p 0.41; RMSE +0.009 %, p 0.80; poses and geometry within the
+  baseline's own spread; `build/quality/eb-cheshire-vs-qr.md`, docs/04). What is left is the user's
+  call. Needed either way:
+  - ~~fix `CHESHIRE_QR_NULLSPACE=0` turning QR on~~ (done by 6q: `::cheshire::env::flag`)
   - give the base e2e config a QR check if the default flips
-  - record today's drone-set A/B (29 of 1051 pairs kept, matches within 0.3 %), which exists only
-    in the session
+  - ~~record the drone-set A/B~~ (in docs/04, "A 444-photo drone survey": 29 of 1051 pairs either
+    way)
 - **"Nullspace SVD" is the same item, not separate work.** README roadmap item 6 holds the SVD
   "until the quality measurement exists" (`README.md:403-412`). That measurement was done, and the
   QR path it concerns is the one above. The over-determined branch and the spherical solver stay on
   the SVD (see Not planned).
-- **Bundle adjustment on the device** (L; the first SfM work on the GPU; waits on the scouting step of
-  "Upstream's next pipeline" below, since StructureFromMotion is being replaced upstream). StructureFromMotion is
+- **Bundle adjustment on the device** (L; the first SfM work on the GPU). The scouting step of
+  "Upstream's next pipeline" below found that SfMExpanding, StructureFromMotion's replacement, runs
+  the same `BundleAdjustmentCeres` with the same cost functions, so this carries over to the new
+  pipeline and is no longer waiting on it. StructureFromMotion is
   the one heavy node that has never touched the GPU, and bundle adjustment is where its time goes:
   63 % of SfM on the engine bay (50.9 s of 92 s: Jacobians 25.1 s, linear solver 13.1 s, per-solve
   bookkeeping 11.0 s; `docs/04-validation.md:750-756`) and 733 s of the 1498 s False Door replay
@@ -431,7 +436,7 @@ the one after. They pointed to the experimental pipelines. On AliceVision's `dev
 templates now live in the AliceVision repository (`meshroom/*.mg`), and `photogrammetry.mg` has a
 new chain beside `photogrammetryLegacy.mg`:
 
-| legacy (Meshroom 2023.3, Cheshire's base) | `develop`'s `photogrammetry.mg` |
+| legacy (`photogrammetryLegacy.mg`; what Meshroom 2023.3 runs) | `develop`'s `photogrammetry.mg` |
 |---|---|
 | StructureFromMotion 3.3 | TracksBuilding 1.0, RelativePoseEstimating 3.0, SfMBootStrapping 4.1, SfMExpanding 2.1 (then SfMTransform, SfMColorizing) |
 | PrepareDenseScene 3.1 | IntrinsicsTransforming 1.0 and ExportImages 1.0 |
@@ -443,9 +448,10 @@ What carries over:
   filter, Meshing (votes, max-flow, visibility, fusion) and Texturing.
 - The SfM work (the #2344 fix, reproducible SfM, BA construction) and the PrepareDenseScene work
   (the direct 8-bit read's call site, CheshireJPG in the read) target nodes that go.
-- Parts may still carry over if the new nodes share the code underneath: the analytic BA
-  Jacobians if SfMExpanding runs the same `BundleAdjustmentCeres`, and the direct read if
-  ExportImages reads through `image::readImage`. Not checked yet.
+- Much of it carries over anyway, because the new nodes share the code underneath (checked in step
+  2 below): SfMExpanding runs the same `BundleAdjustmentCeres`, so the analytic Jacobians and the
+  BA construction work there, and ExportImages reads through the same `image::readImage`, so the
+  direct 8-bit read and CheshireJPG do too.
 
 Plan, loosely, since the release date is not known:
 
@@ -459,15 +465,44 @@ Plan, loosely, since the release date is not known:
    removing the dropped-option allowance refuses DepthMap on both. Not covered: an option that keeps
    its name and changes meaning. A node-version table read from Meshroom's node descriptions
    would cover that, if the next release turns out to need it.
-2. **Scout** (M). Read the new nodes on `develop` (TracksBuilding, RelativePoseEstimating,
-   SfMBootStrapping, SfMExpanding, IntrinsicsTransforming, ExportImages) for their hot paths. Find
-   what they share with the legacy nodes (BA, image reads, track building), and time the
-   experimental pipeline on the 41-view set and the engine bay against the legacy one. That
-   settles which SfM/PDS work is worth continuing on the legacy nodes.
-3. **Pivot** (L-XL) when a Meshroom release ships the new pipeline. Rebase the patch set onto that
-   AliceVision release (the generator's anchors, every step), carry the surviving ports first,
-   and keep a 2023.3 package line for as long as people use that release. Versioning then follows
-   the base: one package per supported Meshroom release, chosen by the detection in step 1.
+2. **Scout** (M). **Reading done 2026-09-26; timing not run.** The first finding changes the
+   plan: Cheshire's AliceVision is not 2023.3. The submodule is `develop` at 2cb1a39 (2026-08-28,
+   version 3.4.0, a shallow clone); only the Meshroom it pairs into is 2023.3. `origin/develop` was
+   12 commits ahead on 2026-09-26, all vcpkg, CI and CMake. So the new nodes' sources are already
+   in the tree and already build (`aliceVision_sfmExpanding`, `aliceVision_exportImages` are in
+   `build/av-cuda`), and of the 66 files the generator patches only the two top-level
+   `CMakeLists.txt` changed upstream since, with every anchor still present. What the new nodes do,
+   read from the code, not run:
+   - TracksBuilding: tracks to one JSON file, single-threaded; every later node parses it again.
+   - RelativePoseEstimating: per pair (OpenMP, chunks of 25), NACRANSAC with the **5-point
+     essential** solver, whose nullspace is a 9x9 JacobiSVD on a zero-padded 5x9 matrix
+     (`Essential5PSolver.cpp:77-82`): the same lever as docs/17's QR, for a new solver. The
+     7-point solver and `CHESHIRE_QR_NULLSPACE` stay in FeatureMatching.
+   - SfMBootStrapping: pair scoring and a DLT triangulation of the best pair; cheap.
+   - SfMExpanding: the time. Rounds of up to 30 views, resection one view per thread (NACRANSAC,
+     then a small BA per view), multiview triangulation, then `SfmBundle::process`: bundle
+     adjustment and cleanup. **It runs the same `BundleAdjustmentCeres`, with cost functions
+     unchanged since our base**, so 5m (analytic Jacobians), 5o-5q and the BA half of 5n carry
+     over as they are, and so would the device Jacobians below. Not carried: 5r's persistent
+     Problem (SfmBundle builds a new adjuster per call), 5s (SfmBundle calls the passes itself),
+     the ranking-tie part of 5n (`ExpansionPolicyLegacy.cpp:107-123` sorts by score only), and 5k,
+     whose crash is in the legacy engine.
+   - IntrinsicsTransforming: intrinsics and observations only, no pixels.
+   - ExportImages: reads with the same `readImage(..., RGBAfColor, LINEAR)` as PrepareDenseScene,
+     so 6n and 6r reach it unchanged; it resamples every image even without distortion, uses its
+     own remap (5h's undistortion-map cache does not apply) and loops over views serially (4k
+     would need redoing).
+   Two blockers for the new templates: they write the scene as `.usda`, which needs AliceVision
+   built with USD (the Linux builds pass `ALICEVISION_USE_USD=OFF`), and several node files import
+   `pyalicevision`, which Meshroom 2023.3 does not have. Still to do: time the new pipeline against
+   the legacy one on the 41-view set and the engine bay (a build with USD, and a Meshroom from
+   `develop`).
+3. **Pivot** (M-L, smaller than first thought) when a Meshroom release ships the new pipeline:
+   update the submodule to that release's AliceVision (anchors hold today), ship and pair the new
+   binaries, build with USD, and port 5r, 5s and the ranking ties to SfmBundle and
+   ExpansionPolicyLegacy. Keep a 2023.3 package line for as long as people use that release.
+   Versioning then follows the Meshroom release: one package per supported release, chosen by the
+   detection in step 1.
 
 Effect on the open items: bundle adjustment on the device (0.3.5) waits for step 2 to show it
 still applies. GPS pairing, the QR default, the matcher self-check and everything in Meshing,
