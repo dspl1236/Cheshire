@@ -2388,4 +2388,6 @@ False Door cache is at `/data/tests/fd833`.
 Same points, order, metric and comparisons: mini6 and 41-view CHECK identical to nanoflann, and the
 884-view digests unchanged. On the RX 9070 it saves 0.65 s of the passes' 82 s (two alternating
 pairs), because RDNA4's cache already hid the scattered reads. It is unmeasured on cards without
-that cache. `CHESHIRE_GPU_KNN_LAYOUT=0` keeps the old kernel.
+that cache. On house-pc's RX 6750 XT it is slower: on the engine bay the knn kernel takes 5.3 s and 4.7 s
+per pass against the old layout's 3.6 s and 3.1 s. So it is off by default, and
+`CHESHIRE_GPU_KNN_LAYOUT=1` selects it.

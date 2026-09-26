@@ -234,7 +234,8 @@ __global__ void knnKernel(const Node* __restrict__ nodes,
 // - the stack holds DEPTH frames, the smallest of 40/64/96 that covers the tree (Index::build);
 // - the three axis distances are registers selected by the axis, not an indexed private array.
 // Same points in the same order, same metric, same comparisons: the answers are knnKernel's, ties
-// included. CHESHIRE_GPU_KNN_LAYOUT=0 keeps knnKernel.
+// included. Off by default (CHESHIRE_GPU_KNN_LAYOUT=1 selects it): about 1 % faster on the RX 9070,
+// whose cache hid the scattered reads anyway, and about 50 % slower on the RX 6750 XT (docs/04 6s).
 struct PackedFrame
 {
     double x;     // phase 0: the cut distance; phase 1: the axis distance it replaced
@@ -850,7 +851,7 @@ bool Index::build(const double* points, std::size_t nbPoints, const Node* nodes,
     // frames (a node id takes 28 bits); its stack is the smallest of 40/64/96 frames that holds the
     // deepest path (one frame per inner node). Children are flattened after their parent, so one
     // forward pass gives every node's level; a tree that breaks that order gets the full stack.
-    _leafOrder = ::cheshire::env::flag("CHESHIRE_GPU_KNN_LAYOUT", true) && nbNodes < (std::size_t(1) << 28);
+    _leafOrder = ::cheshire::env::flag("CHESHIRE_GPU_KNN_LAYOUT", false) && nbNodes < (std::size_t(1) << 28);
     _stack = kMaxDepth;
     _treeFrames = -1;
     {

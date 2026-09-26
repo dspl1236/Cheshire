@@ -409,9 +409,9 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
     {
         layoutAnnounced = true;
         if (index.leafOrder())
-            ALICEVISION_LOG_INFO("cheshire: visibility knn kernel: points in leaf order, " << index.stackFrames() << "-frame stack (CHESHIRE_GPU_KNN_LAYOUT=0 for the original layout)");
+            ALICEVISION_LOG_INFO("cheshire: visibility knn kernel: points in leaf order, " << index.stackFrames() << "-frame stack (CHESHIRE_GPU_KNN_LAYOUT=1)");
         else
-            ALICEVISION_LOG_INFO("cheshire: visibility knn kernel: original layout, " << index.stackFrames() << "-frame stack");
+            ALICEVISION_LOG_INFO("cheshire: visibility knn kernel: original layout, " << index.stackFrames() << "-frame stack (CHESHIRE_GPU_KNN_LAYOUT=1 for leaf order)");
     }
     if (logIt)
         ALICEVISION_LOG_INFO("cheshire: GPU knn index: " << snapshot.size() << " points, " << nodes.size() << " nodes, depth " << treeDepth << ", tree " << msTree << " ms, index " << msIndex

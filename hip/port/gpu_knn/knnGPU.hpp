@@ -115,7 +115,7 @@ class Index
     bool wait();
     std::size_t overflowed() const { return _overflowed; }
 
-    // the kernel build() chose (step 6s): points in leaf order (CHESHIRE_GPU_KNN_LAYOUT=0 keeps the
+    // the kernel build() chose (step 6s): points in leaf order (CHESHIRE_GPU_KNN_LAYOUT=1; the default keeps the
     // original order and 96-frame stack), and the stack frames per query
     bool leafOrder() const { return _leafOrder; }
     int stackFrames() const { return _stack; }
