@@ -2583,3 +2583,37 @@ the check agreed with two different results, each against its own reference.
 Both are in the gate's `verify` configuration, with verdicts for FeatureMatching and
 DepthMapFilter. Every GPU port now has an in-process check against its CPU reference.
 
+## 0.3.5: the reconstruction-quality gate's mesh part (2026-09-26)
+
+`scripts/mesh_distance.py A.obj B.obj` measures how far apart two meshes are. It samples each
+surface (300,000 points, area-weighted) and takes each sample's exact distance to the other mesh:
+the closest point on the nearest triangle, found through a voxel grid of triangle bounding boxes
+and tested against the 27 surrounding cells. Coarser grids pick up whatever is further away, so
+holes and extra surface are measured too. It reports both directions: mean, median, p95, p99 and
+max, absolute and as a fraction of the bounding-box diagonal. It needs only numpy.
+
+Checks:
+
+- The triangle distance matches eight closed-form cases (face, three vertices, three edges, a point
+  on the face) exactly, and is never above a dense brute-force sampling on 200 random triangles.
+- A mesh against itself measures about 1e-16.
+- A copy shifted 1 mm along x has a maximum of exactly 1 mm and a mean of 0.5 mm, the shift
+  projected on the surface normals.
+- mini6 with device votes against mini6 with host votes also measures about 1e-16. Meshing's
+  output renumbers run to run, but its geometry here is the same surface.
+
+`scripts/quality_gate.py mesh --leg base=A1.obj,A2.obj --leg cand=B.obj` uses it as a gate. Pairs
+within the first leg are its run-to-run spread, each candidate is measured against every baseline
+mesh, and the verdict is on the median symmetric p95:
+
+- FAIL when it is more than 50 % over the baseline's largest spread and over 0.1 % of the diagonal
+  (`--mesh-tol`, `--mesh-floor`);
+- WARN past the spread but within the tolerance;
+- PASS otherwise.
+
+On mini6, the 1 mm shift (0.018 %) passes under the floor and a 20 mm shift (0.35 %) fails.
+
+What the gate is for, Cheshire's full pipeline against upstream Meshroom's on the same photos,
+needs an upstream reference mesh. Upstream's DepthMap is CUDA-only, so that means a run on an
+NVIDIA card.
+

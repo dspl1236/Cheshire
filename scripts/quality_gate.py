@@ -27,6 +27,16 @@ Verdict per metric: FAIL when the candidate is worse with p < --alpha by more th
 WARN when it is significantly worse but within it, PASS otherwise (a significant improvement is
 reported as such). Tolerances are policy, so they are flags; the defaults are this file's proposal.
 A report goes to build/quality/<set>-<prefix>.md and .json.
+
+  mesh --leg NAME=A.obj[,A2.obj,...] --leg NAME=B.obj[,...] [--name N] [--mesh-tol T] [--mesh-floor F]
+        compares finished meshes by surface distance (scripts/mesh_distance.py: exact point-to-surface,
+        both ways). The first leg is the baseline. Pairs within it are its run-to-run spread; each
+        candidate mesh is measured against every baseline mesh. The measure is the symmetric p95
+        distance as a fraction of the bounding-box diagonal (the larger of the two directions).
+        FAIL when a candidate's median cross distance exceeds the baseline's largest own spread by
+        more than --mesh-tol (default 50 %) and exceeds --mesh-floor (default 0.1 % of the diagonal);
+        WARN past the spread but within the tolerance; PASS otherwise. With one baseline mesh the
+        spread is 0 and the floor decides. It says "different", not "worse": a mesh has no ground truth.
 """
 from __future__ import annotations
 
@@ -266,9 +276,77 @@ def parse_leg(text: str) -> tuple[str, dict[str, str]]:
     return name, env
 
 
+def mesh_gate(a: argparse.Namespace) -> int:
+    import statistics
+    import mesh_distance
+    legs = []
+    for x in a.leg:
+        name, _, paths = x.partition("=")
+        files = [Path(q) for q in paths.split(",") if q]
+        if not files:
+            sys.exit(f"leg {name}: no meshes")
+        legs.append((name, files))
+    if len(legs) < 2:
+        sys.exit("give a baseline leg and at least one candidate")
+    cache: dict = {}
+
+    def sym_p95(x: Path, y: Path) -> tuple[float, dict]:
+        r = mesh_distance.compare(x, y, a.samples, 0, cache)
+        return max(r["a_to_b"]["p95_rel"], r["b_to_a"]["p95_rel"]), r
+
+    base_name, base = legs[0]
+    spread, rows = [], []
+    for x, y in itertools.combinations(base, 2):
+        v, r = sym_p95(x, y)
+        spread.append(v)
+        rows.append(dict(kind="baseline", a=str(x), b=str(y), p95_rel=v, detail=r))
+        print(f"  baseline spread {x.name} / {y.name}: p95 {100 * v:.4f} % of the diagonal", flush=True)
+    floor_spread = max(spread) if spread else 0.0
+    results = []
+    for name, files in legs[1:]:
+        cross = []
+        for x in files:
+            for y in base:
+                v, r = sym_p95(x, y)
+                cross.append(v)
+                rows.append(dict(kind=name, a=str(x), b=str(y), p95_rel=v, detail=r))
+                print(f"  {name} {x.name} / {base_name} {y.name}: p95 {100 * v:.4f} % of the diagonal", flush=True)
+        m = statistics.median(cross)
+        if m > floor_spread * (1 + a.mesh_tol) and m > a.mesh_floor:
+            v = "FAIL"
+        elif m > floor_spread and m > a.mesh_floor:
+            v = "WARN"
+        else:
+            v = "PASS"
+        results.append(dict(leg=name, median_p95_rel=m, baseline_spread=floor_spread, verdict=v))
+    overall = "FAIL" if any(r["verdict"] == "FAIL" for r in results) else ("WARN" if any(r["verdict"] == "WARN" for r in results) else "PASS")
+    lines = [f"# Mesh quality gate: {', '.join(n for n, _ in legs)}", "",
+             f"Baseline {base_name}: {len(base)} meshes, run-to-run spread (largest symmetric p95) {100 * floor_spread:.4f} % of the diagonal; "
+             f"tolerance {100 * a.mesh_tol:.0f} %, floor {100 * a.mesh_floor:.3f} %.", "",
+             "| candidate | median symmetric p95 to the baseline | verdict |", "|---|---|---|"]
+    for r in results:
+        lines.append(f"| {r['leg']} | {100 * r['median_p95_rel']:.4f} % | {r['verdict']} |")
+    lines += ["", f"Overall: **{overall}**"]
+    out = Path(__file__).resolve().parents[1] / "build" / "quality"
+    out.mkdir(parents=True, exist_ok=True)
+    stem = a.name or f"mesh-{base_name}"
+    (out / f"{stem}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (out / f"{stem}.json").write_text(json.dumps(dict(legs=[(n, [str(f) for f in fs]) for n, fs in legs], results=results, pairs=rows,
+                                                      tolerance=a.mesh_tol, floor=a.mesh_floor), indent=1), encoding="utf-8")
+    print("\n".join(lines))
+    print(f"report: {out / (stem + '.md')}")
+    return 1 if overall == "FAIL" else 0
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    pm = sub.add_parser("mesh")
+    pm.add_argument("--leg", action="append", required=True, help="NAME=mesh.obj[,mesh2.obj,...]; the first leg is the baseline")
+    pm.add_argument("--samples", type=int, default=300_000)
+    pm.add_argument("--mesh-tol", dest="mesh_tol", type=float, default=0.5, help="fraction above the baseline spread that fails (default 0.5)")
+    pm.add_argument("--mesh-floor", dest="mesh_floor", type=float, default=0.001, help="distances below this fraction of the diagonal never flag (default 0.001)")
+    pm.add_argument("--name", help="report file name (default mesh-<baseline>)")
     for cmd in ("sfm", "report"):
         p = sub.add_parser(cmd)
         p.add_argument("set", choices=sorted(set(sfmbench.SETS) | set(sfmbench.KEPT)))
@@ -288,6 +366,8 @@ def main(argv: list[str]) -> int:
             p.add_argument("--repeat", type=int, default=10)
             p.add_argument("--prefix", default=time.strftime("q%m%d%H%M"))
     a = ap.parse_args(argv)
+    if a.cmd == "mesh":
+        return mesh_gate(a)
     if a.cmd == "sfm":
         legs = [parse_leg(x) for x in a.leg]
         if len(legs) < 2:
