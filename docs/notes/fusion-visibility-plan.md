@@ -12,8 +12,11 @@
 > `CHESHIRE_GPU_VIS_VOTES=1`, with one change to the design: no hipCUB/CUB sort. rocPRIM's config
 > dispatch disagrees between host and device on generic targets and faulted the RX 9070, so the fold
 > order comes from a per-vertex count, an exact scan, a scatter and a per-vertex sort. Step 12's
-> kernel layout is done as 6s (about 1 % on RDNA4). Open: step 8's 884-view CHECK, step 9 (readers),
-> step 10 (default on, gate entries), and step 11 (house-pc, bench-pc, CUDA).
+> kernel layout is done as 6s: about 1 % faster on RDNA4 and 50 % slower on RDNA2, so it is off by
+> default. Step 9 is done as a knob (`CHESHIRE_GPU_VIS_READERS`, default 3); it is not a clear win on
+> house-pc, whose remaining cost is decode time. house-pc is measured (device votes: 884-view passes
+> 158.8 to 116.9 s). Open: step 8's 884-view CHECK, step 10 (default on, gate entries), and step 11 on
+> bench-pc and CUDA.
 
 ## 1. Verdict
 

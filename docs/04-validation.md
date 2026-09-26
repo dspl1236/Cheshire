@@ -2393,6 +2393,32 @@ At 884 views the host's own votes were 59.0 and 42.4 s. With device votes it onl
 rises from 7.3 and 8.5 s to 29.8 and 25.1 s. That is the plan's step 9 (readers). The knn kernel
 itself is 39.5 and 28.0 s.
 
+**Step 9, the readers (`CHESHIRE_GPU_VIS_READERS`, default 3).** The depth maps are read ahead on
+1-16 threads and consumed in camera order, so the result does not depend on the count (every run
+below has the same digests). LOG now gives the time the readers spent, summed over the maps. The
+False Door's filtered depth maps are ZIPS at 14.8 MB each (20.3 MB raw), so a pass reads 12.3 GB.
+house-pc's `/data` is the 512 GB mSATA drive on a 3 Gbps link, and `/` is the system SSD on a
+6 Gbps link, so both were measured (b035c bundle, device votes):
+
+| house-pc, 884 views | waiting for maps | reading, summed | passes | Meshing node |
+|---|---|---|---|---|
+| `/data` (3 Gbps), 3 readers | 29.8 + 25.1 s | | 116.9 s | 450.6 s |
+| `/data` (3 Gbps), 6 readers | 18.0 + 26.2 s | 274 + 283 s | 119.6 s | 450.4 s |
+| `/` (6 Gbps), 3 readers | 21.4 + 24.0 s | 132 + 127 s | 111.3 s | 428.8 s |
+| `/` (6 Gbps), 4 readers | 18.3 + 20.1 s | 177 + 167 s | 110.2 s | 429.5 s |
+| `/` (6 Gbps), 6 readers | 12.2 + 16.9 s | 243 + 238 s | 105.6 s | 423.7 s |
+
+On the RX 9070 box, a read takes 35 ms and 3 readers already keep up. The wait is about 3.7 s per
+pass with 3 or 6 readers. So the default stays at 3.
+
+- On house-pc, more readers wait less, but each read takes longer, because the i3's two cores
+  decode the maps.
+- On the slower drive, 6 readers are a little slower than 3.
+- The faster drive saves about 20 s of the 884-view Meshing, most of it in the depth-map load.
+
+What remains is decode time: about 130 s of reading per pass with 3 readers. The Linux bundle's
+OpenEXR is 3.1, which inflates with zlib; the Windows packages have 3.4 with libdeflate.
+
 **6s. The knn kernel's layout.** Four changes:
 
 - The points are stored in leaf order, so a leaf is one contiguous run and the answer is
