@@ -222,6 +222,7 @@ together as its `verify` configuration ([docs/04](docs/04-validation.md)):
 |---|---|
 | `CHESHIRE_FILTER_CHECK=1` | `filterByPixSize check: identical to single-threaded upstream on all N slots` |
 | `CHESHIRE_MAXFLOW_CHECK=1` | `max-flow check: ... cut values on the adjacency-list graph (double): CSR labelling X, adjacency-list labelling Y (equal, ...)` - equal cut values are the verdict: a minimum cut need not be unique, so the two labellings may differ in cells Boykov-Kolmogorov leaves undetermined (the line also counts them); the two float flow totals it prints are never equal and are not the test |
+| `CHESHIRE_GPU_MATCHER_CHECK=1` | FeatureMatching: answer a sample of every GPU search again with upstream's CPU brute force (`CHESHIRE_GPU_MATCHER_CHECK_SAMPLE` queries per search, default 64) and print "GPU matcher check: N of M sampled queries identical to upstream's brute force" at exit: both distances, and the nearest row unless the two nearest are tied |
 | `CHESHIRE_GPU_VIS_CHECK=1` | `GPU knn check: identical to nanoflann on all N queries`, and per pass `visibility votes check (pass N, ...): identical to the ordered host reference on all N vertices` (the votes redone from the host's own answers) |
 | `CHESHIRE_SEGMENT_CHECK=1` | `segmentFullOrFree check: identical to upstream on all N cells` |
 | `CHESHIRE_GPU_TEDGE_CHECK=1` | `tedge check: cells with on != 0: cpu N, gpu N` - the counts must match; the sums differ by an ulp of summation order |

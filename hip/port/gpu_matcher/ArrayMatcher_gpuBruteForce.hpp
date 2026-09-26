@@ -3,7 +3,10 @@
 // neighbours, so the ratio test sees the same numbers as BRUTE_FORCE_L2 (the kd-tree is approximate).
 #pragma once
 #include <aliceVision/matching/ArrayMatcher.hpp>
+#include <aliceVision/matching/ArrayMatcher_bruteForce.hpp>
 #include <aliceVision/matching/gpu/gpuMatcher.hpp>
+#include <algorithm>
+#include <random>
 #include <type_traits>
 #include <vector>
 
@@ -22,6 +25,9 @@ class ArrayMatcher_gpuBruteForce : public ArrayMatcher<Scalar, Metric>
 
     bool Build(std::mt19937& /*rng*/, const Scalar* dataset, int nbRows, int dimension)
     {
+        dataset_ = dataset;  // kept for the self-check; the caller keeps the regions alive while it matches
+        rows_ = nbRows;
+        dim_ = dimension;
         return matcher_.build(dataset, nbRows, dimension, std::is_same<Scalar, float>::value);
     }
 
@@ -45,11 +51,42 @@ class ArrayMatcher_gpuBruteForce : public ArrayMatcher<Scalar, Metric>
                 (*pvec_indices)[size_t(q) * 2 + k] = IndMatch(q, idx_[size_t(q) * 2 + k]);
                 (*pvec_distances)[size_t(q) * 2 + k] = DistanceType(dist_[size_t(q) * 2 + k]);
             }
+        if (gpu::checkEnabled())
+            checkSample(query, nbQuery);
         return true;
+    }
+
+    // CHESHIRE_GPU_MATCHER_CHECK=1: evenly spaced queries of this search answered again by upstream's
+    // brute force, compared with what the GPU returned (see gpu::checkEnabled)
+    void checkSample(const Scalar* query, int nbQuery)
+    {
+        ArrayMatcher_bruteForce<Scalar, Metric> ref;
+        std::mt19937 rng(0);
+        if (dataset_ == nullptr || !ref.Build(rng, dataset_, rows_, dim_))
+            return;
+        const int step = std::max(1, nbQuery / gpu::checkSample());
+        long long checked = 0, identical = 0, nearest = 0, distance = 0;
+        for (int q = 0; q < nbQuery; q += step)
+        {
+            IndMatches ind;
+            std::vector<DistanceType> dist;
+            if (!ref.SearchNeighbours(query + size_t(q) * size_t(dim_), 1, &ind, &dist, 2) || ind.size() < 2 || dist.size() < 2)
+                continue;
+            ++checked;
+            const bool sameDistances = dist[0] == DistanceType(dist_[size_t(q) * 2]) && dist[1] == DistanceType(dist_[size_t(q) * 2 + 1]);
+            const bool sameNearest = dist[0] == dist[1] || int(ind[0]._j) == idx_[size_t(q) * 2];
+            distance += sameDistances ? 0 : 1;
+            nearest += sameNearest ? 0 : 1;
+            identical += (sameDistances && sameNearest) ? 1 : 0;
+        }
+        gpu::checkRecord(std::is_same<Scalar, float>::value, checked, identical, nearest, distance);
     }
 
   private:
     gpu::KnnMatcher matcher_;
+    const Scalar* dataset_ = nullptr;
+    int rows_ = 0;
+    int dim_ = 0;
     std::vector<int> idx_;
     std::vector<float> dist_;
 };

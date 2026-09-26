@@ -22,6 +22,17 @@ bool available();
 // Descriptor lengths the kernels are instantiated for.
 bool supportsDim(int dim);
 
+// The self-check (CHESHIRE_GPU_MATCHER_CHECK=1): a sample of every search is answered again by
+// upstream's brute force on the CPU (ArrayMatcher_gpuBruteForce), and the counts are printed at exit
+// as "GPU matcher check: N of M sampled queries identical to upstream's brute force". Identical means
+// both distances equal and the nearest row equal unless the two nearest are tied (upstream's partial
+// sort leaves tied rows in no particular order, and a tie fails Lowe's ratio test either way). uint8
+// distances are exact integers on both sides; float descriptors are reported separately, since the
+// GPU accumulates them with FMA.
+bool checkEnabled();
+int checkSample();  // queries per search to check (CHESHIRE_GPU_MATCHER_CHECK_SAMPLE, default 64)
+void checkRecord(bool isFloat, long long checked, long long identical, long long nearestDiffers, long long distanceDiffers);
+
 class KnnMatcher
 {
   public:

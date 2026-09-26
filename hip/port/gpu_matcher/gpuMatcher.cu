@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <chrono>
 #include <mutex>
 
@@ -302,6 +303,41 @@ bool available()
 }
 
 bool supportsDim(int dim) { return dim == 128 || dim == 64; }
+
+namespace {
+struct CheckStats {
+    std::mutex m;
+    long long checked[2] = {0, 0}, identical[2] = {0, 0}, nearest[2] = {0, 0}, distance[2] = {0, 0};
+    ~CheckStats() {
+        for (int f = 0; f < 2; ++f)
+            if (checked[f] > 0)
+                std::fprintf(stderr, "[cheshire] GPU matcher check%s: %lld of %lld sampled queries identical to upstream's brute force (nearest row differs %lld, distances differ %lld)\n",
+                             f ? " (float descriptors)" : "", identical[f], checked[f], nearest[f], distance[f]);
+    }
+} g_check;
+}  // namespace
+
+bool checkEnabled()
+{
+    static const bool on = ::cheshire::env::flag("CHESHIRE_GPU_MATCHER_CHECK");
+    return on;
+}
+
+int checkSample()
+{
+    static const int n = static_cast<int>(std::max(1LL, ::cheshire::env::integer("CHESHIRE_GPU_MATCHER_CHECK_SAMPLE", 64)));
+    return n;
+}
+
+void checkRecord(bool isFloat, long long checked, long long identical, long long nearestDiffers, long long distanceDiffers)
+{
+    std::lock_guard<std::mutex> lock(g_check.m);
+    const int f = isFloat ? 1 : 0;
+    g_check.checked[f] += checked;
+    g_check.identical[f] += identical;
+    g_check.nearest[f] += nearestDiffers;
+    g_check.distance[f] += distanceDiffers;
+}
 
 struct KnnMatcher::Impl {
     void* db = nullptr; size_t dbCap = 0;
