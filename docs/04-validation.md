@@ -2373,8 +2373,25 @@ RX 9070 box, False Door, back to back:
 | Meshing node (warm pair) | 237.8 s | 230.3 s |
 
 Here the passes stay knn-bound, at about 38 s of kernel per pass. The step is aimed at four-thread
-hosts, where the votes were most of the host's time. house-pc needs a Linux bundle to measure; its
-False Door cache is at `/data/tests/fd833`.
+hosts, where the votes were most of the host's time.
+
+**On house-pc (Linux, RX 6750 XT, i3-4330; bundle b035b built from 25898f6 with gcc, so the plain
+arithmetic forms).** The engine bay with `CHESHIRE_GPU_VIS_CHECK=1`: votes identical to the ordered
+host reference on all 6,653,300 and 3,292,402 vertices, knn and backprojection identical on all
+147,299,450 queries per pass, and digests equal to the b035a bundle's (`3bc9f8f4.../27fe49ef...`).
+The False Door's digests with device votes also equal the host votes' (`a43c4e50.../8594172d...`,
+tetrahedralization input `8070538c...`). Back to back, old knn layout:
+
+| | engine bay, host votes | engine bay, device votes | False Door, host votes | False Door, device votes |
+|---|---|---|---|---|
+| pass 1 | 9.3 s | 7.4 s | 88.8 s | 65.6 s |
+| pass 2 | 7.3 s | 5.3 s | 70.0 s | 51.3 s |
+| Meshing node | 124.2 s | 120.9 s | 489.9 s | 450.6 s |
+
+At 884 views the host's own votes were 59.0 and 42.4 s. With device votes it only appends cameras
+(9.3 and 5.1 s), and the next limit shows up: waiting for depth maps from the three reader threads
+rises from 7.3 and 8.5 s to 29.8 and 25.1 s. That is the plan's step 9 (readers). The knn kernel
+itself is 39.5 and 28.0 s.
 
 **6s. The knn kernel's layout.** Four changes:
 
