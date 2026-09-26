@@ -403,7 +403,7 @@ the earlier proposal.
   profile flags test only whether the variable is set, and four parsing styles coexist (e.g.
   `scripts/apply_hip_patch.py:1017, :2799`). Route them all through one helper, then do a full
   rebuild and re-gate. Do this before flipping any default.
-- **GPS-radius image pairing** (M). On a 444-photo DJI survey, the vocabulary tree proposed
+- **GPS-radius image pairing** (M). **Steps 2 done 2026-09-26** (6w, `CHESHIRE_GPS_PAIRING_RADIUS`, paired as the ninth binary; mechanics checked on the 41-view monstree set, docs/04). Step 3 needs the drone photos again: they are no longer on house-pc. On a 444-photo DJI survey, the vocabulary tree proposed
   partners a median 214 m apart and SfM placed 49 of 444. Upstream has no GPS mode
   (`imageMatching/ImageMatching.cpp:31-43`), but it has `ImageInfo::getGpsPositionFromMetadata`.
   Measured on the exhaustive rerun (docs/04, "A 444-photo drone survey"): the real pairs sit a median

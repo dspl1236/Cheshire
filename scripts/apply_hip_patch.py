@@ -87,6 +87,7 @@ TRACKED = [
     "src/aliceVision/fuseCut/GraphFiller.hpp",
     "src/software/pipeline/main_prepareDenseScene.cpp",
     "src/software/pipeline/main_meshing.cpp",
+    "src/software/pipeline/main_imageMatching.cpp",
     "src/aliceVision/mesh/UVAtlas.hpp",
     "src/aliceVision/mesh/UVAtlas.cpp",
     "src/aliceVision/robustEstimation/ACRansac.hpp",
@@ -4766,6 +4767,33 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
             "endif()", ""])
         t = t.replace(anchor6r, anchor6r + block, 1)
         icm.write_text(t, encoding="utf-8", newline="")
+
+    # 6w. GPS-radius image pairing, opt-in (hip/port/image_matching/gps_pairs.txt): with
+    #     CHESHIRE_GPS_PAIRING_RADIUS=<metres>, aliceVision_imageMatching pairs every two views that
+    #     carry GPS within that distance, instead of the vocabulary tree's choice between them; views
+    #     without GPS keep the method's pairs. On a 444-photo drone survey the tree's partners were a
+    #     median 214 m apart and SfM placed 49 photos (docs/04). CHESHIRE_GPS_PAIRING_UNION=1 keeps the
+    #     method's pairs too.
+    imm = AV / "src/software/pipeline/main_imageMatching.cpp"
+    t = imm.read_text(encoding="utf-8")
+    if "cheshire (step 6w)" not in t:
+        parts = [x.replace("\n", NL) for x in (ROOT / "hip/port/image_matching/gps_pairs.txt").read_text(encoding="utf-8").split("=====\n")]
+        if len(parts) != 4:
+            sys.exit("step 6w: gps_pairs.txt must hold two old/new pairs")
+        for old, new in ((parts[0], parts[1]), (parts[2], parts[3])):
+            if t.count(old) != 1:
+                sys.exit("step 6w: anchor not found once in main_imageMatching.cpp: " + old[:50])
+            t = t.replace(old, new, 1)
+        inc = "#include <chrono>" + NL
+        if t.count(inc) != 1:
+            sys.exit("step 6w: <chrono> include not found once in main_imageMatching.cpp")
+        t = t.replace(inc, inc + "#include <algorithm>  // cheshire: step 6w" + NL + "#include <cmath>" + NL + "#include <vector>" + NL, 1)
+        desc = 'CmdLine cmdline("The objective of this software is to find images'
+        if t.count(desc) != 1:
+            sys.exit("step 6w: imageMatching description not found once")
+        t = t.replace(desc, 'CmdLine cmdline("(cheshire: CHESHIRE_GPS_PAIRING_RADIUS=<metres> pairs the views that carry GPS by their distance.) '
+                            'The objective of this software is to find images', 1)
+        imm.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports

@@ -36,7 +36,7 @@ set BIN=%MR%\aliceVision\bin
 if not exist "%BIN%\" ( echo %BIN% not found: is %MR% a Meshroom 2023.x Windows install? & exit /b 1 )
 if /i "%PKG%"=="--unpair" (
   if exist "%MR%\lib\meshroom\nodes\aliceVision\DepthMap.py" ( findstr /c:"Cheshire" "%MR%\lib\meshroom\nodes\aliceVision\DepthMap.py" >nul && del /q "%MR%\lib\meshroom\nodes\aliceVision\DepthMap.py" && echo removed the DepthMap node override )
-  for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_featureExtraction aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene aliceVision_incrementalSfM) do call :unpair %%N
+  for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_featureExtraction aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene aliceVision_incrementalSfM aliceVision_imageMatching) do call :unpair %%N
   exit /b 0
 )
 
@@ -83,6 +83,10 @@ rem StructureFromMotion (v0.3.3+): the package's incrementalSfM finishes a resec
 rem adjustment upstream skips, the crash of Meshroom #2344 on large sets (docs\04); gate on its help text
 call :gate aliceVision_incrementalSfM "CHESHIRE_SFM_PENDING_BA" SFOK
 if defined SFOK ( call :pairif aliceVision_incrementalSfM ) else ( echo package's aliceVision_incrementalSfM is upstream's ^(pre-v0.3.3^): not paired )
+rem ImageMatching (v0.3.5+): the package's imageMatching can pair views by GPS distance
+rem (CHESHIRE_GPS_PAIRING_RADIUS, off unless set); gate on its help text
+call :gate aliceVision_imageMatching "CHESHIRE_GPS_PAIRING" IMOK
+if defined IMOK ( call :pairif aliceVision_imageMatching ) else ( echo package's aliceVision_imageMatching is upstream's ^(pre-v0.3.5^): not paired )
 rem GPU SIFT (v0.2.13+, docs\14-gpu-sift.md): gate on popsift.dll being in the package, since
 rem without it this node would move CPU SIFT from one build to another for nothing. Note the
 rem describer falls back to the CPU silently when no GPU is visible, so a paired node that

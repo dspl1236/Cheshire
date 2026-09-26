@@ -2541,3 +2541,27 @@ point cloud check and the libdeflate check:
 So device votes, 6u and 6v are exact on the CUDA backend as on HIP. This bundle predates the GPU
 matcher check, which gets its CUDA run in the release round.
 
+## 0.3.5: GPS-radius image pairing (6w, opt-in, 2026-09-26)
+
+For the drone survey above: with `CHESHIRE_GPS_PAIRING_RADIUS=<metres>`, `aliceVision_imageMatching`
+pairs every two views that carry GPS within that distance. The position is the EXIF one in
+Cartesian metres, through `ImageInfo::getGpsPositionFromMetadata`. The configured method's pairs
+between two GPS views are dropped, or kept as well with `CHESHIRE_GPS_PAIRING_UNION=1`. Pairs
+with a view that has no GPS stay as the method proposed them, so a mixed set still pairs, and a
+pair is added once in either orientation. The node logs how many views carried GPS, the pairs
+within the radius with their median distance, and what happened to the method's pairs. It is
+paired as the ninth node, gated on its help text.
+
+Checked on the 41-view monstree set (GPS in every photo, about 7 m across), with Exhaustive as the
+method:
+
+| radius | pairs | log |
+|---|---|---|
+| none | 820 | |
+| 3 m | 303 | 41 of 41 views with GPS; 303 within the radius, median 1.95 m; 820 method pairs dropped |
+| 10 m, 30 m | 820 | every pair within the radius |
+| 3 m, 10 views stripped of GPS | 527 | 31 of 41 with GPS; 172 radius pairs; 355 method pairs with a view without GPS kept (10 x 40 - 45, all of them) |
+
+What it is for, the 444-photo survey (80 m caught every real pair with 9 % of the exhaustive
+matching), is not run yet: that photo set is no longer on house-pc.
+

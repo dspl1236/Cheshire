@@ -9677,6 +9677,144 @@ index cc6313f..7e5c3ac 100644
  
      ALICEVISION_LOG_INFO(std::to_string(mapPutativesMatches.size()) << " putative image pair matches");
  
+diff --git a/src/software/pipeline/main_imageMatching.cpp b/src/software/pipeline/main_imageMatching.cpp
+index a3a04a0..ba19015 100644
+--- a/src/software/pipeline/main_imageMatching.cpp
++++ b/src/software/pipeline/main_imageMatching.cpp
+@@ -4,6 +4,7 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include <aliceVision/sfmData/SfMData.hpp>
+ #include <aliceVision/sfmDataIO/sfmDataIO.hpp>
+ #include <aliceVision/matchingImageCollection/ImagePairListIO.hpp>
+@@ -27,6 +28,9 @@
+ #include <string>
+ #include <set>
+ #include <chrono>
++#include <algorithm>  // cheshire: step 6w
++#include <cmath>
++#include <vector>
+ 
+ // These constants define the current software version.
+ // They must be updated when the command line is changed.
+@@ -40,6 +44,86 @@ using namespace aliceVision::imageMatching;
+ namespace po = boost::program_options;
+ namespace fs = std::filesystem;
+ 
++// cheshire (step 6w): pairs from GPS positions, opt-in (CHESHIRE_GPS_PAIRING_RADIUS=<metres>).
++// Above minNbImages Meshroom's ImageMatching takes each photo's partners from the vocabulary tree.
++// On a 444-photo drone survey of uniform ground those partners were a median 214 m apart, and SfM
++// placed 49 photos; the real pairs of the exhaustive rerun sit a median 29 m apart, 99 % within
++// 56 m (docs/04, "A 444-photo drone survey"). With a radius, every pair of views that both carry GPS
++// comes from their distance (the EXIF position in Cartesian metres, WGS84ToCartesian), and the
++// method's pairs between two GPS views are dropped, or kept too with CHESHIRE_GPS_PAIRING_UNION=1.
++// Pairs with a view that has no GPS stay as the method proposed them, so a mixed set still pairs.
++// A pair is added once, in either orientation.
++void cheshireGpsPairs(const sfmData::SfMData& sfmData, double radius, bool keepMethodPairs, EImageMatchingMethod method, OrderedPairList& pairs)
++{
++    std::vector<ImageID> ids;
++    std::vector<Vec3> positions;
++    for (const auto& v : sfmData.getViews())
++    {
++        const sfmData::ImageInfo& image = v.second->getImage();
++        if (!image.hasGpsMetadata())
++            continue;
++        try
++        {
++            const Vec3 p = image.getGpsPositionFromMetadata();
++            if (p.allFinite())
++            {
++                ids.push_back(v.first);
++                positions.push_back(p);
++            }
++        }
++        catch (const std::exception&)
++        {
++        }
++    }
++    const std::size_t nbViews = sfmData.getViews().size();
++    if (ids.size() < 2)
++    {
++        ALICEVISION_LOG_WARNING("cheshire: GPS pairing: " << ids.size() << " of " << nbViews << " views carry GPS, the "
++                                                         << EImageMatchingMethod_enumToString(method) << " pairs are kept");
++        return;
++    }
++    const std::set<ImageID> gpsViews(ids.begin(), ids.end());
++    OrderedPairList out;
++    std::size_t methodBetweenGps = 0, methodWithoutGps = 0;
++    for (const auto& a : pairs)
++        for (const ImageID b : a.second)
++        {
++            const bool bothGps = gpsViews.count(a.first) != 0 && gpsViews.count(b) != 0;
++            (bothGps ? methodBetweenGps : methodWithoutGps) += 1;
++            if (!bothGps || keepMethodPairs)
++                out[a.first].insert(b);
++        }
++    const double r2 = radius * radius;
++    std::vector<double> distances;
++    std::size_t added = 0;
++    for (std::size_t i = 0; i < ids.size(); ++i)
++        for (std::size_t j = i + 1; j < ids.size(); ++j)
++        {
++            const double d2 = (positions[i] - positions[j]).squaredNorm();
++            if (d2 > r2)
++                continue;
++            distances.push_back(std::sqrt(d2));
++            const ImageID a = std::min(ids[i], ids[j]), b = std::max(ids[i], ids[j]);
++            const auto reverse = out.find(b);
++            if (reverse != out.end() && reverse->second.count(a) != 0)
++                continue;  // the method already has this pair the other way round
++            if (out[a].insert(b).second)
++                ++added;
++        }
++    double median = 0.0;
++    if (!distances.empty())
++    {
++        std::nth_element(distances.begin(), distances.begin() + distances.size() / 2, distances.end());
++        median = distances[distances.size() / 2];
++    }
++    ALICEVISION_LOG_INFO("cheshire: GPS pairing: radius " << radius << " m, " << ids.size() << " of " << nbViews << " views carry GPS; "
++                                                        << distances.size() << " pairs within the radius (median " << median << " m), " << added
++                                                        << " of them added; the " << EImageMatchingMethod_enumToString(method) << " method proposed "
++                                                        << methodBetweenGps << " pairs between GPS views (" << (keepMethodPairs ? "kept" : "dropped")
++                                                        << ") and " << methodWithoutGps << " with a view without GPS (kept)");
++    pairs.swap(out);
++}
++
+ int aliceVision_main(int argc, char** argv)
+ {
+     // command-line parameters
+@@ -125,7 +209,7 @@ int aliceVision_main(int argc, char** argv)
+         ("removeDuplicates", po::value<bool>(&removeDuplicates)->default_value(removeDuplicates), "Do we remove views from A if they belong to B ?");
+     // clang-format on
+ 
+-    CmdLine cmdline("The objective of this software is to find images that are looking to the same areas of the scene. "
++    CmdLine cmdline("(cheshire: CHESHIRE_GPS_PAIRING_RADIUS=<metres> pairs the views that carry GPS by their distance.) The objective of this software is to find images that are looking to the same areas of the scene. "
+                     "For that, we use the image retrieval techniques to find images that share content without "
+                     "the cost of resolving all feature matches in detail. The ambition is to simplify the image in "
+                     "a compact image descriptor which allows to compute the distance between all images descriptors efficiently.\n"
+@@ -287,6 +371,19 @@ int aliceVision_main(int argc, char** argv)
+         }
+     }
+ 
++    // cheshire (step 6w): GPS-radius pairing, when asked for
++    {
++        const double gpsRadius = ::cheshire::env::real("CHESHIRE_GPS_PAIRING_RADIUS", 0.0);
++        if (gpsRadius > 0.0)
++        {
++            if (useMultiSfM)
++                ALICEVISION_LOG_WARNING("cheshire: GPS pairing: not with a second SfMData; the " << EImageMatchingMethod_enumToString(method)
++                                                                                                 << " pairs are kept");
++            else
++                cheshireGpsPairs(sfmDataA, gpsRadius, ::cheshire::env::flag("CHESHIRE_GPS_PAIRING_UNION"), method, selectedPairs);
++        }
++    }
++
+     // check if the output folder exists
+     const auto basePath = fs::path(outputFile).parent_path();
+     if (!basePath.empty() && !utils::exists(basePath))
 diff --git a/src/software/pipeline/main_incrementalSfM.cpp b/src/software/pipeline/main_incrementalSfM.cpp
 index cfbdfe8..560e390 100644
 --- a/src/software/pipeline/main_incrementalSfM.cpp
