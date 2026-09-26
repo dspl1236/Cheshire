@@ -306,7 +306,7 @@ L items can slide.
   option joins PrepareDenseScene's documented settings or the switch stays an experiment. The check mode's
   heap corruption on Windows is fixed, and so is the GPU check's throughput mode, which counted
   failed decodes (an out-of-memory at 8 threads on the RX 5500 XT printed 25.5 images/s and PASS).
-- **CheshireJPG for the reads** (L). **In, off by default, 2026-09-25** (step 6r, `CHESHIRE_GPU_JPEG=1`; exact on the RX 9070 and the GTX 1080 Ti; remaining gates and timings in docs/notes/cheshirejpg-reads-plan.md). The GPU JPEG codec exists (docs/19): a baseline decoder and
+- **CheshireJPG for the reads** (L). **In, off by default, 2026-09-25** (step 6r, `CHESHIRE_GPU_JPEG=1`): exact on four cards and both backends, but no wall-clock gain on any box (docs/04), so it stays opt-in; FeatureExtraction's read only if a measurement puts the decode on that node's critical path. The GPU JPEG codec exists (docs/19): a baseline decoder and
   encoder in HIP compute kernels, not VCN, so Windows and RDNA1 are covered, identical to
   libjpeg-turbo on 88 of 89 camera files (the 89th is damaged and handed back) and on 833
   synthetic encode/decode cases, checked on the host backend. **RX 9070, Windows (2026-09-24):**

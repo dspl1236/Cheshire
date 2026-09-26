@@ -1,6 +1,9 @@
 # CheshireJPG in the reads: plan (0.3.5)
 
-Status 2026-09-25: steps 1-4 in (generator step 6r, off by default; docs/04 has the first results), 5-6 open. CheshireJPG (docs/19) decodes baseline JPEG on the device,
+Status 2026-09-25: steps 1-5 done (generator step 6r, off by default). Exact on four cards and two
+backends, but no wall-clock gain anywhere (docs/04, 6r): RX 9070 box +6.6 %, the RX 5500 XT box and
+house-pc's i3 neutral. Step 6 (FeatureExtraction) waits for a measurement that puts the decode on
+that node's critical path. CheshireJPG (docs/19) decodes baseline JPEG on the device,
 identical to libjpeg-turbo; no node calls it yet.
 
 ## What it can win

@@ -2287,6 +2287,20 @@ the first to compile the codec's host code with MSVC.
 | hip6.2 gfx1012 payload (Windows) | compiles; the harvest finds `aliceVision_image.dll` with gfx1012 only |
 
 The end-to-end harness has a `gpujpeg` configuration (the switch and its check, both verdicts
-required). Still to do before it can be on by default: the RX 5500 XT and RX 6750 XT runs, the
-timings on the idle RX 9070 box and on house-pc, and a bundled Windows package built with the six
-per-target libraries.
+required).
+
+**Exact on every card, and no faster.** PrepareDenseScene's wall time, off against on (no check):
+
+| box | identical to libjpeg-turbo | off | on |
+|---|---|---|---|
+| RX 9070, Ryzen 5 5600X, engine bay | 107 of 107 | 16.9, 16.5, 16.6 s | 17.8, 17.6, 17.7 s (+6.6 %) |
+| RX 5500 XT (gfx1012, hip6.2), FX-8120, 41 views | 41 of 41 | 25.6, 26.5 s | 26.9 s |
+| GTX 1080 Ti (CUDA), FX-8120, 41 views | 41 of 41 | 30.0 s | 26.2 s (one run) |
+| RX 6750 XT (Linux, b035a), i3-4330, engine bay | 107 of 107 | 93.9, 95.0, 94.9 s | 94.6, 94.8, 98.1 s |
+
+EXRs byte-identical to the libjpeg-turbo run in every case. The ~12 % of the node's thread time that
+the decode takes does not reach the wall clock: on 12 threads the host decodes the photos in well
+under a second of wall time and the device path adds a file read, an upload and a 36 MB download per
+photo, and on house-pc's 4 threads the node is bound elsewhere (the EXR writes and the colour
+transform), so taking the decode off the CPU changes nothing there either. It stays off by default,
+and FeatureExtraction's read waits for a measurement that shows the decode on its critical path.
