@@ -120,13 +120,16 @@ struct CheshireCamMaps
 {
     image::Image<float> depthMap;
     bool ok = false;
+    double ms = 0;  // how long the read took on its reader thread
 };
 
 CheshireCamMaps cheshireLoadCamMaps(int c, mvsUtils::MultiViewParams& mp)
 {
+    const auto t0 = std::chrono::steady_clock::now();
     CheshireCamMaps m;
     mvsUtils::readMap(c, mp, mvsUtils::EFileType::depthMapFiltered, m.depthMap);
     m.ok = m.depthMap.size() > 0;
+    m.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     return m;
 }
 
@@ -428,8 +431,12 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
         d = dd;
     };
 
-    // the maps of the next cameras are read while this one is processed
-    const int ahead = 3;
+    // the maps of the next cameras are read while this one is processed, on `ahead` reader threads
+    // (step 9, CHESHIRE_GPU_VIS_READERS, 1-16, default 3). The maps are consumed in camera order
+    // whatever the count, so the pass is the same; more readers help when a read's latency (the file,
+    // then a single-threaded decode) exceeds the readers' share of a camera's time. Each pending map
+    // holds its decoded depth map (about 20 MB at 3000x1688).
+    const int ahead = (int)std::max<long long>(1, std::min<long long>(16, ::cheshire::env::integer("CHESHIRE_GPU_VIS_READERS", 3)));
     std::vector<std::future<CheshireCamMaps>> pending(cams.size());
     auto launch = [&](int c) {
         if (c < cams.size())
@@ -439,6 +446,7 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
         launch(c);
 
     double msLoad = 0, msPrep = 0, msWait = 0, msVotes = 0, msCheck = 0;
+    double msRead = 0;  // the readers' own time, summed over the maps
     double msDecide = 0, msScan = 0, msScatter = 0, msApply = 0;  // the bucketed votes' phases, for LOG
     std::size_t nbAppended = 0;  // camera-list appends (a vote whose camera the list did not hold yet)
     std::size_t nbQueries = 0, nbIdxDiff = 0, nbDistDiff = 0, nbHost = 0, nbVotes = 0, nbContrib = 0, nbNaN = 0;
@@ -486,6 +494,7 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
         CheshireCamMaps maps = pending[c].get();
         launch(c + ahead);
         msLoad += cheshireVisMs(t1);
+        msRead += maps.ms;
         if (!maps.ok)
         {
             ALICEVISION_LOG_WARNING("Empty depth map (cam id: " << c << ")");
@@ -1083,7 +1092,7 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
     if (logIt)
         ALICEVISION_LOG_INFO("cheshire: visibilities on the GPU: " << nbQueries << " queries, " << nbVotes << " votes, " << nbContrib
                              << " contributions, " << nbHost << " answered on the host, " << nbBpDevice << " built on the device, " << nbNaN
-                             << " NaN depths; index " << msIndex << " ms, maps " << msLoad << " ms, " << (deviceBp ? "count and stage " : "backproject ")
+                             << " NaN depths; index " << msIndex << " ms, maps " << msLoad << " ms (" << ahead << " readers, " << msRead << " ms of reading), " << (deviceBp ? "count and stage " : "backproject ")
                              << msPrep << " ms, device wait " << msWait << " ms (device: upload " << msDevUp << ", backproject " << msDevBp
                              << ", kernel " << msDevKernel << ", download " << msDevDown << " ms), votes " << msVotes << " ms"
                              << (deviceVotes ? " (camera-list appends from the device's bitmaps: " + std::to_string(nbAppended) + "; device decide, sort and fold "
