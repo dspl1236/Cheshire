@@ -15,8 +15,9 @@
 > kernel layout is done as 6s: about 1 % faster on RDNA4 and 50 % slower on RDNA2, so it is off by
 > default. Step 9 is done as a knob (`CHESHIRE_GPU_VIS_READERS`, default 3); it is not a clear win on
 > house-pc, whose remaining cost is decode time. house-pc is measured (device votes: 884-view passes
-> 158.8 to 116.9 s). Open: step 8's 884-view CHECK, step 10 (default on, gate entries), and step 11 on
-> bench-pc and CUDA.
+> 158.8 to 116.9 s). Steps 8 and 10 are done: the 884-view CHECK is identical everywhere, and device
+> votes are the default with gate entries (docs/04). Open: step 11 on bench-pc (RX 5500 XT) and on
+> CUDA hardware (the Windows CUDA tree compiles).
 
 ## 1. Verdict
 

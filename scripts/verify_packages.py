@@ -29,6 +29,11 @@ MARKERS = {
     # v0.2.16: the similarity-map gaussian on the device
     "gpu-sim-blur": (b"CHESHIRE_GPU_BLUR",
                      ("aliceVision_fuseCut", "aliceVision_meshing")),
+    # 0.3.5: the visibility votes on the device (step 6t, the default since step 10)
+    "gpu-vis-votes": (b"CHESHIRE_GPU_VIS_VOTES",
+                      ("aliceVision_fuseCut", "aliceVision_meshing")),
+    # 0.3.5: Meshing's dense point cloud SfMData built on every core (step 6u)
+    "dense-sfm": (b"CHESHIRE_DENSE_SFM", ("aliceVision_meshing",)),
 }
 
 

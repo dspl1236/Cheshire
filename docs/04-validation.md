@@ -2434,3 +2434,42 @@ pairs), because RDNA4's cache already hid the scattered reads. It is unmeasured 
 that cache. On house-pc's RX 6750 XT it is slower: on the engine bay the knn kernel takes 5.3 s and 4.7 s
 per pass against the old layout's 3.6 s and 3.1 s. So it is off by default, and
 `CHESHIRE_GPU_KNN_LAYOUT=1` selects it.
+
+## 0.3.5: device votes by default (step 10) and the dense point cloud's SfMData on every core (6u) (2026-09-26)
+
+**Step 10.** `CHESHIRE_GPU_VIS_VOTES` now defaults to on, after the exactness runs above on the
+RX 9070 (Windows, fused host forms) and the RX 6750 XT (Linux, plain forms). The RX 9070 run also
+includes the full 884-view CHECK below. `CHESHIRE_GPU_VIS_VOTES=0` announces "visibility votes:
+disabled by CHESHIRE_GPU_VIS_VOTES=0, host votes". Gate changes in `scripts/verify_end_to_end.py`:
+
+- The `verify` configuration now requires "(pass N, GPU votes)" in both votes verdicts, so a pass
+  that fell back to host votes fails it.
+- A new `hostvotes` configuration (host votes under CHECK) keeps the bucketed host path gated as the
+  fallback.
+- "visibility votes on the GPU" is a Meshing marker.
+- `scripts/verify_packages.py` looks for `CHESHIRE_GPU_VIS_VOTES` in fuseCut.
+
+The Windows CUDA tree compiles the device votes (`knnGPU.cu`, CUDA 12.9, MSVC 14.44).
+
+**6u.** At the end of Meshing, `main_meshing.cpp`'s `createDenseSfMData` builds the SfMData saved as
+`densePointCloud.abc`. Upstream copies the whole input SfMData, its landmarks included, only to
+clear them. It then builds one landmark per mesh vertex on one thread, with one projection (with
+distortion) per camera that sees the vertex, and inserts it into the map. It printed nothing, and
+at 884 views it was the 13.8 s between "Mesh post-processing done" and "Save dense point cloud".
+
+Now the input's landmarks are set aside while the rest is copied. The landmarks are built in
+parallel into a vector, since every lookup (views, poses, intrinsics, MultiViewParams) is const,
+and are then moved into the map in index order. `Landmarks` is a `std::map`, so its content does
+not depend on insertion order.
+
+`CHESHIRE_DENSE_SFM_CHECK=1` also builds upstream's version and compares every landmark bit for bit:
+position, describer type, colour, and each observation's view, coordinates, feature id and scale.
+It is in the gate's `verify` configuration.
+
+| | result |
+|---|---|
+| mini6, CHECK | identical to upstream on all 250,207 landmarks (916,597 observations) |
+| False Door, 884 views, RX 9070, full CHECK (with the device votes) | identical to upstream on all 4,071,638 landmarks (58,169,569 observations); in the same run, backprojection and knn identical on all 3,124,680,410 queries of each pass, and votes identical to the ordered host reference on all 9,937,481 and 4,699,910 vertices (plan step 8) |
+| False Door, 884 views, RX 9070 box | 13.8 s to 3.3 s before the save (the function: 1.5 s building the landmarks on 12 threads, 0.4 s filling the map); the Meshing node 241.5 s to 228.8 s |
+
+`CHESHIRE_DENSE_SFM=0` runs upstream's function.

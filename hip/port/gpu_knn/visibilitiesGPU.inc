@@ -582,7 +582,7 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
     for (long long v = 0; v < (long long)nbVertices; ++v)
         scoreV[v] = simScorePrepare[v] * pixSizePrepare[v] * pixSizePrepare[v];
 
-    // step 6t: the votes on the device. The vertices' coordinates, nrc, sim and scoreV go to the
+    // step 6t: the votes on the device (the default since step 10; CHESHIRE_GPU_VIS_VOTES=0 for host votes). The vertices' coordinates, nrc, sim and scoreV go to the
     // device for the pass; per camera it decides every query, folds the contributions in query order
     // and returns the voted vertices as a bitmap, from which the host appends the camera to each list
     // (one camera behind, while the device works on the next). The host's coordinates and nrc are
@@ -591,7 +591,7 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
     // differ, and the pass then votes on the host. Anything that fails mid-pass (a device error, an
     // overflowed query, a map larger than announced, CHESHIRE_GPU_VIS_VOTES_FAIL_AT=c) truncates the
     // camera lists to their pass-start sizes and reruns the pass with host votes.
-    const bool votesWanted = ::cheshire::env::flag("CHESHIRE_GPU_VIS_VOTES", false) && !g_cheshireVisForceHostVotes;
+    const bool votesWanted = ::cheshire::env::flag("CHESHIRE_GPU_VIS_VOTES", true) && !g_cheshireVisForceHostVotes;
     const long long votesFailAt = ::cheshire::env::integer("CHESHIRE_GPU_VIS_VOTES_FAIL_AT", -1);
     bool deviceVotes = false;
     std::string votesRefused;
@@ -660,7 +660,7 @@ const char* createVerticesWithVisibilitiesGPU(const StaticVector<int>& cams,
         if (deviceVotes)
             ALICEVISION_LOG_INFO("cheshire: visibility votes on the GPU (CHESHIRE_GPU_VIS_VOTES=0 for host votes)");
         else if (!votesWanted && !g_cheshireVisForceHostVotes)
-            ALICEVISION_LOG_INFO("cheshire: visibility votes on the host (CHESHIRE_GPU_VIS_VOTES=1 for the GPU)");
+            ALICEVISION_LOG_INFO("cheshire: visibility votes: disabled by CHESHIRE_GPU_VIS_VOTES=0, host votes");
     }
     if (votesWanted && !deviceVotes)
         ALICEVISION_LOG_WARNING("cheshire: visibility votes: " << votesRefused << ", host votes (pass " << pass << ")");

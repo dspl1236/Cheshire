@@ -53,7 +53,8 @@ GPU_MARKERS = {
     "Meshing":           [r"meshing votes: ray marching on",
                           r"max-flow: GPU push-relabel on",
                           r"sim blur: Gaussian on the GPU",
-                          r"visibility knn on the GPU"],
+                          r"visibility knn on the GPU",
+                          r"visibility votes on the GPU"],
     "Texturing":         [r"texturing: pyramid \+ rasterisation on"],
     "StructureFromMotion": [r"cheshire: incremental SfM: a resection pass that ends without a bundle adjustment gets one"],
 }
@@ -80,7 +81,7 @@ SILENT_PORTS = None  # 0.3.2: no port is silent on either path any more
 # All fire inside Meshing. The tedge check's SUMS are not asserted - they differ by an ulp of
 # summation order (docs/09) - only its cell counts, which must be equal.
 SELF_CHECK_ENV = {
-    "CHESHIRE_FILTER_CHECK": "1", "CHESHIRE_MAXFLOW_CHECK": "1", "CHESHIRE_GPU_VIS_CHECK": "1",
+    "CHESHIRE_FILTER_CHECK": "1", "CHESHIRE_MAXFLOW_CHECK": "1", "CHESHIRE_GPU_VIS_CHECK": "1", "CHESHIRE_DENSE_SFM_CHECK": "1",
     "CHESHIRE_SEGMENT_CHECK": "1", "CHESHIRE_GPU_TEDGE_CHECK": "1", "CHESHIRE_GPU_VOTE_LOG": "1",
     "CHESHIRE_MESHCLEAN_CHECK": "1", "CHESHIRE_READ_DIRECT_CHECK": "1",
 }
@@ -105,8 +106,12 @@ SELF_CHECK_VERDICTS = {
         # The visibility queries built on the device (6k), and the votes, per pass.
         r"GPU backprojection check \(pass 1\): identical to MultiViewParams on all",
         r"GPU backprojection check \(pass 2\): identical to MultiViewParams on all",
-        r"visibility votes check \(pass 1, [^)]*\): identical to the ordered host reference on all",
-        r"visibility votes check \(pass 2, [^)]*\): identical to the ordered host reference on all",
+        # Since step 10 the votes run on the device by default: the verdict must name the GPU votes, so
+        # a pass that silently fell back to host votes fails here (the hostvotes config gates that path).
+        r"visibility votes check \(pass 1, GPU votes\): identical to the ordered host reference on all",
+        r"visibility votes check \(pass 2, GPU votes\): identical to the ordered host reference on all",
+        # The dense point cloud's SfMData built in parallel (6u) against upstream's.
+        r"dense point cloud check: identical to upstream on all",
         # MeshClean's counting setup (6l) and pre-screened passes (6i) against upstream's.
         r"MeshClean setup check: identical to upstream's",
         r"cleanMesh check: .*every structure identical",
@@ -170,6 +175,12 @@ CONFIGS = {
         "CHESHIRE_GPU_VIS": "0"}),
     # Every in-process self-check on: each port must agree with its CPU reference, in its own words.
     "verify": dict(overrides=SIFT, env=dict(SELF_CHECK_ENV), checks=SELF_CHECK_VERDICTS),
+    # The host votes (bucketed), which the device votes replaced as the default in step 10: still the
+    # fallback, so still checked against the ordered reference in both passes.
+    "hostvotes": dict(overrides=SIFT, env={"CHESHIRE_GPU_VIS_VOTES": "0", "CHESHIRE_GPU_VIS_CHECK": "1"}, checks={
+        "Meshing": [r"visibility votes: disabled by CHESHIRE_GPU_VIS_VOTES=0, host votes",
+                    r"visibility votes check \(pass 1, bucketed host votes\): identical to the ordered host reference on all",
+                    r"visibility votes check \(pass 2, bucketed host votes\): identical to the ordered host reference on all"]}),
     # The memory bridge under caps. Planner v2 absorbs 1.5 GB on the six-view set by planning
     # smaller tiles - budget 1200 MB, 0 full cameras + 2 tiles, no spill (docs/02) - so that run
     # asserts the re-plan, not a spill; the first version asserted "must spill", which was true of

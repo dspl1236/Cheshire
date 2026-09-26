@@ -9680,10 +9680,161 @@ index cfbdfe8..560e390 100644
                      "AliceVision incrementalSfM");
  
 diff --git a/src/software/pipeline/main_meshing.cpp b/src/software/pipeline/main_meshing.cpp
-index 4fe193b..a271a2f 100644
+index 4fe193b..0145801 100644
 --- a/src/software/pipeline/main_meshing.cpp
 +++ b/src/software/pipeline/main_meshing.cpp
-@@ -271,7 +271,7 @@ int aliceVision_main(int argc, char* argv[])
+@@ -4,6 +4,7 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include <aliceVision/image/Rgb.hpp>
+ #include <aliceVision/sfmData/SfMData.hpp>
+ #include <aliceVision/sfmData/colorize.hpp>
+@@ -30,6 +31,10 @@
+ 
+ #include <filesystem>
+ #include <cmath>
++#include <aliceVision/alicevision_omp.hpp>  // cheshire: step 6u
++#include <chrono>
++#include <cstring>
++#include <vector>
+ 
+ // These constants define the current software version.
+ // They must be updated when the command line is changed.
+@@ -86,11 +91,11 @@ inline std::istream& operator>>(std::istream& in, ERepartitionMode& out_mode)
+ 
+ /// Create a dense SfMData based on reference \p sfmData,
+ /// using \p vertices as landmarks and \p ptCams as observations
+-void createDenseSfMData(const sfmData::SfMData& sfmData,
+-                        const mvsUtils::MultiViewParams& mp,
+-                        const std::vector<Point3d>& vertices,
+-                        const StaticVector<StaticVector<int>>& ptsCams,
+-                        sfmData::SfMData& outSfmData)
++void createDenseSfMDataUpstream(const sfmData::SfMData& sfmData,
++                                const mvsUtils::MultiViewParams& mp,
++                                const std::vector<Point3d>& vertices,
++                                const StaticVector<StaticVector<int>>& ptsCams,
++                                sfmData::SfMData& outSfmData)
+ {
+     outSfmData = sfmData;
+     outSfmData.getLandmarks().clear();
+@@ -118,6 +123,114 @@ void createDenseSfMData(const sfmData::SfMData& sfmData,
+     }
+ }
+ 
++// cheshire (step 6u): the same SfMData, built on every core. Upstream above copies the whole input,
++// its landmarks included, only to clear them, then builds the landmark of each vertex (one projection
++// with distortion per camera that sees it) and inserts it into the map, one vertex after another:
++// 13-15 s at 884 views on either test box. Here the input's landmarks are set aside while the rest is
++// copied, the landmarks are built in parallel into a vector (every lookup is const: views, poses,
++// intrinsics, MultiViewParams), then moved into the map in index order. Landmarks is a std::map, so
++// its content does not depend on insertion order and the result is upstream's.
++// CHESHIRE_DENSE_SFM=0 runs upstream's function; CHESHIRE_DENSE_SFM_CHECK=1 also builds upstream's
++// and compares every landmark and observation bit for bit.
++void createDenseSfMData(sfmData::SfMData& sfmData,
++                        const mvsUtils::MultiViewParams& mp,
++                        const std::vector<Point3d>& vertices,
++                        const StaticVector<StaticVector<int>>& ptsCams,
++                        sfmData::SfMData& outSfmData)
++{
++    if (!::cheshire::env::flag("CHESHIRE_DENSE_SFM", true))
++    {
++        createDenseSfMDataUpstream(sfmData, mp, vertices, ptsCams, outSfmData);
++        return;
++    }
++    using Clock = std::chrono::steady_clock;
++    auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
++    const auto t0 = Clock::now();
++    {
++        // everything but the landmarks, which are replaced: set them aside for the copy
++        sfmData::Landmarks inputLandmarks;
++        inputLandmarks.swap(sfmData.getLandmarks());
++        try
++        {
++            outSfmData = sfmData;
++        }
++        catch (...)
++        {
++            inputLandmarks.swap(sfmData.getLandmarks());
++            throw;
++        }
++        inputLandmarks.swap(sfmData.getLandmarks());
++    }
++    outSfmData.getLandmarks().clear();
++    const auto t1 = Clock::now();
++
++    const double unknownScale = 0.0;
++    const long long n = (long long)vertices.size();
++    std::vector<sfmData::Landmark> built(n);
++#pragma omp parallel for schedule(dynamic, 4096)
++    for (long long i = 0; i < n; ++i)
++    {
++        const Point3d& point = vertices[i];
++        const Vec3 pt3D(point.x, point.y, point.z);
++        sfmData::Landmark landmark(pt3D, feature::EImageDescriberType::UNKNOWN);
++        for (int cam : ptsCams[i])
++        {
++            const sfmData::View& view = sfmData.getView(mp.getViewId(cam));
++            const camera::IntrinsicBase* intrinsicPtr = sfmData.getIntrinsicPtr(view.getIntrinsicId());
++            const sfmData::Observation observation(intrinsicPtr->transformProject(sfmData.getPose(view).getTransform(), pt3D.homogeneous(), true),
++                                                   UndefinedIndexT,
++                                                   unknownScale);  // apply distortion
++            landmark.getObservations()[view.getViewId()] = observation;
++        }
++        built[i] = std::move(landmark);
++    }
++    const auto t2 = Clock::now();
++
++    sfmData::Landmarks& landmarks = outSfmData.getLandmarks();
++    for (long long i = 0; i < n; ++i)
++        landmarks.emplace_hint(landmarks.end(), (IndexT)i, std::move(built[i]));
++    const auto t3 = Clock::now();
++    ALICEVISION_LOG_INFO("cheshire: dense point cloud: " << n << " landmarks on " << omp_get_max_threads() << " threads; copy " << ms(t0, t1)
++                         << " ms, landmarks " << ms(t1, t2) << " ms, map " << ms(t2, t3) << " ms (CHESHIRE_DENSE_SFM=0 for upstream's)");
++
++    if (::cheshire::env::flag("CHESHIRE_DENSE_SFM_CHECK"))
++    {
++        sfmData::SfMData ref;
++        createDenseSfMDataUpstream(sfmData, mp, vertices, ptsCams, ref);
++        const sfmData::Landmarks& a = outSfmData.getLandmarks();
++        const sfmData::Landmarks& b = ref.getLandmarks();
++        std::size_t diff = 0, nbObs = 0;
++        bool sizes = a.size() == b.size() && outSfmData.getViews().size() == ref.getViews().size()
++                     && outSfmData.getIntrinsics().size() == ref.getIntrinsics().size() && outSfmData.getPoses().size() == ref.getPoses().size();
++        for (auto ia = a.begin(), ib = b.begin(); ia != a.end() && ib != b.end(); ++ia, ++ib)
++        {
++            const sfmData::Landmark& la = ia->second;
++            const sfmData::Landmark& lb = ib->second;
++            bool same = ia->first == ib->first && std::memcmp(la.getX().data(), lb.getX().data(), 3 * sizeof(double)) == 0
++                        && la.getDescType() == lb.getDescType() && la.getRgb().r() == lb.getRgb().r() && la.getRgb().g() == lb.getRgb().g() && la.getRgb().b() == lb.getRgb().b()
++                        && la.getObservations().size() == lb.getObservations().size();
++            if (same)
++            {
++                auto oa = la.getObservations().begin();
++                auto ob = lb.getObservations().begin();
++                for (; oa != la.getObservations().end(); ++oa, ++ob)
++                {
++                    const double sa = oa->second.getScale(), sb = ob->second.getScale();
++                    same = same && oa->first == ob->first
++                           && std::memcmp(oa->second.getCoordinates().data(), ob->second.getCoordinates().data(), 2 * sizeof(double)) == 0
++                           && oa->second.getFeatureId() == ob->second.getFeatureId() && std::memcmp(&sa, &sb, sizeof(double)) == 0;
++                }
++            }
++            nbObs += la.getObservations().size();
++            diff += same ? 0 : 1;
++        }
++        if (diff == 0 && sizes)
++            ALICEVISION_LOG_INFO("cheshire: dense point cloud check: identical to upstream on all " << a.size() << " landmarks (" << nbObs << " observations)");
++        else
++            ALICEVISION_LOG_WARNING("cheshire: dense point cloud check: " << diff << " of " << b.size() << " landmarks differ" << (sizes ? "" : " (the counts differ)"));
++    }
++}
++
+ /// Remove all landmarks without observations from \p sfmData.
+ void removeLandmarksWithoutObservations(sfmData::SfMData& sfmData)
+ {
+@@ -271,7 +384,7 @@ int aliceVision_main(int argc, char* argv[])
           "Seed used in random processes. (0 to use a random seed).");
      // clang-format on
  
@@ -9692,7 +9843,7 @@ index 4fe193b..a271a2f 100644
      cmdline.add(requiredParams);
      cmdline.add(optionalParams);
      cmdline.add(advancedParams);
-@@ -418,6 +418,7 @@ int aliceVision_main(int argc, char* argv[])
+@@ -418,6 +531,7 @@ int aliceVision_main(int argc, char* argv[])
                      fuseCut::GraphFiller gfiller(mp, pc, tetrahedralization);
                      gfiller.build(cams);
                      gfiller.binarize();

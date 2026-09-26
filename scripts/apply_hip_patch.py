@@ -4718,6 +4718,27 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                       + "#include <algorithm>" + NL + "#include <condition_variable>" + NL + "#include <fstream>" + NL, 1)
         iop.write_text(t, encoding="utf-8", newline="")
 
+    # 6u. Meshing's dense point cloud SfMData built on every core (hip/port/meshing_cpu/dense_sfm.txt).
+    #     main_meshing's createDenseSfMData copied the whole input SfMData, landmarks included, only to
+    #     clear them, then built and inserted one landmark per mesh vertex (a projection with
+    #     distortion per camera that sees it) on one thread: 13-15 s at 884 views. The input's
+    #     landmarks are now set aside for the copy and the landmarks built in parallel, then moved into
+    #     the std::map in index order, so the content is upstream's. CHESHIRE_DENSE_SFM=0 keeps
+    #     upstream's; CHESHIRE_DENSE_SFM_CHECK=1 compares every landmark and observation in-process.
+    mm = AV / "src/software/pipeline/main_meshing.cpp"
+    t = mm.read_text(encoding="utf-8")
+    if "cheshire (step 6u)" not in t:
+        old, new = [x.replace("\n", NL) for x in (ROOT / "hip/port/meshing_cpu/dense_sfm.txt").read_text(encoding="utf-8").split("=====\n")]
+        if t.count(old) != 1:
+            sys.exit("step 6u: createDenseSfMData not found once in main_meshing.cpp")
+        t = t.replace(old, new, 1)
+        inc = "#include <cmath>" + NL
+        if t.count(inc) != 1:
+            sys.exit("step 6u: <cmath> include not found once in main_meshing.cpp")
+        t = t.replace(inc, inc + "#include <aliceVision/alicevision_omp.hpp>  // cheshire: step 6u" + NL + "#include <chrono>" + NL
+                      + "#include <cstring>" + NL + "#include <vector>" + NL, 1)
+        mm.write_text(t, encoding="utf-8", newline="")
+
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports
     #     and the inline code above had parsed them five ways (a `getenv(X) != nullptr` test turned a
