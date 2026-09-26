@@ -17,7 +17,10 @@ if(CHESHIREJPG_GPU STREQUAL "CUDA")
   set(CMAKE_CUDA_STANDARD 17)
   set_source_files_properties(jpegGPU.cu PROPERTIES LANGUAGE CUDA)
   add_library(CheshireJPG STATIC jpegGPU.cu jpegHost.cpp)
-  target_include_directories(CheshireJPG PRIVATE ${CHESHIREJPG_COMPAT})  # cheshire/env.h
+  # cheshire/env.h on its own: the compat directory also holds the HIP stand-ins for cuda_runtime.h
+  # and cuda_fp16.h, which would shadow the toolkit's headers under nvcc
+  configure_file(${CHESHIREJPG_COMPAT}/cheshire/env.h ${CMAKE_CURRENT_BINARY_DIR}/env-include/cheshire/env.h COPYONLY)
+  target_include_directories(CheshireJPG PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/env-include)
 else()
   enable_language(HIP)
   set(CMAKE_HIP_STANDARD 17)
