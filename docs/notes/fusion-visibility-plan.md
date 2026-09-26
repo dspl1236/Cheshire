@@ -16,8 +16,9 @@
 > default. Step 9 is done as a knob (`CHESHIRE_GPU_VIS_READERS`, default 3); it is not a clear win on
 > house-pc, whose remaining cost is decode time. house-pc is measured (device votes: 884-view passes
 > 158.8 to 116.9 s). Steps 8 and 10 are done: the 884-view CHECK is identical everywhere, and device
-> votes are the default with gate entries (docs/04). Open: step 11 on bench-pc (RX 5500 XT) and on
-> CUDA hardware (the Windows CUDA tree compiles).
+> votes are the default with gate entries (docs/04). Step 11 is done: exact on the RX 5500 XT
+> (bench-pc, Windows HIP 6.2) and on the GTX 1080 Ti (house-pc, Linux CUDA), where the digests equal
+> the AMD Linux runs'.
 
 ## 1. Verdict
 

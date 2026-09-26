@@ -2526,3 +2526,18 @@ of reading per 884-view pass, against 27.1 and 30.8 s. On house-pc (OpenEXR 3.1)
 About 24 s (5 %) of the node. The same reader serves DepthMap, DepthMapFilter and Texturing, so the
 Linux bundle's other EXR reads inflate this way too.
 
+**On CUDA: GTX 1080 Ti in house-pc (Linux; bundle built from 870683d with CUDA 12.9 for sm_61),
+2026-09-26.** Engine bay Meshing with device votes (the default), the visibility CHECK, the dense
+point cloud check and the libdeflate check:
+
+| check | result |
+|---|---|
+| visibility votes, both passes | identical to the ordered host reference on all 6,653,300 and 3,292,402 vertices |
+| knn and backprojection, both passes | identical on all 147,299,450 queries |
+| pass digests and tetrahedralization input | `3bc9f8f4...` / `27fe49ef...` and `df6828cc...`, the same as the RX 6750 XT's Linux runs |
+| dense point cloud (6u) | identical to upstream on all 1,181,458 landmarks (7,401,407 observations) |
+| EXR reads through libdeflate (6v) | 428 of 428 files identical to OpenEXR's readPixels |
+
+So device votes, 6u and 6v are exact on the CUDA backend as on HIP. This bundle predates the GPU
+matcher check, which gets its CUDA run in the release round.
+
