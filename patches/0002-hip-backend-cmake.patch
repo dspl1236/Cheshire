@@ -5989,7 +5989,7 @@ index bd5e932..987a60c 100644
  
      std::map<VertexIndex, std::set<CellIndex>> neighboringCellsPerVertexTmp;
 diff --git a/src/aliceVision/image/CMakeLists.txt b/src/aliceVision/image/CMakeLists.txt
-index 1907d8f..f189c15 100644
+index 1907d8f..80355e0 100644
 --- a/src/aliceVision/image/CMakeLists.txt
 +++ b/src/aliceVision/image/CMakeLists.txt
 @@ -14,6 +14,8 @@ set(image_files_headers
@@ -6030,7 +6030,7 @@ index 1907d8f..f189c15 100644
  alicevision_add_library(aliceVision_image
      SOURCES ${image_files_headers} ${image_files_sources}
      PUBLIC_LINKS
-@@ -46,7 +64,11 @@ alicevision_add_library(aliceVision_image
+@@ -46,7 +64,22 @@ alicevision_add_library(aliceVision_image
      PRIVATE_LINKS
          aliceVision_system
          OpenEXR::OpenEXR
@@ -6038,6 +6038,17 @@ index 1907d8f..f189c15 100644
  )
 +if (CHESHIRE_JPG_LINK)
 +    target_compile_definitions(aliceVision_image PRIVATE CHESHIRE_HAVE_JPG=1)
++endif()
++# cheshire (step 6v): libdeflate for the direct EXR reader's ZIP/ZIPS chunks
++find_path(CHESHIRE_DEFLATE_INCLUDE_DIR libdeflate.h)
++find_library(CHESHIRE_DEFLATE_LIBRARY NAMES deflate libdeflate)
++if (CHESHIRE_DEFLATE_INCLUDE_DIR AND CHESHIRE_DEFLATE_LIBRARY)
++    target_include_directories(aliceVision_image PRIVATE ${CHESHIRE_DEFLATE_INCLUDE_DIR})
++    target_link_libraries(aliceVision_image PRIVATE ${CHESHIRE_DEFLATE_LIBRARY})
++    target_compile_definitions(aliceVision_image PRIVATE CHESHIRE_HAVE_DEFLATE=1)
++    message(STATUS "cheshire: libdeflate for the EXR reader: ${CHESHIRE_DEFLATE_LIBRARY}")
++else()
++    message(STATUS "cheshire: libdeflate not found; the EXR reader inflates through OpenEXR")
 +endif()
  
  # Install config.ocio

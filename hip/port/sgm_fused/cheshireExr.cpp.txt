@@ -23,6 +23,18 @@ inline int omp_in_parallel() { return 0; }
 #include <OpenEXR/ImfStringAttribute.h>
 #include <OpenEXR/ImfThreading.h>
 #include <Imath/ImathBox.h>
+#if defined(CHESHIRE_HAVE_DEFLATE)
+    #include <libdeflate.h>
+    #include <OpenEXR/IlmThreadPool.h>
+    #include <OpenEXR/ImfCompression.h>
+    #include <OpenEXR/OpenEXRConfig.h>
+    #include <Imath/half.h>
+    #include <atomic>
+    #include <cstdio>
+    #include <cstring>
+    #include <functional>
+    #include <vector>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -84,6 +96,207 @@ bool hasExrExtension(const std::string& path)
 }
 
 thread_local int tlConcurrentLoad = 0;
+
+#if defined(CHESHIRE_HAVE_DEFLATE)
+// cheshire (step 6v): ZIP and ZIPS chunks inflated with libdeflate. OpenEXR before 3.2 inflates with
+// zlib (the Linux bundle's 3.1); libdeflate decompresses the same stream about twice as fast, and
+// decompression has one answer, so the pixels are OpenEXR's. Per chunk, as OpenEXR's zip: the zlib
+// stream, then the byte predictor (each byte the previous plus itself minus 128) and the interleave
+// (the first half of the bytes are the even ones), then per line the channels in the file's order
+// (alphabetical), half widened to float exactly as a FLOAT slice does. A chunk whose data is not
+// smaller than its lines is stored uncompressed, as OpenEXR writes it. Chunks come off the file in
+// order through InputFile::rawPixelData and are decoded on OpenEXR's own thread pool, in batches, so
+// concurrent readers share the pool as their readPixels calls did. Default: on with OpenEXR before
+// 3.2, off after (it uses libdeflate itself); CHESHIRE_EXR_DEFLATE=0|1 overrides, and
+// CHESHIRE_EXR_DEFLATE_CHECK=1 also reads every such file through readPixels and keeps OpenEXR's
+// pixels on a difference, reporting "EXR deflate check: N of M files identical" at exit.
+bool cheshireExrDeflateEnabled()
+{
+#if OPENEXR_VERSION_MAJOR < 3 || (OPENEXR_VERSION_MAJOR == 3 && OPENEXR_VERSION_MINOR < 2)
+    constexpr bool byDefault = true;
+#else
+    constexpr bool byDefault = false;
+#endif
+    static const bool on = ::cheshire::env::flag("CHESHIRE_EXR_DEFLATE", byDefault);
+    static std::once_flag once;
+    std::call_once(once, [] {
+        ALICEVISION_LOG_INFO("cheshire: EXR ZIP/ZIPS chunks inflated " << (on ? "with libdeflate" : "by OpenEXR") << " (OpenEXR " << OPENEXR_VERSION_MAJOR << "."
+                                                                     << OPENEXR_VERSION_MINOR << "; CHESHIRE_EXR_DEFLATE=" << (on ? "0" : "1") << " for the other)");
+    });
+    return on;
+}
+
+bool cheshireExrDeflateCheck()
+{
+    static const bool on = ::cheshire::env::flag("CHESHIRE_EXR_DEFLATE_CHECK");
+    return on;
+}
+
+struct CheshireDeflateStats
+{
+    std::atomic<long long> checked{0}, identical{0};
+    ~CheshireDeflateStats()
+    {
+        if (checked.load() > 0)
+            std::fprintf(stderr, "[cheshire] EXR deflate check: %lld of %lld files identical to OpenEXR's readPixels\n", identical.load(), checked.load());
+    }
+};
+CheshireDeflateStats g_cheshireDeflateStats;
+
+struct DeflateChannel
+{
+    int target;  // output component, or -1 when the file channel is not read
+    int bytes;   // 2 (half) or 4 (float)
+};
+
+// The unpacked bytes of one chunk into out (unpacked bytes), tmp as the zlib output
+bool cheshireUnzipChunk(libdeflate_decompressor* d, const char* in, std::size_t inSize, std::size_t unpacked, std::vector<unsigned char>& tmp, unsigned char* out)
+{
+    if (inSize >= unpacked)
+    {
+        if (inSize != unpacked)
+            return false;
+        std::memcpy(out, in, unpacked);
+        return true;
+    }
+    tmp.resize(unpacked);
+    std::size_t actual = 0;
+    if (libdeflate_zlib_decompress(d, in, inSize, tmp.data(), unpacked, &actual) != LIBDEFLATE_SUCCESS || actual != unpacked)
+        return false;
+    unsigned char* t = tmp.data();
+    for (std::size_t i = 1; i < unpacked; ++i)
+        t[i] = static_cast<unsigned char>(int(t[i - 1]) + int(t[i]) - 128);
+    const unsigned char* t1 = t;
+    const unsigned char* t2 = t + (unpacked + 1) / 2;
+    for (std::size_t i = 0; i < unpacked; ++i)
+        out[i] = (i & 1) ? t2[i >> 1] : t1[i >> 1];
+    return true;
+}
+
+// Chunks [k0, k1): unzip, then scatter the lines into the float image
+bool cheshireDecodeChunks(const std::vector<char>& blob, const std::vector<std::size_t>& offs, int k0, int k1, int linesPerChunk, int width, int height,
+                          const std::vector<DeflateChannel>& chs, std::size_t bytesPerLine, int nchannels, float* base)
+{
+    libdeflate_decompressor* d = libdeflate_alloc_decompressor();
+    if (d == nullptr)
+        return false;
+    std::vector<unsigned char> tmp, unpackedBuf;
+    bool good = true;
+    for (int k = k0; k < k1 && good; ++k)
+    {
+        const int y0 = k * linesPerChunk;
+        const int y1 = std::min(y0 + linesPerChunk, height);
+        const std::size_t unpacked = bytesPerLine * static_cast<std::size_t>(y1 - y0);
+        unpackedBuf.resize(unpacked);
+        good = cheshireUnzipChunk(d, blob.data() + offs[k], offs[k + 1] - offs[k], unpacked, tmp, unpackedBuf.data());
+        if (!good)
+            break;
+        const unsigned char* p = unpackedBuf.data();
+        for (int y = y0; y < y1; ++y)
+        {
+            float* row = base + static_cast<std::size_t>(y) * static_cast<std::size_t>(width) * static_cast<std::size_t>(nchannels);
+            for (const DeflateChannel& ch : chs)
+            {
+                if (ch.target < 0)
+                {
+                    p += static_cast<std::size_t>(ch.bytes) * static_cast<std::size_t>(width);
+                    continue;
+                }
+                float* o = row + ch.target;
+                if (ch.bytes == 2)
+                {
+                    for (int x = 0; x < width; ++x, p += 2, o += nchannels)
+                    {
+                        Imath::half h;
+                        h.setBits(static_cast<unsigned short>(p[0] | (p[1] << 8)));
+                        *o = static_cast<float>(h);
+                    }
+                }
+                else
+                {
+                    for (int x = 0; x < width; ++x, p += 4, o += nchannels)
+                        std::memcpy(o, p, 4);
+                }
+            }
+        }
+    }
+    libdeflate_free_decompressor(d);
+    return good;
+}
+
+class CheshireDeflateTask : public IlmThread::Task
+{
+  public:
+    CheshireDeflateTask(IlmThread::TaskGroup* group, std::function<bool()> work, std::atomic<bool>* failed)
+      : IlmThread::Task(group),
+        _work(std::move(work)),
+        _failed(failed)
+    {}
+    void execute() override
+    {
+        if (!_work())
+            _failed->store(true);
+    }
+
+  private:
+    std::function<bool()> _work;
+    std::atomic<bool>* _failed;
+};
+
+// The whole image through libdeflate; false (the image then read by readPixels) on anything unexpected
+bool cheshireReadExrDeflate(Imf::InputFile& file, const Imf::Header& header, int width, int height, int nchannels, const char* const* names, float* base,
+                            int fileThreads)
+{
+    const Imf::Compression comp = header.compression();
+    const int linesPerChunk = comp == Imf::ZIPS_COMPRESSION ? 1 : 16;
+    std::vector<DeflateChannel> chs;
+    std::size_t bytesPerPixel = 0;
+    for (Imf::ChannelList::ConstIterator it = header.channels().begin(); it != header.channels().end(); ++it)
+    {
+        DeflateChannel ch{-1, it.channel().type == Imf::HALF ? 2 : 4};
+        if (it.channel().type != Imf::HALF && it.channel().type != Imf::FLOAT)
+            return false;
+        for (int c = 0; c < nchannels; ++c)
+            if (std::strcmp(it.name(), names[c]) == 0)
+                ch.target = c;
+        bytesPerPixel += static_cast<std::size_t>(ch.bytes);
+        chs.push_back(ch);
+    }
+    const std::size_t bytesPerLine = bytesPerPixel * static_cast<std::size_t>(width);
+    const int nChunks = (height + linesPerChunk - 1) / linesPerChunk;
+    // the compressed chunks, in order
+    std::vector<char> blob;
+    std::vector<std::size_t> offs(static_cast<std::size_t>(nChunks) + 1, 0);
+    for (int k = 0; k < nChunks; ++k)
+    {
+        const char* data = nullptr;
+        int size = 0;
+        file.rawPixelData(k * linesPerChunk, data, size);
+        if (data == nullptr || size <= 0)
+            return false;
+        offs[k] = blob.size();
+        blob.insert(blob.end(), data, data + size);
+    }
+    offs[nChunks] = blob.size();
+    // decode: inline, or in batches on OpenEXR's pool like readPixels
+    if (fileThreads <= 0 || nChunks < 2)
+        return cheshireDecodeChunks(blob, offs, 0, nChunks, linesPerChunk, width, height, chs, bytesPerLine, nchannels, base);
+    const int batch = std::max(1, 64 / linesPerChunk);
+    std::atomic<bool> failed{false};
+    {
+        IlmThread::TaskGroup group;
+        for (int k0 = 0; k0 < nChunks; k0 += batch)
+        {
+            const int k1 = std::min(nChunks, k0 + batch);
+            IlmThread::ThreadPool::addGlobalTask(new CheshireDeflateTask(
+              &group,
+              [&, k0, k1] { return cheshireDecodeChunks(blob, offs, k0, k1, linesPerChunk, width, height, chs, bytesPerLine, nchannels, base); },
+              &failed));
+        }
+    }  // the group waits for its tasks
+    return !failed.load();
+}
+#endif
 
 }  // namespace
 
@@ -165,16 +378,50 @@ bool cheshireReadExr(const std::string& path, int nchannels, bool requireLinearM
         float* base = allocate(width, height);
         const std::size_t xStride = sizeof(float) * static_cast<std::size_t>(nchannels);
         const std::size_t yStride = xStride * static_cast<std::size_t>(width);
+        bool viaDeflate = false;
+#if defined(CHESHIRE_HAVE_DEFLATE)
+        {
+            const Imf::Compression compression = header.compression();
+            if (!header.hasTileDescription() && (compression == Imf::ZIPS_COMPRESSION || compression == Imf::ZIP_COMPRESSION) && cheshireExrDeflateEnabled()
+                && cheshireReadExrDeflate(file, header, width, height, nchannels, names, base, fileThreads))
+            {
+                viaDeflate = true;
+                if (cheshireExrDeflateCheck())
+                {
+                    // OpenEXR's own pixels beside these, bit for bit; OpenEXR's are kept on a difference
+                    std::vector<float> ref(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * static_cast<std::size_t>(nchannels));
+                    Imf::FrameBuffer refBuffer;
+                    for (int c = 0; c < nchannels; ++c)
+                        refBuffer.insert(names[c], Imf::Slice(Imf::FLOAT, reinterpret_cast<char*>(ref.data() + c), xStride, yStride));
+                    file.setFrameBuffer(refBuffer);
+                    file.readPixels(dw.min.y, dw.max.y);
+                    const bool same = std::memcmp(ref.data(), base, ref.size() * sizeof(float)) == 0;
+                    ++g_cheshireDeflateStats.checked;
+                    if (same)
+                        ++g_cheshireDeflateStats.identical;
+                    else
+                    {
+                        std::memcpy(base, ref.data(), ref.size() * sizeof(float));
+                        ALICEVISION_LOG_WARNING("cheshire: EXR deflate check: " << path << " differs from OpenEXR's readPixels; OpenEXR's pixels kept");
+                    }
+                }
+            }
+        }
+#endif
         Imf::FrameBuffer frameBuffer;
         for (int c = 0; c < nchannels; ++c)
             frameBuffer.insert(names[c], Imf::Slice(Imf::FLOAT, reinterpret_cast<char*>(base + c), xStride, yStride));
-        file.setFrameBuffer(frameBuffer);
-        if (header.hasTileDescription())
+        if (viaDeflate)
         {
+        }
+        else if (header.hasTileDescription())
+        {
+            file.setFrameBuffer(frameBuffer);
             file.readPixels(dw.min.y, dw.max.y);
         }
         else
         {
+            file.setFrameBuffer(frameBuffer);
             // In blocks of scanlines. readPixels allocates its packed and unpacked chunk buffers
             // for the whole requested range up front - 235 MB for one of these files, freed after -
             // and a dozen threads page-faulting fresh temporaries at once serialise in the kernel:
@@ -191,7 +438,7 @@ bool cheshireReadExr(const std::string& path, int nchannels, bool requireLinearM
                                                              << std::chrono::duration<double>(tOpen1 - tOpen0).count() << " s, read "
                                                              << std::chrono::duration<double>(tEnd - tOpen1).count() << " s, thread cpu "
                                                              << (threadCpuSeconds() - cpu0) << " s, file threads " << fileThreads << ", in parallel "
-                                                             << (omp_in_parallel() ? 1 : 0));
+                                                             << (omp_in_parallel() ? 1 : 0) << (viaDeflate ? ", libdeflate" : ""));
         }
         return true;
     }

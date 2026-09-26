@@ -4739,6 +4739,34 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                       + "#include <cstring>" + NL + "#include <vector>" + NL, 1)
         mm.write_text(t, encoding="utf-8", newline="")
 
+    # 6v. The direct EXR reader (5v) inflates ZIP and ZIPS chunks with libdeflate where OpenEXR itself
+    #     uses zlib (before 3.2: the Linux bundle's 3.1), hip/port/sgm_fused/cheshireExr.cpp.txt. Same
+    #     pixels (decompression has one answer; CHESHIRE_EXR_DEFLATE_CHECK=1 compares every file with
+    #     readPixels); the files Cheshire writes are untouched. libdeflate comes from the system (Ubuntu's
+    #     libdeflate-dev, already in the bundle through libtiff) or vcpkg (deflate.dll, which OpenEXR 3.4
+    #     already loads); without it the reader stays on OpenEXR.
+    icm = AV / "src/aliceVision/image/CMakeLists.txt"
+    t = icm.read_text(encoding="utf-8")
+    if "cheshire (step 6v)" not in t:
+        nl_i = "\r\n" if "\r\n" in t else "\n"
+        anchor6r = "    target_compile_definitions(aliceVision_image PRIVATE CHESHIRE_HAVE_JPG=1)" + nl_i + "endif()" + nl_i
+        if t.count(anchor6r) != 1:
+            sys.exit("step 6v: step 6r's CheshireJPG block not found once in image/CMakeLists.txt")
+        block = nl_i.join([
+            "# cheshire (step 6v): libdeflate for the direct EXR reader's ZIP/ZIPS chunks",
+            "find_path(CHESHIRE_DEFLATE_INCLUDE_DIR libdeflate.h)",
+            "find_library(CHESHIRE_DEFLATE_LIBRARY NAMES deflate libdeflate)",
+            "if (CHESHIRE_DEFLATE_INCLUDE_DIR AND CHESHIRE_DEFLATE_LIBRARY)",
+            "    target_include_directories(aliceVision_image PRIVATE ${CHESHIRE_DEFLATE_INCLUDE_DIR})",
+            "    target_link_libraries(aliceVision_image PRIVATE ${CHESHIRE_DEFLATE_LIBRARY})",
+            "    target_compile_definitions(aliceVision_image PRIVATE CHESHIRE_HAVE_DEFLATE=1)",
+            '    message(STATUS "cheshire: libdeflate for the EXR reader: ${CHESHIRE_DEFLATE_LIBRARY}")',
+            "else()",
+            '    message(STATUS "cheshire: libdeflate not found; the EXR reader inflates through OpenEXR")',
+            "endif()", ""])
+        t = t.replace(anchor6r, anchor6r + block, 1)
+        icm.write_text(t, encoding="utf-8", newline="")
+
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports
     #     and the inline code above had parsed them five ways (a `getenv(X) != nullptr` test turned a
