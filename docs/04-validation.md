@@ -2304,3 +2304,88 @@ under a second of wall time and the device path adds a file read, an upload and 
 photo, and on house-pc's 4 threads the node is bound elsewhere (the EXR writes and the colour
 transform), so taking the decode off the CPU changes nothing there either. It stays off by default,
 and FeatureExtraction's read waits for a measurement that shows the decode on its critical path.
+
+## 0.3.5: the visibility votes on the device (step 6t, off by default) and the knn kernel's layout (6s) (2026-09-26)
+
+**The decision point** (docs/notes/fusion-visibility-plan.md, after step 3): go on to device votes
+if house-pc is still host-bound. Measured with `CHESHIRE_GPU_VIS_LOG=1` (b035a bundle on house-pc,
+the dev install here):
+
+| where | pass 1 | pass 2 |
+|---|---|---|
+| house-pc, engine bay (107 views), per camera | host 53.5 ms (votes 47) against device 46.6 ms | host-bound as well |
+| house-pc, False Door (884 views) | 87.5 s: host 70.9 (votes 59.2, maps 7.0, staging 4.6), device 66.7 (knn 39.3, download 20.0) | 69.0 s: host 56.8 (votes 43.4), device 56.0 |
+| RX 9070, False Door | 46 s, device-bound (votes 12.7 s on 12 threads) | 35 s |
+
+The whole 884-view Meshing on house-pc is 483 s: 157 s in the two passes, 131 s reading the depth
+maps. On the 5600X the host votes split as decide 3.7, scan 0.4, scatter 0.9 and apply 7.3 s in
+pass 1. Only the camera-list appends have to stay on the host. 128 M of the 946 M votes add a
+camera in pass 1, and 7.2 M in pass 2, whose lists already hold pass 1's cameras.
+
+**6t.** With `CHESHIRE_GPU_VIS_VOTES=1` the pass's vertices (coordinates, nrc, sim, scoreV) live on
+the device. Per camera, after the backprojection and the knn:
+
+1. Every query is decided with the host's expressions: `simScorePrepare[v] * pixSize * pixSize`
+   rounded to float, `std::max` as `(a < b) ? b : a`, and the float products compared in double.
+2. A vote sets the vertex's bit in the camera's bitmap. The host appends the camera to each voted
+   list from that bitmap, one camera behind, while the device works on the next camera.
+3. A contribution counts itself on its vertex. An exact integer scan of the counts gives each
+   vertex a range, and the contributions are scattered into it. One thread per vertex sorts its
+   range by query (insertion sort, heapsort past 32) and folds it with Point3d's three separate
+   operations. Each vertex sees its contributions in pixel order, as the ordered host votes apply
+   them.
+4. At the end of the pass the coordinates and nrc come back. The host's copies are untouched until
+   then.
+
+Before a pass, the device's fold is compared with this build's on 4096 triples. Every index the
+scatter and the fold compute is range-checked into a counter that must stay 0. Any failure mid-pass
+truncates the camera lists to their pass-start sizes and reruns the pass with host votes. The
+failures covered are a device error, an overflowed query, a map larger than announced, a nonzero
+counter, and `CHESHIRE_GPU_VIS_VOTES_FAIL_AT=c`. After a device error, the rerun is upstream's CPU
+pass and the device is not used again.
+
+**The first version used hipCUB's radix sort and crashed this machine.** rocPRIM, under hipCUB and
+rocThrust, resolves its kernel configuration twice. On the host it takes the device it finds
+(gfx1201). In the kernel it takes the compile target, and a generic target (gfx12-generic,
+Cheshire's default) resolves there to "unknown". So the host launched one configuration and the
+kernel ran another. The mini6 run folded the wrong contributions into every vertex. The
+fault-injection run hit "unspecified launch failure", and its recovery kept using the faulted
+context. The machine then bugchecked (0x119, VIDEO_SCHEDULER_INTERNAL_ERROR). Devices rocPRIM
+doesn't name (gfx1031, gfx1012) would have worked by accident. The scan and scatter above replace
+the library, and a device error now ends the device's part in that pass. PopSIFT's grid filter uses
+Thrust and is being checked for the same trap.
+
+| check | result |
+|---|---|
+| mini6, `CHESHIRE_GPU_VIS_CHECK=1` | votes identical to the ordered host reference on all 741,973 / 264,054 vertices (coordinates, nrc, camera lists in order, pixSize); backprojection and knn identical on all 8,808,856 queries per pass; digests `806ef990.../51779edd...` as before |
+| mini6, failure injected at camera 3 | both passes rerun with host votes; same digests and tetrahedralization checksum |
+| 41 views, CHECK | identical on all 4,138,408 / 1,860,629 vertices and all 88,267,121 queries per pass; digests `4d536979.../db94ece3...`, tetrahedralization input `cdd23710...` |
+| False Door, 884 views | digests `c572bc16.../f0ff15ea...` and tetrahedralization input `64b36ee4...` unchanged |
+
+RX 9070 box, False Door, back to back:
+
+| | host votes | device votes |
+|---|---|---|
+| pass 1 | 45.7 s, 44.9 s | 42.6 s (cold, first run after a reboot), 39.0 s |
+| pass 2 | 33.7 s, 34.7 s | 29.7 s, 27.6 s |
+| camera-list appends on the host | inside votes of 13.4 / 9.2 s | 3.0 / 1.4 s |
+| device decide, scan, scatter and fold | | 0.3 s per pass |
+| Meshing node (warm pair) | 237.8 s | 230.3 s |
+
+Here the passes stay knn-bound, at about 38 s of kernel per pass. The step is aimed at four-thread
+hosts, where the votes were most of the host's time. house-pc needs a Linux bundle to measure; its
+False Door cache is at `/data/tests/fd833`.
+
+**6s. The knn kernel's layout.** Four changes:
+
+- The points are stored in leaf order, so a leaf is one contiguous run and the answer is
+  `perm[slot]`.
+- A stack frame is 24 bytes instead of 40. The other child, the axis and the phase share one int,
+  and once the frame is revisited the cut distance is replaced by the distance it displaced.
+- The stack is 40, 64 or 96 frames depending on the tree's depth, instead of always 96.
+- The three axis distances are held in registers.
+
+Same points, order, metric and comparisons: mini6 and 41-view CHECK identical to nanoflann, and the
+884-view digests unchanged. On the RX 9070 it saves 0.65 s of the passes' 82 s (two alternating
+pairs), because RDNA4's cache already hid the scattered reads. It is unmeasured on cards without
+that cache. `CHESHIRE_GPU_KNN_LAYOUT=0` keeps the old kernel.

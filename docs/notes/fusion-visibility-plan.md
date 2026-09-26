@@ -6,6 +6,14 @@
 > Step 1's premise was incomplete: the pragma does not reach HIP's `__dadd_rn`/`__dmul_rn`, which are
 > defined in a header included before the file, so they fused anyway; 6k replaced them. Open: steps
 > 4-12 (device votes and the rest), and the house-pc measurements the plan asks for.
+>
+> **Update, 2026-09-26.** Decision point measured: house-pc is host-bound, 70.9 s host against
+> 66.7 s device in pass 1 at 884 views. Steps 4-7 are done as 6t (docs/04), opt-in behind
+> `CHESHIRE_GPU_VIS_VOTES=1`, with one change to the design: no hipCUB/CUB sort. rocPRIM's config
+> dispatch disagrees between host and device on generic targets and faulted the RX 9070, so the fold
+> order comes from a per-vertex count, an exact scan, a scatter and a per-vertex sort. Step 12's
+> kernel layout is done as 6s (about 1 % on RDNA4). Open: step 8's 884-view CHECK, step 9 (readers),
+> step 10 (default on, gate entries), and step 11 (house-pc, bench-pc, CUDA).
 
 ## 1. Verdict
 
