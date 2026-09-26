@@ -4671,6 +4671,53 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
         t = t.replace(old, new, 1)
         av.write_text(t, encoding="utf-8", newline="")
 
+    # 6r. CheshireJPG in the direct read (docs/notes/cheshirejpg-reads-plan.md). The codec is built from
+    #     the Cheshire checkout into the image library with the build's own GPU language and
+    #     architectures (CMAKE_HIP_ARCHITECTURES / CMAKE_CUDA_ARCHITECTURES are the build's), linked
+    #     PRIVATE, and CHESHIRE_HAVE_JPG turns on its use in 6n's helper (hip/port/image_read/direct8.txt),
+    #     where CHESHIRE_GPU_JPEG=1 swaps libjpeg-turbo's decode for the device's (identical pixels).
+    #     The API crosses as std::vector<uint8_t>, so the Eigen AVX2/HIP allocation trap does not
+    #     apply. aliceVision_image then carries device code, so it is one of build_targets.py's
+    #     per-target libraries.
+    icm = AV / "src/aliceVision/image/CMakeLists.txt"
+    t = icm.read_text(encoding="utf-8")
+    if "cheshire (step 6r)" not in t:
+        nl_i = "\r\n" if "\r\n" in t else "\n"
+        anchor = "alicevision_add_library(aliceVision_image" + nl_i
+        if t.count(anchor) != 1:
+            sys.exit("step 6r: alicevision_add_library(aliceVision_image not found once in image/CMakeLists.txt")
+        block = nl_i.join([
+            "# cheshire (step 6r): CheshireJPG (hip/port/cheshirejpg, docs/19) for the direct read's device JPEG",
+            "# decode, built from the Cheshire checkout with the build's GPU language and architectures",
+            'set(CHESHIRE_JPG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../hip/port/cheshirejpg")',
+            'set(CHESHIRE_JPG_LINK "")',
+            'if (ALICEVISION_HAVE_CUDA AND EXISTS "${CHESHIRE_JPG_DIR}/CMakeLists.txt")',
+            "    if (ALICEVISION_HAVE_HIP)",
+            '        set(CHESHIREJPG_GPU HIP CACHE STRING "HIP or CUDA" FORCE)',
+            "    else()",
+            '        set(CHESHIREJPG_GPU CUDA CACHE STRING "HIP or CUDA" FORCE)',
+            "    endif()",
+            '    set(CHESHIREJPG_BUILD_TOOL OFF CACHE BOOL "the cheshirejpg command-line tool" FORCE)',
+            '    add_subdirectory("${CHESHIRE_JPG_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/cheshirejpg")',
+            "    set(CHESHIRE_JPG_LINK CheshireJPG)",
+            "endif()", "", ""])
+        t = t.replace(anchor, block + anchor, 1)
+        priv = "        OpenEXR::OpenEXR" + nl_i + ")" + nl_i
+        if t.count(priv) != 1:
+            sys.exit("step 6r: the image library's PRIVATE_LINKS end not found once in image/CMakeLists.txt")
+        t = t.replace(priv, "        OpenEXR::OpenEXR" + nl_i + "        ${CHESHIRE_JPG_LINK}" + nl_i + ")" + nl_i
+                      + "if (CHESHIRE_JPG_LINK)" + nl_i + "    target_compile_definitions(aliceVision_image PRIVATE CHESHIRE_HAVE_JPG=1)" + nl_i
+                      + "endif()" + nl_i, 1)
+        icm.write_text(t, encoding="utf-8", newline="")
+    t = iop.read_text(encoding="utf-8")
+    if "cheshire: step 6r" not in t:
+        inc = "#include <OpenImageIO/parallel.h>  // cheshire: step 6n" + NL
+        if t.count(inc) != 1:
+            sys.exit("step 6r: step 6n's include not found once in image/io.cpp")
+        t = t.replace(inc, inc + "#if defined(CHESHIRE_HAVE_JPG)  // cheshire: step 6r" + NL + "#include <jpegCodec.hpp>" + NL + "#endif" + NL
+                      + "#include <algorithm>" + NL + "#include <condition_variable>" + NL + "#include <fstream>" + NL, 1)
+        iop.write_text(t, encoding="utf-8", newline="")
+
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports
     #     and the inline code above had parsed them five ways (a `getenv(X) != nullptr` test turned a

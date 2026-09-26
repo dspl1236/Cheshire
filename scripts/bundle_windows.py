@@ -20,13 +20,13 @@ Layout produced:
     common/bin/, common/share/ everything bit-identical across every input
     fam/<family>/bin/, lib/    AliceVision's own binaries for that toolchain
     gpu/<family>/              amdhip64_* + amd_comgr_* (what the probe loads)
-    gpu/<family>/<target>/     the five GPU-bearing DLLs
+    gpu/<family>/<target>/     the GPU-bearing DLLs (build_targets.py's GPU_DLLS)
 
 At run time the launcher sets
     PATH = gpu/<fam>/<target>;gpu/<fam>;fam/<fam>/bin;common/bin
     ALICEVISION_ROOT = common
 so nothing is copied or materialised on the user's disk - Windows resolves each DLL from PATH, and
-the GPU directory comes first so its five win over anything with the same name.
+the GPU directory comes first so its DLLs win over anything with the same name.
 """
 import hashlib, os, re, shutil, sys, zipfile
 from collections import defaultdict
@@ -112,7 +112,7 @@ def main(argv):
         if not (p / 'bin').is_dir():
             kids = [c for c in p.iterdir() if c.is_dir() and (c / 'bin').is_dir()]
             if len(kids) == 1: p = kids[0]
-        # A directory with no bin/ is a bare payload from build_targets.py: the five GPU DLLs and
+        # A directory with no bin/ is a bare payload from build_targets.py: the GPU DLLs and
         # nothing else. Only the first input of a family needs to be a full package, since that is
         # where the shared and per-family files come from.
         if not (p / 'bin').is_dir():
@@ -140,7 +140,7 @@ def main(argv):
     for family, target, root in inputs:
         base_for_family = family not in seen_family
         seen_family.add(family)
-        # A bare payload dir carries the five DLLs and the build logs that produced them; only the
+        # A bare payload dir carries the GPU DLLs and the build logs that produced them; only the
         # DLLs belong in the bundle. It also cannot be a family's base, because the shared and
         # per-family files have to come from a real package.
         is_payload = not (root / 'bin').is_dir()
@@ -213,7 +213,7 @@ def main(argv):
     for k in sorted(counts): print(f"  {k:<34} {counts[k]:5} files")
     total = sum(f.stat().st_size for f in stage.rglob('*') if f.is_file())
     # What this replaces is one full package per target, so compare against that - not against the
-    # inputs, most of which are bare five-DLL payloads and would understate it wildly.
+    # inputs, most of which are bare GPU-DLL payloads and would understate it wildly.
     pkgs = [r for _, _, r in inputs if (r / 'bin').is_dir()]
     per_pkg = max((sum(f.stat().st_size for f in r.rglob('*') if f.is_file()) for r in pkgs),
                   default=0)

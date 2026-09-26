@@ -318,7 +318,7 @@ L items can slide.
   allocated at the first batch, with per-batch free-VRAM logging. The check mode's
   heap corruption on Windows is fixed, and so is the GPU check's throughput mode, which counted
   failed decodes (an out-of-memory at 8 threads on the RX 5500 XT printed 25.5 images/s and PASS).
-- **CheshireJPG for the reads** (L). The GPU JPEG codec exists (docs/19): a baseline decoder and
+- **CheshireJPG for the reads** (L). **In, off by default, 2026-09-25** (step 6r, `CHESHIRE_GPU_JPEG=1`; exact on the RX 9070 and the GTX 1080 Ti; remaining gates and timings in docs/notes/cheshirejpg-reads-plan.md). The GPU JPEG codec exists (docs/19): a baseline decoder and
   encoder in HIP compute kernels, not VCN, so Windows and RDNA1 are covered, identical to
   libjpeg-turbo on 88 of 89 camera files (the 89th is damaged and handed back) and on 833
   synthetic encode/decode cases, checked on the host backend. **RX 9070, Windows (2026-09-24):**
@@ -355,7 +355,7 @@ Parked items from this group are listed under Parked and exploratory.
 GPS image pairing, reconstruction quality, and the first SfM work on the GPU. This was 0.3.4 in
 the earlier proposal.
 
-- **Reconstruction-quality gate** (L). No gate measures quality today: `verify_end_to_end.py`
+- **Reconstruction-quality gate** (L). **SfM part done 2026-09-25** (`scripts/quality_gate.py`; docs/04: today's defaults pass against upstream-equivalent SfM on 41 views and the engine bay, resolution about 0.01-0.1 %). Still open: mesh-to-reference distance for the full pipeline. No gate measures quality today: `verify_end_to_end.py`
   checks outputs, provenance, port markers and self-check verdicts
   (`scripts/verify_end_to_end.py:300-330`). Build a script for landmark count, mean reprojection
   error, poses and mesh-to-reference distance on mini6 and the engine bay. Take the thresholds from

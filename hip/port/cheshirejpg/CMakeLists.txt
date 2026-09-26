@@ -26,13 +26,18 @@ else()
   find_package(hip REQUIRED)
   set_source_files_properties(jpegGPU.cu PROPERTIES LANGUAGE HIP)
   add_library(CheshireJPG STATIC jpegGPU.cu jpegHost.cpp)
-  target_include_directories(CheshireJPG PRIVATE ${CHESHIREJPG_COMPAT})
   # nvcc pre-includes cuda_runtime.h; clang does not, and the HIP build maps the CUDA names
-  # through Cheshire's compat header (allocations go through the memory bridge)
-  if(CMAKE_HIP_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-    target_compile_options(CheshireJPG PRIVATE "$<$<COMPILE_LANGUAGE:HIP>:/FI${CHESHIREJPG_COMPAT}/cheshire/cuda_to_hip.h>")
-  else()
-    target_compile_options(CheshireJPG PRIVATE "$<$<COMPILE_LANGUAGE:HIP>:-include${CHESHIREJPG_COMPAT}/cheshire/cuda_to_hip.h>")
+  # through Cheshire's compat header (allocations go through the memory bridge). Inside
+  # AliceVision's build (generator step 6r) that build already force-includes its own copy of the
+  # header for every HIP source, so adding this checkout's copy as well defines everything twice
+  # (two files, so #pragma once does not help): only a standalone build adds it.
+  if(NOT DEFINED ALICEVISION_HIP_DIR)
+    target_include_directories(CheshireJPG PRIVATE ${CHESHIREJPG_COMPAT})
+    if(CMAKE_HIP_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+      target_compile_options(CheshireJPG PRIVATE "$<$<COMPILE_LANGUAGE:HIP>:/FI${CHESHIREJPG_COMPAT}/cheshire/cuda_to_hip.h>")
+    else()
+      target_compile_options(CheshireJPG PRIVATE "$<$<COMPILE_LANGUAGE:HIP>:-include${CHESHIREJPG_COMPAT}/cheshire/cuda_to_hip.h>")
+    endif()
   endif()
   # hip::host only. hip::device would add HIP compile options to every source of the target, so
   # jpegHost.cpp would be compiled as HIP for the default gfx906 without the compat header
@@ -46,6 +51,10 @@ target_include_directories(CheshireJPG PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} PRIVAT
 # (R_X86_64_32S against .text, "recompile with -fPIE").
 set_target_properties(CheshireJPG PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-add_executable(cheshirejpg_cli cheshirejpgTool.cpp)
-set_target_properties(cheshirejpg_cli PROPERTIES OUTPUT_NAME cheshirejpg)
-target_link_libraries(cheshirejpg_cli PRIVATE CheshireJPG)
+# AliceVision's build (generator step 6r) adds the library only.
+option(CHESHIREJPG_BUILD_TOOL "the cheshirejpg command-line tool" ON)
+if(CHESHIREJPG_BUILD_TOOL)
+  add_executable(cheshirejpg_cli cheshirejpgTool.cpp)
+  set_target_properties(cheshirejpg_cli PROPERTIES OUTPUT_NAME cheshirejpg)
+  target_link_libraries(cheshirejpg_cli PRIVATE CheshireJPG)
+endif()

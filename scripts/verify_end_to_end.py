@@ -186,6 +186,11 @@ CONFIGS = {
     # Texturing's two 0.3.2 ports under their self-checks: the device edge padding against
     # upstream's sequential sweeps (must differ on 0 texels) and the direct OBJ writer with
     # Assimp's file written beside it (scripts/check_textured_obj.py compares them by content).
+    # CheshireJPG in PrepareDenseScene's direct read (step 6r, off by default): every photo decoded on
+    # the device and compared with libjpeg-turbo's pixels, none handed back to OpenImageIO.
+    "gpujpeg": dict(overrides=SIFT, env={"CHESHIRE_GPU_JPEG": "1", "CHESHIRE_GPU_JPEG_CHECK": "1"}, checks={
+        "PrepareDenseScene": [r"GPU JPEG check: (\d+) of \1 images identical to libjpeg-turbo",
+                              r"GPU JPEG: [1-9]\d* decoded on the device \(CheshireJPG\), 0 read by OpenImageIO"]}),
     "texcheck": dict(overrides=SIFT, obj_check=True, env={"CHESHIRE_GPU_PAD_CHECK": "1", "CHESHIRE_OBJ_CHECK": "1", "CHESHIRE_GPU_RESIZE_CHECK": "1"}, checks={
         "Texturing": [r"GPU padding check: texels differing from the sequential sweeps: 0 of [1-9]",
                       r"GPU resize check: texel channels differing from OpenImageIO: 0 of [1-9]",

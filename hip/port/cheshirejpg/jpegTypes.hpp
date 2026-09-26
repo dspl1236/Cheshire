@@ -22,6 +22,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>  // _BitScanReverse: MSVC, the host compiler of the Windows CUDA build, has no __builtin_clz
+#endif
 
 #if defined(__CUDACC__) || defined(__HIPCC__)
 #define CHESHIRE_JPEG_HD __host__ __device__
@@ -82,6 +85,9 @@ CHESHIRE_JPEG_HD inline int bitLength(uint32_t x)
 {
 #if defined(CHESHIRE_JPEG_DEVICE_PASS)
     return x ? 32 - __clz((int)x) : 0;
+#elif defined(_MSC_VER) && !defined(__clang__)
+    unsigned long top;
+    return _BitScanReverse(&top, x) ? static_cast<int>(top) + 1 : 0;
 #else
     return x ? 32 - __builtin_clz(x) : 0;
 #endif
