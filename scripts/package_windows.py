@@ -59,6 +59,22 @@ if gpl:
              f"(ceres.dll built with SUITESPARSE=ON?); rebuild Ceres without SuiteSparse first")
 print('=== no SuiteSparse GPL libraries in the package')
 
+# GPU SIFT by substance, as scripts/windows/package-cuda.ps1 checks it: the feature library must import
+# popsift.dll, and the DLL must be in the stage. The v0.3.2 CUDA zip staged popsift.dll while
+# aliceVision_feature.dll had been built with ALICEVISION_USE_POPSIFT=OFF, a package that said GPU SIFT
+# and ran the CPU extractor; and the HIP build scripts defaulted CHESHIRE_POPSIFT to OFF until 0.3.6.
+# Read from the import table with the llvm-objdump given, not by grepping the file.
+feat = stage / 'bin' / 'aliceVision_feature.dll'
+if not feat.exists():
+    sys.exit("no aliceVision_feature.dll in the install's bin")
+if 'popsift.dll' not in imports(feat):
+    sys.exit("aliceVision_feature.dll does not import popsift.dll: the build ran with ALICEVISION_USE_POPSIFT=OFF "
+             "(scripts/build-alicevision.cmd found no PopSift; set CHESHIRE_POPSIFT_DIR and rebuild). "
+             "A package without GPU SIFT is not shipped.")
+if 'popsift.dll' not in have:
+    sys.exit("aliceVision_feature.dll imports popsift.dll but the stage has none (the install step did not copy it)")
+print('=== GPU SIFT: aliceVision_feature.dll imports popsift.dll')
+
 cand = list(rbin.glob('amd_comgr*.dll'))
 wanted = set()
 for pe in list((stage / 'bin').glob('*.dll')) + list((stage / 'bin').glob('*.exe')):
