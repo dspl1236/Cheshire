@@ -443,7 +443,37 @@ measured at about 2 % and dropped (docs/notes/ba-device-plan.md); a bundle-adjus
 passing the SfM gate); GPS pairing is validated on a public survey, OpenDroneMap's "zoo" (CC0 1.0,
 524 photos from a fixed-wing mapping flight, GPS in every EXIF), since the DJI set is gone.
 
-- **Bundle adjustment on the device** (L, the headline; the entry in 0.3.5 above). Step 0 first:
+- **Meshroom 2025.1** (M, the headline; in progress). **Windows, 2026-09-27** (docs/04): the 0.3.5
+  package pairs into Meshroom 2025.1.0 as it is. All nine paired nodes pass the option check, the
+  photogrammetry template runs the same twelve nodes, and mini6 ran end to end with 7/7 ports. Three
+  things differed, none of them in the package:
+  - **Two `meshroom_batch` bugs broke the gate harness.** `--cache` is dropped on both platforms:
+    `executeGraph` saves an unsaved graph to a temp project and the cache follows it, the Meshroom
+    #2174 symptom. The Windows start-up script re-launches the executable with `os.execv`, so the
+    process the harness waits on ends in half a second. The harness now uses `--save` and presets
+    `ALICEVISION_LIBPATH`.
+  - **The 2023.3 DepthMap override finds no compiled node,** since 2025.1's node descriptions are
+    source in `aliceVision/share/meshroom/aliceVision`. A 2025 override (`DepthMap.2025.py`) wraps
+    Meshroom's file, kept as `DepthMap.py.meshroom`, and gives chunks of 48 views.
+  - **Unpairing said "restored" over a binary a running node still held.**
+
+  **The full Windows gate passes on 2025.1:** mini6 15 of 15, 41 views base and verify.
+  - **Meshroom 2025.1 raised two RANSAC defaults.** FeatureMatching `maxIteration` went from 2048
+    to 50000 and SfM `localizerEstimatorMaxIterations` from 4096 to 50000. The 41-view base went
+    from 348 s to 483 s. The host AC-RANSAC now costs 35 s of geometric filtering against 10 s of
+    GPU matching, and triples resection.
+
+  Still open:
+  - Linux (the tarball is on house-pc; `--cache` is dropped there too; waiting for the GPU);
+  - the CUDA packages;
+  - the house-pc app, which starts `meshroom_batch` with `--cache`;
+  - the README.
+- **AC-RANSAC under Meshroom 2025.1's iteration counts** (M-L, found 2026-09-27, docs/04). Every
+  hypothesis is a 7-point (or P3P) solve plus a residual pass and a sort over all matches, which is
+  independent per hypothesis and suits the device. Measure first: the share of geometric filtering
+  and of resection on the engine bay and the False Door at 50000 iterations, and whether AC-RANSAC
+  stops early on these sets.
+- **Bundle adjustment on the device** (L; moved to 0.3.7's headline; the entry in 0.3.5 above). Step 0 first:
   profile SfM again on today's defaults. The shares that entry quotes (Jacobians 25.1 s of 92 s on
   the engine bay, 421 s of the False Door replay) predate 5m-5r, which cut the Jacobian phase about
   3x (41 views: 13.0 s to 4.3 s). Whatever dominates now, Jacobians, the Schur solve or the
@@ -641,7 +671,7 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   Needs a jammy or bookworm container and a test node. In the same pass, pin
   `AV_BUILD_SUITESPARSE=OFF` and add a GPL check to the Linux packagers.
 - **Meshroom 2025.x** (M). Pairing, shims and gates target 2023.3 only; 2025.1.0 is declared
-  untested (`docs/upstream/meshroom-issue-comments.md:20`).
+  untested (`docs/upstream/meshroom-issue-comments.md:20`). Moved to 0.3.6's headline.
 - **`CHESHIRE_BACKEND=auto` on NVIDIA boxes** (S). `auto` returns every node to Meshroom whenever an
   NVIDIA card is present (`scripts/windows/meshroom-pair-launcher.cpp:131-135`). Record the
   package's backend at pair time and follow it. On Linux, `scripts/linux/meshroom-pair.sh` decides

@@ -4387,10 +4387,13 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
         t = t.replace(old, "    parallelization = desc.Parallelization(blockSize=48)  # cheshire: 12 upstream; a chunk is a process with a cold cache" + NL, 1)
         dmn.write_text(t, encoding="utf-8", newline="")
 
-    # 5z (continued). The Meshroom 2023.3 override (meshroom-overrides/DepthMap.py) ships in every
-    #     package under share/cheshire/meshroom-overrides/, from where the pairing scripts install it.
+    # 5z (continued). The Meshroom node overrides (meshroom-overrides/: DepthMap.py for 2023.3, and
+    #     since 0.3.6 DepthMap.2025.py for 2025.1, whose nodes are source in the AliceVision tree) ship
+    #     in every package under share/cheshire/meshroom-overrides/, from where the pairing scripts
+    #     install the one that fits the Meshroom they pair.
     (AV / "meshroom-overrides").mkdir(exist_ok=True)
-    shutil.copy2(ROOT / "meshroom-overrides" / "DepthMap.py", AV / "meshroom-overrides" / "DepthMap.py")
+    for f in sorted((ROOT / "meshroom-overrides").glob("*.py")):
+        shutil.copy2(f, AV / "meshroom-overrides" / f.name)
     top = AV / "CMakeLists.txt"
     t = top.read_text(encoding="utf-8")
     if "meshroom-overrides" not in t:
@@ -4398,7 +4401,7 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                   + "        DESTINATION ${CMAKE_INSTALL_DATADIR}" + NL + "    )" + NL + "endif()" + NL)
         if t.count(anchor) != 1:
             sys.exit("meshroom install rule not found once in the top-level CMakeLists.txt")
-        rule = (NL + "# cheshire (step 5z): the Meshroom 2023.3 node override the pairing scripts install (docs/04)" + NL
+        rule = (NL + "# cheshire (step 5z): the Meshroom node overrides the pairing scripts install (docs/04)" + NL
                 + "install(" + NL + "    DIRECTORY meshroom-overrides" + NL + "    DESTINATION ${CMAKE_INSTALL_DATADIR}/cheshire" + NL + ")" + NL)
         t = t.replace(anchor, anchor + rule, 1)
         top.write_text(t, encoding="utf-8", newline="")

@@ -1,5 +1,5 @@
 @echo off
-rem Cheshire: pair a Meshroom 2023.3 Windows install with a Cheshire AliceVision package.
+rem Cheshire: pair a Meshroom 2023.3 or 2025.1 Windows install with a Cheshire AliceVision package.
 rem
 rem Meshroom runs its nodes as aliceVision_*.exe from <Meshroom>\aliceVision\bin. Seven of them get
 rem the Cheshire treatment when the package carries them: PrepareDenseScene, FeatureExtraction,
@@ -33,9 +33,10 @@ set MR=%~1
 set PKG=%~2
 if "%PKG%"=="" ( echo usage: %~nx0 ^<Meshroom dir^> ^<Cheshire package dir^> ^| --unpair & exit /b 1 )
 set BIN=%MR%\aliceVision\bin
-if not exist "%BIN%\" ( echo %BIN% not found: is %MR% a Meshroom 2023.x Windows install? & exit /b 1 )
+if not exist "%BIN%\" ( echo %BIN% not found: is %MR% a Meshroom 2023.3 or 2025.1 Windows install? & exit /b 1 )
 if /i "%PKG%"=="--unpair" (
   if exist "%MR%\lib\meshroom\nodes\aliceVision\DepthMap.py" ( findstr /c:"Cheshire" "%MR%\lib\meshroom\nodes\aliceVision\DepthMap.py" >nul && del /q "%MR%\lib\meshroom\nodes\aliceVision\DepthMap.py" && echo removed the DepthMap node override )
+  if exist "%MR%\aliceVision\share\meshroom\aliceVision\DepthMap.py.meshroom" ( findstr /c:"Cheshire" "%MR%\aliceVision\share\meshroom\aliceVision\DepthMap.py" >nul && move /y "%MR%\aliceVision\share\meshroom\aliceVision\DepthMap.py.meshroom" "%MR%\aliceVision\share\meshroom\aliceVision\DepthMap.py" >nul && echo restored Meshroom's DepthMap node )
   for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_featureExtraction aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene aliceVision_incrementalSfM aliceVision_imageMatching) do call :unpair %%N
   exit /b 0
 )
@@ -100,16 +101,29 @@ if defined HAVE (
 )
 if defined FEOK ( call :pairif aliceVision_featureExtraction ) else ( echo package has no GPU SIFT ^(no popsift.dll^): featureExtraction not paired )
 rem The DepthMap node in blocks of 48 views instead of 12 (docs/04, 0.3.4 "the depth-map node was loading
-rem images"): each chunk is a process that loads the SfM data, probes the device and starts cold. The
-rem package carries share\cheshire\meshroom-overrides\DepthMap.py, which loads Meshroom's compiled node
-rem and re-declares it with the larger block; Python prefers the .py beside the .pyc. Removed by --unpair.
+rem images"): each chunk is a process that loads the SfM data, probes the device and starts cold. Removed
+rem by --unpair. Meshroom 2023.3 compiled its nodes into lib\meshroom\nodes: the package's
+rem meshroom-overrides\DepthMap.py loads the compiled node and re-declares it with the larger block, and
+rem Python prefers the .py beside the .pyc. Meshroom 2025.1 ships them as source in
+rem aliceVision\share\meshroom\aliceVision: its DepthMap.py is kept as DepthMap.py.meshroom, a name the
+rem node loader skips, and meshroom-overrides\DepthMap.2025.py, which loads that, takes its place.
+set OVR=
+if exist "%PKG%\share\cheshire\meshroom-overrides\" set OVR=%PKG%\share\cheshire\meshroom-overrides
+if exist "%PKG%\common\share\cheshire\meshroom-overrides\" set OVR=%PKG%\common\share\cheshire\meshroom-overrides
 set NODES=%MR%\lib\meshroom\nodes\aliceVision
-set OVERRIDE=
-if exist "%PKG%\share\cheshire\meshroom-overrides\DepthMap.py" set OVERRIDE=%PKG%\share\cheshire\meshroom-overrides\DepthMap.py
-if exist "%PKG%\common\share\cheshire\meshroom-overrides\DepthMap.py" set OVERRIDE=%PKG%\common\share\cheshire\meshroom-overrides\DepthMap.py
-if defined OVERRIDE (
-  if exist "%NODES%\DepthMap.pyc" ( copy /y "%OVERRIDE%" "%NODES%\DepthMap.py" >nul & echo installed the DepthMap node override: blocks of 48 views ^(CHESHIRE_DEPTHMAP_BLOCK=0 for Meshroom's 12^) ) else ( echo no compiled DepthMap node at %NODES%: node override not installed )
-) else ( echo package carries no meshroom-overrides ^(pre-0.3.4^): DepthMap keeps Meshroom's block of 12 )
+set NODES25=%MR%\aliceVision\share\meshroom\aliceVision
+if not defined OVR ( echo package carries no meshroom-overrides ^(pre-0.3.4^): DepthMap keeps Meshroom's block of 12 & exit /b 0 )
+if exist "%NODES%\DepthMap.pyc" (
+  copy /y "%OVR%\DepthMap.py" "%NODES%\DepthMap.py" >nul
+  echo installed the DepthMap node override: blocks of 48 views ^(CHESHIRE_DEPTHMAP_BLOCK=0 for Meshroom's 12^)
+  exit /b 0
+)
+if not exist "%NODES25%\DepthMap.py" ( echo no DepthMap node in %NODES% or %NODES25%: node override not installed & exit /b 0 )
+if not exist "%OVR%\DepthMap.2025.py" ( echo package carries no Meshroom 2025 node override ^(pre-0.3.6^): DepthMap keeps Meshroom's block of 12 & exit /b 0 )
+rem once only: a re-pair finds its own override in DepthMap.py and must not keep that as Meshroom's
+findstr /c:"Cheshire" "%NODES25%\DepthMap.py" >nul || move /y "%NODES25%\DepthMap.py" "%NODES25%\DepthMap.py.meshroom" >nul
+copy /y "%OVR%\DepthMap.2025.py" "%NODES25%\DepthMap.py" >nul
+echo installed the Meshroom 2025 DepthMap node override: blocks of 48 views ^(CHESHIRE_DEPTHMAP_BLOCK=0 for Meshroom's 12^)
 exit /b 0
 
 :have
@@ -160,6 +174,8 @@ exit /b 0
 set T=%BIN%\%1
 if exist "%T%.cuda.exe" (
   del /q "%T%.exe" "%T%.cheshire.txt" 2>nul
+  rem a running node holds its binary: the delete fails, so would the rename, and "restored" was a lie
+  if exist "%T%.exe" ( echo %1: in use, NOT restored ^(a Meshroom job still running?^) - run --unpair again once it ends & exit /b 0 )
   ren "%T%.cuda.exe" %1.exe
   echo restored %1.exe
 ) else ( echo %1: not paired )
