@@ -432,6 +432,32 @@ the earlier proposal.
   `scripts/bridge_matrix.py:50-59` can report a sub-5e-5 difference as bit-identical. Add
   decoded-pixel counts and make PASS/FAIL selectable.
 
+## 0.3.6
+
+Started 2026-09-27. Decisions that day: **the QR nullspace stays opt-in** (the user's call, with QR
+passing the SfM gate); GPS pairing is validated on a public survey, OpenDroneMap's "zoo" (CC0 1.0,
+524 photos from a fixed-wing mapping flight, GPS in every EXIF), since the DJI set is gone.
+
+- **Bundle adjustment on the device** (L, the headline; the entry in 0.3.5 above). Step 0 first:
+  profile SfM again on today's defaults. The shares that entry quotes (Jacobians 25.1 s of 92 s on
+  the engine bay, 421 s of the False Door replay) predate 5m-5r, which cut the Jacobian phase about
+  3x (41 views: 13.0 s to 4.3 s). Whatever dominates now, Jacobians, the Schur solve or the
+  per-solve bookkeeping, decides what moves to the device.
+- **The mesh gate's median gap** (M, in progress). Cheshire's meshes sit a systematic 0.05 % of the
+  diagonal from upstream Meshroom 2023.3's, beyond upstream's own run-to-run spread. The first test
+  is Cheshire with its non-bit-identical SfM defaults at upstream's (`CHESHIRE_BA_JACOBIANS=autodiff`,
+  `CHESHIRE_BA_PERSIST=0`, `CHESHIRE_SFM_TASK_SEED=0`) against the same two upstream meshes. If the
+  gap stays, it is AliceVision 3.2 against 3.4, or something else not yet named.
+- **GPS-radius pairing on a real survey** (M). The zoo set: vocabulary tree (Meshroom's default
+  above 200 photos), exhaustive, and GPS radius, compared on views placed, pairs proposed, verified
+  pairs caught, and time.
+- **Tooling debts** (S each, from "Packaging and platforms" below): `CHESHIRE_POPSIFT` defaulting
+  OFF in the HIP build scripts; the end-to-end gate gaps; `CHESHIRE_BACKEND=auto` on NVIDIA boxes;
+  the patch export's missing files; `verify_packages.py` revived or retired.
+- **Upstream's new pipeline, timed** (M, optional). Step 2 of the section below: a build with USD and
+  a Meshroom from `develop`, and the new SfM chain against the legacy one on 41 views and the engine
+  bay.
+
 ## Upstream's next pipeline: detect, then pivot
 
 Added 2026-09-26. On discussion #2116 an AliceVision maintainer pointed out that StructureFromMotion,
