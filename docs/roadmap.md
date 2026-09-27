@@ -442,7 +442,16 @@ passing the SfM gate); GPS pairing is validated on a public survey, OpenDroneMap
   profile SfM again on today's defaults. The shares that entry quotes (Jacobians 25.1 s of 92 s on
   the engine bay, 421 s of the False Door replay) predate 5m-5r, which cut the Jacobian phase about
   3x (41 views: 13.0 s to 4.3 s). Whatever dominates now, Jacobians, the Schur solve or the
-  per-solve bookkeeping, decides what moves to the device.
+  per-solve bookkeeping, decides what moves to the device. **Step 0 done 2026-09-27** (sfmbench, today's defaults,
+  `build/sfmbench/bench.jsonl` p036-*). False Door, 884 views, 1498 s: bundle adjustment is 82 % of the
+  node by the log's clock. Inside it: Jacobians 313 s (21 % of the node), linear solver 207 s (14 %),
+  problem build + Ceres preprocessor + teardown 183 + 120 + 30 s (22 %), residuals 55 s. Outside it:
+  resection 128 s, loading 60 s, triangulation 44 s. Engine bay, 107 views, 46 s: Jacobians 4.4 s,
+  linear 8.1 s. So the work is two parts, each about a fifth of a large set's SfM: (a) residuals and
+  Jacobians on the device, as planned; (b) the per-solve bookkeeping on the host, rebuilding and
+  preprocessing the Problem at every solve. 5r keeps a Problem alive only while every landmark is
+  active and there are at most 100 poses, which a local-BA run of 884 views rarely is. Small sets
+  gain little either way.
 - **The mesh gate's median gap** (M, in progress). Cheshire's meshes sit a systematic 0.05 % of the
   diagonal from upstream Meshroom 2023.3's, beyond upstream's own run-to-run spread. The first test
   is Cheshire with its non-bit-identical SfM defaults at upstream's (`CHESHIRE_BA_JACOBIANS=autodiff`,
