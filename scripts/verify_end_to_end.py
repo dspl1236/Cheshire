@@ -378,11 +378,16 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
         theirs = tdir / "texturedMesh.assimp.obj" if tdir else None
         if not (ours and ours.exists() and theirs.exists()):
             unmet.append("Texturing: texturedMesh.obj and texturedMesh.assimp.obj both present")
+        elif not Path(__file__).with_name("check_textured_obj.py").exists():
+            # it runs from beside this script; a copy of the harness alone crashed the 0.3.5 Linux gate here
+            unmet.append("Texturing: check_textured_obj.py beside verify_end_to_end.py (not found)")
         else:
             r = subprocess.run([sys.executable, str(Path(__file__).with_name("check_textured_obj.py")), str(ours), str(theirs)],
                                capture_output=True, text=True)
             if r.returncode != 0:
-                unmet.append("Texturing: direct OBJ content == Assimp's (" + r.stdout.strip().splitlines()[-2][:100] + ")")
+                tail = (r.stdout + r.stderr).strip().splitlines()
+                why = tail[-2] if len(tail) >= 2 else (tail[-1] if tail else f"the checker exited {r.returncode} with no output")
+                unmet.append("Texturing: direct OBJ content == Assimp's (" + why[:100] + ")")
     # Depth and sim maps as bytes, for the cross-config identity check in main().
     dm_dir = next(iter(sorted((cache / "DepthMap").glob("*/"))), None)
     dm_digest = None
