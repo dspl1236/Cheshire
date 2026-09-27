@@ -437,8 +437,8 @@ the earlier proposal.
 Started 2026-09-27. **Headline, decided the same day after the BA findings below: Meshroom 2025.1
 support.** Meshroom 2025.1.0 (2025-08-18, AliceVision 3.3.0, plugin architecture, Python bindings) has
 been the current release for a year while Cheshire pairs only into 2023.3; the "Meshroom 2025.x" item
-in "Packaging and platforms" moves here. Bundle adjustment: the exact host win (cost functions kept
-across rebuilds) stays in 0.3.6; a bundle-adjustment loop of Cheshire's own is 0.3.7's headline
+in "Packaging and platforms" moves here. Bundle adjustment: the exact host win considered, cost functions kept across rebuilds, was
+measured at about 2 % and dropped (docs/notes/ba-device-plan.md); a bundle-adjustment loop of Cheshire's own is 0.3.7's headline
 (docs/notes/ba-device-plan.md). Decisions that day: **the QR nullspace stays opt-in** (the user's call, with QR
 passing the SfM gate); GPS pairing is validated on a public survey, OpenDroneMap's "zoo" (CC0 1.0,
 524 photos from a fixed-wing mapping flight, GPS in every EXIF), since the DJI set is gone.

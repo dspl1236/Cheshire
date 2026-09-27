@@ -218,3 +218,18 @@ a few percent of a large set's SfM:
 The structural answer is a bundle-adjustment loop of our own that evaluates straight into the Schur
 structure, on the host or the device. That is an XL item, and a decision for the owner.
 
+### Cost functions kept across rebuilds: measured and dropped (2026-09-27)
+
+A local measurement build counted how many observations of each main-solve rebuild were already in
+the previous one. On the False Door replay: 52.3 M of 72.7 M over 40 rebuilds (71.9 %; from 31 % to
+100 % per rebuild). A cache holding one rebuild's cost functions would therefore save about 72 % of
+the ~29 s of cost-function construction and part of the teardown, about 20-30 s, or 2 % of a
+large set's SfM.
+
+The same run took 1631 s, against 1139-1498 s for the four before it. At this size SfM's wall time
+varies by more than 20 % run to run, so a 2 % gain cannot be shown without many repeats. It also
+needs `DO_NOT_TAKE_OWNERSHIP` with separately owned cost functions for every other residual kind,
+and holds a second copy of a rebuild's cost functions in memory. Dropped. The one remaining host
+lever of any size is in Ceres itself (sentinel scan, fixed-size manifold products), and it waits for
+0.3.7's decision on a bundle-adjustment loop of Cheshire's own.
+
