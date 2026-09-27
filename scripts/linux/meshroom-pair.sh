@@ -96,6 +96,18 @@ pair() {  # name  drop-option
 # default while Cheshire was AMD-only and is exactly wrong when the paired bundle is itself a CUDA
 # build, so a CUDA bundle has to be asked for. CHESHIRE_DEPTHMAP=cuda|hip is the older spelling,
 # from when "hip" and "the Cheshire bundle" were the same thing, and is still honoured.
+#
+# The bundle's env.sh is the persistent place for CHESHIRE_* settings (USING.md), but it was sourced
+# only after this decision, so a CHESHIRE_BACKEND set there never took effect (docs/roadmap.md,
+# 0.3.6 tooling debts). It is read first now, in a subshell that hands back only the two backend
+# variables: the rest of env.sh (node-amd-setup.sh writes LD_LIBRARY_PATH=<bundle>/lib into it) must
+# not reach Meshroom's own binary on the branch below. A value in the node's environment still wins.
+if [ -z "\${CHESHIRE_BACKEND:-}\${CHESHIRE_DEPTHMAP:-}" ] && [ -f "$BUNDLE/../env.sh" ]; then
+  CHESHIRE_ENV_BACKEND=\$( . "$BUNDLE/../env.sh" >/dev/null 2>&1; printf '%s %s' "\${CHESHIRE_BACKEND:--}" "\${CHESHIRE_DEPTHMAP:--}" )
+  read -r CHESHIRE_BACKEND CHESHIRE_DEPTHMAP <<<"\$CHESHIRE_ENV_BACKEND"
+  [ "\$CHESHIRE_BACKEND" = - ] && CHESHIRE_BACKEND=
+  [ "\$CHESHIRE_DEPTHMAP" = - ] && CHESHIRE_DEPTHMAP=
+fi
 CHESHIRE_MODE="\${CHESHIRE_BACKEND:-}"
 if [ -z "\$CHESHIRE_MODE" ]; then
   case "\${CHESHIRE_DEPTHMAP:-auto}" in
