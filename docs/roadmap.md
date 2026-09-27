@@ -463,10 +463,13 @@ passing the SfM gate); GPS pairing is validated on a public survey, OpenDroneMap
     from 348 s to 483 s. The host AC-RANSAC now costs 35 s of geometric filtering against 10 s of
     GPU matching, and triples resection.
 
+  - **The Linux gate passes on 2025.1 too:** house-pc, mini6 15 of 15, 41 views base and verify.
+    `--cache` is dropped there as well; Linux has no re-launch.
+  - **The house-pc app moves to 2025.1 for new jobs** (the user's call). Existing jobs stay on 2023.3
+    via each job's recorded Meshroom. There is a "RANSAC iterations" option for the old counts.
+
   Still open:
-  - Linux (the tarball is on house-pc; `--cache` is dropped there too; waiting for the GPU);
-  - the CUDA packages;
-  - the house-pc app, which starts `meshroom_batch` with `--cache`;
+  - the CUDA packages (bench-pc's GTX 1080 and house-pc's CUDA build);
   - the README.
 - **AC-RANSAC under Meshroom 2025.1's iteration counts** (M-L, found 2026-09-27, docs/04). Every
   hypothesis is a 7-point (or P3P) solve plus a residual pass and a sort over all matches, which is
@@ -477,8 +480,13 @@ passing the SfM gate); GPS pairing is validated on a public survey, OpenDroneMap
   - The reconstruction is the same: 107 poses either way, landmarks within the unseeded spread,
     13 % more weak pairs verified.
 
-  Still to measure: the False Door. The house-pc app has a "RANSAC iterations" option for the old
-  counts meanwhile.
+  **False Door measured the same day:**
+  - Geometric filtering: 105 s to 2234 s. FeatureMatching: 8 to 44 minutes.
+  - 72 % more pairs verified, then 830 of 884 views placed (twelve 2048-iteration runs: 815-833)
+    with 5 % fewer landmarks.
+
+  2025.1's budget buys nothing on either set. The house-pc app has a "RANSAC iterations" option
+  for the old counts.
 - **Bundle adjustment on the device** (L; moved to 0.3.7's headline; the entry in 0.3.5 above). Step 0 first:
   profile SfM again on today's defaults. The shares that entry quotes (Jacobians 25.1 s of 92 s on
   the engine bay, 421 s of the False Door replay) predate 5m-5r, which cut the Jacobian phase about
