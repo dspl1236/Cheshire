@@ -2447,7 +2447,8 @@ disabled by CHESHIRE_GPU_VIS_VOTES=0, host votes". Gate changes in `scripts/veri
 - A new `hostvotes` configuration (host votes under CHECK) keeps the bucketed host path gated as the
   fallback.
 - "visibility votes on the GPU" is a Meshing marker.
-- `scripts/verify_packages.py` looks for `CHESHIRE_GPU_VIS_VOTES` in fuseCut.
+- `scripts/verify_packages.py` looks for `CHESHIRE_GPU_VIS_VOTES` in fuseCut. (That script was retired
+  in 0.3.6; see "0.3.6: tooling debts" at the end.)
 
 The Windows CUDA tree compiles the device votes (`knnGPU.cu`, CUDA 12.9, MSVC 14.44).
 
@@ -2774,4 +2775,38 @@ Exhaustive's verified pairs sit a median 96 m apart, 99 % within 201 m. The phot
 the DJI set's failure again. A 200 m radius gives exhaustive's result within 0.02 % of the landmarks
 for 11 % of the pairs and a tenth of the matching time. The FeatureMatching and SfM times of the GPS
 legs were taken while a Linux bundle built beside them, so they are upper bounds.
+
+## 0.3.6: tooling debts (scripts only, 2026-09-27)
+
+Four items from the roadmap's "Packaging and platforms", in scripts only. Nothing here was run on a
+GPU. Each was checked with `py_compile` / `bash -n` and a fake-input run (the commit messages give
+the cases); the owner's next gate run is the first real test. What changes for that run:
+
+- **`scripts/verify_end_to_end.py`.**
+  - `cpufallback` now runs FeatureExtraction on the CPU (`forceCpuExtraction=True`). Until now it
+    kept PopSIFT on the card while every `CHESHIRE_GPU_*` switch was off. Its FeatureExtraction
+    markers are empty, as in `defaults`: the node is held to being the paired binary only.
+  - PrepareDenseScene is gated. It is in `BINARY`, so Meshroom's own binary there aborts the run.
+    Its marker is step 6n's "cheshire: 8-bit images read directly into float RGB(A)" in every
+    configuration, since no switch in the matrix turns the direct read off. A photo set the direct
+    read does not take (not three-channel 8-bit JPEG or PNG) would fail this marker.
+  - StructureFromMotion's step 5k warning ("local BA graph: N edges ... were skipped") fails any
+    configuration that logs it.
+  - A node in `BINARY` that the pairing script declines ("not paired", or the Linux script's
+    "DepthMap paired only") stops the matrix before `meshroom_batch` starts, with the script's line.
+- **`CHESHIRE_POPSIFT` is auto in the HIP build scripts.** Unset, it is ON when a PopSift install is
+  at `CHESHIRE_POPSIFT_DIR` (Windows) or `CHESHIRE_POPSIFT_INSTALL` (Linux), or at their defaults,
+  and OFF with a warning otherwise. `package_windows.py` (import table through `llvm-objdump`) and
+  `wsl-pack-bundle.sh` (`readelf -d` on `libaliceVision_feature.so*`) now refuse a package whose
+  feature library does not link PopSift, as `package-cuda.ps1` already did.
+- **`scripts/linux/meshroom-pair.sh`.** The generated launcher reads `CHESHIRE_BACKEND` (and the
+  older `CHESHIRE_DEPTHMAP`) from the bundle's `env.sh` before deciding the backend, when the node's
+  environment sets neither. It reads them in a subshell rather than sourcing the whole file first,
+  because `node-amd-setup.sh` writes `LD_LIBRARY_PATH=<bundle>/lib` into `env.sh` and that must not
+  reach Meshroom's own binary. Nodes must be re-paired to get the new launcher.
+- **`scripts/verify_packages.py` is retired.** It looked for one string literal per change inside the
+  release archives. It stopped growing at v0.2.16 with five markers, and later steps added a couple
+  by hand (the visibility votes, 6u). The end-to-end gate proves more than a literal can: that the
+  paired binary ran and that its port announced itself, per node, on a real pipeline. The stage gates
+  cover the per-node outputs. Nothing called the script.
 
