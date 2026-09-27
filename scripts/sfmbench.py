@@ -164,6 +164,23 @@ def parse_log(log: Path) -> dict:
     return out
 
 
+def sfm_cmd(ci: Path, fe: Path, fm: Path, describer: str, out: Path, as_json: bool = False, extra: list[str] | None = None) -> list[str]:
+    """incrementalSfM with Meshroom 2023.3's default node options (shared with scripts/gpsbench.py)."""
+    return ["aliceVision_incrementalSfM", "--input", str(ci), "--featuresFolders", str(fe), "--matchesFolders", str(fm),
+            "--describerTypes", describer, "--localizerEstimator", "acransac", "--observationConstraint", "Scale",
+            "--localizerEstimatorMaxIterations", "4096", "--localizerEstimatorError", "0.0", "--lockScenePreviouslyReconstructed", "False",
+            "--useLocalBA", "True", "--localBAGraphDistance", "1", "--nbFirstUnstableCameras", "30", "--maxImagesPerGroup", "30",
+            "--bundleAdjustmentMaxOutliers", "50", "--maxNumberOfMatches", "0", "--minNumberOfMatches", "0", "--minInputTrackLength", "2",
+            "--minNumberOfObservationsForTriangulation", "2", "--minAngleForTriangulation", "3.0", "--minAngleForLandmark", "2.0",
+            "--maxReprojectionError", "4.0", "--minAngleInitialPair", "5.0", "--maxAngleInitialPair", "40.0",
+            "--useOnlyMatchesFromInputFolder", "False", "--useRigConstraint", "True", "--rigMinNbCamerasForCalibration", "20",
+            "--lockAllIntrinsics", "False", "--minNbCamerasToRefinePrincipalPoint", "3", "--filterTrackForks", "False",
+            "--computeStructureColor", "True", "--useAutoTransform", "True", "--initialPairA", "", "--initialPairB", "",
+            "--interFileExtension", ".abc", "--logIntermediateSteps", "False", "--verboseLevel", "info",
+            "--output", str(out / ("sfm.sfm" if as_json else "sfm.abc")), "--outputViewsAndPoses", str(out / "cameras.sfm"),
+            "--extraInfoFolder", str(out)] + (extra or [])
+
+
 def run(s: str, tag: str, envs: dict[str, str], repeat: int, extra: list[str], as_json: bool = False) -> None:
     d = cache_dirs(s)
     ci = d["ci"] / "cameraInit.sfm"
@@ -181,19 +198,7 @@ def run(s: str, tag: str, envs: dict[str, str], repeat: int, extra: list[str], a
         out.mkdir(parents=True)
         env = {"CHESHIRE_BA_PROFILE": "1"}
         env.update(envs)
-        cmd = ["aliceVision_incrementalSfM", "--input", str(ci), "--featuresFolders", str(d["fe"]), "--matchesFolders", str(d["fm"]),
-               "--describerTypes", describer, "--localizerEstimator", "acransac", "--observationConstraint", "Scale",
-               "--localizerEstimatorMaxIterations", "4096", "--localizerEstimatorError", "0.0", "--lockScenePreviouslyReconstructed", "False",
-               "--useLocalBA", "True", "--localBAGraphDistance", "1", "--nbFirstUnstableCameras", "30", "--maxImagesPerGroup", "30",
-               "--bundleAdjustmentMaxOutliers", "50", "--maxNumberOfMatches", "0", "--minNumberOfMatches", "0", "--minInputTrackLength", "2",
-               "--minNumberOfObservationsForTriangulation", "2", "--minAngleForTriangulation", "3.0", "--minAngleForLandmark", "2.0",
-               "--maxReprojectionError", "4.0", "--minAngleInitialPair", "5.0", "--maxAngleInitialPair", "40.0",
-               "--useOnlyMatchesFromInputFolder", "False", "--useRigConstraint", "True", "--rigMinNbCamerasForCalibration", "20",
-               "--lockAllIntrinsics", "False", "--minNbCamerasToRefinePrincipalPoint", "3", "--filterTrackForks", "False",
-               "--computeStructureColor", "True", "--useAutoTransform", "True", "--initialPairA", "", "--initialPairB", "",
-               "--interFileExtension", ".abc", "--logIntermediateSteps", "False", "--verboseLevel", "info",
-               "--output", str(out / ("sfm.sfm" if as_json else "sfm.abc")), "--outputViewsAndPoses", str(out / "cameras.sfm"),
-               "--extraInfoFolder", str(out)] + extra
+        cmd = sfm_cmd(ci, d["fe"], d["fm"], describer, out, as_json, extra)
         print(f"[{name}] incrementalSfM on {s} with {env}" + (f" and {' '.join(extra)}" if extra else ""))
         dt = sh(cmd, out / "sfm.log", env)
         rec = {"set": s, "tag": name, "env": envs, "extra": extra, "wall_s": round(dt, 1), "when": time.strftime("%Y-%m-%d %H:%M:%S")}

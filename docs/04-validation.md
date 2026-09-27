@@ -2705,3 +2705,24 @@ The gate found four problems, all in tooling, none in the binaries:
 
 All are fixed (82a4fcc, c765d94, 65246c2).
 
+## 0.3.6: the mesh gate's median gap is not Cheshire's SfM defaults (2026-09-27)
+
+The same engine-bay gate as in 0.3.5, with two new Cheshire runs (0.3.5 release package, `defaults`
+configuration, RX 9070). Here Cheshire's non-bit-identical SfM defaults were set to upstream's:
+`CHESHIRE_BA_JACOBIANS=autodiff`, `CHESHIRE_BA_PERSIST=0` and `CHESHIRE_SFM_TASK_SEED=0`, the SfM
+quality gate's upstream-equivalent set. The SfM log confirms the autodiff Jacobians took effect.
+Report: `build/quality/mesh-eb-upstream-vs-upeq.md`.
+
+| candidate against upstream Meshroom 2023.3 | median distances | median symmetric p95 | ICP rotation | verdict |
+|---|---|---|---|---|
+| Cheshire, 0.3.5 defaults | 0.0022-0.0025 | 1.117 % | 1.02-1.07 degrees | PASS |
+| Cheshire, upstream-equivalent SfM | 0.0022-0.0025 | 1.062 % | 1.04-1.09 degrees | PASS |
+| upstream's own two runs (baseline) | 0.0017-0.0018 | 1.2225 % | 0.056 degrees | |
+
+Putting the SfM switches back changes neither the medians nor the frame. Both Cheshire
+configurations sit about 1 degree from upstream's frame, where upstream's own two runs sit 0.06
+degrees apart. So the gap comes from something these switches do not reach. The candidates are
+AliceVision 3.2, which Meshroom 2023.3 ships, against the 3.4 `develop` base, or the libraries
+around it, Ceres among them. The next test runs Cheshire's dense stages on upstream's own SfM
+result: if the gap disappears it is in SfM, and if it stays it is in the dense stages.
+
