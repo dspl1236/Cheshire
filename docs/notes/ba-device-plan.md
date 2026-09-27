@@ -113,3 +113,123 @@ waits until A and B are done and the profile is taken again.
 - The new SfMExpanding pipeline needs nothing separate. It runs the same `BundleAdjustmentCeres`
   and cost functions (docs/roadmap.md, "Upstream's next pipeline"), so A carries over. B would need
   its own call site in SfmBundle.
+
+## Step A1 result (2026-09-27): no-go for Part A as designed
+
+`CHESHIRE_BA_EVAL_PROFILE=1` times the analytic `Evaluate` per thread and compares it with Ceres'
+own phase times after each solve. Engine bay, 107 views:
+
+| | our arithmetic inside `Evaluate` | Ceres' phase | arithmetic's share |
+|---|---|---|---|
+| Jacobians, 12 threads (thread-seconds = wall x 12) | 12.1 s (293 ns a call) | 57.2 s | 21 % |
+| Jacobians, 1 Ceres thread (no idle time) | 10.0 s | 29.5 s | 34 % |
+| residuals, 1 Ceres thread | 3.3 s | 8.5 s | 39 % |
+
+Two thirds of the Jacobian phase is Ceres' per-block machinery, even on one thread. The rest of the
+gap at 12 threads is parallel inefficiency (29.5 s on one thread becomes 57 thread-s on twelve).
+Ceres 2.2's `ResidualBlock::Evaluate` (internal/ceres/residual_block.cc) does, unconditionally:
+
+1. fill the outputs with a NaN sentinel (`InvalidateEvaluation`);
+2. scan them afterwards (`IsEvaluationValid`);
+3. apply manifold PlusJacobians through a generic dynamic-size `MatrixMatrixMultiply`;
+4. apply the loss function's `Corrector`.
+
+The evaluator then scatters the block into the block-sparse Jacobian. A device `Evaluate` would
+remove at most the third that is arithmetic, a few percent of SfM, and pay transfers on top.
+
+Options, in order of cost:
+
+- **Profile the machinery first.** Run the Linux build of incrementalSfM under `perf` (WSL) on the
+  engine-bay and False Door caches, with Ceres' symbols, to see which of the four pieces and the
+  scatter take the time.
+- **Trim it in the Ceres Cheshire builds**, which are ours on Windows and in the Linux deps:
+  - the sentinel scan, where the cost function guarantees finite output (the analytic path can
+    check its own inputs);
+  - a fixed-size path for the common manifold sizes.
+
+  Host-only, helps both backends. It has to stay exact: the same arithmetic, less bookkeeping.
+- **Our own bundle-adjustment loop** that evaluates straight into the Schur structure, on the host
+  or the device. XL, and the largest change to results risk; only if the first two leave the phase
+  dominant.
+
+Part B (the per-solve build, preprocessor and teardown, 22 % at 884 views) is unaffected by this and
+comes next.
+
+### Confirmed at 884 views, and one piece measured (2026-09-27)
+
+False Door replay, 12 threads, 951 solves: the analytic arithmetic is 850 of 3,406 thread-seconds
+of Ceres' Jacobian phase (25 %), over 3.36 billion evaluations at 253 ns each. Residuals: 184 of 656
+(28 %). The same picture as the engine bay.
+
+An experimental Ceres (the 2.2.0 source Cheshire builds, with `CERES_SKIP_EVAL_CHECK=1` guarding the
+NaN-sentinel fill and scan; `build/ceres-exp.cmd`, not shipped) on the engine bay with one Ceres
+thread:
+
+| | Jacobian phase | residual phase | output |
+|---|---|---|---|
+| checks on | 23.0 s | 6.3 s | sfm `a76946037b3860e6`, cameras `38450e663421b3e4` |
+| sentinel fill and scan skipped | 19.8 s (-14 %) | 6.1 s | the same, byte for byte |
+
+The same run counted 36.2 million manifold Jacobian products, close to one per Jacobian evaluation.
+AliceVision gives every intrinsics block a manifold (`IntrinsicsManifold`), and poses a
+`SubsetManifold` when part of their extrinsics is constant (BundleAdjustmentCeres.cpp:290, 495).
+Ceres applies both through the dynamic-size `MatrixMatrixMultiply`.
+
+**Direction for 0.3.6.** Not device Jacobians inside Ceres. In order:
+
+1. **Part B**, the per-solve host bookkeeping: 22 % of a large set's SfM, unaffected by any of this.
+2. **Exact host trimming in the Ceres Cheshire builds.**
+   - Replace the sentinel with the cost function's own finiteness check, returning false on a
+     non-finite output, as `IsEvaluationValid` would: -14 % of the Jacobian phase, output
+     byte-identical.
+   - A fixed-size path for the manifold product sizes that occur.
+
+   Both mean shipping a patched Ceres on Windows and in the Linux deps, a maintenance cost to weigh
+   against a few percent of SfM.
+3. **A bundle-adjustment loop of our own** that evaluates straight into the Schur structure. It
+   removes Ceres' per-block machinery altogether, on the host or the device. XL, and not in 0.3.6.
+
+## Step B1 result (2026-09-27): the build cost is the main solves' rebuilds
+
+A local measurement build (stage timers in `createProblem`, and a 1-in-64 sample of cost-function
+construction against `AddResidualBlock`; not in the generator). False Door replay, 929 solves,
+1139 s. SfM wall time at this size varies run to run: 1139 to 1498 s over four runs, with 929-953
+solves.
+
+- **Only 36 solves rebuilt the Problem.** They are the main bundle adjustments under the local
+  strategy, where 5r rebuilds on purpose: with persistence, Ceres' preprocessor scans every residual
+  block of the Problem at each Solve. The other ~893 are small per-view refinements, about 8 s in all.
+- **The 36 rebuilds took 144.8 s:**
+  - landmarks 105.6 s, of which cost-function construction ~28.8 s and `AddResidualBlock` ~48.3 s,
+    over 67.7 M observations;
+  - 39.2 s outside the three stages, mostly dropping the previous persistent Problem;
+  - plus 25.2 s of teardown after the solves, and most of the ~100 s preprocessor.
+
+**Where 0.3.6 stands on bundle adjustment.** Both halves of its time sit in Ceres' generic machinery:
+the per-block evaluation around our arithmetic, and the per-solve Problem build, preprocessing and
+teardown. Neither a device `Evaluate` nor more persistence reaches it. The exact wins left are each
+a few percent of a large set's SfM:
+
+- keep cost-function objects across rebuilds (Problem option `cost_function_ownership =
+  DO_NOT_TAKE_OWNERSHIP`, cache keyed by (landmark, view)): about 30-40 s at 884 views, no Ceres change;
+- drop the NaN-sentinel scan (-14 % of the Jacobian phase) and give the manifold products a fixed
+  size: both need a patched Ceres in the Windows and Linux dependency builds.
+
+The structural answer is a bundle-adjustment loop of our own that evaluates straight into the Schur
+structure, on the host or the device. That is an XL item, and a decision for the owner.
+
+### Cost functions kept across rebuilds: measured and dropped (2026-09-27)
+
+A local measurement build counted how many observations of each main-solve rebuild were already in
+the previous one. On the False Door replay: 52.3 M of 72.7 M over 40 rebuilds (71.9 %; from 31 % to
+100 % per rebuild). A cache holding one rebuild's cost functions would therefore save about 72 % of
+the ~29 s of cost-function construction and part of the teardown, about 20-30 s, or 2 % of a
+large set's SfM.
+
+The same run took 1631 s, against 1139-1498 s for the four before it. At this size SfM's wall time
+varies by more than 20 % run to run, so a 2 % gain cannot be shown without many repeats. It also
+needs `DO_NOT_TAKE_OWNERSHIP` with separately owned cost functions for every other residual kind,
+and holds a second copy of a rebuild's cost functions in memory. Dropped. The one remaining host
+lever of any size is in Ceres itself (sentinel scan, fixed-size manifold products), and it waits for
+0.3.7's decision on a bundle-adjustment loop of Cheshire's own.
+

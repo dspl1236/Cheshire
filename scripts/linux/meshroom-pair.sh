@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cheshire: pair a Meshroom 2023.3 Linux bundle with the Cheshire HIP AliceVision bundle.
+# Cheshire: pair a Meshroom 2023.3 or 2025.1 Linux bundle with the Cheshire HIP AliceVision bundle.
 #
 # Meshroom runs its nodes as aliceVision_* executables from <Meshroom>/aliceVision/bin. Seven of
 # them get the Cheshire treatment when the bundle carries them: PrepareDenseScene,
@@ -41,13 +41,15 @@ MESHROOM="${1:?Meshroom directory (e.g. ~/apps/Meshroom-2023.3.0)}"
 #      -> change it and feature extraction silently drops to the CPU
 # If you restructure the wrapper or the bundle layout, say so in the same commit.
 BIN="$MESHROOM/aliceVision/bin"
-[ -d "$BIN" ] || { echo "$BIN not found: is $MESHROOM a Meshroom 2023.x Linux bundle?"; exit 1; }
+[ -d "$BIN" ] || { echo "$BIN not found: is $MESHROOM a Meshroom 2023.3 or 2025.1 Linux bundle?"; exit 1; }
 if [ "${2:-}" = "--unpair" ]; then
   for name in aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_featureExtraction aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene aliceVision_incrementalSfM aliceVision_imageMatching; do
     if [ -x "$BIN/$name.cuda" ]; then mv -f "$BIN/$name.cuda" "$BIN/$name"; echo "restored $name"; else echo "$name: not paired"; fi
   done
   NODE="$MESHROOM/lib/meshroom/nodes/aliceVision/DepthMap.py"
   if [ -f "$NODE" ] && grep -q "Cheshire" "$NODE"; then rm -f "$NODE"; echo "removed the DepthMap node override (block of 48)"; fi
+  NODE="$MESHROOM/aliceVision/share/meshroom/aliceVision/DepthMap.py"
+  if [ -f "$NODE.meshroom" ] && grep -q "Cheshire" "$NODE"; then mv -f "$NODE.meshroom" "$NODE"; echo "restored Meshroom's DepthMap node"; fi
   exit 0
 fi
 BUNDLE="${2:-$HOME/apps/cheshire/bundle}"
@@ -221,17 +223,28 @@ else
 fi
 # The DepthMap node in blocks of 48 views instead of 12 (docs/04, 0.3.4 "the depth-map node was
 # loading images"): each chunk is a process that loads the SfM data, probes the device and starts
-# cold, 74 times at 884 views. The bundle carries meshroom-overrides/DepthMap.py, which loads
-# Meshroom's compiled node and re-declares it with the larger block - same attributes, same UID,
-# caches stay valid. Python prefers the .py beside the .pyc, so copying it in is the whole install.
+# cold, 74 times at 884 views. Same attributes, same UID, caches stay valid. Meshroom 2023.3 compiled
+# its nodes into lib/meshroom/nodes: the bundle's meshroom-overrides/DepthMap.py loads the compiled
+# node and re-declares it with the larger block, and Python prefers the .py beside the .pyc, so
+# copying it in is the whole install. Meshroom 2025.1 ships them as source in
+# aliceVision/share/meshroom/aliceVision: its DepthMap.py is kept as DepthMap.py.meshroom, a name the
+# node loader skips, and meshroom-overrides/DepthMap.2025.py, which loads that, takes its place.
 NODES="$MESHROOM/lib/meshroom/nodes/aliceVision"
-OVERRIDE="$BUNDLE/share/cheshire/meshroom-overrides/DepthMap.py"
+NODES25="$MESHROOM/aliceVision/share/meshroom/aliceVision"
+OVR="$BUNDLE/share/cheshire/meshroom-overrides"
 if [ "$CHECK_ONLY" = 1 ]; then
   echo "--check: nothing changed"
-elif [ -f "$OVERRIDE" ] && [ -f "$NODES/DepthMap.pyc" ]; then
-  cp -f "$OVERRIDE" "$NODES/DepthMap.py" && echo "installed the DepthMap node override: blocks of 48 views (CHESHIRE_DEPTHMAP_BLOCK=0 for Meshroom's 12)"
-elif [ -f "$OVERRIDE" ]; then
-  echo "no compiled DepthMap node at $NODES: node override not installed"
-else
+elif [ ! -f "$OVR/DepthMap.py" ]; then
   echo "bundle carries no meshroom-overrides (pre-0.3.4): DepthMap keeps Meshroom's block of 12"
+elif [ -f "$NODES/DepthMap.pyc" ]; then
+  cp -f "$OVR/DepthMap.py" "$NODES/DepthMap.py" && echo "installed the DepthMap node override: blocks of 48 views (CHESHIRE_DEPTHMAP_BLOCK=0 for Meshroom's 12)"
+elif [ ! -f "$NODES25/DepthMap.py" ]; then
+  echo "no DepthMap node in $NODES or $NODES25: node override not installed"
+elif [ ! -f "$OVR/DepthMap.2025.py" ]; then
+  echo "bundle carries no Meshroom 2025 node override (pre-0.3.6): DepthMap keeps Meshroom's block of 12"
+else
+  # once only: a re-pair finds its own override in DepthMap.py and must not keep that as Meshroom's
+  grep -q "Cheshire" "$NODES25/DepthMap.py" || mv -f "$NODES25/DepthMap.py" "$NODES25/DepthMap.py.meshroom"
+  cp -f "$OVR/DepthMap.2025.py" "$NODES25/DepthMap.py" \
+    && echo "installed the Meshroom 2025 DepthMap node override: blocks of 48 views (CHESHIRE_DEPTHMAP_BLOCK=0 for Meshroom's 12)"
 fi

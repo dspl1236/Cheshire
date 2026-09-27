@@ -2776,6 +2776,94 @@ the DJI set's failure again. A 200 m radius gives exhaustive's result within 0.0
 for 11 % of the pairs and a tenth of the matching time. The FeatureMatching and SfM times of the GPS
 legs were taken while a Linux bundle built beside them, so they are upper bounds.
 
+
+## 0.3.6: Meshroom 2025.1 (2026-09-27)
+
+Meshroom 2025.1.0 (2025-08-18, AliceVision 3.3.0) from Zenodo record 16887472, checked against the
+record's md5s. The Windows zip is 10.2 GB and the Linux tarball 14.3 GB. Most of that is not
+Meshroom's pipeline: `plugins/mrSegmentation` (10.9 GB unpacked, a segmentation plugin nothing here
+uses) and, on Linux, an 8.3 GB PySide6. Both were unpacked without the segmentation plugin.
+
+**What changed for pairing.** The Meshroom layout is the one 2023.3 has:
+- `aliceVision/bin` holds the node binaries;
+- the frozen start-up sets `ALICEVISION_ROOT` and puts `aliceVision/bin` on PATH;
+- the photogrammetry template runs the same twelve nodes (StructureFromMotion and PrepareDenseScene
+  are still there; the new SfM chain is `develop`'s, not this release's).
+
+The node descriptions moved. 2023.3 compiled them into `lib/meshroom/nodes/aliceVision/*.pyc`;
+2025.1 ships them as source in `aliceVision/share/meshroom/aliceVision/*.py` (DepthMap 5.0,
+FeatureExtraction 1.3, FeatureMatching 2.0, DepthMapFilter 4.0, Meshing 7.0, Texturing 6.0). The
+option check passes on all nine paired nodes: the 0.3.5 package (AliceVision 3.4) takes every option
+2025.1's own binaries take. Every attribute path the gate's configurations override still exists.
+
+**Two `meshroom_batch` behaviours made the first run look empty** ("0 of 1 pipelines", 5 s, nothing
+in the cache):
+
+- **`--cache` is dropped, on Windows and Linux.** `executeGraph` calls `graph.save()` before
+  computing. A graph with no project file is saved to `generateTempProjectFilepath()`, and
+  `_setFilepath` then moves the cache next to it, to `<temp>/MeshroomCache`. Every run of the day
+  computed there whatever `--cache` said. The same happens with `--save` and `--cache` together:
+  that saves without keeping the file path. `--save <dir>/project.mg` alone keeps the cache at
+  `<dir>/MeshroomCache`. Meshroom issue #2174 reports the symptom.
+- **On Windows the process ends in half a second.** Meshroom's `setupInitScriptWindows.py` sets
+  `ALICEVISION_LIBPATH` and `PYTHONPATH` and calls `os.execv(sys.executable, sys.argv)` unless the
+  variable already lists its folder. On Windows `os.execv` starts a new process and ends the
+  current one, so `meshroom_batch.exe` exited with 0 while its copy computed the graph. The harness
+  then unpaired Meshroom under the running FeatureExtraction. The locked binary survived the
+  delete, and the unpair still printed "restored". On Linux `execv` keeps the process, so only
+  Windows is affected. It also passes arguments unquoted, so a path with a space would split.
+
+`verify_end_to_end.py` now handles a 2025 layout (`aliceVision/share/meshroom` present) as follows:
+- It runs with `--save <run>/project.mg` and reads `<run>/MeshroomCache`.
+- On Windows it presets the two variables, so the process it waits on is the one that computes.
+- Should a re-launch still happen, it finds the copy by parent PID and waits for it.
+
+The Windows unpair now says "in use, NOT restored" when a running node holds its binary.
+
+**The DepthMap override.** The 2023.3 override loads the compiled node beside it, and 2025.1 has
+none, so pairing reported "no compiled DepthMap node" and DepthMap kept Meshroom's block of 12.
+`meshroom-overrides/DepthMap.2025.py` does the same job for the source layout:
+- the pairing scripts keep Meshroom's `DepthMap.py` as `DepthMap.py.meshroom`, a name the node
+  loader does not import, and put the override in its place;
+- the override loads that file and re-declares the class with blockSize 48 (version, attributes and
+  command line are Meshroom's);
+- `--unpair` puts Meshroom's file back.
+
+The package's own `share/meshroom` node files (step 5z) are not an option here: they are AliceVision
+3.4's (DepthMap 5.1, importing `pyalicevision`), written for a Meshroom newer than 2025.1. Step 5z
+now ships every file in `meshroom-overrides/`.
+
+**The gate on 2025.1** (Windows, RX 9070). The package was the 0.3.5 Windows AMD zip, with the 0.3.6
+pairing script and `DepthMap.2025.py` added as a 0.3.6 package will carry them.
+- **mini6: 15 of 15 configurations**, 7/7 ports each, DepthMap run with `--rangeSize 48`. Times are
+  the 0.3.5 gate's on 2023.3 or a little lower (blast 155 s against 196 s, ds1 135 s against 156 s,
+  the rest within 10 s).
+- **41 views: base and verify both pass**, 7/7 ports, 3 textures each. They took 489 s and 846 s,
+  against 393 s and 720 s on 2023.3.
+
+**Why the 41-view runs are slower: Meshroom 2025.1 raised two RANSAC defaults.** Per node, the
+41-view base run on 2025.1 matches a same-day run on 2023.3 with the same package, to the second,
+everywhere except two nodes:
+
+| 41 views, base, RX 9070 | 2023.3 | 2025.1 | 2025.1 at 2023.3's iteration counts |
+|---|---|---|---|
+| FeatureMatching | 18.7 s | 63.2 s | 19.0 s |
+| StructureFromMotion | 47.4 s | 135.2 s | 47.6 s |
+| whole graph | 348 s | 483 s | 366 s |
+| views placed | 41 | 41 | 41 |
+
+The two command lines differ in exactly two options:
+- FeatureMatching's `--maxIteration` went from 2048 to 50000. Geometric filtering, the host
+  AC-RANSAC after the GPU matcher, went from 1.5 s to 35.3 s for 389 verified pairs instead of 387.
+  The GPU brute-force matching itself took 10.4 s in both.
+- StructureFromMotion's `--localizerEstimatorMaxIterations` went from 4096 to 50000. Resection went
+  from 39 s to 127 s over the same 29 resection groups, with the same final bundle adjustment.
+
+With both set back (`FeatureMatching:maxIteration=2048`,
+`StructureFromMotion:localizerEstimatorMaxIterations=4096`), 2025.1 runs at 2023.3's speed. Under
+2025.1's defaults, the host AC-RANSAC in geometric filtering and in resection becomes the largest
+cost in both nodes. That is a lead for the next port, not a regression in the package.
+
 ## 0.3.6: tooling debts (scripts only, 2026-09-27)
 
 Four items from the roadmap's "Packaging and platforms", in scripts only. Nothing here was run on a

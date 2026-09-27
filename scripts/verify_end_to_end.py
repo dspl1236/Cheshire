@@ -298,9 +298,60 @@ def wrong_binary(cache: Path):
     return None
 
 
+def meshroom_2025(meshroom: Path) -> bool:
+    """Meshroom 2025.1 and later: the AliceVision node descriptions ship in the AliceVision tree
+    (aliceVision/share/meshroom), where 2023.3 compiled them into lib/meshroom/nodes."""
+    return (meshroom / "aliceVision" / "share" / "meshroom").is_dir()
+
+
+def windows_children(pid: int) -> list:
+    """Live processes whose parent is pid, on Windows: what an os.execv 're-launch' leaves running
+    after the process that was started has ended."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Entry(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_char * 260)]
+
+    k32 = ctypes.windll.kernel32
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    snap = k32.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS
+    if not snap or snap == wintypes.HANDLE(-1).value:
+        return []
+    entry, found = Entry(), []
+    entry.dwSize = ctypes.sizeof(Entry)
+    ok = k32.Process32First(snap, ctypes.byref(entry))
+    while ok:
+        if entry.th32ParentProcessID == pid:
+            found.append(entry.th32ProcessID)
+        ok = k32.Process32Next(snap, ctypes.byref(entry))
+    k32.CloseHandle(snap)
+    return found
+
+
+def windows_alive(pid: int) -> bool:
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    h = k32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+    if not h:
+        return False
+    try:
+        return k32.WaitForSingleObject(h, 0) == 0x102  # WAIT_TIMEOUT: still running
+    finally:
+        k32.CloseHandle(h)
+
+
 def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     out = outroot / name
-    cache = out / "cache"
+    # Meshroom 2025.1's meshroom_batch takes --cache and then computes in <temp>/MeshroomCache anyway,
+    # on Windows and Linux: executeGraph saves an unsaved graph to a temporary project file first, and
+    # the cache moves next to it (Meshroom issue #2174 reports the symptom; docs/04, 0.3.6). --save
+    # alone keeps the cache next to the project, and leaves the project beside the run to read later.
+    new = meshroom_2025(meshroom)
+    cache = out / ("MeshroomCache" if new else "cache")
     # CHESHIRE_E2E_RESUME=1 keeps an existing cache so Meshroom skips the chunks it already finished.
     # For the bench-pc BSOD of 2026-09-21 (bugcheck 0x1A, three hours and 48 full-resolution depth
     # maps into a run on a 4 GB card) a fresh start would have cost the same three hours again. The
@@ -334,11 +385,22 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     # was AMD-only, and precisely wrong when the package under test is itself the CUDA one.
     env["CHESHIRE_BACKEND"] = "cheshire"
     env.update(cfg["env"])
+    if new and os.name == "nt":
+        # Meshroom 2025.1's Windows start-up script re-launches the executable with os.execv until
+        # ALICEVISION_LIBPATH lists its folder, and on Windows os.execv starts a new process and ends
+        # the old one. meshroom_batch.exe exited in half a second while its copy computed the graph,
+        # so this saw a 5 s run with nothing in it and unpaired Meshroom under the running node. Set
+        # what the script would, so the process waited on here is the one that computes.
+        d = str(meshroom)
+        env["ALICEVISION_LIBPATH"] = os.pathsep.join(
+            [os.path.join(d, "aliceVision", "bin"), os.path.join(d, "aliceVision", "lib"), os.path.join(d, "lib"), d]
+            + ([env["ALICEVISION_LIBPATH"]] if env.get("ALICEVISION_LIBPATH") else []))
+        env["PYTHONPATH"] = os.pathsep.join([os.path.join(d, "aliceVision", "lib", "python"),
+                                             os.path.join(d, "aliceVision", "lib", "python3.11", "site-packages")])
 
     batch = meshroom / ("meshroom_batch.exe" if os.name == "nt" else "meshroom_batch")
-    cmd = [str(batch),
-           "--input", str(photos), "--output", str(out / "out"), "--cache", str(cache),
-           "--pipeline", "photogrammetry"]
+    cmd = [str(batch), "--input", str(photos), "--output", str(out / "out"), "--pipeline", "photogrammetry"]
+    cmd += ["--save", str(out / "project.mg")] if new else ["--cache", str(cache)]
     # CHESHIRE_E2E_OVERRIDES adds Meshroom parameter overrides to any config without editing the table
     # (space-separated, e.g. "StructureFromMotion:useLocalBA=False"), for one-off runs such as the
     # 884-view False Door where incremental SfM's local bundle adjustment crashes upstream.
@@ -357,6 +419,18 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
             if aborted:
                 proc.kill()
         rc = proc.wait()
+        # Should the re-launch still happen (a Meshroom whose start-up script wants more than the
+        # variables set above), wait for the copy that computes rather than report an empty run.
+        relaunched = windows_children(proc.pid) if os.name == "nt" and not aborted else []
+        if relaunched:
+            print(f"        meshroom_batch re-launched itself (pid {', '.join(map(str, relaunched))}): waiting for it")
+            while any(windows_alive(p) for p in relaunched):
+                time.sleep(5)
+                aborted = wrong_binary(cache)
+                if aborted:
+                    for p in relaunched:
+                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p)], capture_output=True)
+                    break
     secs = round(time.time() - t0)
     if aborted:
         # Do not let a wrong pairing run for hours to be reported at the end. The 1050 Ti's
