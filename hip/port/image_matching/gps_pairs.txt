@@ -2,6 +2,9 @@ namespace fs = std::filesystem;
 =====
 namespace fs = std::filesystem;
 
+#include <aliceVision/numeric/gps.hpp>     // cheshire: step 6w
+#include <aliceVision/sfmData/exif.hpp>    // cheshire: step 6w
+
 // cheshire (step 6w): pairs from GPS positions, opt-in (CHESHIRE_GPS_PAIRING_RADIUS=<metres>).
 // Above minNbImages Meshroom's ImageMatching takes each photo's partners from the vocabulary tree.
 // On a 444-photo drone survey of uniform ground those partners were a median 214 m apart, and SfM
@@ -18,11 +21,24 @@ void cheshireGpsPairs(const sfmData::SfMData& sfmData, double radius, bool keepM
     for (const auto& v : sfmData.getViews())
     {
         const sfmData::ImageInfo& image = v.second->getImage();
-        if (!image.hasGpsMetadata())
+        // Latitude and longitude with their references are required; the altitude is optional, and so
+        // is GPSAltitudeRef, which EXIF defines as 0 (above sea level) when absent. Upstream's
+        // hasGpsMetadata() requires all six tags, and so dropped every photo of a camera that omits
+        // the reference: the Sony DSC-WX220 of OpenDroneMap's zoo survey, 0 of 524 views found.
+        using sfmData::GPSExifTags;
+        if (!image.hasMetadata({GPSExifTags::latitude()}) || !image.hasMetadata({GPSExifTags::latitudeRef()}) ||
+            !image.hasMetadata({GPSExifTags::longitude()}) || !image.hasMetadata({GPSExifTags::longitudeRef()}))
             continue;
         try
         {
-            const Vec3 p = image.getGpsPositionFromMetadata();
+            const auto& meta = image.getMetadata();
+            const double lat = parseGPSFromString(meta.at(GPSExifTags::latitude()), meta.at(GPSExifTags::latitudeRef()));
+            const double lon = parseGPSFromString(meta.at(GPSExifTags::longitude()), meta.at(GPSExifTags::longitudeRef()));
+            double alt = 0.0;
+            if (image.hasMetadata({GPSExifTags::altitude()}))
+                alt = parseAltitudeFromString(meta.at(GPSExifTags::altitude()),
+                                              image.hasMetadata({GPSExifTags::altitudeRef()}) ? meta.at(GPSExifTags::altitudeRef()) : std::string("0"));
+            const Vec3 p = WGS84ToCartesian(Vec3(lat, lon, alt));
             if (p.allFinite())
             {
                 ids.push_back(v.first);
