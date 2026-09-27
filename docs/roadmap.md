@@ -355,6 +355,10 @@ Parked items from this group are listed under Parked and exploratory.
 
 ## 0.3.5
 
+**Released 2026-09-27** (tag v0.3.5 at c7bd354; docs/releases/0.3.5.md). Carried to the next release:
+bundle adjustment on the device, the QR default (the user's call; QR passes the SfM gate), GPS
+pairing's validation on the drone set, and the cross-pipeline median difference the mesh gate found.
+
 GPS image pairing, reconstruction quality, and the first SfM work on the GPU. This was 0.3.4 in
 the earlier proposal.
 
