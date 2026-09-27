@@ -16,7 +16,9 @@ param([Parameter(Mandatory = $true)][string]$Meshroom,
       [string]$Drop = "")
 
 function Get-Options([string]$text) {
-    [regex]::Matches($text, ' --[A-Za-z][A-Za-z0-9_.]*') | ForEach-Object { $_.Value.Trim() } | Sort-Object -Unique
+    # --help is left out: no node passes it, Meshroom 2023.3's Windows binaries list it ("-h [ --help ]")
+    # and its Linux ones and the package's (AliceVision 3.4) do not, which refused every node on Windows
+    [regex]::Matches($text, ' --[A-Za-z][A-Za-z0-9_.]*') | ForEach-Object { $_.Value.Trim() } | Where-Object { $_ -ne '--help' } | Sort-Object -Unique
 }
 
 $bin = Join-Path $Meshroom "aliceVision\bin"

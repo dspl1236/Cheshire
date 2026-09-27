@@ -66,8 +66,10 @@ compatible() {  # name  [option the wrapper drops]
   [ -e "$BIN/$1.cuda" ] && own="$BIN/$1.cuda"   # once paired, Meshroom's own binary is <name>.cuda
   mr=$(ALICEVISION_ROOT="$MESHROOM/aliceVision" LD_LIBRARY_PATH="$MESHROOM/aliceVision/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$own" --help 2>&1 || true)
   ours=$(ALICEVISION_ROOT="$BUNDLE" LD_LIBRARY_PATH="$BUNDLE/lib" "$BUNDLE/bin/$1" --help 2>&1 || true)
-  mr=$(grep -o -- ' --[A-Za-z][A-Za-z0-9_.]*' <<<"$mr" | LC_ALL=C sort -u || true)
-  ours=$(grep -o -- ' --[A-Za-z][A-Za-z0-9_.]*' <<<"$ours" | LC_ALL=C sort -u || true)
+  # --help is left out: no node passes it, and whether a build lists it differs (Meshroom 2023.3's
+  # Windows binaries do, its Linux ones and the bundle's do not)
+  mr=$(grep -o -- ' --[A-Za-z][A-Za-z0-9_.]*' <<<"$mr" | grep -vxF -- ' --help' | LC_ALL=C sort -u || true)
+  ours=$(grep -o -- ' --[A-Za-z][A-Za-z0-9_.]*' <<<"$ours" | grep -vxF -- ' --help' | LC_ALL=C sort -u || true)
   if [ -z "$mr" ]; then echo "$1: Meshroom's binary listed no options, compatibility not checked"; return 0; fi
   missing=$(LC_ALL=C comm -23 <(printf '%s\n' "$mr") <(printf '%s\n' "$ours") | grep -vxF -- " $drop" | tr '\n' ' ' || true)
   if [ -n "${missing// /}" ]; then
