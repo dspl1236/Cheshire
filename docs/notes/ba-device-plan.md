@@ -189,3 +189,32 @@ Ceres applies both through the dynamic-size `MatrixMatrixMultiply`.
 3. **A bundle-adjustment loop of our own** that evaluates straight into the Schur structure. It
    removes Ceres' per-block machinery altogether, on the host or the device. XL, and not in 0.3.6.
 
+## Step B1 result (2026-09-27): the build cost is the main solves' rebuilds
+
+A local measurement build (stage timers in `createProblem`, and a 1-in-64 sample of cost-function
+construction against `AddResidualBlock`; not in the generator). False Door replay, 929 solves,
+1139 s. SfM wall time at this size varies run to run: 1139 to 1498 s over four runs, with 929-953
+solves.
+
+- **Only 36 solves rebuilt the Problem.** They are the main bundle adjustments under the local
+  strategy, where 5r rebuilds on purpose: with persistence, Ceres' preprocessor scans every residual
+  block of the Problem at each Solve. The other ~893 are small per-view refinements, about 8 s in all.
+- **The 36 rebuilds took 144.8 s:**
+  - landmarks 105.6 s, of which cost-function construction ~28.8 s and `AddResidualBlock` ~48.3 s,
+    over 67.7 M observations;
+  - 39.2 s outside the three stages, mostly dropping the previous persistent Problem;
+  - plus 25.2 s of teardown after the solves, and most of the ~100 s preprocessor.
+
+**Where 0.3.6 stands on bundle adjustment.** Both halves of its time sit in Ceres' generic machinery:
+the per-block evaluation around our arithmetic, and the per-solve Problem build, preprocessing and
+teardown. Neither a device `Evaluate` nor more persistence reaches it. The exact wins left are each
+a few percent of a large set's SfM:
+
+- keep cost-function objects across rebuilds (Problem option `cost_function_ownership =
+  DO_NOT_TAKE_OWNERSHIP`, cache keyed by (landmark, view)): about 30-40 s at 884 views, no Ceres change;
+- drop the NaN-sentinel scan (-14 % of the Jacobian phase) and give the manifold products a fixed
+  size: both need a patched Ceres in the Windows and Linux dependency builds.
+
+The structural answer is a bundle-adjustment loop of our own that evaluates straight into the Schur
+structure, on the host or the device. That is an XL item, and a decision for the owner.
+
