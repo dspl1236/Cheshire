@@ -455,7 +455,10 @@ passing the SfM gate); GPS pairing is validated on a public survey, OpenDroneMap
   automatic end-of-SfM transform the first suspect.
 - **GPS-radius pairing on a real survey** (M). The zoo set: vocabulary tree (Meshroom's default
   above 200 photos), exhaustive, and GPS radius, compared on views placed, pairs proposed, verified
-  pairs caught, and time.
+  pairs caught, and time. **Done 2026-09-27** (docs/04): it found a bug first (a missing
+  GPSAltitudeRef hid every photo's GPS; fixed in 9e1562c). Then 200 m placed 521 of 524 views like
+  exhaustive, with 98.9 % of its verified pairs from 11 % of the pairs, while the vocabulary tree
+  placed 90. The house-pc app has a "GPS pairing radius" option.
 - **Tooling debts** (S each, from "Packaging and platforms" below): `CHESHIRE_POPSIFT` defaulting
   OFF in the HIP build scripts; the end-to-end gate gaps; `CHESHIRE_BACKEND=auto` on NVIDIA boxes;
   the patch export's missing files; `verify_packages.py` revived or retired.

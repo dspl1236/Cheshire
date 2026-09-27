@@ -2747,3 +2747,31 @@ Meshroom 2023.3. The frame offset makes the end-of-SfM automatic transform (`use
 first suspect; that is unchecked. Without ground truth the gate cannot say which SfM is better, only
 that the two differ by about 0.05 % of the diagonal.
 
+## 0.3.6: GPS-radius pairing on a real survey, and the AltitudeRef fix (2026-09-27)
+
+OpenDroneMap's "zoo" survey (CC0 1.0, hub.dronedb.app/r/odm/zoo) stands in for the DJI set: 524
+photos from a Sony DSC-WX220 on a fixed-wing mapping flight, 1.85 km x 1.08 km, a median 25 m between
+shots, GPS in every EXIF. `scripts/gpsbench.py` runs GPU SIFT once, then each pairing leg through
+ImageMatching, FeatureMatching and SfM with Meshroom's default options (development install, RX 9070
+box).
+
+**The first GPS legs changed nothing, and that was a bug.** The log said "GPS pairing: 0 of 524 views
+carry GPS". Upstream's `ImageInfo::hasGpsMetadata()` requires all six GPS tags, and this camera writes
+no `GPSAltitudeRef`, which EXIF makes optional (absent means above sea level). 6w now needs only
+latitude and longitude with their references, takes the altitude if present, and defaults a missing
+AltitudeRef to 0 (9e1562c). After the fix, 524 of 524 views were found.
+
+| leg | pairs proposed | verified | exhaustive's verified pairs caught | views placed | landmarks | FeatureMatching |
+|---|---|---|---|---|---|---|
+| vocabulary tree (Meshroom's rule above 200 photos) | 13,660 | 842 | 842 of 6,897 | 90 of 524 | 79,197 | 290 s |
+| exhaustive | 137,026 | 6,897 | 6,897 | 521 of 524 | 683,790 | 2766 s |
+| GPS radius 120 m | 5,677 | 4,707 | 4,707 (68 %) | 521 of 524 | 673,731 | 120 s |
+| GPS radius 160 m | 9,770 | 6,328 | 6,328 (92 %) | 521 of 524 | 681,878 | 231 s |
+| GPS radius 200 m | 14,801 | 6,823 | 6,823 (98.9 %) | 521 of 524 | 683,645 | 286 s |
+
+Exhaustive's verified pairs sit a median 96 m apart, 99 % within 201 m. The photo footprint at about
+100 m above ground is roughly 140 x 105 m. On this survey the vocabulary tree placed 90 of 524 views,
+the DJI set's failure again. A 200 m radius gives exhaustive's result within 0.02 % of the landmarks
+for 11 % of the pairs and a tenth of the matching time. The FeatureMatching and SfM times of the GPS
+legs were taken while a Linux bundle built beside them, so they are upper bounds.
+
