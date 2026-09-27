@@ -358,7 +358,7 @@ Parked items from this group are listed under Parked and exploratory.
 GPS image pairing, reconstruction quality, and the first SfM work on the GPU. This was 0.3.4 in
 the earlier proposal.
 
-- **Reconstruction-quality gate** (L). **SfM part done 2026-09-25** (`scripts/quality_gate.py`; docs/04: today's defaults pass against upstream-equivalent SfM on 41 views and the engine bay, resolution about 0.01-0.1 %). Mesh part done 2026-09-26 (`scripts/mesh_distance.py`, `quality_gate.py mesh`; docs/04). Still open: an upstream reference mesh to gate against (upstream DepthMap needs an NVIDIA card). No gate measures quality today: `verify_end_to_end.py`
+- **Reconstruction-quality gate** (L). **SfM part done 2026-09-25** (`scripts/quality_gate.py`; docs/04: today's defaults pass against upstream-equivalent SfM on 41 views and the engine bay, resolution about 0.01-0.1 %). Mesh part done 2026-09-26 (`scripts/mesh_distance.py`, `quality_gate.py mesh`; docs/04), and run against upstream Meshroom 2023.3 on the engine bay the same day (GTX 1080 Ti): PASS, Cheshire's median p95 1.117 % against upstream's own spread of 1.2225 %. Open: the cross-pipeline medians sit about 30 % above upstream's own (a systematic 0.05 % of the diagonal; AliceVision 3.2 against 3.4, or Cheshire's non-bit-identical SfM defaults). No gate measures quality today: `verify_end_to_end.py`
   checks outputs, provenance, port markers and self-check verdicts
   (`scripts/verify_end_to_end.py:300-330`). Build a script for landmark count, mean reprojection
   error, poses and mesh-to-reference distance on mini6 and the engine bay. Take the thresholds from

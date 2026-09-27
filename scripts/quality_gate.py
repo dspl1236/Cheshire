@@ -28,9 +28,18 @@ WARN when it is significantly worse but within it, PASS otherwise (a significant
 reported as such). Tolerances are policy, so they are flags; the defaults are this file's proposal.
 A report goes to build/quality/<set>-<prefix>.md and .json.
 
-  mesh --leg NAME=A.obj[,A2.obj,...] --leg NAME=B.obj[,...] [--name N] [--mesh-tol T] [--mesh-floor F]
+  mesh --leg NAME=A.obj[@A.sfm][,A2.obj[@A2.sfm],...] --leg NAME=B.obj[@B.sfm][,...] [--name N]
+       [--mesh-tol T] [--mesh-floor F]
         compares finished meshes by surface distance (scripts/mesh_distance.py: exact point-to-surface,
-        both ways). The first leg is the baseline. Pairs within it are its run-to-run spread; each
+        both ways). Each pair is first put in one frame: on the cameras when every mesh carries
+        @cameras.sfm (that run's StructureFromMotion output), then refined on the surfaces (trimmed
+        point-to-plane ICP with a similarity), and only the volume both meshes cover is measured, with
+        its diagonal as the yardstick. SfM's frame is fixed by the reconstruction itself, and Meshing's
+        volume is estimated from a few dozen tail landmarks and moves run to run (upstream too), so
+        neither is a difference in quality; a rigid shift is therefore not caught in this mode. --raw
+        measures the meshes as they are, without refinement or common volume. --jobs N runs pairs in
+        parallel (about 2.5 GB each on 2.3 M-triangle meshes).
+        The first leg is the baseline. Pairs within it are its run-to-run spread; each
         candidate mesh is measured against every baseline mesh. The measure is the symmetric p95
         distance as a fraction of the bounding-box diagonal (the larger of the two directions).
         FAIL when a candidate's median cross distance exceeds the baseline's largest own spread by
@@ -276,41 +285,60 @@ def parse_leg(text: str) -> tuple[str, dict[str, str]]:
     return name, env
 
 
+def _mesh_label(path: str) -> str:
+    """The folder that tells a mesh apart: the nearest one above it that is not Meshroom's out/cache."""
+    for part in reversed(Path(path).parts[:-1]):
+        if part.lower() not in ("out", "cache", "defaults", "base", "texturing", "meshfiltering"):
+            return part
+    return Path(path).name
+
+
+def _mesh_pair(job):
+    import mesh_distance
+    x, y, samples, cap, refine, common = job
+    r = mesh_distance.compare(x[0], y[0], samples, 0, None, x[1], y[1], cap, refine, common)
+    return max(r["a_to_b"]["p95_rel"], r["b_to_a"]["p95_rel"]), r
+
+
 def mesh_gate(a: argparse.Namespace) -> int:
     import statistics
     import mesh_distance
     legs = []
     for x in a.leg:
         name, _, paths = x.partition("=")
-        files = [Path(q) for q in paths.split(",") if q]
+        files = []
+        for q in paths.split(","):
+            if q:
+                mesh, _, cams = q.rpartition("@") if "@" in q else (q, "", "")
+                files.append((Path(mesh), Path(cams) if cams else None))
         if not files:
             sys.exit(f"leg {name}: no meshes")
         legs.append((name, files))
     if len(legs) < 2:
         sys.exit("give a baseline leg and at least one candidate")
-    cache: dict = {}
-
-    def sym_p95(x: Path, y: Path) -> tuple[float, dict]:
-        r = mesh_distance.compare(x, y, a.samples, 0, cache)
-        return max(r["a_to_b"]["p95_rel"], r["b_to_a"]["p95_rel"]), r
+    aligned = all(c for _, fs in legs for _, c in fs)
+    if not aligned and any(c for _, fs in legs for _, c in fs):
+        sys.exit("give @cameras.sfm for every mesh, or for none")
 
     base_name, base = legs[0]
-    spread, rows = [], []
-    for x, y in itertools.combinations(base, 2):
-        v, r = sym_p95(x, y)
-        spread.append(v)
-        rows.append(dict(kind="baseline", a=str(x), b=str(y), p95_rel=v, detail=r))
-        print(f"  baseline spread {x.name} / {y.name}: p95 {100 * v:.4f} % of the diagonal", flush=True)
+    pairs = [("baseline", x, y) for x, y in itertools.combinations(base, 2)]
+    pairs += [(name, x, y) for name, files in legs[1:] for x in files for y in base]
+    jobs = [(x, y, a.samples, a.mesh_cap, not a.raw, not a.raw) for _, x, y in pairs]
+    if a.jobs > 1:
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=a.jobs) as ex:
+            got = list(ex.map(_mesh_pair, jobs))
+    else:
+        got = [_mesh_pair(j) for j in jobs]
+    rows = []
+    for (kind, x, y), (v, r) in zip(pairs, got):
+        rows.append(dict(kind=kind, a=str(x[0]), b=str(y[0]), p95_rel=v, detail=r))
+        print(f"  {kind}: {x[0]} / {y[0]}: symmetric p95 {100 * v:.4f} % of the diagonal", flush=True)
+    spread = [r["p95_rel"] for r in rows if r["kind"] == "baseline"]
     floor_spread = max(spread) if spread else 0.0
     results = []
     for name, files in legs[1:]:
-        cross = []
-        for x in files:
-            for y in base:
-                v, r = sym_p95(x, y)
-                cross.append(v)
-                rows.append(dict(kind=name, a=str(x), b=str(y), p95_rel=v, detail=r))
-                print(f"  {name} {x.name} / {base_name} {y.name}: p95 {100 * v:.4f} % of the diagonal", flush=True)
+        cross = [r["p95_rel"] for r in rows if r["kind"] == name]
         m = statistics.median(cross)
         if m > floor_spread * (1 + a.mesh_tol) and m > a.mesh_floor:
             v = "FAIL"
@@ -322,16 +350,28 @@ def mesh_gate(a: argparse.Namespace) -> int:
     overall = "FAIL" if any(r["verdict"] == "FAIL" for r in results) else ("WARN" if any(r["verdict"] == "WARN" for r in results) else "PASS")
     lines = [f"# Mesh quality gate: {', '.join(n for n, _ in legs)}", "",
              f"Baseline {base_name}: {len(base)} meshes, run-to-run spread (largest symmetric p95) {100 * floor_spread:.4f} % of the diagonal; "
-             f"tolerance {100 * a.mesh_tol:.0f} %, floor {100 * a.mesh_floor:.3f} %.", "",
+             f"tolerance {100 * a.mesh_tol:.0f} %, floor {100 * a.mesh_floor:.3f} %; "
+             + ("raw: no alignment, whole meshes." if a.raw else
+                ("each pair aligned on its cameras, " if aligned else "") + "refined on the surfaces, common volume only."), "",
              "| candidate | median symmetric p95 to the baseline | verdict |", "|---|---|---|"]
     for r in results:
         lines.append(f"| {r['leg']} | {100 * r['median_p95_rel']:.4f} % | {r['verdict']} |")
-    lines += ["", f"Overall: **{overall}**"]
+    lines += ["", f"Overall: **{overall}**", "", "| pair | A | B | symmetric p95 | medians A->B / B->A | beyond the cap A / B "
+              "| in the common volume A / B | ICP rotation, scale |", "|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        d = r["detail"]
+        cm, ic = d.get("common") or {}, d.get("refinement") or {}
+        lines.append(f"| {r['kind']} | {_mesh_label(r['a'])} | {_mesh_label(r['b'])} | {100 * r['p95_rel']:.4f} % "
+                     f"| {d['a_to_b']['median']:.4g} / {d['b_to_a']['median']:.4g} "
+                     f"| {100 * d['a_to_b']['beyond_cap']:.2f} / {100 * d['b_to_a']['beyond_cap']:.2f} % "
+                     + (f"| {100 * cm['a']:.1f} / {100 * cm['b']:.1f} % " if cm else "| - ")
+                     + (f"| {ic['rotation_deg']:.3f} deg, {ic['scale_minus_1']:+.1e} |" if ic else "| - |"))
     out = Path(__file__).resolve().parents[1] / "build" / "quality"
     out.mkdir(parents=True, exist_ok=True)
     stem = a.name or f"mesh-{base_name}"
     (out / f"{stem}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    (out / f"{stem}.json").write_text(json.dumps(dict(legs=[(n, [str(f) for f in fs]) for n, fs in legs], results=results, pairs=rows,
+    (out / f"{stem}.json").write_text(json.dumps(dict(legs=[(n, [[str(f), str(c) if c else None] for f, c in fs]) for n, fs in legs],
+                                                      aligned=aligned, results=results, pairs=rows,
                                                       tolerance=a.mesh_tol, floor=a.mesh_floor), indent=1), encoding="utf-8")
     print("\n".join(lines))
     print(f"report: {out / (stem + '.md')}")
@@ -346,6 +386,9 @@ def main(argv: list[str]) -> int:
     pm.add_argument("--samples", type=int, default=300_000)
     pm.add_argument("--mesh-tol", dest="mesh_tol", type=float, default=0.5, help="fraction above the baseline spread that fails (default 0.5)")
     pm.add_argument("--mesh-floor", dest="mesh_floor", type=float, default=0.001, help="distances below this fraction of the diagonal never flag (default 0.001)")
+    pm.add_argument("--mesh-cap", dest="mesh_cap", type=float, default=0.02, help="distances measured up to this fraction of the diagonal (default 0.02)")
+    pm.add_argument("--raw", action="store_true", help="measure the meshes as they are: no surface refinement, no common volume")
+    pm.add_argument("--jobs", type=int, default=1, help="pairs measured in parallel (default 1)")
     pm.add_argument("--name", help="report file name (default mesh-<baseline>)")
     for cmd in ("sfm", "report"):
         p = sub.add_parser(cmd)

@@ -79,6 +79,10 @@ SILENT_PORTS = None  # 0.3.2: no port is silent on either path any more
 # True), so its GPU lines cannot appear; the node must still be the paired binary. Every other port
 # is as in a GPU run.
 DEFAULT_MARKERS = dict(GPU_MARKERS, FeatureExtraction=[])
+# Host votes: Meshing prints its disabled line instead of "visibility votes on the GPU" (asserted in the
+# configuration's checks); every other port as in a GPU run. First run end to end in the 0.3.5 release
+# gate, which it failed at 6/7 for requiring the GPU line.
+HOSTVOTES_MARKERS = dict(GPU_MARKERS, Meshing=[m for m in GPU_MARKERS["Meshing"] if "visibility votes on the GPU" not in m])
 
 # In-process self-checks: the port runs the CPU reference alongside itself and compares. These are
 # the strongest correctness tests the project has, and until 2026-09-20 no gate switched them on.
@@ -189,7 +193,7 @@ CONFIGS = {
     "verify": dict(overrides=SIFT, env=dict(SELF_CHECK_ENV), checks=SELF_CHECK_VERDICTS),
     # The host votes (bucketed), which the device votes replaced as the default in step 10: still the
     # fallback, so still checked against the ordered reference in both passes.
-    "hostvotes": dict(overrides=SIFT, env={"CHESHIRE_GPU_VIS_VOTES": "0", "CHESHIRE_GPU_VIS_CHECK": "1"}, checks={
+    "hostvotes": dict(overrides=SIFT, markers="hostvotes", env={"CHESHIRE_GPU_VIS_VOTES": "0", "CHESHIRE_GPU_VIS_CHECK": "1"}, checks={
         "Meshing": [r"visibility votes: disabled by CHESHIRE_GPU_VIS_VOTES=0, host votes",
                     r"visibility votes check \(pass 1, bucketed host votes\): identical to the ordered host reference on all",
                     r"visibility votes check \(pass 2, bucketed host votes\): identical to the ordered host reference on all"]}),
@@ -345,7 +349,7 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     # Any extension: Meshroom's Texturing writes texture_1001.exr by default, not .png, so globbing
     # for .png reported a perfectly good textured mesh as having no textures.
     tex = list((out / "out").glob("texture_*.*"))
-    markers = {"cpu": CPU_MARKERS, "defaults": DEFAULT_MARKERS}.get(cfg.get("markers"), GPU_MARKERS)
+    markers = {"cpu": CPU_MARKERS, "defaults": DEFAULT_MARKERS, "hostvotes": HOSTVOTES_MARKERS}.get(cfg.get("markers"), GPU_MARKERS)
 
     # Provenance first, then the port. A port marker alone is not proof the Cheshire binary ran:
     # Meshroom's own featureExtraction is a CUDA PopSIFT and prints the very same

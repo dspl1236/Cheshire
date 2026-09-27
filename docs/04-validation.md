@@ -2611,9 +2611,68 @@ mesh, and the verdict is on the median symmetric p95:
 - WARN past the spread but within the tolerance;
 - PASS otherwise.
 
-On mini6, the 1 mm shift (0.018 %) passes under the floor and a 20 mm shift (0.35 %) fails.
+On mini6, measured raw, the 1 mm shift (0.018 %) passes under the floor and a 20 mm shift (0.35 %)
+fails. Against upstream the gate no longer measures raw (below), and a rigid shift is then aligned
+away by design.
 
-What the gate is for, Cheshire's full pipeline against upstream Meshroom's on the same photos,
-needs an upstream reference mesh. Upstream's DepthMap is CUDA-only, so that means a run on an
-NVIDIA card.
+### Against upstream Meshroom 2023.3 on the engine bay (2026-09-26)
+
+Upstream: Meshroom 2023.3's own binaries on every node (`CHESHIRE_BACKEND=meshroom` through the
+paired launchers), Meshroom's default photogrammetry graph, house-pc's GTX 1080 Ti, two runs of
+about 2 hours each (CPU DSP-SIFT and matching on the i3). Cheshire: the same graph through the
+end-to-end gate's new `defaults` configuration (Meshroom's parameters, nothing overridden, 7/7
+ports), a package of this tree, the RX 9070 box, two runs. 107 photos.
+
+Comparing these meshes raw measured their coordinate frames, not their surfaces, for two reasons:
+
+- **SfM fixes its own frame.** After aligning the camera centres (Umeyama), upstream's frame sat
+  0.5 degrees and 5 % of the camera spread from Cheshire's. The cameras then agreed to 0.13 %, but
+  the surfaces still needed about 1 more degree. Camera centres carry their own pose noise and
+  cannot pin the frame as tightly as the surfaces can. So `mesh_distance.py --refine` follows the
+  camera alignment with a trimmed point-to-plane ICP with a similarity. On a synthetic mesh moved
+  by 2 degrees, 1 % scale and 3 cm it recovers the move exactly (p95 6e-17) in 5 rounds. A local
+  bump survives it untouched.
+- **Meshing's volume moves run to run, upstream too.** `divideSpaceFromSfM` takes the axis-aligned
+  box of the landmarks with at least 3 observations and 10 degrees of parallax, from their 0.1-99.9 %
+  quantiles plus 5 %. The quantile is the 40th most extreme of about 40,000 such landmarks, and
+  the box flips between two sizes: upstream's run 1 got 3.66 x 1.75 x 1.77, its run 2 got
+  2.73 x 0.96 x 1.73, both Cheshire runs about 2.74 x 0.97 x 1.74, and an earlier Cheshire job on
+  house-pc got 3.71 x 1.77 x 1.76. A Python copy of the function reproduces both of today's logged
+  boxes from the SfM outputs, and both pipelines' landmark counts and filtered counts are within
+  1 %. So the flip is in which tail landmarks pass the filter, not in Meshing's code or in Cheshire.
+  `--common` measures only inside the volume both meshes cover, and reports how much of each mesh
+  was left out. The relative figures are then fractions of that volume's diagonal.
+
+Two further fixes came out of this run. Distances are capped at 2 % of the diagonal, and samples
+farther than that count as "beyond" and are reported as a fraction. The sample-triangle pairs are
+evaluated in chunks of at most 2 million. An unbounded first version reached 45 GB on two meshes in
+different frames, and a watchdog now also guards these runs.
+
+`quality_gate.py mesh` aligns on the cameras, refines, and uses the common volume by default
+(`--raw` for neither). It runs pairs in parallel with `--jobs`. Result
+(`build/quality/mesh-eb-upstream-vs-cheshire.md`):
+
+| pair | symmetric p95 | medians | beyond 2 % | in the common volume | ICP rotation |
+|---|---|---|---|---|---|
+| upstream 1 / upstream 2 (baseline) | 1.2225 % | 0.00179 / 0.00169 | 2.86 / 1.43 % | 88.6 / 100.0 % | 0.056 degrees |
+| Cheshire 1 / upstream 1 | 1.4643 % | 0.00238 / 0.00249 | 1.83 / 3.38 % | 100.0 / 88.6 % | 1.027 degrees |
+| Cheshire 1 / upstream 2 | 0.7410 % | 0.00220 / 0.00217 | 0.73 / 0.47 % | 99.5 / 99.9 % | 1.070 degrees |
+| Cheshire 2 / upstream 1 | 1.3418 % | 0.00243 / 0.00252 | 2.15 / 2.95 % | 100.0 / 88.7 % | 1.017 degrees |
+| Cheshire 2 / upstream 2 | 0.8926 % | 0.00225 / 0.00222 | 1.44 / 0.47 % | 99.7 / 100.0 % | 1.058 degrees |
+
+**PASS**: Cheshire's median symmetric p95 to upstream is 1.117 %, against upstream's own run-to-run
+spread of 1.2225 %. The p95 follows the volume more than the pipeline: the pairs with upstream's run
+1, the large box, are the high ones on both sides. Every ICP converged, with final steps of 2-5e-6.
+
+One difference below that verdict, not yet explained. The medians across the pipelines, 0.0022 to
+0.0025, sit about 30 % above upstream's own (0.0017-0.0018). Two Cheshire runs, refined the same way,
+measure 0.0015. Cheshire is as repeatable as upstream, and a systematic difference of about 0.05 % of
+the diagonal separates the two. There are two candidates:
+
+- **The AliceVision versions.** Meshroom 2023.3 ships 3.2, and Cheshire is built on `develop` 3.4
+  (docs/roadmap.md, "Upstream's next pipeline").
+- **Cheshire's changes that are not bit-identical.** These are the analytic BA Jacobians, the
+  per-task SfM generators, and the persistent Problem.
+
+Running this tree with those switches at upstream's settings would separate the two.
 
