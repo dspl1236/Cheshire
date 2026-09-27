@@ -2676,3 +2676,32 @@ the diagonal separates the two. There are two candidates:
 
 Running this tree with those switches at upstream's settings would separate the two.
 
+## The 0.3.5 release gate (2026-09-26/27)
+
+Every binary was built at 4720cb7. The two Windows zips were repacked with the pairing scripts of
+82a4fcc (below), and the checksums are in `build/release/0.3.5/SHA256SUMS`. Each package was gated as
+the file you download, through Meshroom 2023.3, on its own card: the 15-configuration mini6 matrix,
+then the 41-view set with `base` and `verify`, harness at 65246c2.
+
+| package | hardware | mini6 | 41 views |
+|---|---|---|---|
+| Windows AMD | RX 9070 (rocm7.2 gfx12-generic) | 15/15 at 7/7 | base and verify at 7/7 |
+| Windows AMD | RX 5500 XT (hip6.2 gfx1012, bench-pc) | 15/15 at 7/7 | base and verify at 7/7 |
+| Linux AMD | RX 6750 XT (house-pc) | 15/15 at 7/7 | base and verify at 7/7 |
+| Linux CUDA | GTX 1080 Ti (house-pc) | 15/15 at 7/7 (11 + 4 rerun after the harness fixes) | base and verify at 7/7 |
+| Windows CUDA | GTX 1080 Ti (bench-pc) | 15/15 at 7/7 | base and verify at 7/7 |
+
+house-pc ran the gates in a scratch Meshroom 2023.3, extracted from its tarball into
+`/data/tests/gate-035`, so the node app's own install and pairing stayed as they were.
+
+The gate found four problems, all in tooling, none in the binaries:
+
+- The Windows pairing option check refused every node (`--help`: Meshroom 2023.3's Windows binaries
+  list it, and ours and its Linux ones do not). It had never truly run on Windows before, because
+  Meshroom's binaries crashed on `--help` in the earlier test and "no options" pairs unchecked.
+- The Windows CUDA zip did not ship the check.
+- `hostvotes` required the GPU votes' line.
+- A harness copy without `check_textured_obj.py` crashed the matrix.
+
+All are fixed (82a4fcc, c765d94, 65246c2).
+
