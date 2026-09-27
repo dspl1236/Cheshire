@@ -3352,6 +3352,16 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                                  << summary.iterations.size() << " iterations, " << summary.num_threads_used << " threads, "
                                  << ceres::LinearSolverTypeToString(summary.linear_solver_type_used) << ", "
                                  << summary.num_residual_blocks << " residual blocks, " << summary.num_parameter_blocks << " parameter blocks");
+        if (sfm::cheshire::evalProfile())
+        {
+            // step A1 (0.3.6): the arithmetic inside the analytic Evaluate against Ceres' phases, in thread-seconds
+            const auto e = sfm::cheshire::evalTake();
+            const int thr = std::max(1, summary.num_threads_used);
+            ALICEVISION_LOG_INFO("cheshire: BA eval profile: inside Evaluate, jacobians " << e.jacNs * 1e-9 << " thread-s in " << e.jacCalls
+                                 << " calls, residuals only " << e.resNs * 1e-9 << " thread-s in " << e.resCalls << " calls; Ceres' phases "
+                                 << summary.jacobian_evaluation_time_in_seconds * thr << " and " << summary.residual_evaluation_time_in_seconds * thr
+                                 << " thread-s (" << thr << " threads)");
+        }
     }
 """.replace("\n", NL), 1)
         if "#include <cstdlib>" not in t:

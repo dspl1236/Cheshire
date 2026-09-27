@@ -55,6 +55,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -66,6 +67,74 @@
 namespace aliceVision {
 namespace sfm {
 namespace cheshire {
+
+// 0.3.6, bundle adjustment on the device, step A1 (docs/notes/ba-device-plan.md): the time inside the
+// analytic Evaluate, per thread, so Ceres' Jacobian phase splits into the arithmetic a device would
+// replace and the per-block handling around it that it would not. CHESHIRE_BA_EVAL_PROFILE=1; the
+// profile line after each solve reports it (step 5i). One cache line per thread, no atomics per call.
+struct alignas(64) EvalSlot
+{
+    std::uint64_t jacNs = 0, resNs = 0, jacCalls = 0, resCalls = 0;
+};
+inline EvalSlot g_evalSlots[256];
+inline std::atomic<int> g_evalNext{0};
+
+inline bool evalProfile()
+{
+    static const bool on = ::cheshire::env::flag("CHESHIRE_BA_EVAL_PROFILE");
+    return on;
+}
+
+inline EvalSlot& evalSlot()
+{
+    thread_local const int idx = g_evalNext.fetch_add(1) & 255;
+    return g_evalSlots[idx];
+}
+
+struct EvalTimer
+{
+    EvalSlot* slot;
+    bool jac;
+    std::chrono::steady_clock::time_point t0;
+    explicit EvalTimer(bool jacobians)
+      : slot(evalProfile() ? &evalSlot() : nullptr),
+        jac(jacobians)
+    {
+        if (slot)
+            t0 = std::chrono::steady_clock::now();
+    }
+    ~EvalTimer()
+    {
+        if (!slot)
+            return;
+        const auto ns = std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+        if (jac)
+        {
+            slot->jacNs += ns;
+            ++slot->jacCalls;
+        }
+        else
+        {
+            slot->resNs += ns;
+            ++slot->resCalls;
+        }
+    }
+};
+
+// Summed over the threads since the last call, and reset (between solves, when no Evaluate runs).
+inline EvalSlot evalTake()
+{
+    EvalSlot sum;
+    for (EvalSlot& s : g_evalSlots)
+    {
+        sum.jacNs += s.jacNs;
+        sum.resNs += s.resNs;
+        sum.jacCalls += s.jacCalls;
+        sum.resCalls += s.resCalls;
+        s = EvalSlot();
+    }
+    return sum;
+}
 
 enum class BaJacobians
 {
@@ -401,6 +470,7 @@ class CostProjectionSimpleAnalytic final : public ceres::CostFunction
 
     bool Evaluate(double const* const* parameters, double* residuals, double** jacobians) const override
     {
+        const EvalTimer cheshireEvalTimer(jacobians != nullptr);  // step A1, CHESHIRE_BA_EVAL_PROFILE
         const double* pose = parameters[2];
         const double* X = parameters[3];
         const double v[3] = {X[0] - pose[3], X[1] - pose[4], X[2] - pose[5]};
@@ -476,6 +546,7 @@ class CostProjectionRigAnalytic final : public ceres::CostFunction
 
     bool Evaluate(double const* const* parameters, double* residuals, double** jacobians) const override
     {
+        const EvalTimer cheshireEvalTimer(jacobians != nullptr);  // step A1, CHESHIRE_BA_EVAL_PROFILE
         const double* pose = parameters[2];
         const double* sub = parameters[3];
         const double* X = parameters[4];
