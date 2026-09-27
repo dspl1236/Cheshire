@@ -2775,6 +2775,17 @@ the DJI set's failure again. A 200 m radius gives exhaustive's result within 0.0
 for 11 % of the pairs and a tenth of the matching time. The FeatureMatching and SfM times of the GPS
 legs were taken while a Linux bundle built beside them, so they are upper bounds.
 
+**Whole jobs through the house-pc app** (Meshroom 2023.3 paired with the b036a bundle, RX 6750 XT,
+standard preset, mesh only, 2026-09-27):
+
+| job | FeatureMatching | whole job | views placed | landmarks |
+|---|---|---|---|---|
+| GPS radius 200 m | 9.8 min | 122 min | 521 of 524 | 681,153 |
+| exhaustive | 101.1 min | 208 min | 521 of 524 | 681,061 |
+
+Every other node took the same time within a minute. The 86 minutes are all matching.
+PrepareDenseScene took 20 minutes of each job for 524 photos.
+
 
 ## 0.3.6: Meshroom 2025.1 (2026-09-27)
 
@@ -2840,6 +2851,14 @@ pairing script and `DepthMap.2025.py` added as a 0.3.6 package will carry them.
 - **41 views: base and verify both pass**, 7/7 ports, 3 textures each. They took 489 s and 846 s,
   against 393 s and 720 s on 2023.3.
 
+**The Linux gate on 2025.1** (house-pc, RX 6750 XT, i3-4330). The package was the 0.3.5 Linux HIP
+tarball as published, plus `DepthMap.2025.py`, with the 0.3.6 harness and `meshroom-pair.sh`, paired
+into a scratch Meshroom 2025.1 under `/data/tests`.
+- **mini6: 15 of 15**, 7/7 ports each. The override was installed and `--unpair` restored Meshroom's
+  node. Times were within 10 s of 0.3.5's on 2023.3.
+- **41 views: base 931 s and verify 1697 s, both pass.** 0.3.5 on 2023.3 took 531 s and 1281 s. The
+  i3 pays for the host AC-RANSAC below more heavily than the Ryzen does (+75 % on base against +24 %).
+
 **Why the 41-view runs are slower: Meshroom 2025.1 raised two RANSAC defaults.** Per node, the
 41-view base run on 2025.1 matches a same-day run on 2023.3 with the same package, to the second,
 everywhere except two nodes:
@@ -2862,3 +2881,38 @@ With both set back (`FeatureMatching:maxIteration=2048`,
 `StructureFromMotion:localizerEstimatorMaxIterations=4096`), 2025.1 runs at 2023.3's speed. Under
 2025.1's defaults, the host AC-RANSAC in geometric filtering and in resection becomes the largest
 cost in both nodes. That is a lead for the next port, not a regression in the package.
+
+**The same on the engine bay** (107 photos, DSP-SIFT, sfmbench cache, dev install, RX 9070;
+`build/ransac/measure.py`):
+
+| engine bay | at 2023.3's counts | at 2025.1's counts |
+|---|---|---|
+| FeatureMatching, whole node | 68.8 s | 530.8 s |
+| of which geometric filtering | 21.4 s | 487.5 s (22.8x; 50000/2048 = 24.4x) |
+| verified pairs / matches | 906 / 502,538 | 1,028 / 512,749 |
+| SfM on the 2048-iteration matches (localizer 4096 / 50000) | 40.1 s | 75.4 s |
+| SfM on the 50000-iteration matches (localizer 4096) | 107 poses, 139,058 landmarks, 37.9 s | |
+| SfM on the 2048-iteration matches | 107 poses, 140,340 landmarks (localizer 4096); 140,319 (50000) | |
+
+AC-RANSAC runs very nearly its whole budget here: geometric filtering grows 22.8x for 24.4x the
+iterations. At 50000 it verifies 13 % more pairs, weak ones: 2 % more matches. SfM places the same
+107 views either way, with landmarks within the run-to-run spread of an unseeded SfM. On this set,
+2025.1's defaults cost 8 minutes of matching and 35 s of SfM for the same reconstruction. The house-pc
+app offers the 2023.3 counts as an option ("RANSAC iterations"). A device port of the hypothesis loop
+would remove most of the 487 s.
+
+**The False Door** (884 photos, SIFT, the 0.3.3 end-to-end cache's features and 25,354 pairs; dev
+install, RX 9070):
+
+| False Door | maxIteration 2048 | maxIteration 50000 |
+|---|---|---|
+| FeatureMatching, whole node | 489.5 s | 2617.3 s |
+| of which geometric filtering | 104.7 s | 2233.9 s (21.3x) |
+| verified pairs / matches | 4,954 / 5,158,159 | 8,499 / 5,718,065 |
+
+Here the larger budget verifies 72 % more pairs but only 11 % more matches, so the added pairs are
+small ones: pairs whose few inliers 2048 hypotheses rarely sample. SfM on them (localizer 4096,
+the same options) placed **830 of 884 views with 1,268,756 landmarks in 1960 s**. Twelve earlier runs on
+the 2048-iteration matches placed 815 to 833 views, with 1.338 to 1.355 million landmarks, in 1139 to
+2368 s. The extra pairs bought no registration and about 5 % fewer landmarks, for 35 more minutes of
+matching. On neither set does 2025.1's matching budget improve the reconstruction.

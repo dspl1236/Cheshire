@@ -470,9 +470,15 @@ passing the SfM gate); GPS pairing is validated on a public survey, OpenDroneMap
   - the README.
 - **AC-RANSAC under Meshroom 2025.1's iteration counts** (M-L, found 2026-09-27, docs/04). Every
   hypothesis is a 7-point (or P3P) solve plus a residual pass and a sort over all matches, which is
-  independent per hypothesis and suits the device. Measure first: the share of geometric filtering
-  and of resection on the engine bay and the False Door at 50000 iterations, and whether AC-RANSAC
-  stops early on these sets.
+  independent per hypothesis and suits the device. **Engine bay measured 2026-09-27** (docs/04):
+  - Geometric filtering: 21 s at 2048 iterations, 488 s at 50000 (22.8x for 24.4x the iterations,
+    so AC-RANSAC runs nearly its whole budget). FeatureMatching: 69 s to 531 s.
+  - SfM: 40 s to 75 s.
+  - The reconstruction is the same: 107 poses either way, landmarks within the unseeded spread,
+    13 % more weak pairs verified.
+
+  Still to measure: the False Door. The house-pc app has a "RANSAC iterations" option for the old
+  counts meanwhile.
 - **Bundle adjustment on the device** (L; moved to 0.3.7's headline; the entry in 0.3.5 above). Step 0 first:
   profile SfM again on today's defaults. The shares that entry quotes (Jacobians 25.1 s of 92 s on
   the engine bay, 421 s of the False Door replay) predate 5m-5r, which cut the Jacobian phase about
