@@ -57,14 +57,23 @@ GPU_MARKERS = {
                           r"visibility votes on the GPU"],
     "Texturing":         [r"texturing: pyramid \+ rasterisation on"],
     "StructureFromMotion": [r"cheshire: incremental SfM: a resection pass that ends without a bundle adjustment gets one"],
+    # 0.3.6: PrepareDenseScene has been paired since v0.2.9 and was checked by nothing, so a run
+    # whose PrepareDenseScene was Meshroom's own binary passed. CPU only; the marker is the direct
+    # 8-bit read (step 6n, hip/port/image_read/direct8.txt) announcing its first image. It is printed
+    # only on that path's success branch (CHESHIRE_READ_DIRECT=0 prints nothing), and also when
+    # CheshireJPG (6r) supplies the pixels, since the device decode feeds the same conversion.
+    "PrepareDenseScene": [r"cheshire: 8-bit images read directly into float RGB\(A\)"],
 }
-# ... and the lines printed when switched off. FeatureExtraction and DepthMap have no such switch,
-# so they stay on the GPU in the fallback run and keep their markers. Sim blur announces its
+# ... and the lines printed when switched off. DepthMap and PrepareDenseScene have no such switch,
+# so they keep their markers in the fallback run. FeatureExtraction is forced onto the CPU there
+# (forceCpuExtraction=True, see CPUFALLBACK below), so its GPU SIFT lines cannot appear and it is
+# held only to being the paired binary, as in the defaults configuration. Sim blur announces its
 # disabled state; max-flow and visibility do not, so with CHESHIRE_GPU_MAXFLOW=0 and
 # CHESHIRE_GPU_VIS=0 set the fallback run exercises their CPU paths without being able to prove it.
 CPU_MARKERS = {
-    "FeatureExtraction": GPU_MARKERS["FeatureExtraction"],
+    "FeatureExtraction": [],
     "DepthMap":          GPU_MARKERS["DepthMap"],
+    "PrepareDenseScene": GPU_MARKERS["PrepareDenseScene"],
     "FeatureMatching":   [r"GPU brute-force disabled by CHESHIRE_GPU_MATCHER=0"],
     "DepthMapFilter":    [r"depth map filter: disabled by CHESHIRE_GPU_FILTER=0"],
     "Meshing":           [r"meshing votes: disabled by CHESHIRE_GPU_VOTE=0",
@@ -83,6 +92,14 @@ DEFAULT_MARKERS = dict(GPU_MARKERS, FeatureExtraction=[])
 # configuration's checks); every other port as in a GPU run. First run end to end in the 0.3.5 release
 # gate, which it failed at 6/7 for requiring the GPU line.
 HOSTVOTES_MARKERS = dict(GPU_MARKERS, Meshing=[m for m in GPU_MARKERS["Meshing"] if "visibility votes on the GPU" not in m])
+
+# Lines that must NOT appear in any configuration. Step 5k (scripts/apply_hip_patch.py) makes the
+# local-BA graph skip an edge to a posed view it was never handed, where upstream throws "invalid
+# map<K, T> key" (Meshroom #2344), and warns when it does. The run then completes, so nothing else
+# here would notice; a gate run that needed the workaround should say so.
+FORBIDDEN = {
+    "StructureFromMotion": [r"local BA graph: \d+ edges to posed views the graph was never handed were skipped"],
+}
 
 # In-process self-checks: the port runs the CPU reference alongside itself and compares. These are
 # the strongest correctness tests the project has, and until 2026-09-20 no gate switched them on.
@@ -142,6 +159,10 @@ SELF_CHECK_VERDICTS = {
 # run of this script fell into it anyway, reporting a missing GPU SIFT marker as if the package
 # were at fault.
 SIFT = ["FeatureExtraction:describerTypes=sift", "FeatureExtraction:forceCpuExtraction=False"]
+# The fallback run keeps the sift describer but on the CPU. Until 0.3.6 it used SIFT above, so every
+# CHESHIRE_GPU_* switch was off while feature extraction still ran PopSIFT on the card, and the run
+# said nothing about a machine without a supported GPU.
+CPUFALLBACK = ["FeatureExtraction:describerTypes=sift", "FeatureExtraction:forceCpuExtraction=True"]
 
 # The binary each Meshroom node runs, for the provenance check below.
 BINARY = {
@@ -153,6 +174,8 @@ BINARY = {
     "Texturing":         "aliceVision_texturing",
     # 0.3.3: the eighth paired node. CPU only; its marker is the fix announcing itself.
     "StructureFromMotion": "aliceVision_incrementalSfM",
+    # 0.3.6: paired since v0.2.9, checked from here on (its launcher line and the 6n marker above).
+    "PrepareDenseScene": "aliceVision_prepareDenseScene",
 }
 
 # Override paths are Meshroom ATTRIBUTE paths, not AliceVision command-line flags, and the two are
@@ -185,7 +208,7 @@ CONFIGS = {
         "Texturing:textureSide=8192", "Texturing:downscale=1"], env={}),
     # Every GPU port switched off. Must still produce a mesh, and must say it went to the CPU.
     # Until 2026-09-20 this set four of the seven switches and was described as "every port off".
-    "cpufallback": dict(overrides=SIFT, markers="cpu", note=SILENT_PORTS, env={
+    "cpufallback": dict(overrides=CPUFALLBACK, markers="cpu", note=SILENT_PORTS, env={
         "CHESHIRE_GPU_MATCHER": "0", "CHESHIRE_GPU_FILTER": "0", "CHESHIRE_GPU_VOTE": "0",
         "CHESHIRE_GPU_TEX": "0", "CHESHIRE_GPU_BLUR": "0", "CHESHIRE_GPU_MAXFLOW": "0",
         "CHESHIRE_GPU_VIS": "0"}),
@@ -370,6 +393,11 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     # Config-specific assertions on top of the port lines: self-check verdicts, bridge announcements.
     unmet = [f"{n}: /{p}/" for n, pats in cfg.get("checks", {}).items()
              for p in pats if not re.search(p, node_logs(cache, n))]
+    for n, pats in FORBIDDEN.items():
+        for p in pats:
+            m = re.search(p, node_logs(cache, n))
+            if m:
+                unmet.append(f"{n}: must not log /{p}/ (logged: {m.group(0)[:100]})")
     if cfg.get("obj_check"):
         # The direct textured-OBJ writer against Assimp's file of the same mesh, by content
         # (CHESHIRE_OBJ_CHECK=1 makes Texturing write both; numbering differs by design).
@@ -454,6 +482,35 @@ def depthmap_identity(results: dict) -> bool:
     return True
 
 
+def unpaired_by_script(pair_output: str) -> list:
+    """The expected nodes the pairing script declined, each with the script's own line. Both scripts
+    print a line containing "not paired" for a node they leave to Meshroom (the Linux script prints
+    "... DepthMap paired only" when the bundle predates the GPU matcher), and name the binary in it:
+    aliceVision_<name>, or bare <name> in the Windows script's GPU SIFT line. Nodes outside BINARY
+    (ImageMatching) are not gated here."""
+    out = []
+    for line in pair_output.splitlines():
+        if "not paired" not in line and "paired only" not in line:
+            continue
+        for node, binary in BINARY.items():
+            if re.search(re.escape(binary.split("_", 1)[1]), line, re.IGNORECASE):
+                out.append((node, line.strip()))
+    return out
+
+
+def unpair(pair_cmd, meshroom: Path, win: bool):
+    """Put Meshroom back: pairing renames its binaries in place, and a half-paired install is a trap
+    for whoever opens Meshroom next. CHESHIRE_E2E_KEEP_PAIRING=1 leaves it paired: for a node
+    (house-pc) whose Meshroom is already paired with this same package by its owner, where unpairing
+    would put the dashboard's jobs back on Meshroom's own binaries."""
+    if os.environ.get("CHESHIRE_E2E_KEEP_PAIRING") == "1":
+        print("\nleft Meshroom paired with this package (CHESHIRE_E2E_KEEP_PAIRING=1)")
+        return
+    u = subprocess.run(pair_cmd + [str(meshroom), "--unpair"],
+                       capture_output=True, text=True, shell=win)
+    print("\n" + (u.stdout.strip() or u.stderr.strip()))
+
+
 def main(argv):
     if len(argv) < 5:
         print(__doc__)
@@ -483,22 +540,22 @@ def main(argv):
     print(p.stdout.strip() or p.stderr.strip())
     if p.returncode != 0:
         return 2
+    # A node the script declined to pair runs Meshroom's own binary in every config, and until 0.3.6
+    # that was noticed only once the node had run (wrong_binary), hours into a full-resolution run
+    # when the node is late in the graph. The script has already said why, so stop here and repeat it.
+    declined = unpaired_by_script(p.stdout)
+    if declined:
+        for node, line in declined:
+            print(f"  FAIL  {node} was not paired, so no config can test it: {line}")
+        unpair(pair_cmd, meshroom, win)
+        return 2
 
     outroot.mkdir(parents=True, exist_ok=True)
     try:
         print()
         results = {n: run_one(n, CONFIGS[n], meshroom, photos, outroot) for n in names}
     finally:
-        # Always put Meshroom back: pairing renames its binaries in place, and a half-paired install
-        # is a trap for whoever opens Meshroom next. CHESHIRE_E2E_KEEP_PAIRING=1 leaves it paired: for
-        # a node (house-pc) whose Meshroom is already paired with this same package by its owner, where
-        # unpairing would put the dashboard's jobs back on Meshroom's own binaries.
-        if os.environ.get("CHESHIRE_E2E_KEEP_PAIRING") == "1":
-            print("\nleft Meshroom paired with this package (CHESHIRE_E2E_KEEP_PAIRING=1)")
-        else:
-            u = subprocess.run(pair_cmd + [str(meshroom), "--unpair"],
-                               capture_output=True, text=True, shell=win)
-            print("\n" + (u.stdout.strip() or u.stderr.strip()))
+        unpair(pair_cmd, meshroom, win)
 
     passed = sum(1 for ok, _ in results.values() if ok)
     print(f"\n{passed} of {len(results)} pipelines ran end to end on this package")
