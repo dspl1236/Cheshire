@@ -2726,3 +2726,24 @@ AliceVision 3.2, which Meshroom 2023.3 ships, against the 3.4 `develop` base, or
 around it, Ceres among them. The next test runs Cheshire's dense stages on upstream's own SfM
 result: if the gap disappears it is in SfM, and if it stays it is in the dense stages.
 
+**The stage swap places the gap in SfM.** Meshroom caches each node by its inputs, not by the binary
+that ran it. So upstream run 1's cache up to StructureFromMotion (Meshroom 2023.3's own
+FeatureExtraction, FeatureMatching and SfM) was copied into a fresh cache on house-pc, and
+Meshroom's default graph was run on it with the app's install, paired with the 0.3.5 bundle. The
+copied nodes count as done and the SfM log was unchanged, while PrepareDenseScene through Texturing
+ran the Cheshire build (RX 6750 XT, 645 s). Report: `build/quality/mesh-eb-upstream-vs-swap.md`.
+
+| pair | medians | symmetric p95 | ICP rotation |
+|---|---|---|---|
+| upstream SfM + Cheshire's dense stages / upstream run 1 (the same SfM) | 0.00146 / 0.00152 | 0.686 % | 0.004 degrees |
+| upstream SfM + Cheshire's dense stages / upstream run 2 | 0.00171 / 0.00169 | 0.934 % | 0.056 degrees |
+| upstream run 1 / upstream run 2 (baseline) | 0.00179 / 0.00169 | 1.2225 % | 0.056 degrees |
+
+On upstream's own SfM, Cheshire's dense stages land at least as close to upstream's mesh as
+upstream's two runs are to each other. The gap and the 1-degree frame offset appear only with
+Cheshire's SfM, and the upstream-equivalent run above showed that Cheshire's SfM switches do not
+cause them. What remains is the SfM of the AliceVision base: 3.4 `develop` in Cheshire, 3.2 in
+Meshroom 2023.3. The frame offset makes the end-of-SfM automatic transform (`useAutoTransform`) the
+first suspect; that is unchecked. Without ground truth the gate cannot say which SfM is better, only
+that the two differ by about 0.05 % of the diagonal.
+

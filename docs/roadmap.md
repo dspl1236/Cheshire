@@ -448,8 +448,11 @@ passing the SfM gate); GPS pairing is validated on a public survey, OpenDroneMap
   is Cheshire with its non-bit-identical SfM defaults at upstream's (`CHESHIRE_BA_JACOBIANS=autodiff`,
   `CHESHIRE_BA_PERSIST=0`, `CHESHIRE_SFM_TASK_SEED=0`) against the same two upstream meshes. If the
   gap stays, it is AliceVision 3.2 against 3.4, or something else not yet named. **Run 2026-09-27: the gap stays** (medians 0.0022-0.0025 either way, both about 1 degree from
-  upstream's frame; docs/04). Next: Cheshire's dense stages on upstream's own SfM result, to place
-  the gap in SfM or in the dense stages.
+  upstream's frame; docs/04). **Placed the same day:** Cheshire's dense stages on upstream's own SfM
+  land as close to upstream as upstream's two runs are to each other (medians 0.0015 on the same SfM),
+  so the gap is the SfM of the AliceVision base (3.4 `develop` against Meshroom 2023.3's 3.2), not
+  Cheshire's switches or its dense stages. Open, low priority: which 3.2-to-3.4 SfM change, with the
+  automatic end-of-SfM transform the first suspect.
 - **GPS-radius pairing on a real survey** (M). The zoo set: vocabulary tree (Meshroom's default
   above 200 photos), exhaustive, and GPS radius, compared on views placed, pairs proposed, verified
   pairs caught, and time.
