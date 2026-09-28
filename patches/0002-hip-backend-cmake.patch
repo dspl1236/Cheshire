@@ -8782,7 +8782,7 @@ index 9500f70..b12c078 100644
          numAddedEdges += addIntrinsicEdgesToTheGraph(sfmData, addedViewsId);
      }
 diff --git a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
-index bd0bf27..7454dcd 100644
+index bd0bf27..aa909ff 100644
 --- a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
 +++ b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
 @@ -5,6 +5,10 @@
@@ -8796,15 +8796,16 @@ index bd0bf27..7454dcd 100644
  #include <aliceVision/config.hpp>
  #include <aliceVision/alicevision_omp.hpp>
  #include <aliceVision/system/Logger.hpp>
-@@ -12,6 +16,7 @@
+@@ -12,6 +16,8 @@
  #include <aliceVision/sfm/bundle/costfunctions/constraint2d.hpp>
  #include <aliceVision/sfm/bundle/costfunctions/constraintPoint.hpp>
  #include <aliceVision/sfm/bundle/costfunctions/projection.hpp>
 +#include <aliceVision/sfm/bundle/costfunctions/projectionCheshire.hpp>  // cheshire: step 5m
++#include <aliceVision/sfm/bundle/costfunctions/ownSolver.hpp>  // cheshire: step 7a
  #include <aliceVision/sfm/bundle/costfunctions/projectionMesh.hpp>
  #include <aliceVision/sfm/bundle/costfunctions/rotationPrior.hpp>
  #include <aliceVision/sfm/bundle/costfunctions/temporalConstraint.hpp>
-@@ -207,7 +212,7 @@ void BundleAdjustmentCeres::setSolverOptions(ceres::Solver::Options& solverOptio
+@@ -207,7 +213,7 @@ void BundleAdjustmentCeres::setSolverOptions(ceres::Solver::Options& solverOptio
      solverOptions.minimizer_progress_to_stdout = _ceresOptions.verbose;
      solverOptions.logging_type = ceres::SILENT;
      solverOptions.update_state_every_iteration = true;
@@ -8813,7 +8814,7 @@ index bd0bf27..7454dcd 100644
      solverOptions.max_num_iterations = _ceresOptions.maxNumIterations;
      solverOptions.max_num_consecutive_invalid_steps = 10;
      /*solverOptions.function_tolerance = 1e-12;
-@@ -215,7 +220,7 @@ void BundleAdjustmentCeres::setSolverOptions(ceres::Solver::Options& solverOptio
+@@ -215,7 +221,7 @@ void BundleAdjustmentCeres::setSolverOptions(ceres::Solver::Options& solverOptio
      solverOptions.parameter_tolerance = 1e-12;*/
  
  #if CERES_VERSION_MAJOR < 2
@@ -8822,7 +8823,7 @@ index bd0bf27..7454dcd 100644
  #endif
  
      if (_ceresOptions.useParametersOrdering)
-@@ -387,11 +392,19 @@ void BundleAdjustmentCeres::addIntrinsicsToProblem(const sfmData::SfMData& sfmDa
+@@ -387,11 +393,19 @@ void BundleAdjustmentCeres::addIntrinsicsToProblem(const sfmData::SfMData& sfmDa
          }
  
          //Create a copy of the intrinsics to enable rollback
@@ -8843,7 +8844,7 @@ index bd0bf27..7454dcd 100644
          double* intrinsicBlockPtr = intrinsicBlock.data();
          problem.AddParameterBlock(intrinsicBlockPtr, intrinsicBlock.size());
  
-@@ -500,7 +513,14 @@ void BundleAdjustmentCeres::addIntrinsicsToProblem(const sfmData::SfMData& sfmDa
+@@ -500,7 +514,14 @@ void BundleAdjustmentCeres::addIntrinsicsToProblem(const sfmData::SfMData& sfmDa
              {
                  //Create data block for intrinsics inside ceres
                  std::vector<double>& distortionBlock = _distortionsBlocks[intrinsicId];
@@ -8859,7 +8860,7 @@ index bd0bf27..7454dcd 100644
                  double* distortionBlockPtr = distortionBlock.data();
                  problem.AddParameterBlock(distortionBlockPtr, distortionBlock.size());
  
-@@ -522,6 +542,19 @@ void BundleAdjustmentCeres::addIntrinsicsToProblem(const sfmData::SfMData& sfmDa
+@@ -522,6 +543,19 @@ void BundleAdjustmentCeres::addIntrinsicsToProblem(const sfmData::SfMData& sfmDa
  
  void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmData, ERefineOptions refineOptions, ceres::Problem& problem, std::vector<ceres::ResidualBlockId>& blockIds)
  {
@@ -8879,7 +8880,7 @@ index bd0bf27..7454dcd 100644
      const bool refineStructure = refineOptions & REFINE_STRUCTURE;
  
      // set a LossFunction to be less penalized by false measurements.
-@@ -551,6 +584,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+@@ -551,6 +585,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
          //If the landmark has a referenceViewIndex set, then retrieve the reference pose
          int sizeLandmark = 3;
          double * referencePoseBlockPtr = nullptr;
@@ -8887,7 +8888,7 @@ index bd0bf27..7454dcd 100644
  
  
          if (landmark.getReferenceViewIndex() != UndefinedIndexT)
-@@ -576,6 +610,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+@@ -576,6 +611,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
              landmarkBlock[2] = refX.z();
  
              referencePoseBlockPtr = _posesBlocks.at(refview.getPoseId()).data();
@@ -8895,7 +8896,7 @@ index bd0bf27..7454dcd 100644
          }
  
          double* landmarkBlockPtr = landmarkBlock.data();
-@@ -585,48 +620,55 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+@@ -585,48 +621,55 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
  
          // add landmark parameter to the all parameters blocks pointers list
          _allParametersBlocks.push_back(landmarkBlockPtr);
@@ -8986,7 +8987,7 @@ index bd0bf27..7454dcd 100644
  
              ceres::LossFunction* weightedLossFunction = lossFunction;
              if (observation.getWeight() != 1.0)
-@@ -636,10 +678,10 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+@@ -636,10 +679,10 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
  
              if (view.isPartOfRig() && !view.isPoseIndependant())
              {
@@ -8999,7 +9000,7 @@ index bd0bf27..7454dcd 100644
  
                  std::vector<double*> params;
                  params.push_back(intrinsicBlockPtr);
-@@ -657,7 +699,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+@@ -657,7 +700,7 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
  
                  if (_ceresOptions.useParametersOrdering && !samePose)
                  {
@@ -9008,7 +9009,7 @@ index bd0bf27..7454dcd 100644
                  }
  
                  ceres::CostFunction* costFunction = ProjectionMeshErrorFunctor::createCostFunction(intrinsic, observation, landmark.getPointFetcher(), samePose);
-@@ -677,15 +719,10 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
+@@ -677,15 +720,10 @@ void BundleAdjustmentCeres::addLandmarksToProblem(const sfmData::SfMData& sfmDat
              }
              else
              {
@@ -9027,7 +9028,7 @@ index bd0bf27..7454dcd 100644
                  blockIds.push_back(blockId);
              }
  
-@@ -765,9 +802,9 @@ void BundleAdjustmentCeres::addSurveyPointsToProblem(const sfmData::SfMData& sfm
+@@ -765,9 +803,9 @@ void BundleAdjustmentCeres::addSurveyPointsToProblem(const sfmData::SfMData& sfm
          // apply a specific parameter ordering:
          if (_ceresOptions.useParametersOrdering)
          {
@@ -9040,7 +9041,7 @@ index bd0bf27..7454dcd 100644
          }
  
  
-@@ -994,7 +1031,7 @@ void BundleAdjustmentCeres::addTemporalSmoothnessToProblem(const sfmData::SfMDat
+@@ -994,7 +1032,7 @@ void BundleAdjustmentCeres::addTemporalSmoothnessToProblem(const sfmData::SfMDat
          for (IndexT frameIdx = firstViewWithPose; frameIdx <= lastViewWithPose; frameIdx++)
          {
              poseBlockPtrs.push_back(_posesBlocks.at(poseIdsVec.at(frameIdx)).data());
@@ -9049,7 +9050,7 @@ index bd0bf27..7454dcd 100644
          }
  
          double trajectoryLength = cameraTrajectoryLength(poseBlockPtrs);
-@@ -1065,6 +1102,17 @@ void BundleAdjustmentCeres::createProblem(const sfmData::SfMData& sfmData, ERefi
+@@ -1065,6 +1103,17 @@ void BundleAdjustmentCeres::createProblem(const sfmData::SfMData& sfmData, ERefi
      // clear previously computed data
      resetProblem();
  
@@ -9067,7 +9068,7 @@ index bd0bf27..7454dcd 100644
      // ensure we are not using incompatible options
      // REFINEINTRINSICS_OPTICALCENTER_ALWAYS and REFINEINTRINSICS_OPTICALCENTER_IF_ENOUGH_DATA cannot be used at the same time
      assert(!((refineOptions & REFINE_INTRINSICS_OPTICALOFFSET_ALWAYS) && (refineOptions & REFINE_INTRINSICS_OPTICALOFFSET_IF_ENOUGH_DATA)));
-@@ -1106,6 +1154,10 @@ void BundleAdjustmentCeres::resetProblem()
+@@ -1106,6 +1155,10 @@ void BundleAdjustmentCeres::resetProblem()
      _intrinsicObjects.clear();
      _distortionsBlocks.clear();
      _linearSolverOrdering.Clear();
@@ -9078,7 +9079,7 @@ index bd0bf27..7454dcd 100644
  }
  
  void BundleAdjustmentCeres::updateFromSolution(sfmData::SfMData& sfmData, ERefineOptions refineOptions) const
-@@ -1197,7 +1249,11 @@ void BundleAdjustmentCeres::updateFromSolution(sfmData::SfMData& sfmData, ERefin
+@@ -1197,7 +1250,11 @@ void BundleAdjustmentCeres::updateFromSolution(sfmData::SfMData& sfmData, ERefin
      {
          for (const auto& [idLandmark, block] : _landmarksBlocks)
          {
@@ -9091,7 +9092,7 @@ index bd0bf27..7454dcd 100644
  
              std::array<double, 3> lblock = block;
  
-@@ -1309,13 +1365,45 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1309,13 +1366,45 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      ceres::Problem::Options problemOptions;
      problemOptions.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
      problemOptions.evaluation_callback = this;
@@ -9141,7 +9142,7 @@ index bd0bf27..7454dcd 100644
      problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
      ALICEVISION_LOG_INFO("landmarksBlocks cost : " << cost);
  
-@@ -1325,6 +1413,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1325,6 +1414,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
          problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
          ALICEVISION_LOG_INFO("temporalConstraintBlocks cost : " << cost);
      }
@@ -9150,13 +9151,94 @@ index bd0bf27..7454dcd 100644
  
      // configure a Bundle Adjustment engine and run it
      // make Ceres automatically detect the bundle structure.
-@@ -1337,8 +1427,37 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1335,10 +1426,118 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+     IterationInfos iterationInfos;
+     options.callbacks.push_back(&iterationInfos);
  
++    // cheshire (step 7a, 0.3.7): shadow mode. Cheshire's own solver runs in place on the problem's
++    // parameter blocks first, its result is kept, the starting values are put back, and Ceres then solves
++    // what it always did; one line compares the two (docs/notes/ba-own-solver.md).
++    const bool cheshireShadowOn = cheshire::own::shadowEnabled() && options.linear_solver_ordering &&
++                                  (options.linear_solver_type == ceres::DENSE_SCHUR || options.linear_solver_type == ceres::SPARSE_SCHUR);
++    cheshire::own::Result cheshireShadow;
++    cheshire::own::Recorder cheshireRecorder;
++    std::vector<double*> cheshireShadowBlocks;
++    std::vector<std::vector<double>> cheshireShadowFinal;
++    if (cheshireShadowOn)
++    {
++        problem.GetParameterBlocks(&cheshireShadowBlocks);
++        std::vector<std::vector<double>> saved(cheshireShadowBlocks.size());
++        for (size_t i = 0; i < cheshireShadowBlocks.size(); ++i)
++            saved[i].assign(cheshireShadowBlocks[i], cheshireShadowBlocks[i] + problem.ParameterBlockSize(cheshireShadowBlocks[i]));
++        cheshire::own::Options o;
++        o.sparse = options.linear_solver_type == ceres::SPARSE_SCHUR;
++        o.maxIterations = options.max_num_iterations;
++        o.maxConsecutiveInvalidSteps = options.max_num_consecutive_invalid_steps;
++        o.functionTolerance = options.function_tolerance;
++        o.gradientTolerance = options.gradient_tolerance;
++        o.parameterTolerance = options.parameter_tolerance;
++        o.initialRadius = options.initial_trust_region_radius;
++        o.maxRadius = options.max_trust_region_radius;
++        o.minRadius = options.min_trust_region_radius;
++        o.minRelativeDecrease = options.min_relative_decrease;
++        o.minDiagonal = options.min_lm_diagonal;
++        o.maxDiagonal = options.max_lm_diagonal;
++        o.jacobiScaling = options.jacobi_scaling;
++        if (::cheshire::env::integer("CHESHIRE_BA_SHADOW", 0) == 3)
++        {
++            // the control: Ceres itself on one thread as the shadow, against Ceres on its usual threads
++            ceres::Solver::Options o1 = options;
++            o1.num_threads = 1;
++            o1.callbacks.clear();
++            cheshire::own::Recorder rec;
++            o1.callbacks.push_back(&rec);
++            ceres::Solver::Summary s1;
++            const auto c0 = std::chrono::steady_clock::now();
++            ceres::Solve(o1, &problem, &s1);
++            cheshireShadow.ok = true;
++            cheshireShadow.iterations = rec.iterations;
++            cheshireShadow.initialCost = s1.initial_cost;
++            cheshireShadow.finalCost = s1.final_cost;
++            cheshireShadow.termination = std::string("Ceres 1 thread: ") + ceres::TerminationTypeToString(s1.termination_type);
++            cheshireShadow.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - c0).count();
++        }
++        else
++        {
++            cheshire::own::Solver cheshireSolver(problem, *options.linear_solver_ordering, o, [this] { PrepareForEvaluation(true, true); });
++            cheshireShadow = cheshireSolver.solve();
++        }
++        cheshireShadowFinal.resize(cheshireShadowBlocks.size());
++        for (size_t i = 0; i < cheshireShadowBlocks.size(); ++i)
++        {
++            cheshireShadowFinal[i].assign(cheshireShadowBlocks[i], cheshireShadowBlocks[i] + saved[i].size());
++            std::copy(saved[i].begin(), saved[i].end(), cheshireShadowBlocks[i]);
++        }
++        PrepareForEvaluation(true, true);
++        options.callbacks.push_back(&cheshireRecorder);
++    }
++
      // solve BA
      ceres::Solver::Summary summary;
 +    const cheshireAdjustClock::time_point cheshireT2 = cheshireAdjustClock::now();
      ceres::Solve(options, &problem, &summary);
 +    const double cheshireSolveS = std::chrono::duration<double>(cheshireAdjustClock::now() - cheshireT2).count();
++    if (cheshireShadowOn)
++    {
++        double maxAbs = 0.0, maxRel = 0.0;
++        for (size_t i = 0; i < cheshireShadowBlocks.size(); ++i)
++            for (size_t k = 0; k < cheshireShadowFinal[i].size(); ++k)
++            {
++                const double a = cheshireShadowBlocks[i][k], b = cheshireShadowFinal[i][k];
++                maxAbs = std::max(maxAbs, std::abs(a - b));
++                maxRel = std::max(maxRel, cheshire::own::relDiff(a, b));
++            }
++        ALICEVISION_LOG_INFO("cheshire: BA shadow (" << ceres::LinearSolverTypeToString(options.linear_solver_type) << "): "
++                             << cheshire::own::compare(cheshireShadow, cheshireRecorder.iterations, summary, maxAbs, maxRel, cheshireSolveS));
++        if (cheshire::own::shadowVerbose() && cheshireShadow.ok &&
++            (cheshireShadow.iterations.size() != cheshireRecorder.iterations.size() ||
++             cheshire::own::relDiff(cheshireShadow.finalCost, summary.final_cost) > 1e-9))
++            ALICEVISION_LOG_INFO("cheshire: BA shadow traces:" << cheshire::own::traces(cheshireShadow, cheshireRecorder.iterations));
++    }
 +    const cheshireAdjustClock::time_point cheshireT3 = cheshireAdjustClock::now();
 +    // cheshire: the projection cost check, one line per solve (scripts/apply_hip_patch.py, step 5m)
 +    if (cheshire::baCheckEnabled())
@@ -9188,7 +9270,7 @@ index bd0bf27..7454dcd 100644
      ALICEVISION_LOG_INFO("landmarksBlockIds : " << landmarksBlockIds.size());
      evaluateOptions.residual_blocks = landmarksBlockIds;
      problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
-@@ -1350,6 +1469,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1350,6 +1549,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
          problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
          ALICEVISION_LOG_INFO("temporalConstraintBlocks cost : " << cost);
      }
@@ -9197,7 +9279,7 @@ index bd0bf27..7454dcd 100644
  
      // print summary
      if (_ceresOptions.summary)
-@@ -1365,6 +1486,7 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1365,6 +1566,7 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      }
  
      // update input sfmData with the solution
@@ -9205,7 +9287,7 @@ index bd0bf27..7454dcd 100644
      updateFromSolution(sfmData, refineOptions);
  
      // Info from surveys
-@@ -1378,6 +1500,16 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1378,6 +1580,16 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      _statistics.RMSEinitial = std::sqrt(summary.initial_cost / summary.num_residuals);
      _statistics.RMSEfinal = std::sqrt(summary.final_cost / summary.num_residuals);
  
@@ -9222,7 +9304,7 @@ index bd0bf27..7454dcd 100644
      ALICEVISION_LOG_INFO("BundleAdjustmentCeres::adjust end");
  
      return true;
-@@ -1411,3 +1543,5 @@ void BundleAdjustmentCeres::PrepareForEvaluation(bool evaluate_jacobians, bool n
+@@ -1411,3 +1623,5 @@ void BundleAdjustmentCeres::PrepareForEvaluation(bool evaluate_jacobians, bool n
  
  }  // namespace sfm
  }  // namespace aliceVision

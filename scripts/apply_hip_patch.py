@@ -28,6 +28,10 @@ ROOT = Path(__file__).resolve().parent.parent
 AV = ROOT / "third_party" / "aliceVision"
 MARK = "# --- cheshire HIP backend ---"
 NL = chr(10)
+# step 7a's hook blocks (the BA solver's shadow mode), inserted around ceres::Solve
+STEP7A_PRE = '    // cheshire (step 7a, 0.3.7): shadow mode. Cheshire\'s own solver runs in place on the problem\'s\n    // parameter blocks first, its result is kept, the starting values are put back, and Ceres then solves\n    // what it always did; one line compares the two (docs/notes/ba-own-solver.md).\n    const bool cheshireShadowOn = cheshire::own::shadowEnabled() && options.linear_solver_ordering &&\n                                  (options.linear_solver_type == ceres::DENSE_SCHUR || options.linear_solver_type == ceres::SPARSE_SCHUR);\n    cheshire::own::Result cheshireShadow;\n    cheshire::own::Recorder cheshireRecorder;\n    std::vector<double*> cheshireShadowBlocks;\n    std::vector<std::vector<double>> cheshireShadowFinal;\n    if (cheshireShadowOn)\n    {\n        problem.GetParameterBlocks(&cheshireShadowBlocks);\n        std::vector<std::vector<double>> saved(cheshireShadowBlocks.size());\n        for (size_t i = 0; i < cheshireShadowBlocks.size(); ++i)\n            saved[i].assign(cheshireShadowBlocks[i], cheshireShadowBlocks[i] + problem.ParameterBlockSize(cheshireShadowBlocks[i]));\n        cheshire::own::Options o;\n        o.sparse = options.linear_solver_type == ceres::SPARSE_SCHUR;\n        o.maxIterations = options.max_num_iterations;\n        o.maxConsecutiveInvalidSteps = options.max_num_consecutive_invalid_steps;\n        o.functionTolerance = options.function_tolerance;\n        o.gradientTolerance = options.gradient_tolerance;\n        o.parameterTolerance = options.parameter_tolerance;\n        o.initialRadius = options.initial_trust_region_radius;\n        o.maxRadius = options.max_trust_region_radius;\n        o.minRadius = options.min_trust_region_radius;\n        o.minRelativeDecrease = options.min_relative_decrease;\n        o.minDiagonal = options.min_lm_diagonal;\n        o.maxDiagonal = options.max_lm_diagonal;\n        o.jacobiScaling = options.jacobi_scaling;\n        if (::cheshire::env::integer("CHESHIRE_BA_SHADOW", 0) == 3)\n        {\n            // the control: Ceres itself on one thread as the shadow, against Ceres on its usual threads\n            ceres::Solver::Options o1 = options;\n            o1.num_threads = 1;\n            o1.callbacks.clear();\n            cheshire::own::Recorder rec;\n            o1.callbacks.push_back(&rec);\n            ceres::Solver::Summary s1;\n            const auto c0 = std::chrono::steady_clock::now();\n            ceres::Solve(o1, &problem, &s1);\n            cheshireShadow.ok = true;\n            cheshireShadow.iterations = rec.iterations;\n            cheshireShadow.initialCost = s1.initial_cost;\n            cheshireShadow.finalCost = s1.final_cost;\n            cheshireShadow.termination = std::string("Ceres 1 thread: ") + ceres::TerminationTypeToString(s1.termination_type);\n            cheshireShadow.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - c0).count();\n        }\n        else\n        {\n            cheshire::own::Solver cheshireSolver(problem, *options.linear_solver_ordering, o, [this] { PrepareForEvaluation(true, true); });\n            cheshireShadow = cheshireSolver.solve();\n        }\n        cheshireShadowFinal.resize(cheshireShadowBlocks.size());\n        for (size_t i = 0; i < cheshireShadowBlocks.size(); ++i)\n        {\n            cheshireShadowFinal[i].assign(cheshireShadowBlocks[i], cheshireShadowBlocks[i] + saved[i].size());\n            std::copy(saved[i].begin(), saved[i].end(), cheshireShadowBlocks[i]);\n        }\n        PrepareForEvaluation(true, true);\n        options.callbacks.push_back(&cheshireRecorder);\n    }\n\n'
+STEP7A_POST = '    if (cheshireShadowOn)\n    {\n        double maxAbs = 0.0, maxRel = 0.0;\n        for (size_t i = 0; i < cheshireShadowBlocks.size(); ++i)\n            for (size_t k = 0; k < cheshireShadowFinal[i].size(); ++k)\n            {\n                const double a = cheshireShadowBlocks[i][k], b = cheshireShadowFinal[i][k];\n                maxAbs = std::max(maxAbs, std::abs(a - b));\n                maxRel = std::max(maxRel, cheshire::own::relDiff(a, b));\n            }\n        ALICEVISION_LOG_INFO("cheshire: BA shadow (" << ceres::LinearSolverTypeToString(options.linear_solver_type) << "): "\n                             << cheshire::own::compare(cheshireShadow, cheshireRecorder.iterations, summary, maxAbs, maxRel, cheshireSolveS));\n        if (cheshire::own::shadowVerbose() && cheshireShadow.ok &&\n            (cheshireShadow.iterations.size() != cheshireRecorder.iterations.size() ||\n             cheshire::own::relDiff(cheshireShadow.finalCost, summary.final_cost) > 1e-9))\n            ALICEVISION_LOG_INFO("cheshire: BA shadow traces:" << cheshire::own::traces(cheshireShadow, cheshireRecorder.iterations));\n    }\n'
+
 
 
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
@@ -4121,6 +4125,34 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
     BundleAdjustmentCeres& BA = *_cheshireBA;
 """.replace("\n", NL), 1)
         eng.write_text(t, encoding="utf-8", newline="")
+
+    # 7a (0.3.7). A bundle-adjustment solver of Cheshire's own, step 1: shadow mode
+    #     (docs/notes/ba-own-solver.md). hip/port/sfm_ba/ownSolver.hpp walks the ceres::Problem built above
+    #     and solves it with Ceres' own algorithm specialised for this shape: the trust-region LM with
+    #     Jacobi scaling, the Huber corrector, bounds with the projected Armijo line search, and landmarks
+    #     eliminated by Schur complement (dense LLT or Eigen's SimplicialLDLT with AMD, as AliceVision's
+    #     DENSE_SCHUR / SPARSE_SCHUR choose). Every residual block is evaluated by its own CostFunction.
+    #     CHESHIRE_BA_SHADOW=1 runs it in place before Ceres, keeps its result, restores the starting
+    #     values, lets Ceres solve as always and logs one comparison line per solve; =2 adds both
+    #     trajectories when they part; =3 is the control (Ceres on one thread as the shadow). Off, nothing
+    #     changes.
+    shutil.copy2(ROOT / "hip" / "port" / "sfm_ba" / "ownSolver.hpp",
+                 AV / "src/aliceVision/sfm/bundle/costfunctions/ownSolver.hpp")
+    bac7 = AV / "src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp"
+    t = bac7.read_text(encoding="utf-8")
+    if "ownSolver.hpp" not in t:
+        inc = "#include <aliceVision/sfm/bundle/costfunctions/projectionCheshire.hpp>  // cheshire: step 5m" + NL
+        if t.count(inc) != 1:
+            sys.exit("the step 5m include not found once in BundleAdjustmentCeres.cpp (7a)")
+        t = t.replace(inc, inc + "#include <aliceVision/sfm/bundle/costfunctions/ownSolver.hpp>  // cheshire: step 7a" + NL, 1)
+        old = ("    // solve BA" + NL + "    ceres::Solver::Summary summary;" + NL
+               + "    const cheshireAdjustClock::time_point cheshireT2 = cheshireAdjustClock::now();" + NL
+               + "    ceres::Solve(options, &problem, &summary);" + NL
+               + "    const double cheshireSolveS = std::chrono::duration<double>(cheshireAdjustClock::now() - cheshireT2).count();" + NL)
+        if t.count(old) != 1:
+            sys.exit("the Solve call not found once in BundleAdjustmentCeres.cpp (7a)")
+        t = t.replace(old, STEP7A_PRE.replace("\n", NL) + old + STEP7A_POST.replace("\n", NL), 1)
+    bac7.write_text(t, encoding="utf-8", newline="")
 
     # 5s. The passes after every bundle-adjustment iteration - the pixel and angle outlier tests
     #     over every observation and the per-pose observation recount - walk the whole scene for a

@@ -1,6 +1,6 @@
 # A bundle-adjustment solver of Cheshire's own: design (0.3.7)
 
-Status: design, 2026-09-28. Step 0 done (below); nothing else is built. Background and the measurements
+Status: 2026-09-28. Step 0 done; step 1 (shadow mode) built as generator step 7a and matching Ceres on 41 views and the engine bay (below); the False Door running. Background and the measurements
 behind the decision are in docs/notes/ba-device-plan.md.
 
 ## Why
@@ -56,6 +56,40 @@ dynamic-size eliminator; Ceres specialises only one F block of size 6.
   elimination and the other minimizer work: roughly 250-300 s of the 601.
 - **Building from the SfM data directly (step 3b)** also saves the build and teardown, 184 s.
 - **The pose refinements** stay on Ceres (DENSE_QR, 2.5 %).
+
+## Step 1: shadow mode, first results (2026-09-28)
+
+`hip/port/sfm_ba/ownSolver.hpp`, generator step 7a. `CHESHIRE_BA_SHADOW=1` runs the solver in place
+before Ceres on every DENSE_SCHUR / SPARSE_SCHUR solve, restores the starting values, and logs one line
+comparing the two (`build/ba037/shadow.py` summarises a log).
+- `=2` adds both trajectories whenever they part.
+- `=3` is the control: Ceres itself on one thread as the shadow.
+
+| set | solves | same iterations | parted | final cost, worst rel. diff | parameters, worst abs. diff |
+|---|---|---|---|---|---|
+| 41 views | 68 dense | 68 | 0 | 3.0e-14 | 7.1e-12 |
+| engine bay | 137 dense, 3 sparse | 140 | 0 | 2.9e-13 | 1.2e-9 |
+
+**What the first engine-bay run found:** four small early solves (24-42 columns) parted, from the
+first or third iteration on, and one step was exactly 1000x Ceres'.
+- **Not rounding.** The control run showed Ceres on one thread and on twelve agreeing on all 140
+  solves, those four included.
+- **The cause was bounds.** AliceVision bounds the focal length (with a prior) and the principal
+  point (±5 % of the image). With any bound on a free block, Ceres projects every Plus onto the box
+  and runs a projected Armijo line search, with cubic interpolation, along every trust-region step.
+  - The line search shrinks a failing step by at most `max_line_search_step_contraction` = 1e-3:
+    the 1000x.
+- **The fix:** both, ported (the polynomial helpers from Ceres' polynomial.cc). All 140 solves then
+  matched.
+
+**A saving this exposes.** The line search's first trial evaluates the gradient at the trial point
+(CUBIC interpolation), and it is used only if Armijo fails there. Ceres pays that gradient
+evaluation on every iteration of every bounded solve. Computing it only when needed gives the same
+iterates.
+
+**Time so far:** the solver is 2.5-3.2x slower than Ceres on these sets. It is single-threaded, with
+a dense S, map-based chunk buffers and a line search that always takes the gradient. That is step 2's
+work, now that the iterates match.
 
 ## Scope
 
