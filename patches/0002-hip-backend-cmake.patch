@@ -8782,7 +8782,7 @@ index 9500f70..b12c078 100644
          numAddedEdges += addIntrinsicEdgesToTheGraph(sfmData, addedViewsId);
      }
 diff --git a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
-index bd0bf27..aa909ff 100644
+index bd0bf27..c5653c3 100644
 --- a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
 +++ b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
 @@ -5,6 +5,10 @@
@@ -9151,7 +9151,7 @@ index bd0bf27..aa909ff 100644
  
      // configure a Bundle Adjustment engine and run it
      // make Ceres automatically detect the bundle structure.
-@@ -1335,10 +1426,118 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1335,10 +1426,119 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      IterationInfos iterationInfos;
      options.callbacks.push_back(&iterationInfos);
  
@@ -9184,6 +9184,7 @@ index bd0bf27..aa909ff 100644
 +        o.minDiagonal = options.min_lm_diagonal;
 +        o.maxDiagonal = options.max_lm_diagonal;
 +        o.jacobiScaling = options.jacobi_scaling;
++        o.threads = options.num_threads;
 +        if (::cheshire::env::integer("CHESHIRE_BA_SHADOW", 0) == 3)
 +        {
 +            // the control: Ceres itself on one thread as the shadow, against Ceres on its usual threads
@@ -9270,7 +9271,7 @@ index bd0bf27..aa909ff 100644
      ALICEVISION_LOG_INFO("landmarksBlockIds : " << landmarksBlockIds.size());
      evaluateOptions.residual_blocks = landmarksBlockIds;
      problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
-@@ -1350,6 +1549,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1350,6 +1550,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
          problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
          ALICEVISION_LOG_INFO("temporalConstraintBlocks cost : " << cost);
      }
@@ -9279,7 +9280,7 @@ index bd0bf27..aa909ff 100644
  
      // print summary
      if (_ceresOptions.summary)
-@@ -1365,6 +1566,7 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1365,6 +1567,7 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      }
  
      // update input sfmData with the solution
@@ -9287,7 +9288,7 @@ index bd0bf27..aa909ff 100644
      updateFromSolution(sfmData, refineOptions);
  
      // Info from surveys
-@@ -1378,6 +1580,16 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1378,6 +1581,16 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      _statistics.RMSEinitial = std::sqrt(summary.initial_cost / summary.num_residuals);
      _statistics.RMSEfinal = std::sqrt(summary.final_cost / summary.num_residuals);
  
@@ -9304,7 +9305,7 @@ index bd0bf27..aa909ff 100644
      ALICEVISION_LOG_INFO("BundleAdjustmentCeres::adjust end");
  
      return true;
-@@ -1411,3 +1623,5 @@ void BundleAdjustmentCeres::PrepareForEvaluation(bool evaluate_jacobians, bool n
+@@ -1411,3 +1624,5 @@ void BundleAdjustmentCeres::PrepareForEvaluation(bool evaluate_jacobians, bool n
  
  }  // namespace sfm
  }  // namespace aliceVision

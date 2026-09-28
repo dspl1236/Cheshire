@@ -1,6 +1,6 @@
 # A bundle-adjustment solver of Cheshire's own: design (0.3.7)
 
-Status: 2026-09-28. Step 0 done; step 1 (shadow mode) built as generator step 7a and matching Ceres on 41 views and the engine bay (below); the False Door running. Background and the measurements
+Status: 2026-09-28. Steps 0-2 done: the solver, in shadow mode beside Ceres, takes Ceres' iterates to rounding on 41 views, the engine bay and the False Door, and solves in a third of Ceres' time (below). Step 3 next. Background and the measurements
 behind the decision are in docs/notes/ba-device-plan.md.
 
 ## Why
@@ -69,6 +69,10 @@ comparing the two (`build/ba037/shadow.py` summarises a log).
 |---|---|---|---|---|---|
 | 41 views | 68 dense | 68 | 0 | 3.0e-14 | 7.1e-12 |
 | engine bay | 137 dense, 3 sparse | 140 | 0 | 2.9e-13 | 1.2e-9 |
+| False Door, first 715 solves | 691 dense, 24 sparse | 713 | 3 | 8.5e-3 | |
+
+The False Door run was stopped at 715 solves, since step 2 replaced the code. Its one real parting,
+a 2.5-million-row sparse solve that ended 0.85 % from Ceres, was the sparse ordering (step 2).
 
 **What the first engine-bay run found:** four small early solves (24-42 columns) parted, from the
 first or third iteration on, and one step was exactly 1000x Ceres'.
@@ -91,6 +95,76 @@ iterates.
 a dense S, map-based chunk buffers and a line search that always takes the gradient. That is step 2's
 work, now that the iterates match.
 
+## Step 2: the parallel, block-sparse solver (2026-09-28)
+
+Same file, same shadow mode. What changed from step 1:
+
+- **Ceres' reduced program, in Ceres' order.**
+  - Parameter blocks no residual block uses are dropped, as Ceres' preprocessor drops them.
+  - For `SPARSE_SCHUR` the camera blocks are reordered as `ReorderSchurComplementColumnsUsingEigen`
+    reorders them: AMD on the block pattern F^T F − F^T E E^T F. `SimplicialLDLT` then keeps the
+    natural order (`AreJacobianColumnsOrdered`) and analyses the pattern once per solve.
+  - Step 1 had run scalar AMD, a different elimination order. That was its one real parting: the
+    ill-conditioned 2.5-million-row False Door solve ended 0.85 % from Ceres (below).
+- **Threads, without the thread count in the result.**
+  - Evaluation runs over fixed partitions of whole chunks.
+  - Elimination is fused with the assembly of S over fixed groups of chunks. Each group streams its
+    landmarks once into its own copy of (S, rhs), and the copies are added in group order. The
+    first version assembled row by row of camera blocks; it was bound by memory latency, and the
+    groups are 1.8x faster.
+  - Vector passes sum over fixed blocks.
+  - All boundaries depend on the problem alone. On 41 views with `CHESHIRE_SFM_DETERMINISTIC=1`,
+    `CHESHIRE_BA_OWN_THREADS=1` and `=12` give the same final-state digest on all 68 solves.
+- **S as its upper block triangle**, with the pattern fixed per solve. Dense Schur fills the lower
+  triangle for LLT. Sparse Schur keeps a CSC pattern whose values are refilled per iteration.
+- **The line search takes a gradient only when a sample fails Armijo.** The cubic step is the only
+  reader. The candidate's cost is the search's last sample, which is the point Ceres evaluates
+  again. One deviation: a sample that passes is never asked for its Jacobian. A non-finite Jacobian
+  there counts as valid here and as invalid in Ceres. On the False Door the search needed a gradient
+  in 27 % of samples.
+- **Fixed-size kernels** for the pose blocks, with the same summation order per entry (bit-identical).
+
+**Diagnostics.**
+- `CHESHIRE_BA_SHADOW=2` traces print our line search per iteration (samples, gradients, the step
+  size, whether it failed). The shadow line carries Ceres' termination message.
+- `CHESHIRE_BA_OWN_THREADS` sets our threads alone.
+- `CHESHIRE_BA_OWN_EAGER=1` takes every sample with its gradient, as Ceres does.
+
+| set | solves | same iterations | parted | final cost, worst rel. diff | ours | Ceres (solve) |
+|---|---|---|---|---|---|---|
+| 41 views | 68 dense | 68 | 0 | 1.4e-14 | 6.1 s | 21.1 s |
+| engine bay | 137 dense, 3 sparse | 140 | 0 | 1.6e-11 | 7.7 s | 21.3 s |
+| False Door | 886 dense, 34 sparse | 916 | 4 | 5.3e-2 (below) | 172 s | 487 s |
+
+False Door split of our 161 s in the 34 sparse solves: setup 23 s, evaluations with Jacobians 28 s, costs 18 s, gradients 11 s, elimination and assembly 25 s, factorisation 12 s, back-substitution 4 s, and 39 s of vector passes, Plus and state copies. Ceres took 461 s for the same solves.
+
+**Where they still differ, and why it is rounding.**
+- **The line search at the floor.** In a 217-row solve, both reach iteration 5 identically.
+  - Ceres: "Parameter tolerance reached. Relative step_norm: 1.24e-14", after 15 line-search steps.
+  - Ours: the search shrinks to a = 1e-16 and fails on the minimum step size. We then go on to a
+    lower cost (1,439,322 against 1,443,677).
+
+  At a step of 1e-14 of the parameters, Armijo compares two costs that differ in the last bits,
+  and the answer is decided by summation order. A 351-row solve does the same the other way round.
+- **An ill-conditioned solve.** The 2.5-million-row solve starts at a cost of 1.4 million, and its
+  first step has norm 960,000. After that step the two costs differ by 3.7e-10. That difference
+  grows to 1e-7 to 5e-4 by the 50th iteration, depending on the run.
+- **The control.** Ceres against itself (`CHESHIRE_BA_SHADOW=3`: one thread as the shadow, twelve
+  driving, the same False Door run): 919 of 920 solves take the same iterations, 4 part, and the worst
+  final difference is 3.0e-3. The worst is that same 217-row solve with the same two outcomes. One
+  thread stops at iteration 4 on the parameter tolerance (1,443,676); twelve threads run all 50
+  (1,439,322). The ill-conditioned large sparse solve parts at iteration 5 and ends 7.2e-5 apart. So
+  Ceres disagrees with itself where the solver disagrees with Ceres, and by the same amounts. These are
+  the places where summation order decides, not faults of either. The solver shows three more solves
+  ending on a different iteration than the control does, all of them line searches at the floor.
+
+**Time, next.**
+- **Setup:** 23 s of the sparse solves. It is Ceres' `std::map` lookups per parameter
+  block, and building from the SfM data (step 3b) removes it.
+- **Factorisation:** Eigen's single-threaded simplicial LDLT, kept for parity. A supernodal or
+  dense factorisation is a step-3 choice, judged by the quality gate.
+- **Evaluations:** these are the analytic cost functions, and the device's (step 4).
+
 ## Scope
 
 The solver covers the problems incremental SfM builds most:
@@ -102,7 +176,7 @@ The solver covers the problems incremental SfM builds most:
   constant.
 - **Solvers:** both AliceVision configurations. `DENSE_SCHUR` up to 100 poses, or up to 20 cameras
   under the local strategy. `SPARSE_SCHUR` above that, which in Cheshire's GPL-free Ceres is
-  `EIGEN_SPARSE`: Eigen's `SimplicialLDLT` with AMD ordering.
+  `EIGEN_SPARSE`: Eigen's `SimplicialLDLT`, after Ceres' own block AMD of the camera blocks.
 
 Anything else in a problem (rig sub-poses, mesh-point projections, depth residuals, 2-D constraints,
 rotation priors, temporal constraints, the focal prior) sends that solve to Ceres, as today.
@@ -145,8 +219,10 @@ rounding. Validation is then a comparison run by run, not an argument about qual
   key), and the reduced camera system over pose, intrinsics and distortion columns is
   S = B − E C⁻¹ Eᵀ, with the LM diagonal added before elimination as Ceres does.
   - **Dense:** Cholesky of the dense S.
-  - **Sparse:** `SimplicialLDLT` with `AMDOrdering`, the same Eigen class Ceres calls, on S
-    assembled in Ceres' block order.
+  - **Sparse:** for `EIGEN_SPARSE`, Ceres first reorders the camera blocks itself
+    (`ReorderSchurComplementColumnsUsingEigen`: AMD on the block pattern F^T F − F^T E E^T F), then
+    factors with `SimplicialLDLT` in the natural order (`AreJacobianColumnsOrdered`). The solver does
+    the same. Step 1 ran scalar AMD instead, and that was its one real parting (below).
 
 Where exact agreement is not reachable (summation order inside S, the threading of the
 landmark-block loop), the comparison falls back to relative tolerances per iteration. It then stops

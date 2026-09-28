@@ -551,12 +551,20 @@ reaches it. The design is in docs/notes/ba-own-solver.md; the steps, each a go/n
   - The 860 pose refinements are 2.5 %.
 
   First target: the large sparse solves.
-- **Step 1: shadow mode** (M). The solver walks the `ceres::Problem` AliceVision builds and calls
-  each block's own cost function, so it evaluates Ceres' numbers.
+- **Step 1: shadow mode** (M). **Done 2026-09-28** (09f87f9). The solver walks the
+  `ceres::Problem` AliceVision builds and calls each block's own cost function, so it evaluates
+  Ceres' numbers.
   - `CHESHIRE_BA_SHADOW=1` runs it beside Ceres on a copy of the parameters, in every solve of a real
     run, and logs both iteration traces.
   - Ceres still drives the reconstruction.
-- **Step 2: the solver on the host, Ceres-faithful** (L). Levenberg-Marquardt with Ceres' own
+- **Step 2: the solver on the host, Ceres-faithful** (L). **Done 2026-09-28**, in shadow mode:
+  - Ceres' iterates to rounding on 41 views (68 of 68 solves), the engine bay (140 of 140) and the
+    False Door (916 of 920). The rest are line searches decided at the rounding floor, and an
+    ill-conditioned solve.
+  - 172 s against Ceres' 487 s on the False Door's solves.
+  - Bit-identical for any thread count.
+
+  Levenberg-Marquardt with Ceres' own
   strategy: trust-region radius updates, Jacobi scaling, step acceptance and termination tests, and
   the Huber corrector as Ceres applies it. Landmarks are eliminated by Schur complement, with the
   reduced camera system solved by dense Cholesky or sparse Cholesky as AliceVision chooses.
