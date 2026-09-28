@@ -2961,3 +2961,25 @@ the cases); the owner's next gate run is the first real test. What changes for t
   paired binary ran and that its port announced itself, per node, on a real pipeline. The stage gates
   cover the per-node outputs. Nothing called the script.
 
+## The 0.3.6 release gate (2026-09-28)
+
+All four packages built at 863384e (`build/chain-036.cmd`, then `chain-036-resume.cmd` after the
+Windows CUDA link lost to a file lock; the second attempt built clean). The packers' checks pass,
+including the new ones from the tooling-debts task: every package's feature library links PopSift
+(Windows: `aliceVision_feature.dll` imports `popsift.dll`; Linux: `libaliceVision_feature.so.3.4`
+needs `libpopsift`). Every package carries `share/cheshire/meshroom-overrides/DepthMap.2025.py`.
+
+Each package was gated as built, on its own card. The full gate runs through Meshroom 2025.1: the
+15-configuration mini6 matrix, then 41 views with `base` and `verify`. A shorter mini6 check runs
+through Meshroom 2023.3: `base`, `defaults`, `cpufallback`, `verify`. Every run is scored at eight
+nodes: the seven GPU ports and the SfM node as before, and PrepareDenseScene, new in this gate.
+
+| package | hardware | 2025.1: mini6 | 2025.1: 41 views | 2023.3: mini6 |
+|---|---|---|---|---|
+| Windows AMD | RX 9070 (rocm7.2 gfx12-generic payload) | 15/15 at 8/8 | base 478 s, verify 832 s | 4/4 at 8/8 |
+| Linux AMD | RX 6750 XT (house-pc) | 15/15 at 8/8 | base 916 s, verify 1672 s | 4/4 at 8/8 |
+| Windows CUDA | GTX 1080 Ti (bench-pc) | 15/15 at 8/8 | base 1343 s, verify 2273 s | 4/4 at 8/8 |
+
+Pairing installed the matching DepthMap override on each Meshroom, and `--unpair` restored Meshroom's
+own node in every run. The Linux CUDA bundle was not gated: the GTX card is in bench-pc. The RX 5500 XT
+(the hip6.2 payloads of the Windows AMD package) was not gated either.
