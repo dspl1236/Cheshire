@@ -2977,9 +2977,12 @@ nodes: the seven GPU ports and the SfM node as before, and PrepareDenseScene, ne
 | package | hardware | 2025.1: mini6 | 2025.1: 41 views | 2023.3: mini6 |
 |---|---|---|---|---|
 | Windows AMD | RX 9070 (rocm7.2 gfx12-generic payload) | 15/15 at 8/8 | base 478 s, verify 832 s | 4/4 at 8/8 |
+| Windows AMD | RX 5500 XT (hip6.2 gfx1012 payload, bench-pc) | 15/15 at 8/8 | base 1469 s, verify 2377 s | 4/4 at 8/8 |
 | Linux AMD | RX 6750 XT (house-pc) | 15/15 at 8/8 | base 916 s, verify 1672 s | 4/4 at 8/8 |
 | Windows CUDA | GTX 1080 Ti (bench-pc) | 15/15 at 8/8 | base 1343 s, verify 2273 s | 4/4 at 8/8 |
+| Linux CUDA | GTX 1080 Ti (house-pc) | 15/15 at 8/8 | base 966 s, verify 1707 s | 4/4 at 8/8 |
 
 Pairing installed the matching DepthMap override on each Meshroom, and `--unpair` restored Meshroom's
-own node in every run. The Linux CUDA bundle was not gated: the GTX card is in bench-pc. The RX 5500 XT
-(the hip6.2 payloads of the Windows AMD package) was not gated either.
+own node in every run. The last two rows ran on 2026-09-28 after a card swap (the GTX 1080 Ti into
+house-pc, the RX 5500 XT into bench-pc), so every package and both halves of the Windows AMD package
+are gated. 105 runs, none failed.

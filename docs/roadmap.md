@@ -434,6 +434,12 @@ the earlier proposal.
 
 ## 0.3.6
 
+**Released 2026-09-28 as v0.3.6** ([notes](releases/0.3.6.md)): Meshroom 2025.1 support, the GPS
+AltitudeRef fix, the tooling debts. All four packages passed the full gate through Meshroom 2025.1 and a
+mini6 check through 2023.3 on the RX 9070, RX 5500 XT, RX 6750 XT and GTX 1080 Ti: 105 runs, none failed
+(docs/04). Still open from this list: the mesh gap's cause (low priority), upstream's new pipeline timed,
+and the AC-RANSAC device loop (a candidate for 0.3.7 beside the bundle-adjustment loop).
+
 Started 2026-09-27. **Headline, decided the same day after the BA findings below: Meshroom 2025.1
 support.** Meshroom 2025.1.0 (2025-08-18, AliceVision 3.3.0, plugin architecture, Python bindings) has
 been the current release for a year while Cheshire pairs only into 2023.3; the "Meshroom 2025.x" item
@@ -471,9 +477,8 @@ passing the SfM gate); GPS pairing is validated on a public survey, OpenDroneMap
   - **The Windows CUDA gate passes on 2025.1:** bench-pc's GTX 1080 Ti, mini6 15 of 15, 41 views
     base and verify.
 
-  Still open:
-  - the Linux CUDA bundle (needs the GTX card in a Linux box);
-  - the README.
+  - **All four v0.3.6 packages gated on 2025.1**, the Linux CUDA bundle included, after a card swap put
+    the GTX 1080 Ti in house-pc. The README covers pairing 2025.1, `--save` and the RANSAC limits.
 - **AC-RANSAC under Meshroom 2025.1's iteration counts** (M-L, found 2026-09-27, docs/04). Every
   hypothesis is a 7-point (or P3P) solve plus a residual pass and a sort over all matches, which is
   independent per hypothesis and suits the device. **Engine bay measured 2026-09-27** (docs/04):
