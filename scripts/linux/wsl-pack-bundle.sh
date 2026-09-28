@@ -52,6 +52,19 @@ else
                  || note FAIL "libpopsift.so carries no HIP code objects"
 fi
 
+# ... and the feature library must actually link it. libpopsift.so in lib/ proves nothing on its own:
+# the v0.3.2 CUDA zip carried popsift.dll beside a feature library built with
+# ALICEVISION_USE_POPSIFT=OFF, and build-alicevision.sh defaulted CHESHIRE_POPSIFT to OFF until 0.3.6.
+# The HIP PopSift's soname is the plain libpopsift.so (a versioned one is the CUDA build, refused below).
+feat=$(for f in "$B"/lib/libaliceVision_feature.so*; do [ -f "$f" ] && [ ! -L "$f" ] && echo "$f"; done | head -1)
+if [ -z "$feat" ]; then
+  note FAIL "no libaliceVision_feature.so in the bundle"
+elif readelf -d "$feat" 2>/dev/null | grep -qE 'NEEDED.*\[libpopsift\.so'; then
+  note ok "GPU SIFT: $(basename "$feat") needs libpopsift"
+else
+  note FAIL "$(basename "$feat") does not need libpopsift: built with ALICEVISION_USE_POPSIFT=OFF (no PopSift found at build time?)"
+fi
+
 dm="$B/lib/libaliceVision_depthMap_cuda.so.3.4"
 if [ -f "$dm" ]; then
   note ok "depthMap: amdhsa=$(grep -ac 'amdhsa--' "$dm") clamp=$(grep -ac 'exceeds this device' "$dm") ($(stat -c %s "$dm") bytes)"

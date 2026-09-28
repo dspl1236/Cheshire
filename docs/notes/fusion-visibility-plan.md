@@ -199,7 +199,7 @@ Other gate entries:
 - `GPU_MARKERS`: `"visibility votes on the GPU"`
 - `CPU_MARKERS`: `"visibility votes: disabled by CHESHIRE_GPU_VIS_VOTES=0"`
 - the `cpufallback` env gets `CHESHIRE_GPU_VIS_VOTES=0`
-- `verify_packages.py`: `b'CHESHIRE_GPU_VIS_VOTES'` in aliceVision_fuseCut
+- `verify_packages.py`: `b'CHESHIRE_GPU_VIS_VOTES'` in aliceVision_fuseCut (the script was retired in 0.3.6, docs/04)
 - a new `visband` config: CHECK plus `CHESHIRE_GPU_VIS_BAND_PIXELS=65536`, so order preservation across bands stays proven.
 
 **Out of process.** Under `CHESHIRE_GPU_VIS_LOG`, each pass prints an FNV-1a-64 digest of (coordinate bits, nrc, cams in order, pixSize bits) on every path. It must match between `VOTES=0` and the default, across bridge caps, and across band sizes. So must the tetrahedralization input checksum (False Door: `64b36ee445e30d38`, `meshing.log:1801`), the ray count (62,394,383, `:1805`) and the number of points removed by the angle filter (225,360, `:925`).

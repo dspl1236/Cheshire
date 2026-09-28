@@ -20,10 +20,22 @@ AV_DEPS="${AV_DEPS:-/opt/AliceVision_deps}"
 AV_BUILD="${AV_BUILD:-$HOME/av-hip-build}"
 AV_INSTALL="${AV_INSTALL:-/opt/AliceVision_hip}"
 AV_BUNDLE="${AV_BUNDLE:-$AV_INSTALL/bundle}"
-# GPU SIFT: CHESHIRE_POPSIFT=ON with a HIP popsift build (scripts/linux/build-popsift.sh).
-# Its lib directory also joins the bundle search path so libpopsift.so gets packaged.
-CHESHIRE_POPSIFT="${CHESHIRE_POPSIFT:-OFF}"
+# GPU SIFT: a HIP popsift build (scripts/linux/build-popsift.sh). Its lib directory also joins the
+# bundle search path so libpopsift.so gets packaged. CHESHIRE_POPSIFT=ON|OFF decides; unset, it is ON
+# when a PopSift install is at CHESHIRE_POPSIFT_INSTALL (default build/popsift-linux-install) and OFF
+# with a warning otherwise. It used to default to OFF, the trap that shipped a CPU-SIFT CUDA zip in
+# v0.3.2 (docs/04): a build that forgot the variable had no GPU SIFT and nothing said so.
+# wsl-pack-bundle.sh now refuses such a bundle.
 POPSIFT_INSTALL="${CHESHIRE_POPSIFT_INSTALL:-$ROOT/build/popsift-linux-install}"
+if [ -z "${CHESHIRE_POPSIFT:-}" ]; then
+  if [ -f "$POPSIFT_INSTALL/lib/cmake/PopSift/PopSiftConfig.cmake" ]; then
+    CHESHIRE_POPSIFT=ON
+    echo "GPU SIFT: PopSift found at $POPSIFT_INSTALL, CHESHIRE_POPSIFT=ON"
+  else
+    CHESHIRE_POPSIFT=OFF
+    echo "WARNING: no PopSift at $POPSIFT_INSTALL: building WITHOUT GPU SIFT (set CHESHIRE_POPSIFT_INSTALL, or CHESHIRE_POPSIFT=OFF to silence this)" >&2
+  fi
+fi
 # A missing PopSift is a hard error, not a fallback. With CHESHIRE_POPSIFT=ON and this directory
 # absent, -DPopSift_DIR points nowhere and find_package keeps searching - and found the CUDA
 # PopSift cached from a previous configure of the same tree, so a HIP bundle linked

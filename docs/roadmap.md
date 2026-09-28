@@ -522,7 +522,10 @@ passing the SfM gate); GPS pairing is validated on a public survey, OpenDroneMap
   placed 90. The house-pc app has a "GPS pairing radius" option.
 - **Tooling debts** (S each, from "Packaging and platforms" below): `CHESHIRE_POPSIFT` defaulting
   OFF in the HIP build scripts; the end-to-end gate gaps; `CHESHIRE_BACKEND=auto` on NVIDIA boxes;
-  the patch export's missing files; `verify_packages.py` revived or retired.
+  the patch export's missing files; `verify_packages.py` revived or retired. **Scripts done
+  2026-09-27** (docs/04, "0.3.6: tooling debts"): the PopSIFT default, the gate gaps, the Linux
+  launcher's `env.sh` order, `verify_packages.py` retired. Open: the patch export, and recording the
+  package's backend at pair time.
 - **Upstream's new pipeline, timed** (M, optional). Step 2 of the section below: a build with USD and
   a Meshroom from `develop`, and the new SfM chain against the legacy one on 41 views and the engine
   bay.
@@ -678,9 +681,9 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 - **PopSIFT from generic code objects** (M). A gfx12-generic PopSIFT exits 0xC0000094
   (`docs/16-bundling.md:166-189`), so a future RDNA3/4 chip likely fails. Find the host-side divide
   and add a vlfeat fallback guard meanwhile.
-- **`CHESHIRE_POPSIFT` defaults OFF in the HIP build scripts** (S). See
-  `scripts/build-alicevision.cmd:16` and `scripts/linux/build-alicevision.sh:25`. The same trap
-  shipped a CPU-SIFT CUDA zip in v0.3.2. Auto-detect PopSIFT and check the import at packaging time.
+- **`CHESHIRE_POPSIFT` defaults OFF in the HIP build scripts** (S). **Done 2026-09-27 (docs/04
+  "0.3.6: tooling debts")**: auto in both HIP build scripts, and both HIP packagers refuse a feature
+  library that does not link PopSift.
 - **x86-64 ISA tiers** (L). Both Linux bundles and the Windows CUDA package are SSE2-only
   (`scripts/linux/build-alicevision.sh:60`). Build v1/avx/v3 tiers, choose between them by CPUID,
   and re-validate: a v3 gcc build contracts FMAs.
@@ -691,21 +694,20 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   untested (`docs/upstream/meshroom-issue-comments.md:20`). Moved to 0.3.6's headline.
 - **`CHESHIRE_BACKEND=auto` on NVIDIA boxes** (S). `auto` returns every node to Meshroom whenever an
   NVIDIA card is present (`scripts/windows/meshroom-pair-launcher.cpp:131-135`). Record the
-  package's backend at pair time and follow it. On Linux, `scripts/linux/meshroom-pair.sh` decides
-  the backend at `:63-68` but sources the bundle's `env.sh` only at `:80`, so a `CHESHIRE_BACKEND`
-  set there never takes effect: source it first, or document that it cannot.
+  package's backend at pair time and follow it. (The Linux launcher's `env.sh` order is fixed: it now
+  reads `CHESHIRE_BACKEND` from the bundle's `env.sh` before deciding, 2026-09-27.)
 - **Linux stage gate** (M). The stage gates need `cheshire-run.cmd` or PowerShell
   (`scripts/verify_bundle_stages.py:32-34`), so no Linux artifact gets per-stage checks.
 - **Resume cannot detect a corrupt cached input** (M). SUCCESS chunks are kept without being
   decoded (`scripts/verify_end_to_end.py:238-255`), and one damaged EXR went through Texturing
   three times.
-- **End-to-end gate gaps** (M). The gaps:
+- **End-to-end gate gaps** (M). **Done 2026-09-27 (docs/04 "0.3.6: tooling debts")**, all four. The gaps:
   - `cpufallback` never forces CPU SIFT
   - PrepareDenseScene is not in `BINARY`/`GPU_MARKERS` (`scripts/verify_end_to_end.py:114-123`)
   - no check that SfM's "edges skipped" warning is absent
   - a never-paired node is caught only at the end of the run
-- **verify_packages.py stops at v0.2.16** (S). It has five markers
-  (`scripts/verify_packages.py:21-32`). Revive it with one literal per step since 4d, or retire it.
+- **verify_packages.py stops at v0.2.16** (S). It had five markers. **Retired 2026-09-27 (docs/04
+  "0.3.6: tooling debts")**: the end-to-end and stage gates cover what its literals did.
 - **Patch export** (S). Seven edited upstream files are missing from `TRACKED`
   (`scripts/apply_hip_patch.py:43-88`), and the port sources outside `depthMap/cuda/hip` are
   missing from `patches/0002`.

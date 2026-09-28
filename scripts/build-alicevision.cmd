@@ -12,9 +12,20 @@ rem cannot be passed as %1); ARCH then only names the build directory.
 set ARCHS=%ARCH%
 if defined CHESHIRE_HIP_ARCHS set ARCHS=%CHESHIRE_HIP_ARCHS%
 set R=%CHESHIRE_ROOT:\=/%
-rem GPU SIFT: CHESHIRE_POPSIFT=ON with a HIP popsift build (see hip/port/popsift)
-if not defined CHESHIRE_POPSIFT set CHESHIRE_POPSIFT=OFF
+rem GPU SIFT: a HIP popsift build (see hip/port/popsift). CHESHIRE_POPSIFT=ON|OFF decides; unset, it is
+rem ON when a PopSift install is at CHESHIRE_POPSIFT_DIR and OFF with a warning otherwise. It used to
+rem default to OFF, the trap that shipped a CPU-SIFT CUDA zip in v0.3.2 (docs/04): a build that forgot
+rem the variable had no GPU SIFT and nothing said so. package_windows.py now refuses such a package.
 if not defined CHESHIRE_POPSIFT_DIR set CHESHIRE_POPSIFT_DIR=%R%/build/popsift-install/lib/cmake/PopSift
+if not defined CHESHIRE_POPSIFT (
+  if exist "%CHESHIRE_POPSIFT_DIR:/=\%\PopSiftConfig.cmake" (
+    set CHESHIRE_POPSIFT=ON
+    echo GPU SIFT: PopSift found at %CHESHIRE_POPSIFT_DIR%, CHESHIRE_POPSIFT=ON
+  ) else (
+    set CHESHIRE_POPSIFT=OFF
+    echo WARNING: no PopSift at %CHESHIRE_POPSIFT_DIR%: building WITHOUT GPU SIFT ^(set CHESHIRE_POPSIFT_DIR, or CHESHIRE_POPSIFT=OFF to silence this^)
+  )
+)
 set LLVMBIN=%ROCM_PATH%/lib/llvm/bin
 if defined CHESHIRE_LLVM_BIN set LLVMBIN=%CHESHIRE_LLVM_BIN%
 set V=%R%/tools/vcpkg-deps/x64-windows-release
