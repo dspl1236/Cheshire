@@ -23,6 +23,9 @@
 // chunks' contributions to the reduced matrix in arrival order. CHESHIRE_SFM_DETERMINISTIC=1 runs
 // bundle adjustment on one thread (CHESHIRE_BA_THREADS=n sets it explicitly); the OpenMP loops of
 // SfM itself keep their threads, since the points above make them order-independent.
+// Since 0.3.7 the Schur solves go to Cheshire's own solver (sfm/bundle/costfunctions/ownSolver.hpp),
+// whose result does not depend on its thread count: SfM is reproducible by default, and this mode
+// matters only with CHESHIRE_BA_SOLVER=ceres.
 #pragma once
 
 #include <aliceVision/depthMap/cuda/hip/cheshire/env.h>

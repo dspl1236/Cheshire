@@ -1,7 +1,8 @@
 // This file is part of the Cheshire patch set for AliceVision (https://github.com/dspl1236/Cheshire).
 //
 // 0.3.7: a bundle-adjustment solver of Cheshire's own (docs/notes/ba-own-solver.md): step 1 shadow mode,
-// step 2 the parallel, block-sparse implementation.
+// step 2 the parallel, block-sparse implementation, step 3 in SfM in place of Ceres (the default;
+// CHESHIRE_BA_SOLVER=ceres for Ceres).
 //
 // It walks the ceres::Problem BundleAdjustmentCeres has built, through Ceres' public API, and solves it
 // with Ceres' own algorithm specialised for this shape: Levenberg-Marquardt in a trust region, Jacobi
@@ -30,6 +31,7 @@
 #pragma once
 
 #include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
+#include <aliceVision/system/Logger.hpp>
 
 #include <ceres/ceres.h>
 #include <Eigen/Core>
@@ -38,6 +40,7 @@
 #include <Eigen/OrderingMethods>
 #include <Eigen/Eigenvalues>
 #include <Eigen/LU>
+#include <Eigen/QR>
 
 #include <algorithm>
 #include <chrono>
@@ -46,6 +49,8 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -318,7 +323,7 @@ struct Iteration
 struct Times
 {
     double setup = 0.0, evalJ = 0.0, evalCost = 0.0, evalGrad = 0.0, elim = 0.0, schur = 0.0, factor = 0.0, back = 0.0;
-    int nJ = 0, nCost = 0, nGrad = 0, threads = 1;
+    int nJ = 0, nCost = 0, nGrad = 0, nSolves = 0, threads = 1;
 };
 
 struct Result
@@ -329,10 +334,31 @@ struct Result
     double initialCost = 0.0, finalCost = 0.0, fixedCost = 0.0;
     std::string termination;
     int eBlocks = 0, fBlocks = 0, fColumns = 0, rows = 0;
+    bool denseQR = false;          // no eliminated block: Ceres' DENSE_QR in place of DENSE_SCHUR
+    size_t residuals = 0;          // scalar residuals of the reduced program
+    bool constrained = false;
     double seconds = 0.0;
     Times time;
     std::uint64_t digest = 0;      // FNV-1a over the final state's bytes: the thread-count independence check
+    std::uint64_t digestIn = 0;    // the same over the starting state (CHESHIRE_BA_DIGEST)
 };
+
+// FNV-1a over a state vector's bytes
+inline std::uint64_t digestOf(const std::vector<double>& x)
+{
+    std::uint64_t h = 0xcbf29ce484222325ull;
+    const unsigned char* b = reinterpret_cast<const unsigned char*>(x.data());
+    for (size_t i = 0; i < x.size() * sizeof(double); ++i)
+        h = (h ^ b[i]) * 0x100000001b3ull;
+    return h;
+}
+
+// CHESHIRE_BA_DIGEST=1: one line per solve with the digests of its starting and final states
+inline bool digestEnabled()
+{
+    static const bool on = ::cheshire::env::flag("CHESHIRE_BA_DIGEST");
+    return on;
+}
 
 // Ceres' corrector (corrector.cc): scale by sqrt(rho'), and the rank-one curvature correction in the
 // inlier region only when rho'' > 0 (never for Huber).
@@ -455,6 +481,8 @@ inline void subU3M(int t1, int t2, const double* U, const double* M, double* out
     }
 }
 
+inline bool shadowEnabled();
+
 // A pointer -> int map for the setup (open addressing, Fibonacci hashing): Ceres' own lookups are std::map.
 class PtrIndex
 {
@@ -548,16 +576,15 @@ class Solver
             res.fBlocks = int(_f.size());
             res.fColumns = _nf;
             res.rows = int(_rows.size());
+            res.residuals = _nr;
+            res.denseQR = _qr;
+            res.constrained = _constrained;
             res.fixedCost = _fixedCost;
             minimize(&res);
-            if (res.ok)
+            if (res.ok && (shadowEnabled() || digestEnabled()))
             {
-                const std::vector<double> x = stateVector();
-                std::uint64_t h = 0xcbf29ce484222325ull;
-                const unsigned char* b = reinterpret_cast<const unsigned char*>(x.data());
-                for (size_t i = 0; i < x.size() * sizeof(double); ++i)
-                    h = (h ^ b[i]) * 0x100000001b3ull;
-                res.digest = h;
+                res.digest = digestOf(stateVector());
+                res.digestIn = digestOf(_x0);
             }
         }
         res.seconds = since(t0);
@@ -622,6 +649,8 @@ class Solver
     Buffer _J;
     size_t _nr = 0;
     bool _constrained = false;               // any bound on a free block: Ceres' is_constrained
+    std::vector<double> _x0;                 // the starting point (Ceres puts it back on FAILURE)
+    bool _qr = false;                        // no eliminated block: Ceres' DENSE_QR (LinearSolverForZeroEBlocks)
     std::vector<double> _partF;              // per partition, an F-sized accumulator (gradient, column norms)
 
     // Schur elimination: per chunk, its F blocks (sorted) with their E^T F blocks in _m
@@ -873,6 +902,40 @@ class Solver
             for (int i = 0; i < nR; ++i)
                 if (rowE[i] >= 0)
                     rowE[i] = mapE[rowE[i]];
+        }
+        // No eliminated block left: Ceres gives up the Schur solver (LinearSolverForZeroEBlocks) and, not
+        // reordering for it, keeps the program in the problem's own order. DENSE_SCHUR becomes DENSE_QR,
+        // done here; SPARSE_SCHUR becomes SPARSE_NORMAL_CHOLESKY, left to Ceres.
+        if (_e.empty())
+        {
+            if (_opt.sparse)
+            {
+                *why = "no eliminated block (Ceres' SPARSE_NORMAL_CHOLESKY)";
+                return false;
+            }
+            _qr = true;
+            std::vector<double*> blocks;
+            _problem.GetParameterBlocks(&blocks);
+            PtrIndex position;
+            position.reserve(blocks.size());
+            for (size_t i = 0; i < blocks.size(); ++i)
+                position.set(blocks[i], int(i));
+            const int nF0 = int(_f.size());
+            std::vector<int> order(static_cast<size_t>(nF0));
+            for (int i = 0; i < nF0; ++i)
+                order[i] = i;
+            std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return position.get(_f[a].ptr) < position.get(_f[b].ptr); });
+            std::vector<int> inv(static_cast<size_t>(nF0));
+            std::vector<PBlock> nf(static_cast<size_t>(nF0));
+            for (int i = 0; i < nF0; ++i)
+            {
+                inv[order[i]] = i;
+                nf[i] = std::move(_f[order[i]]);
+            }
+            _f.swap(nf);
+            for (auto& v : _pv)
+                if (v <= -2)
+                    v = -2 - inv[-2 - v];
         }
 
         // rows grouped by E block in residual order (a stable counting sort), then the rows without one
@@ -1717,9 +1780,51 @@ class Solver
         }
     }
 
+    // DenseQRSolver: Eigen's HouseholderQR of [J; diag(D)] (column-major, the problem's order) against
+    // [r; 0], the dense_linear_algebra_library_type EIGEN that AliceVision leaves as it is
+    bool solveStepQR(const std::vector<double>& D, std::vector<double>* y)
+    {
+        const auto t0 = Clock::now();
+        const Eigen::Index m = Eigen::Index(_nr), nc = _nf;
+        Eigen::MatrixXd A = Eigen::MatrixXd::Zero(m + nc, nc);
+        Eigen::VectorXd b = Eigen::VectorXd::Zero(m + nc);
+        for (const Row& row : _rows)
+        {
+            for (int i = 0; i < row.nres; ++i)
+                b(Eigen::Index(row.r) + i) = _r[row.r + size_t(i)];
+            for (int k = 0; k < row.np; ++k)
+            {
+                if (_pj[row.p + k] < 0)
+                    continue;
+                const PBlock& fb = block(_pv[row.p + k]);
+                const double* J = _J.data() + row.j + _pj[row.p + k];
+                const int c = fb.col - _ne;
+                for (int i = 0; i < row.nres; ++i)
+                    for (int tt = 0; tt < fb.tsize; ++tt)
+                        A(Eigen::Index(row.r) + i, c + tt) = J[i * fb.tsize + tt];
+            }
+        }
+        for (Eigen::Index i = 0; i < nc; ++i)
+            A(m + i, i) = D[size_t(_ne + i)];
+        const Eigen::HouseholderQR<Eigen::MatrixXd> qr(A);
+        const Eigen::VectorXd yf = qr.solve(b);
+        y->assign(size_t(_n), 0.0);
+        bool ok = true;
+        for (Eigen::Index i = 0; i < nc; ++i)
+        {
+            (*y)[size_t(_ne + i)] = yf(i);
+            ok = ok && std::isfinite(yf(i));
+        }
+        _times.factor += since(t0);
+        return ok;
+    }
+
     bool solveStep(const std::vector<double>& D, std::vector<double>* y)
     {
         const auto t0 = Clock::now();
+        ++_times.nSolves;
+        if (_qr)
+            return solveStepQR(D, y);
         const int nE = int(_e.size()), nF = int(_f.size());
         // 1. per group of chunks, into the group's copy of (S, rhs): per chunk E^T E + D_e^2 and its inverse,
         // E^T b and E^T F (kept for the back-substitution), each row's F^T F and F^T b, then the chunk's Schur
@@ -2001,6 +2106,7 @@ class Solver
     void minimize(Result* res)
     {
         std::vector<double> x = stateVector();
+        _x0 = x;
         if (_constrained)
         {
             // IterationZero: project the starting point onto the feasible set
@@ -2013,6 +2119,8 @@ class Solver
         if (!evaluate(Mode::Full, &xCost))
         {
             res->why = "initial evaluation failed";
+            setState(_x0);
+            _prepare();
             return;
         }
         const int n = _n;
@@ -2057,7 +2165,8 @@ class Solver
         Iteration cur = it0;
         auto finish = [&](const std::string& why) {
             res->termination = why;
-            setState(best);
+            // Solver::Solve: the minimizer's best point when the solution is usable, else the starting point
+            setState(why.rfind("FAILURE", 0) == 0 ? _x0 : best);
             _prepare();
             res->finalCost = bestCost + _fixedCost;
             res->ok = true;
@@ -2216,6 +2325,159 @@ class Solver
         }
     }
 };
+
+// ---- step 3: in place of Ceres ---------------------------------------------------------------------------
+// CHESHIRE_BA_SOLVER: Cheshire's solver by default (since 0.3.7), Ceres with "ceres"
+inline bool solverEnabled()
+{
+    static const bool on = ::cheshire::env::text("CHESHIRE_BA_SOLVER", "cheshire") != "ceres";
+    return on;
+}
+
+// The solver's options from the Ceres options BundleAdjustmentCeres set, or false (and why) when those ask
+// for something the solver does not do.
+inline bool optionsFrom(const ceres::Solver::Options& c, Options* o, std::string* why)
+{
+    if (c.linear_solver_type != ceres::DENSE_SCHUR && c.linear_solver_type != ceres::SPARSE_SCHUR)
+        *why = std::string("linear solver ") + ceres::LinearSolverTypeToString(c.linear_solver_type);
+    else if (!c.linear_solver_ordering)
+        *why = "no elimination ordering";
+    else if (c.minimizer_type != ceres::TRUST_REGION || c.trust_region_strategy_type != ceres::LEVENBERG_MARQUARDT)
+        *why = "not Levenberg-Marquardt";
+    else if (c.use_nonmonotonic_steps || c.use_inner_iterations || c.dynamic_sparsity)
+        *why = "nonmonotonic steps, inner iterations or dynamic sparsity";
+    else if (c.line_search_interpolation_type != ceres::CUBIC)
+        *why = "line search interpolation other than CUBIC";
+    else if (c.max_solver_time_in_seconds < 1e8)
+        *why = "a solver time limit";
+    else if (c.min_lm_diagonal <= 0.0 || c.max_num_iterations < 0)
+        *why = "unusual limits";
+    if (!why->empty())
+        return false;
+    o->sparse = c.linear_solver_type == ceres::SPARSE_SCHUR;
+    o->maxIterations = c.max_num_iterations;
+    o->maxConsecutiveInvalidSteps = c.max_num_consecutive_invalid_steps;
+    o->functionTolerance = c.function_tolerance;
+    o->gradientTolerance = c.gradient_tolerance;
+    o->parameterTolerance = c.parameter_tolerance;
+    o->initialRadius = c.initial_trust_region_radius;
+    o->maxRadius = c.max_trust_region_radius;
+    o->minRadius = c.min_trust_region_radius;
+    o->minRelativeDecrease = c.min_relative_decrease;
+    o->minDiagonal = c.min_lm_diagonal;
+    o->maxDiagonal = c.max_lm_diagonal;
+    o->jacobiScaling = c.jacobi_scaling;
+    o->lineSearchMaxIterations = c.max_num_line_search_step_size_iterations;
+    o->lineSearchSufficientDecrease = c.line_search_sufficient_function_decrease;
+    o->lineSearchMaxContraction = c.max_line_search_step_contraction;
+    o->lineSearchMinContraction = c.min_line_search_step_contraction;
+    o->lineSearchMinStepSize = c.min_line_search_step_size;
+    o->threads = c.num_threads;
+    return true;
+}
+
+// Each reason a solve goes to Ceres, logged the first time.
+inline void noteFallback(const std::string& why)
+{
+    static std::mutex m;
+    static std::set<std::string> seen;
+    std::lock_guard<std::mutex> lock(m);
+    if (seen.insert(why).second)
+        ALICEVISION_LOG_INFO("cheshire: BA solver: this solve goes to Ceres (" << why << "); further ones for the same reason are not logged");
+}
+
+// Solve with this solver in place of ceres::Solve and fill the Summary as Ceres would, or return false
+// (the problem untouched) for Ceres to solve. requestedThreads: the threads BundleAdjustmentCeres asked
+// for; the deterministic mode's single thread is Ceres' need, not this solver's (its result does not
+// depend on the count), so CHESHIRE_BA_THREADS alone lowers it.
+inline bool solveInstead(ceres::Problem& problem, const ceres::Solver::Options& options, int requestedThreads,
+                         std::function<void()> prepare, ceres::Solver::Summary* summary)
+{
+    if (!solverEnabled())
+        return false;
+    static std::once_flag said;
+    std::call_once(said, [] {
+        ALICEVISION_LOG_INFO("cheshire: BA solver: Cheshire's own for the Schur solves (CHESHIRE_BA_SOLVER=ceres for Ceres)");
+    });
+    Options o;
+    std::string why;
+    if (!optionsFrom(options, &o, &why))
+    {
+        noteFallback(why);
+        return false;
+    }
+    static const long forced = static_cast<long>(::cheshire::env::integer("CHESHIRE_BA_THREADS", 0));
+    o.threads = forced > 0 ? int(forced) : std::max(1, requestedThreads);
+    Solver solver(problem, *options.linear_solver_ordering, o, std::move(prepare));
+    const Result r = solver.solve();
+    if (!r.ok)
+    {
+        noteFallback(r.why);
+        return false;
+    }
+    *summary = ceres::Solver::Summary();
+    ceres::Solver::Summary& s = *summary;
+    s.minimizer_type = ceres::TRUST_REGION;
+    s.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+    s.linear_solver_type_given = options.linear_solver_type;
+    s.linear_solver_type_used = r.denseQR ? ceres::DENSE_QR : options.linear_solver_type;
+    s.sparse_linear_algebra_library_type = options.sparse_linear_algebra_library_type;
+    s.dense_linear_algebra_library_type = options.dense_linear_algebra_library_type;
+    s.num_threads_given = options.num_threads;
+    s.num_threads_used = r.time.threads;
+    s.termination_type = r.termination.rfind("CONVERGENCE", 0) == 0      ? ceres::CONVERGENCE
+                         : r.termination.rfind("NO_CONVERGENCE", 0) == 0 ? ceres::NO_CONVERGENCE
+                                                                         : ceres::FAILURE;
+    s.message = "Cheshire's solver: " + r.termination;
+    s.initial_cost = r.initialCost;
+    s.final_cost = r.finalCost;
+    s.fixed_cost = r.fixedCost;
+    s.num_successful_steps = s.num_unsuccessful_steps = s.num_line_search_steps = 0;
+    for (const Iteration& it : r.iterations)
+    {
+        ceres::IterationSummary i;
+        i.iteration = it.iteration;
+        i.step_is_valid = it.stepIsValid;
+        i.step_is_successful = it.stepIsSuccessful;
+        i.cost = it.cost;
+        i.cost_change = it.costChange;
+        i.gradient_max_norm = it.gradientMaxNorm;
+        i.step_norm = it.stepNorm;
+        i.relative_decrease = it.relativeDecrease;
+        i.trust_region_radius = it.radius;
+        i.line_search_iterations = std::max(0, it.lsSamples - 1);
+        s.iterations.push_back(i);
+        (it.stepIsSuccessful ? s.num_successful_steps : s.num_unsuccessful_steps) += 1;   // iteration 0 counts, as in Ceres
+        s.num_line_search_steps += std::max(0, it.lsSamples - 1);
+    }
+    s.is_constrained = r.constrained;
+    s.num_parameter_blocks = problem.NumParameterBlocks();
+    s.num_parameters = problem.NumParameters();
+    s.num_residual_blocks = problem.NumResidualBlocks();
+    s.num_residuals = problem.NumResiduals();
+    s.num_parameter_blocks_reduced = r.eBlocks + r.fBlocks;
+    s.num_residual_blocks_reduced = r.rows;
+    s.num_residuals_reduced = int(r.residuals);
+    s.num_effective_parameters_reduced = 3 * r.eBlocks + r.fColumns;
+    s.num_linear_solves = r.time.nSolves;
+    s.num_residual_evaluations = r.time.nJ + r.time.nCost + r.time.nGrad;
+    s.num_jacobian_evaluations = r.time.nJ + r.time.nGrad;
+    s.preprocessor_time_in_seconds = r.time.setup;
+    s.minimizer_time_in_seconds = r.seconds - r.time.setup;
+    s.postprocessor_time_in_seconds = 0.0;
+    s.total_time_in_seconds = r.seconds;
+    s.jacobian_evaluation_time_in_seconds = r.time.evalJ + r.time.evalGrad;
+    s.residual_evaluation_time_in_seconds = r.time.evalCost;
+    s.linear_solver_time_in_seconds = r.time.elim + r.time.schur + r.time.factor + r.time.back;
+    if (digestEnabled())
+        ALICEVISION_LOG_INFO("cheshire: BA digest: " << r.rows << " rows, " << r.fColumns << " columns, in " << std::hex << r.digestIn << " out "
+                                                     << r.digest << std::dec << ", " << r.iterations.size() - 1 << " iterations");
+    // the callbacks see the iterations after the fact (AliceVision's only logs them)
+    for (const auto& i : s.iterations)
+        for (ceres::IterationCallback* cb : options.callbacks)
+            (*cb)(i);
+    return true;
+}
 
 // Ceres' trajectory, for the comparison.
 class Recorder : public ceres::IterationCallback

@@ -1,6 +1,6 @@
 # A bundle-adjustment solver of Cheshire's own: design (0.3.7)
 
-Status: 2026-09-28. Steps 0-2 done: the solver, in shadow mode beside Ceres, takes Ceres' iterates to rounding on 41 views, the engine bay and the False Door, and solves in a third of Ceres' time (below). Step 3 next. Background and the measurements
+Status: 2026-09-28. Steps 0-3 done. The solver takes Ceres' iterates to rounding and solves in a third of Ceres' time. It is now the default in SfM (`CHESHIRE_BA_SOLVER=ceres` for Ceres), and passes the SfM quality gate on 41 views, the engine bay and the False Door (below). Background and the measurements
 behind the decision are in docs/notes/ba-device-plan.md.
 
 ## Why
@@ -164,6 +164,120 @@ False Door split of our 161 s in the 34 sparse solves: setup 23 s, evaluations w
 - **Factorisation:** Eigen's single-threaded simplicial LDLT, kept for parity. A supernodal or
   dense factorisation is a step-3 choice, judged by the quality gate.
 - **Evaluations:** these are the analytic cost functions, and the device's (step 4).
+
+## Step 3: in SfM, in place of Ceres, the default (2026-09-28)
+
+Generator step 7b. Every `DENSE_SCHUR` / `SPARSE_SCHUR` solve goes to
+`cheshire::own::solveInstead`. That solves it and fills Ceres' `Solver::Summary` with what
+AliceVision's statistics and Cheshire's profile lines read: the costs, the iterations, the step
+counts, the problem sizes and a time split. It is the default. `CHESHIRE_BA_SOLVER=ceres` gives
+Ceres back, and one line per run says which solver is in use.
+
+Everything else goes to `ceres::Solve` as before:
+- **Options the solver does not implement:** a strategy other than Levenberg-Marquardt,
+  nonmonotonic steps, inner iterations, a time limit, or line-search interpolation other than cubic.
+- **Problems outside its shape:** a residual block on two eliminated blocks, an eliminated block not
+  of size 3, a camera block over 32 parameters, or a `SPARSE_SCHUR` problem left with no eliminated
+  block.
+
+Each reason is logged the first time it sends a solve to Ceres. On the three sets, none did.
+
+**Around the solve it follows Ceres:**
+- The best point is kept on success, and the starting point on FAILURE (`Solver::Solve` restores it).
+- Iteration 0 counts as a successful step.
+- AliceVision's iteration callbacks see every iteration afterwards.
+- **No eliminated block.** In the resection pose refinements (about 860 per False Door run) every
+  landmark is constant. Ceres then gives up the Schur solver (`LinearSolverForZeroEBlocks`), keeps
+  the problem's own order, and solves `DENSE_QR`: Eigen's HouseholderQR of [J; D]. The solver does
+  the same. It had solved the normal equations, which square the condition number.
+  - Every solve that ended on a different iteration count in step 2 was one of these ten-column
+    problems.
+  - They now agree to 1e-16.
+- **Threads:** the solver's result does not depend on its thread count, so it takes the threads
+  `BundleAdjustmentCeres` asked for even under `CHESHIRE_SFM_DETERMINISTIC=1`. That mode's single
+  thread is Ceres' need; `CHESHIRE_BA_THREADS` still lowers it.
+
+**The reverse shadow** (`CHESHIRE_BA_SHADOW=4`) keeps the solver's result, so its trajectory drives,
+and solves every problem with Ceres beside it.
+- **Why it was needed:** with the solver driving, the False Door's large solves took 666 iterations,
+  against Ceres' 241 in its own runs. The iteration counts matched on the same problems, so the
+  question was whether the solver's trajectory meets harder problems, or the solver is slow on them.
+- **The answer is harder problems.** On the solver's trajectory, 922 of 925 solves take the same
+  iterations under Ceres. The large ones take 350 iterations against Ceres' 336, the difference being
+  one solve at the rounding floor.
+- **The time on those same problems:** 174 s against 453 s.
+- **Trajectories vary that much anyway.** Ceres' own runs reach the False Door's end through anything
+  from 241 to 666 iterations of large solves.
+
+**The SfM quality gate** (`scripts/quality_gate.py sfm`, today's Ceres as the baseline):
+
+| set | solver runs | poses | landmarks | RMSE | camera centres / rotations vs baseline spread | verdict |
+|---|---|---|---|---|---|---|
+| 41 views | 10 | 41 = 41 | 80,802 vs 80,803 (p 0.52) | 1.23321 vs 1.23374, better (p 0.003) | 1.00x / 0.60x | PASS |
+| engine bay | 10 | 107 = 107 | 140,471 vs 140,418 (p 0.09) | 1.68536 vs 1.68518 (p 0.72) | 1.13x / 0.97x | PASS |
+| False Door | 3 | 830 vs 826 (817-831) | 1,354,019 vs 1,350,360 | 1.37719 vs 1.39055 (1.367-1.437) | 0.04x / 0.19x | PASS |
+
+With the QR fix and as the default:
+- **41 views:** 80,796 landmarks, RMSE 1.23379; one of Ceres' own ten runs has exactly 80,796. The
+  verdict is WARN on landmarks: a leg with no spread makes a 7-landmark difference significant, but it
+  is within the tolerance.
+- **Engine bay:** PASS, the RMSE better (1.68404, p 0.046).
+- **False Door:** PASS with step 7c (two runs): 830 and 831 poses against Ceres' 817-831, 1.355 M landmarks, RMSE 1.3790 against 1.3906, camera centres 1.03x and rotations 0.70x the baseline's own spread. Four step-7c runs in all: 830-831 poses, RMSE 1.3785-1.4269.
+
+**Reproducible by default, with step 7c.** Every run with the solver gave the same output: 10 of 10
+on 41 views, 10 of 10 on the engine bay. Ceres gave 10 different outputs on each; its multithreaded
+Schur eliminator was the last source of run-to-run difference in SfM (0.3.4, step 5n).
+- The formal check (`--json`): two default runs with the solver, and one with
+  `CHESHIRE_SFM_DETERMINISTIC=1`, give the same `sfm.sfm` and `cameras.sfm`
+  (`a6c6f270ccba9e1e` / `ab4e4706c5d87477`).
+- The deterministic mode no longer costs anything. With Ceres it ran bundle adjustment on one
+  thread, 72 s against 23 s on 41 views; with the solver it is 5.9 s.
+
+On the False Door, two runs of the same build then ended apart (815 poses and 833) and one crashed.
+The cause was in upstream's resection, fixed as step 7c:
+- **What upstream does:** it resects a batch of views in parallel and applies each result at once
+  (`updateScene`, in an omp critical section).
+- **What races with that:** the other threads read the same scene without a lock. They read the poses
+  map one thread is inserting into (`getValidViews`, `getReconstructedIntrinsics`) and the landmarks'
+  observations. They also push to the HTML report stream.
+- **A new camera's intrinsics:** on a camera's first use, `refinePose` writes its intrinsics back while
+  the other threads clone them.
+- **Why it shows here:** the False Door has five cameras (820, 27, 23, 13 and 1 views), so the new
+  cameras' first views meet in one batch.
+- **Why the solver made it more likely:** a faster solve shortens the gaps between the writes.
+
+Step 7c:
+1. It resects the views whose camera is already reconstructed in parallel, against the scene as it
+   was, and applies them afterwards in view order.
+2. It then resects a new camera's views one at a time: the first refines the intrinsics, the next
+   ones use them, as upstream means it.
+3. It puts the report under a lock.
+
+On a one-camera set nothing changes: 41 views give the same bytes with and without it.
+
+**Time:**
+
+| set | bundle adjustment: Ceres | the solver | SfM wall: Ceres | the solver |
+|---|---|---|---|---|
+| 41 views | 21.4 s | 6.1 s | 51 s | 35 s |
+| engine bay | 24.3 s | 8.5 s | 51 s | 35 s |
+| False Door | 344-529 s (3 runs) | 225-527 s (4 runs) | 941-1214 s | 810-1144 s |
+
+The False Door's time depends on the trajectory more than on the solver. On identical problems the
+solver is 2.6x faster (the reverse shadow: 174 s against 453 s). A run, though, meets whatever solves
+its trajectory brings, and the trajectories differ by hundreds of iterations of large solves, for
+Ceres as much as for the solver.
+
+**Still open: the False Door is not yet reproducible.** Two runs with step 7c still end apart (830
+and 831 poses). The solve digests place the first difference (`CHESHIRE_BA_DIGEST=1`: one line per
+solve with its starting and final states):
+- The main solves agree, input and output, to the 35th.
+- The first solve whose input differs is a new camera's first view (10 columns, pose and intrinsics).
+  Under step 7c it is resected on its own.
+
+So the intrinsics of a camera no reconstructed view uses are left in a state that differs between
+runs, and finding how is the next thing. The one-camera sets are unaffected: 41 views and the engine
+bay give the same bytes on every run.
 
 ## Scope
 

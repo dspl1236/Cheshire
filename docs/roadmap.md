@@ -571,7 +571,17 @@ reaches it. The design is in docs/notes/ba-own-solver.md; the steps, each a go/n
   - Checked iteration by iteration against Ceres on the dumps.
   - The goal is the same iterates to rounding, so that validation is a comparison and not a
     statistical argument.
-- **Step 3: in SfM, opt-in** (M). `CHESHIRE_BA_SOLVER=cheshire` for the problems the solver covers:
+- **Step 3: in SfM** (M). **Done 2026-09-28: the default** (`CHESHIRE_BA_SOLVER=ceres` for Ceres).
+  - The quality gate passes on 41 views, the engine bay and the False Door.
+  - Bundle adjustment: 6.1 s against 21.4 s, and 8.5 s against 24.3 s.
+  - SfM is reproducible on one-camera sets with no deterministic mode.
+  - Found on the way:
+    - Ceres' `DENSE_QR` for the pose-only refinements, now matched.
+    - Two data races in upstream's parallel resection, fixed as step 7c.
+  - Open: the False Door (five cameras) still differs run to run, from a new camera's first view
+    (docs/notes/ba-own-solver.md).
+
+  The original plan: `CHESHIRE_BA_SOLVER=cheshire` for the problems the solver covers:
   projection residuals, the pose and intrinsics manifolds, constant blocks. Ceres takes the rest
   (rigs, mesh points, depth, constraints, priors). Gated by the SfM quality gate on 41 views, the
   engine bay and the False Door, then time.

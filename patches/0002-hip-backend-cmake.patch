@@ -8782,7 +8782,7 @@ index 9500f70..b12c078 100644
          numAddedEdges += addIntrinsicEdgesToTheGraph(sfmData, addedViewsId);
      }
 diff --git a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
-index bd0bf27..c5653c3 100644
+index bd0bf27..cd5e638 100644
 --- a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
 +++ b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
 @@ -5,6 +5,10 @@
@@ -9014,14 +9014,14 @@ index bd0bf27..c5653c3 100644
              else
              {
 -                ceres::CostFunction* costFunction = ProjectionSimpleErrorFunctor::createCostFunction(intrinsic, observation);
--
++                ceres::CostFunction* costFunction = cheshire::createProjectionCost(false, intrinsic, observation);  // cheshire: step 5m
+ 
 -                std::vector<double*> params;
 -                params.push_back(intrinsicBlockPtr);
 -                params.push_back(distortionBlockPtr);
 -                params.push_back(poseBlockPtr);
 -                params.push_back(landmarkBlockPtr);
-+                ceres::CostFunction* costFunction = cheshire::createProjectionCost(false, intrinsic, observation);  // cheshire: step 5m
- 
+-
 -                ceres::ResidualBlockId blockId = problem.AddResidualBlock(costFunction, weightedLossFunction, params);
 +                double* params[4] = {intrinsicBlockPtr, distortionBlockPtr, poseBlockPtr, landmarkBlockPtr};  // cheshire (step 5q): no vector per observation
 +                ceres::ResidualBlockId blockId = problem.AddResidualBlock(costFunction, weightedLossFunction, params, 4);
@@ -9151,7 +9151,7 @@ index bd0bf27..c5653c3 100644
  
      // configure a Bundle Adjustment engine and run it
      // make Ceres automatically detect the bundle structure.
-@@ -1335,10 +1426,119 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1335,10 +1426,131 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      IterationInfos iterationInfos;
      options.callbacks.push_back(&iterationInfos);
  
@@ -9220,8 +9220,13 @@ index bd0bf27..c5653c3 100644
 +
      // solve BA
      ceres::Solver::Summary summary;
+-    ceres::Solve(options, &problem, &summary);
 +    const cheshireAdjustClock::time_point cheshireT2 = cheshireAdjustClock::now();
-     ceres::Solve(options, &problem, &summary);
++    // cheshire (step 7b, 0.3.7): Cheshire's own solver where it covers the problem (the default;
++    // CHESHIRE_BA_SOLVER=ceres for Ceres; not in shadow mode, where Ceres drives); anything else stays with Ceres
++    if (cheshireShadowOn || !cheshire::own::solveInstead(problem, options, int(_ceresOptions.nbThreads),
++                                                          [this] { PrepareForEvaluation(true, true); }, &summary))
++        ceres::Solve(options, &problem, &summary);
 +    const double cheshireSolveS = std::chrono::duration<double>(cheshireAdjustClock::now() - cheshireT2).count();
 +    if (cheshireShadowOn)
 +    {
@@ -9239,6 +9244,14 @@ index bd0bf27..c5653c3 100644
 +            (cheshireShadow.iterations.size() != cheshireRecorder.iterations.size() ||
 +             cheshire::own::relDiff(cheshireShadow.finalCost, summary.final_cost) > 1e-9))
 +            ALICEVISION_LOG_INFO("cheshire: BA shadow traces:" << cheshire::own::traces(cheshireShadow, cheshireRecorder.iterations));
++        // =4, the reverse: Cheshire's result is kept, so its trajectory drives and Ceres is the shadow
++        if (::cheshire::env::integer("CHESHIRE_BA_SHADOW", 0) == 4 && cheshireShadow.ok && cheshireShadow.termination.rfind("FAILURE", 0) != 0)
++        {
++            for (size_t i = 0; i < cheshireShadowBlocks.size(); ++i)
++                std::copy(cheshireShadowFinal[i].begin(), cheshireShadowFinal[i].end(), cheshireShadowBlocks[i]);
++            PrepareForEvaluation(true, true);
++            summary.final_cost = cheshireShadow.finalCost;
++        }
 +    }
 +    const cheshireAdjustClock::time_point cheshireT3 = cheshireAdjustClock::now();
 +    // cheshire: the projection cost check, one line per solve (scripts/apply_hip_patch.py, step 5m)
@@ -9271,7 +9284,7 @@ index bd0bf27..c5653c3 100644
      ALICEVISION_LOG_INFO("landmarksBlockIds : " << landmarksBlockIds.size());
      evaluateOptions.residual_blocks = landmarksBlockIds;
      problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
-@@ -1350,6 +1550,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1350,6 +1562,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
          problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
          ALICEVISION_LOG_INFO("temporalConstraintBlocks cost : " << cost);
      }
@@ -9280,7 +9293,7 @@ index bd0bf27..c5653c3 100644
  
      // print summary
      if (_ceresOptions.summary)
-@@ -1365,6 +1567,7 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1365,6 +1579,7 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      }
  
      // update input sfmData with the solution
@@ -9288,7 +9301,7 @@ index bd0bf27..c5653c3 100644
      updateFromSolution(sfmData, refineOptions);
  
      // Info from surveys
-@@ -1378,6 +1581,16 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1378,6 +1593,16 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      _statistics.RMSEinitial = std::sqrt(summary.initial_cost / summary.num_residuals);
      _statistics.RMSEfinal = std::sqrt(summary.final_cost / summary.num_residuals);
  
@@ -9305,7 +9318,7 @@ index bd0bf27..c5653c3 100644
      ALICEVISION_LOG_INFO("BundleAdjustmentCeres::adjust end");
  
      return true;
-@@ -1411,3 +1624,5 @@ void BundleAdjustmentCeres::PrepareForEvaluation(bool evaluate_jacobians, bool n
+@@ -1411,3 +1636,5 @@ void BundleAdjustmentCeres::PrepareForEvaluation(bool evaluate_jacobians, bool n
  
  }  // namespace sfm
  }  // namespace aliceVision
@@ -9472,7 +9485,7 @@ index 1f23958..5491985 100644
  
          if (N == 0)
 diff --git a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
-index 097f8c9..62206e5 100644
+index 097f8c9..57d960b 100644
 --- a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 +++ b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 @@ -5,6 +5,10 @@
@@ -9539,7 +9552,95 @@ index 097f8c9..62206e5 100644
          if (_params.rig.useRigConstraint && !_sfmData.getRigs().empty())
          {
              ALICEVISION_LOG_INFO("Rig(s) calibration start");
-@@ -740,7 +776,14 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+@@ -587,9 +623,22 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
+     auto chrono_start = std::chrono::steady_clock::now();
+ 
+     // add images to the 3D reconstruction
+-#pragma omp parallel for
+-    for (int i = 0; i < bestViewIds.size(); ++i)
+-    {
++    // cheshire (step 7c, 0.3.7): resection without races. Upstream resects the views in parallel and
++    // applies each result at once (updateScene, in an omp critical section) while the other threads read
++    // the same scene: the poses map one of them is inserting into (getValidViews,
++    // getReconstructedIntrinsics), the landmarks' observations, and a new camera's intrinsics, which
++    // refinePose writes back on their first use while the others clone them. Here the views whose camera
++    // is already reconstructed are resected in parallel against the scene as it was and applied
++    // afterwards in view order; a view whose camera is not yet goes after them, one at a time, as upstream
++    // means it (the first refines the intrinsics, the next ones use them).
++    const std::set<IndexT> cheshireKnownIntrinsics = _sfmData.getReconstructedIntrinsics();
++    std::vector<int> cheshireParallel, cheshireFirstUse;
++    for (int i = 0; i < static_cast<int>(bestViewIds.size()); ++i)
++        (cheshireKnownIntrinsics.count(_sfmData.getViews().at(bestViewIds.at(i))->getIntrinsicId()) ? cheshireParallel : cheshireFirstUse)
++          .push_back(i);
++    std::vector<ResectionData> cheshireResections(bestViewIds.size());
++    std::vector<int> cheshireStatus(bestViewIds.size(), -1);  // -1 skipped, 0 not possible, 1 resected
++    auto cheshireResect = [&](int i) -> int {
+         const IndexT viewId = bestViewIds.at(i);
+         const View& view = *_sfmData.getViews().at(viewId);
+ 
+@@ -604,7 +653,7 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
+                                                             << "\t- rig id: " << view.getRigId() << std::endl
+                                                             << "\t- sub-pose id: " << view.getSubPoseId());
+ 
+-                continue;
++                return -1;
+             }
+ 
+             // we cannot localize a view if it is part of an initialized rig with unknown rig pose and unknown sub-pose
+@@ -620,28 +669,37 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
+                                                             << "\t- rig id: " << view.getRigId() << std::endl
+                                                             << "\t- sub-pose id: " << view.getSubPoseId());
+ 
+-                continue;
++                return -1;
+             }
+         }
+ 
+-        ResectionData newResectionData;
++        ResectionData& newResectionData = cheshireResections[i];
+         newResectionData.error_max = _params.localizerEstimatorError;
+         newResectionData.max_iteration = _params.localizerEstimatorMaxIterations;
+-        const bool hasResected = computeResection(viewId, newResectionData);
+-
+-#pragma omp critical
++        return computeResection(viewId, newResectionData) ? 1 : 0;
++    };
++    auto cheshireApply = [&](int i) {
++        const IndexT viewId = bestViewIds.at(i);
++        if (cheshireStatus[i] == 1)
+         {
+-            if (hasResected)
+-            {
+-                updateScene(viewId, newResectionData);
+-                ALICEVISION_LOG_DEBUG("Resection of image " << i << " ( view id: " << viewId << " ) succeed.");
+-                _sfmData.getViews().at(viewId)->setResectionId(resectionId);
+-            }
+-            else
+-            {
+-                ALICEVISION_LOG_DEBUG("Resection of image " << i << " ( view id: " << viewId << " ) was not possible.");
+-            }
++            updateScene(viewId, cheshireResections[i]);
++            ALICEVISION_LOG_DEBUG("Resection of image " << i << " ( view id: " << viewId << " ) succeed.");
++            _sfmData.getViews().at(viewId)->setResectionId(resectionId);
++        }
++        else if (cheshireStatus[i] == 0)
++        {
++            ALICEVISION_LOG_DEBUG("Resection of image " << i << " ( view id: " << viewId << " ) was not possible.");
+         }
++    };
++#pragma omp parallel for
++    for (int k = 0; k < static_cast<int>(cheshireParallel.size()); ++k)
++        cheshireStatus[cheshireParallel[k]] = cheshireResect(cheshireParallel[k]);
++    for (int i : cheshireParallel)
++        cheshireApply(i);
++    for (int i : cheshireFirstUse)
++    {
++        cheshireStatus[i] = cheshireResect(i);
++        cheshireApply(i);
+     }
+ 
+     ALICEVISION_LOG_DEBUG(
+@@ -740,7 +798,14 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
          }
      }
  
@@ -9555,7 +9656,7 @@ index 097f8c9..62206e5 100644
  
      // give the local strategy graph is local strategy is enable
      if (!enableLocalStrategy)
-@@ -771,10 +814,24 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+@@ -771,10 +836,24 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
              statistics.show();
          }
  
@@ -9582,7 +9683,7 @@ index 097f8c9..62206e5 100644
  
          for (IndexT v : removedViewsIdIteration)
              newReconstructedViews.erase(v);
-@@ -1010,7 +1067,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
+@@ -1010,7 +1089,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
  
      // Sort by the image score
      std::sort(out_connectedViews.begin(), out_connectedViews.end(), [](const ViewConnectionScore& t1, const ViewConnectionScore& t2) {
@@ -9592,7 +9693,7 @@ index 097f8c9..62206e5 100644
      });
      return !out_connectedViews.empty();
  }
-@@ -1545,9 +1603,12 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
+@@ -1545,13 +1625,18 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
      // C. Do the resectioning: compute the camera pose.
      ALICEVISION_LOG_INFO("[" << _sfmData.getValidViews().size() + 1 << "/" << _sfmData.getViews().size() << "] Robust Resection of view: " << viewId);
  
@@ -9606,7 +9707,13 @@ index 097f8c9..62206e5 100644
                                                          resectionData,
                                                          resectionData.pose,
                                                          _params.localizerEstimator);
-@@ -1842,7 +1903,10 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+ 
++    // cheshire (step 7c): the report is one stream, and this runs on the parallel resections
++#pragma omp critical(cheshireResectionHtml)
+     if (!_htmlLogFile.empty())
+     {
+         using namespace htmlDocument;
+@@ -1842,7 +1927,10 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
              Vec4 X_homogeneous = Vec4::Zero();
              std::vector<std::size_t> inliersIndex;
  
