@@ -2859,6 +2859,15 @@ into a scratch Meshroom 2025.1 under `/data/tests`.
 - **41 views: base 931 s and verify 1697 s, both pass.** 0.3.5 on 2023.3 took 531 s and 1281 s. The
   i3 pays for the host AC-RANSAC below more heavily than the Ryzen does (+75 % on base against +24 %).
 
+**The Windows CUDA gate on 2025.1** (bench-pc, GTX 1080 Ti). The package was the 0.3.5 CUDA zip, with
+the 0.3.6 pairing script and `DepthMap.2025.py`.
+- **mini6: 15 of 15**, 7/7 ports each.
+- **41 views: base 1352 s and verify 2284 s, both pass.** 0.3.5 on 2023.3 took 788 s and 1720 s.
+  `--unpair` restored Meshroom's node.
+
+All three packages that can be gated here pass on 2025.1. The Linux CUDA bundle is not gated: the
+GTX card is in bench-pc, and house-pc, where the Linux CUDA gate ran, now holds an AMD card.
+
 **Why the 41-view runs are slower: Meshroom 2025.1 raised two RANSAC defaults.** Per node, the
 41-view base run on 2025.1 matches a same-day run on 2023.3 with the same package, to the second,
 everywhere except two nodes:

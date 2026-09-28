@@ -468,8 +468,11 @@ passing the SfM gate); GPS pairing is validated on a public survey, OpenDroneMap
   - **The house-pc app moves to 2025.1 for new jobs** (the user's call). Existing jobs stay on 2023.3
     via each job's recorded Meshroom. There is a "RANSAC iterations" option for the old counts.
 
+  - **The Windows CUDA gate passes on 2025.1:** bench-pc's GTX 1080 Ti, mini6 15 of 15, 41 views
+    base and verify.
+
   Still open:
-  - the CUDA packages (bench-pc's GTX 1080 and house-pc's CUDA build);
+  - the Linux CUDA bundle (needs the GTX card in a Linux box);
   - the README.
 - **AC-RANSAC under Meshroom 2025.1's iteration counts** (M-L, found 2026-09-27, docs/04). Every
   hypothesis is a 7-point (or P3P) solve plus a residual pass and a sort over all matches, which is
