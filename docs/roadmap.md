@@ -535,6 +535,49 @@ passing the SfM gate); GPS pairing is validated on a public survey, OpenDroneMap
   a Meshroom from `develop`, and the new SfM chain against the legacy one on 41 views and the engine
   bay.
 
+## 0.3.7
+
+Started 2026-09-28. **Headline: a bundle-adjustment solver of Cheshire's own** (XL), decided in 0.3.6
+after the step-0/A1/B1 measurements (docs/notes/ba-device-plan.md). Bundle adjustment is 82 % of a
+large set's SfM, and nearly all of it sits in Ceres' generic machinery rather than in the arithmetic.
+That machinery is the per-block evaluation around our analytic Jacobians and the per-solve problem
+build, preprocessing and teardown. Neither a device `Evaluate` inside Ceres nor more persistence
+reaches it. The design is in docs/notes/ba-own-solver.md; the steps, each a go/no-go:
+
+- **Step 0: where the time is, per solve** (S). **Done 2026-09-28** (design note):
+  - On the False Door, bundle adjustment is 675 of SfM's 1140 s.
+  - 89 % of it is 29 sparse-Schur solves of over a million residual blocks. Within those, 47 % is
+    problem build, preprocessor and teardown, and the elimination runs on Ceres' dynamic-size path.
+  - The 860 pose refinements are 2.5 %.
+
+  First target: the large sparse solves.
+- **Step 1: shadow mode** (M). The solver walks the `ceres::Problem` AliceVision builds and calls
+  each block's own cost function, so it evaluates Ceres' numbers.
+  - `CHESHIRE_BA_SHADOW=1` runs it beside Ceres on a copy of the parameters, in every solve of a real
+    run, and logs both iteration traces.
+  - Ceres still drives the reconstruction.
+- **Step 2: the solver on the host, Ceres-faithful** (L). Levenberg-Marquardt with Ceres' own
+  strategy: trust-region radius updates, Jacobi scaling, step acceptance and termination tests, and
+  the Huber corrector as Ceres applies it. Landmarks are eliminated by Schur complement, with the
+  reduced camera system solved by dense Cholesky or sparse Cholesky as AliceVision chooses.
+  - Checked iteration by iteration against Ceres on the dumps.
+  - The goal is the same iterates to rounding, so that validation is a comparison and not a
+    statistical argument.
+- **Step 3: in SfM, opt-in** (M). `CHESHIRE_BA_SOLVER=cheshire` for the problems the solver covers:
+  projection residuals, the pose and intrinsics manifolds, constant blocks. Ceres takes the rest
+  (rigs, mesh points, depth, constraints, priors). Gated by the SfM quality gate on 41 views, the
+  engine bay and the False Door, then time.
+- **Step 4: the device** (L). Residuals, Jacobians and the per-landmark Schur blocks on the GPU; the
+  reduced system on the host first.
+
+Beside it:
+
+- **AC-RANSAC's hypothesis loop on the device** (M-L). Meshroom 2025.1's defaults spend 21 s to 488 s
+  of geometric filtering on the engine bay and 105 s to 2234 s on the False Door, for the same
+  reconstruction (docs/04, 0.3.6).
+- **PrepareDenseScene on four-thread hosts** (M, measure first). About 21 minutes of each 524-photo
+  zoo job on house-pc.
+
 ## Upstream's next pipeline: detect, then pivot
 
 Added 2026-09-26. On discussion #2116 an AliceVision maintainer pointed out that StructureFromMotion,
@@ -788,6 +831,20 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 ## Parked and exploratory
 
 ### Parked from the 0.3.4 group
+
+- **ARM: Jetson, then phones, tablets and Snapdragon laptops** (the user's idea, 2026-09-28). The
+  steps, in order:
+  1. **Jetson (aarch64 Linux + CUDA)** first: the CUDA backend on an ARM host. It is a
+     cross-build of AliceVision's dependencies and one more CUDA target, and needs a board
+     (a Jetson Orin).
+  2. **A Vulkan compute backend** for the ports, the one route to Android, Windows on Snapdragon
+     and Apple (through MoltenVK). It also covers the Intel spike (garage-pc). SPIR-V's
+     `NoContraction` can keep the ports' no-FMA exactness.
+  3. **A phone front end** over the pipeline, like the house-pc node app; Meshroom's Qt interface
+     does not come along.
+
+  The CPU side builds for arm64 as it is. On a phone the limits are shared memory and heat, which is
+  the memory bridge's job. Today a phone can capture and upload to the node app.
 
 - **Linux capped-run 110-pixel difference** (M). One view differs by 1e-6 on Linux only
   (`docs/02-memory-bridge.md:306-310`). A few hours of triage would help: repeat the uncapped run
