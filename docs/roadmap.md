@@ -619,8 +619,12 @@ reaches it. The design is in docs/notes/ba-own-solver.md; the steps, each a go/n
     - The host's bytes: every checked solve the same (41 views 29/29, engine bay 35/35), and the
       False Door's whole run gives the host's digests.
     - False Door, same build back to back: SfM 594.7 s → 543.6 s, bundle adjustment 141.3 s → 93.0 s.
-    - Next: the per-solve setup (about 0.4 s per large solve), then the threshold; the vectors on
-      the device; the CUDA build.
+    - **The setup**, the same day: the device's per-solve setup about halved (parallel tables, no
+      zero-fills, records in 256 units, rows uploaded alongside, device memory kept across solves),
+      and the solver's own setup from 0.63 to 0.35 s on the largest solves. The default threshold is
+      now 200,000 rows. False Door, back to back on an idle box: bundle adjustment 121.8 s (host) →
+      68.0 s, SfM 541 s → 483 s, the same output.
+    - Next: the vectors on the device; the factorisation; the CUDA build.
   - 4d: vectors on the device, CUDA.
 
 Beside it:

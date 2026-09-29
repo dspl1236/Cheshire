@@ -39,6 +39,7 @@ struct DirectRow
     const sfmData::Observation* obs;
     int camera;       // into DirectSource's cameras
     int pose;         // into DirectSource's poses
+    int cand[4];      // slots 0-2: the camera block's place in cameraBlocks; slot 3: the landmark's in landmarks
     double weight;    // ScaledLoss's factor, 1 for none
 };
 
@@ -83,13 +84,17 @@ class DirectSource final : public Source
         }
         // the camera blocks by group (one block per group, as step 5n numbers them); their properties are
         // the small Problem's, i.e. upstream's
-        std::vector<std::pair<int, double*>> sorted = cameraBlocks;
-        std::sort(sorted.begin(), sorted.end());
+        std::vector<int> order(cameraBlocks.size());
+        for (size_t i = 0; i < order.size(); ++i)
+            order[i] = int(i);
+        std::sort(order.begin(), order.end(), [&](int x, int y) { return cameraBlocks[size_t(x)] < cameraBlocks[size_t(y)]; });
+        _camPos.assign(cameraBlocks.size(), 0);
         const double big = std::numeric_limits<double>::max();
         const size_t base = landmarks.size();
-        for (size_t i = 0; i < sorted.size(); ++i)
+        for (size_t i = 0; i < order.size(); ++i)
         {
-            double* p = sorted[i].second;
+            _camPos[size_t(order[i])] = int(i);
+            double* p = cameraBlocks[size_t(order[i])].second;
             BlockInfo& b = (*out)[base + i];
             b.ptr = p;
             if (!_small.HasParameterBlock(p) || _small.IsParameterBlockConstant(p))
@@ -122,6 +127,14 @@ class DirectSource final : public Source
     int numRows() const override { return int(rows.size()); }
     int rowNumParams(int) const override { return 4; }
     void rowParams(int i, double** out) const override { std::copy(rows[i].params, rows[i].params + 4, out); }
+    bool hasCandidates() const override { return true; }
+    void rowCandidates(int i, int* out) const override
+    {
+        const DirectRow& row = rows[size_t(i)];
+        for (int k = 0; k < 3; ++k)
+            out[k] = int(landmarks.size()) + _camPos[size_t(row.cand[k])];
+        out[3] = row.cand[3];
+    }
     int rowNumResiduals(int) const override { return 2; }
     const ceres::LossFunction* rowLoss(int) const override { return _loss; }
     double rowLossScale(int i) const override { return rows[i].weight; }
@@ -129,16 +142,18 @@ class DirectSource final : public Source
     bool deviceView(DeviceView* v) const override
     {
         v->nPoses = int(poses.size());
-        v->rowPose.resize(rows.size());
-        v->rowCamera.resize(rows.size());
-        v->rowObs.resize(3 * rows.size());
-        for (size_t i = 0; i < rows.size(); ++i)
+        v->rowPose.reset(new int[rows.size()]);
+        v->rowCamera.reset(new int[rows.size()]);
+        v->rowObs.reset(new double[3 * rows.size()]);
+        const std::ptrdiff_t n = std::ptrdiff_t(rows.size());
+#pragma omp parallel for schedule(static, 8192)
+        for (std::ptrdiff_t i = 0; i < n; ++i)
         {
-            v->rowPose[i] = rows[i].pose;
-            v->rowCamera[i] = rows[i].camera;
-            v->rowObs[3 * i] = rows[i].obs->getX();
-            v->rowObs[3 * i + 1] = rows[i].obs->getY();
-            v->rowObs[3 * i + 2] = rows[i].obs->getScale();
+            v->rowPose[i] = rows[size_t(i)].pose;
+            v->rowCamera[i] = rows[size_t(i)].camera;
+            v->rowObs[3 * i] = rows[size_t(i)].obs->getX();
+            v->rowObs[3 * i + 1] = rows[size_t(i)].obs->getY();
+            v->rowObs[3 * i + 2] = rows[size_t(i)].obs->getScale();
         }
         for (const DirectCamera& c : cameras)
         {
@@ -182,6 +197,7 @@ class DirectSource final : public Source
     const ceres::Problem& _small;
     const ceres::LossFunction* _loss;
     mutable std::vector<arith::PoseRotation> _poseRot;
+    mutable std::vector<int> _camPos;   // a camera block's place in cameraBlocks -> its place after blocks()' sort
     mutable std::vector<arith::CameraValues> _camValues;
 };
 
@@ -290,13 +306,14 @@ bool BundleAdjustmentCeres::cheshireDirectAdjust(sfmData::SfMData& sfmData, ERef
         double* distortion = nullptr;
         int camera = -1;
         int poseIndex = -1;
+        int cb[3] = {-1, -1, -1};   // the intrinsics', distortion's and pose's places in cameraBlocks
         bool ok = false;
     };
     std::unordered_map<IndexT, ViewBlocks> views;
     views.reserve(sfmData.getViews().size());
     std::map<IndexT, int> cameraOf;
     std::unordered_map<const double*, int> poseOf;
-    std::set<const double*> ordered;   // the camera blocks entered in the ordering, once each
+    std::unordered_map<const double*, int> ordered;   // the camera blocks entered in the ordering, once each: their places
     const bool refineStructure = refineOptions & REFINE_STRUCTURE;
     double* fakeDistortionBlockPtr = &_fakeDistortionBlock;
     src.rows.reserve(sfmData.getLandmarks().size() * 4);
@@ -362,9 +379,17 @@ bool BundleAdjustmentCeres::cheshireDirectAdjust(sfmData::SfMData& sfmData, ERef
                     const std::pair<int, double*> blocks[3] = {{cheshirePoseGroup(view.getPoseId()), e.pose},
                                                                {cheshireIntrinsicGroup(intrinsicId), e.intrinsic},
                                                                {cheshireDistortionGroup(intrinsicId, e.distortion == fakeDistortionBlockPtr), e.distortion}};
-                    for (const auto& b : blocks)
-                        if (ordered.insert(b.second).second)
-                            src.cameraBlocks.push_back(b);
+                    int place[3];
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const auto ins = ordered.emplace(blocks[k].second, int(src.cameraBlocks.size()));
+                        if (ins.second)
+                            src.cameraBlocks.push_back(blocks[k]);
+                        place[k] = ins.first->second;
+                    }
+                    e.cb[0] = place[1];   // the row's slots: intrinsics, distortion, pose
+                    e.cb[1] = place[2];
+                    e.cb[2] = place[0];
                 }
                 it = views.emplace(viewId, e).first;
             }
@@ -380,6 +405,10 @@ bool BundleAdjustmentCeres::cheshireDirectAdjust(sfmData::SfMData& sfmData, ERef
             row.camera = vb.camera;
             row.pose = vb.poseIndex;
             row.weight = observation.getWeight();
+            row.cand[0] = vb.cb[0];
+            row.cand[1] = vb.cb[1];
+            row.cand[2] = vb.cb[2];
+            row.cand[3] = int(src.landmarks.size()) - 1;
             src.rows.push_back(row);
             _statistics.addState(EParameter::LANDMARK, constant ? EEstimatorParameterState::CONSTANT : EEstimatorParameterState::REFINED);
         }

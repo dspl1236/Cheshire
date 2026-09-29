@@ -481,8 +481,9 @@ large solves took 268 iterations against 562. Ceres' own runs span 241 to 666.
 ## Step 4c: the device (2026-09-29)
 
 Generator step 7f, `hip/port/sfm_ba/baDevice.hpp` / `baDevice.cu` (CUDA dialect, HIP through the
-compat header, `--fmad=false` on CUDA). It is the default, for the solves of at least a million rows
-(`CHESHIRE_BA_DEVICE_MIN_ROWS`); `CHESHIRE_BA_DEVICE=0` keeps everything on the host.
+compat header, `--fmad=false` on CUDA). It is the default, for the solves of at least 200,000 rows
+(`CHESHIRE_BA_DEVICE_MIN_ROWS`; a million until the setup work below); `CHESHIRE_BA_DEVICE=0` keeps
+everything on the host.
 
 **What runs where.** The host keeps the trust-region loop, the vectors, Plus, the line search's
 polynomials and the factorisation of the reduced camera system. The device holds the rows, the
@@ -553,11 +554,59 @@ cores. What wins is memory bandwidth: the evaluation and the passes over the Jac
 The Schur terms are arithmetic, and the device is only level with the host there.
 
 **Left for later:**
-- **The per-solve setup:** the records, the lists and the uploads, about 0.4 s per large solve.
-  With it paid back sooner, the threshold could come down from a million rows.
+- **The per-solve setup:** done below (4c, the setup).
 - **The vectors on the device** (4d).
 - **The factorisation**, the largest host phase left.
 - **The CUDA build** (house-pc), not compiled yet.
+
+### 4c, the setup (2026-09-29)
+
+Every solve builds its structure afresh: the solver's own setup (both paths), then, for the device,
+the device's view, its tables and the uploads. On the False Door's largest solves (3.3-3.9 M rows),
+the two together took about 1.2 s per solve, which is why the device started at a million rows. The
+timers (`CHESHIRE_BA_PROFILE`: "BA own setup", "BA device setup"; `CHESHIRE_BA_DEVICE_PROFILE`:
+"BA device create") found the time in serial loops, zero-filled arrays that are overwritten anyway,
+hash lookups and repeated table lookups. Nothing it builds changed.
+
+**The device's setup, 0.55-0.68 s → about 0.3 s:**
+- the view of the rows and the row table in parallel, allocated without initialisation (the `Row`
+  table had been constructing some 400 MB before the fill);
+- the column lists by a counting sort per partition, placed in parallel;
+- the records in 256 units (each group in eight ranges of landmarks), a pair's block looked up once
+  and read back in the second pass;
+- the rows' upload on a thread of its own, while the host builds the rest;
+- the device memory kept across solves (`CHESHIRE_BA_DEVICE_POOL=0` to allocate per solve).
+
+**The solver's own setup, 0.62-0.66 s → 0.33-0.36 s**, on both paths:
+- the direct build gives each row's parameters as candidate positions, so no pointer hash table
+  (0.14 s → 0.03 s);
+- the per-parameter and per-row tables allocated without initialisation, the row table filled in
+  parallel with its offsets in a prefix pass;
+- the rows on constant blocks only evaluated in parallel, their costs added in row order. They are
+  now evaluated after the direct source's per-pose and per-camera tables are filled: since 4b they
+  would have read them empty. No set here has such rows, which is why no output changed.
+- The groups' copies of the reduced system are no longer zero-filled at setup; each group zeroes its
+  copy before use anyway.
+
+The digests are the same on all three sets, the device check still 29 of 29, the direct check 68
+of 68, and the Problem path without persistence still gives the direct path's bytes.
+
+**The threshold.** Back-to-back False Door runs with the installed build on an idle box, all with
+the same output (`a5cc84375086fdec`):
+
+| device on solves of at least | SfM wall | bundle adjustment | solves ≥ 1 M rows | 100 k-1 M rows |
+|---|---|---|---|---|
+| never (host) | 541.4 s | 121.8 s | 105.1 s | 9.6 s |
+| 1,000,000 rows | 483.6 s | 71.3 s | 55.2 s | 9.6 s |
+| 200,000 rows (the default) | 483.1 s | 68.0 s | 54.4 s | 6.9 s |
+
+- **Against the host:** bundle adjustment is 44 % shorter and SfM 11 %.
+- **Against 4c before the setup work:** the large solves went from 73.5 s to 54.4 s.
+- **The medium solves** now gain as well, 9.6 s → 6.9 s, so the default is 200,000 rows. The wall
+  times of the last two runs are within this box's run-to-run drift.
+
+A first set of these runs overlapped a video playing on the box. Their timings were discarded;
+their output was the same.
 
 ## Scope
 

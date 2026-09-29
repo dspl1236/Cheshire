@@ -28,19 +28,38 @@ namespace device {
 // A device the solver can use (and CHESHIRE_BA_DEVICE is not 0); its name when there is one
 bool available(std::string* name = nullptr);
 
-// One row of the direct build (intrinsics, distortion, pose, landmark; two residuals), in the solver's order
+// One row of the direct build (intrinsics, distortion, pose, landmark; two residuals), in the solver's order. A
+// trivial type: the solver writes every field, so the rows are allocated without initialisation.
 struct Row
 {
-    std::int64_t j = 0;       // the row's first Jacobian value
-    std::int32_t pj[4] = {-1, -1, -1, -1};      // per slot, its tangent block's offset from j, or -1 (constant)
-    std::int32_t blk[4] = {-1, -1, -1, -1};     // slots 0-2: the F block; slot 3: the E block (the landmark); -1 constant
-    std::int32_t manif[4] = {-1, -1, -1, -1};   // per slot, its manifold in the manifold table, or -1
-    std::int32_t pose = 0;    // into the pose table
-    std::int32_t camera = 0;  // into the camera table
-    std::int32_t lm = 0;      // a free landmark: its E index; a constant one: -1 - its index in Structure::constLandmarks
-    std::int32_t pad = 0;
-    double ox = 0, oy = 0, os = 0;   // the observation: x, y, scale
-    double weight = 1.0;             // ScaledLoss's factor (1: none)
+    std::int64_t j;           // the row's first Jacobian value
+    std::int32_t pj[4];       // per slot, its tangent block's offset from j, or -1 (constant)
+    std::int32_t blk[4];      // slots 0-2: the F block; slot 3: the E block (the landmark); -1 constant
+    std::int32_t manif[4];    // per slot, its manifold in the manifold table, or -1
+    std::int32_t pose;        // into the pose table
+    std::int32_t camera;      // into the camera table
+    std::int32_t lm;          // a free landmark: its E index; a constant one: -1 - its index in Structure::constLandmarks
+    std::int32_t pad;
+    double ox, oy, os;        // the observation: x, y, scale
+    double weight;            // ScaledLoss's factor (1: none)
+};
+
+// the rows, allocated without initialisation (a std::vector would construct a few hundred MB first)
+struct RowArray
+{
+    std::unique_ptr<Row[]> p;
+    size_t n = 0;
+    void allocate(size_t count)
+    {
+        p.reset(count ? new Row[count] : nullptr);
+        n = count;
+    }
+    size_t size() const { return n; }
+    Row& operator[](size_t i) { return p[i]; }
+    const Row& operator[](size_t i) const { return p[i]; }
+    const Row* begin() const { return p.get(); }
+    const Row* end() const { return p.get() + n; }
+    const Row* data() const { return p.get(); }
 };
 
 struct Camera
@@ -60,7 +79,7 @@ struct PoseEntry
 
 struct Structure
 {
-    std::vector<Row> rows;
+    RowArray rows;
     std::vector<std::int32_t> chunkStart;   // nE + 2: per E block its first row; [nE] the first row without one; [nE + 1] the end
     std::vector<std::int32_t> parts;        // the evaluation partitions' row boundaries
     std::vector<std::int32_t> groups;       // the assembly groups' chunk boundaries

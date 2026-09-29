@@ -410,11 +410,11 @@ inline int deviceMode()
     return mode;
 }
 
-// the smallest problem, in rows, the device takes (CHESHIRE_BA_DEVICE_MIN_ROWS): below about a million rows the
-// device's per-solve setup (the structure, the uploads) is not yet paid back
+// the smallest problem, in rows, the device takes (CHESHIRE_BA_DEVICE_MIN_ROWS): below it the device's per-solve
+// setup (the structure, the uploads) is not paid back
 inline long deviceMinRows()
 {
-    static const long v = static_cast<long>(::cheshire::env::integer("CHESHIRE_BA_DEVICE_MIN_ROWS", 1000000));
+    static const long v = static_cast<long>(::cheshire::env::integer("CHESHIRE_BA_DEVICE_MIN_ROWS", 200000));
     return v;
 }
 
@@ -571,6 +571,30 @@ class PtrIndex
     size_t _mask = 15;
 };
 
+// An uninitialised array of a trivial type: the per-row and per-parameter tables run to hundreds of MB on a large
+// solve, and every element is written before it is read.
+template <typename T>
+struct RawArray
+{
+    std::unique_ptr<T[]> p;
+    size_t n = 0;
+    void allocate(size_t count)
+    {
+        p.reset(count ? new T[count] : nullptr);
+        n = count;
+    }
+    size_t size() const { return n; }
+    bool empty() const { return n == 0; }
+    T& operator[](size_t i) { return p[i]; }
+    const T& operator[](size_t i) const { return p[i]; }
+    T* data() { return p.get(); }
+    const T* data() const { return p.get(); }
+    T* begin() { return p.get(); }
+    T* end() { return p.get() + n; }
+    const T* begin() const { return p.get(); }
+    const T* end() const { return p.get() + n; }
+};
+
 // An uninitialised double buffer (the Jacobian runs to hundreds of MB; every entry is written before use).
 struct Buffer
 {
@@ -583,6 +607,8 @@ struct Buffer
     }
     double* data() { return p.get(); }
     const double* data() const { return p.get(); }
+    double& operator[](size_t i) { return p[i]; }
+    const double& operator[](size_t i) const { return p[i]; }
 };
 
 // ---- what the solver solves ------------------------------------------------------------------------
@@ -615,13 +641,17 @@ class Source
     virtual bool evaluate(int i, double const* const* params, double* residuals, double** jacobians) const = 0;
     // called before each evaluation's rows, after the parameter blocks hold its point and prepare() ran
     virtual void beforeEvaluation() const {}
+    // Optional: a row's parameters as positions in the candidates blocks() returned, so the solver needs no pointer
+    // lookups (the direct build knows them)
+    virtual bool hasCandidates() const { return false; }
+    virtual void rowCandidates(int, int*) const {}
     // What the device needs of the rows (step 4c); only the direct build has it. Per source row its pose and
     // camera (into the tables below) and its observation; per camera whether it has a distortion and the
     // sizes of its intrinsics and distortion blocks.
     struct DeviceView
     {
-        std::vector<int> rowPose, rowCamera;
-        std::vector<double> rowObs;   // x, y, scale per source row
+        std::unique_ptr<int[]> rowPose, rowCamera;   // per source row (allocated without initialisation)
+        std::unique_ptr<double[]> rowObs;            // x, y, scale per source row
         std::vector<int> camHasDistortion, camNd, camIsize;
         int nPoses = 0;
     };
@@ -888,17 +918,17 @@ class Solver
     // A residual block. Its parameters are _pp/_pv/_pj[p .. p + np): the pointer, the free block (an E
     // index >= 0, an F index f as -2 - f, or -1 when constant) and the tangent Jacobian block's offset
     // from j (or -1).
-    struct Row
+    struct Row                               // trivial: setup writes every field
     {
-        int src = 0;                         // the source's residual block
-        const ceres::LossFunction* loss = nullptr;
-        double lossScale = 1.0;
-        int nres = 0;
-        int np = 0;
-        size_t p = 0;
-        size_t r = 0;                        // residuals in _r
-        size_t j = 0;                        // Jacobian blocks in _J, contiguous from here
-        int jSize = 0;
+        int src;                             // the source's residual block
+        const ceres::LossFunction* loss;
+        double lossScale;
+        int nres;
+        int np;
+        size_t p;
+        size_t r;                            // residuals in _r
+        size_t j;                            // Jacobian blocks in _J, contiguous from here
+        int jSize;
     };
     enum class Mode
     {
@@ -916,9 +946,9 @@ class Solver
     int _ne = 0, _nf = 0, _n = 0;            // tangent sizes: E, F, both
     size_t _nx = 0;                          // ambient size of the state
     std::vector<int> _mb;                    // blocks with a manifold (E index, or -2 - F index)
-    std::vector<double*> _pp;
-    std::vector<int> _pv, _pj;
-    std::vector<Row> _rows;                  // rows with an E block first, grouped by it, then the rest
+    RawArray<double*> _pp;
+    RawArray<int> _pv, _pj;                  // _pj: set for the rows of _rows only
+    RawArray<Row> _rows;                     // rows with an E block first, grouped by it, then the rest
     std::vector<int> _chunkStart;            // per E block its first row; [nE] the first row without one; [nE + 1] the end
     std::vector<int> _parts;                 // evaluation partitions (row boundaries, whole chunks)
     double _fixedCost = 0.0;
@@ -945,7 +975,7 @@ class Solver
     // the assembly: fixed groups of whole chunks (the last also takes the rows without an E block), each
     // adding into its own copy of (S, rhs); the copies are summed in group order
     std::vector<int> _groups;                // chunk boundaries, [G] = nE
-    std::vector<double> _sg;                 // G copies of (S, rhs), _sgStride apart
+    Buffer _sg;                              // G copies of (S, rhs), _sgStride apart (each zeroed by its group before use)
     size_t _sgStride = 0;
     std::vector<int> _pairIdx;               // nF x nF: the block (f1 <= f2) as an index into _sCol/_sOff, when nF is small
     // the factorisation
@@ -983,16 +1013,36 @@ class Solver
     // residual block uses (the E group first, then the rest by group, within a group by address; for
     // SPARSE_SCHUR the camera blocks then reordered as ReorderSchurComplementColumnsUsingEigen does), and
     // the residual blocks on at least one free block, grouped by their E block.
+    // CHESHIRE_BA_PROFILE: setup's phases for the large solves (a line per solve of 100k rows or more)
+    double _setupT[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    int _nFixedRows = 0;
+    Clock::time_point _setupT0;
+    void setupMark(int k) { _setupT[k] = since(_setupT0); }
+
     bool setup(std::string* why)
     {
+        _setupT0 = Clock::now();
         std::vector<BlockInfo> info;
         if (!_src.blocks(&info, _threads, why))
             return false;
+        setupMark(0);
         const int nc = int(info.size());
-        // provisional indices, in candidate order
+        // provisional indices, in candidate order: by candidate position when the source gives the rows' parameters
+        // that way, else through a pointer index
         std::vector<PBlock> tE, tF;
+        const bool byCandidate = _src.hasCandidates();
         PtrIndex index;
-        index.reserve(info.size());
+        std::vector<int> prov;
+        if (byCandidate)
+            prov.assign(size_t(nc), -1);
+        else
+            index.reserve(info.size());
+        {
+            size_t nEl = 0;
+            for (const BlockInfo& bi : info)
+                nEl += bi.eliminate && !bi.constant && bi.tsize != 0 ? 1 : 0;
+            tE.reserve(nEl);
+        }
         for (int i = 0; i < nc; ++i)
         {
             BlockInfo& bi = info[i];
@@ -1005,27 +1055,27 @@ class Solver
             b.manifold = bi.manifold;
             b.lower = std::move(bi.lower);
             b.upper = std::move(bi.upper);
-            if (bi.eliminate)
-            {
-                index.set(b.ptr, int(tE.size()));
-                tE.push_back(std::move(b));
-            }
+            const int v = bi.eliminate ? int(tE.size()) : -2 - int(tF.size());
+            if (byCandidate)
+                prov[size_t(i)] = v;
             else
-            {
-                index.set(b.ptr, -2 - int(tF.size()));
+                index.set(b.ptr, v);
+            if (bi.eliminate)
+                tE.push_back(std::move(b));
+            else
                 tF.push_back(std::move(b));
-            }
         }
         info.clear();
 
         // residual blocks
+        setupMark(1);
         const int nR = _src.numRows();
         std::vector<size_t> pStart(size_t(nR) + 1, 0);
         for (int i = 0; i < nR; ++i)
             pStart[i + 1] = pStart[i] + size_t(_src.rowNumParams(i));
-        _pp.resize(pStart[nR]);
-        _pv.resize(pStart[nR]);
-        _pj.assign(pStart[nR], -1);
+        _pp.allocate(pStart[nR]);
+        _pv.allocate(pStart[nR]);
+        _pj.allocate(pStart[nR]);
         std::vector<int> rowE(size_t(nR), -1);
         std::vector<char> rowFree(size_t(nR), 0), rowBad(size_t(nR), 0);
 #pragma omp parallel num_threads(_threads)
@@ -1034,9 +1084,12 @@ class Solver
             for (int i = 0; i < nR; ++i)
             {
                 _src.rowParams(i, _pp.data() + pStart[i]);
+                int cand[16];
+                if (byCandidate)
+                    _src.rowCandidates(i, cand);
                 for (size_t p = pStart[i]; p < pStart[i + 1]; ++p)
                 {
-                    const int v = index.get(_pp[p]);
+                    const int v = byCandidate ? (cand[p - pStart[i]] >= 0 ? prov[size_t(cand[p - pStart[i]])] : -1) : index.get(_pp[p]);
                     _pv[p] = v;
                     if (v >= 0)
                     {
@@ -1055,26 +1108,57 @@ class Solver
                 *why = "a residual block touches two eliminated blocks";
                 return false;
             }
+        setupMark(2);
         // residual blocks on constant parameters only: Ceres' preprocessor removes them and reports their
         // cost as fixed_cost
-        for (int i = 0; i < nR; ++i)
+        // (evaluated in parallel, their costs added in row order; the source's per-pose and per-camera tables first)
         {
-            if (rowFree[i])
-                continue;
-            std::vector<double> r(static_cast<size_t>(_src.rowNumResiduals(i)));
-            if (!_src.evaluate(i, _pp.data() + pStart[i], r.data(), nullptr))
+            std::vector<int> fixed;
+            for (int i = 0; i < nR; ++i)
+                if (!rowFree[i])
+                    fixed.push_back(i);
+            _nFixedRows = int(fixed.size());
+            if (!fixed.empty())
             {
-                *why = "a fixed residual block failed to evaluate";
-                return false;
+                _prepare();
+                _src.beforeEvaluation();
+                std::vector<double> cost(fixed.size(), 0.0);
+                std::vector<char> good(fixed.size(), 1);
+                const std::ptrdiff_t nfx = std::ptrdiff_t(fixed.size());
+#pragma omp parallel for schedule(dynamic, 1024) num_threads(_threads)
+                for (std::ptrdiff_t q = 0; q < nfx; ++q)
+                {
+                    const int i = fixed[size_t(q)];
+                    double r[16];
+                    const int nres = _src.rowNumResiduals(i);
+                    std::vector<double> big;
+                    double* rr = r;
+                    if (nres > 16)
+                    {
+                        big.resize(size_t(nres));
+                        rr = big.data();
+                    }
+                    if (!_src.evaluate(i, _pp.data() + pStart[i], rr, nullptr))
+                    {
+                        good[size_t(q)] = 0;
+                        continue;
+                    }
+                    double s = 0.0;
+                    for (int k = 0; k < nres; ++k)
+                        s += rr[k] * rr[k];
+                    double rho[3];
+                    cost[size_t(q)] = rowRho(_src.rowLoss(i), _src.rowLossScale(i), s, rho) ? 0.5 * rho[0] : 0.5 * s;
+                }
+                for (size_t q = 0; q < fixed.size(); ++q)
+                {
+                    if (!good[q])
+                    {
+                        *why = "a fixed residual block failed to evaluate";
+                        return false;
+                    }
+                    _fixedCost += cost[q];
+                }
             }
-            double s = 0.0;
-            for (double v : r)
-                s += v * v;
-            double rho[3];
-            if (rowRho(_src.rowLoss(i), _src.rowLossScale(i), s, rho))
-                _fixedCost += 0.5 * rho[0];
-            else
-                _fixedCost += 0.5 * s;
         }
         // free blocks no residual block uses: Ceres' reduced program drops them
         std::vector<char> usedE(tE.size(), 0), usedF(tF.size(), 0);
@@ -1091,6 +1175,7 @@ class Solver
             }
         }
         std::vector<int> mapE(tE.size(), -1), mapF(tF.size(), -1);
+        _e.reserve(tE.size());
         for (size_t i = 0; i < tE.size(); ++i)
             if (usedE[i])
             {
@@ -1149,6 +1234,7 @@ class Solver
             _qr = true;
         }
 
+        setupMark(3);
         // rows grouped by E block in residual order (a stable counting sort), then the rows without one
         const int nE = int(_e.size());
         _chunkStart.assign(size_t(nE) + 2, 0);
@@ -1162,8 +1248,8 @@ class Solver
         for (int i = 0; i < nR; ++i)
             if (rowFree[i])
                 order[next[rowE[i] >= 0 ? rowE[i] : nE]++] = i;
-        _rows.resize(size_t(nRows));
-        size_t nj = 0;
+        _rows.allocate(size_t(nRows));
+#pragma omp parallel for schedule(static, 4096) num_threads(_threads)
         for (int ri = 0; ri < nRows; ++ri)
         {
             const int i = order[ri];
@@ -1174,25 +1260,35 @@ class Solver
             row.nres = _src.rowNumResiduals(i);
             row.p = pStart[i];
             row.np = int(pStart[i + 1] - pStart[i]);
-            row.r = _nr;
-            _nr += size_t(row.nres);
-            row.j = nj;
             int jo = 0;
             for (int k = 0; k < row.np; ++k)
             {
                 const int v = _pv[row.p + k];
                 if (v == -1)
+                {
+                    _pj[row.p + k] = -1;
                     continue;
+                }
                 _pj[row.p + k] = jo;
                 jo += row.nres * block(v).tsize;
             }
             row.jSize = jo;
-            nj += size_t(jo);
+        }
+        size_t nj = 0;
+        for (int ri = 0; ri < nRows; ++ri)
+        {
+            Row& row = _rows[ri];
+            row.r = _nr;
+            _nr += size_t(row.nres);
+            row.j = nj;
+            nj += size_t(row.jSize);
         }
         _r.assign(_nr, 0.0);
         _J.reset(nj);
 
+        setupMark(4);
         buildStructure();
+        setupMark(5);
         if (_opt.sparse && _f.size() > 1)
         {
             // ReorderSchurComplementColumnsUsingEigen: AMD on the block pattern of the Schur complement,
@@ -1234,6 +1330,7 @@ class Solver
             }
         }
 
+        setupMark(6);
         // columns and state offsets, E then F; bounds; manifolds
         for (auto& b : _e)
         {
@@ -1264,6 +1361,7 @@ class Solver
         _inv.assign(size_t(nE) * 9, 0.0);
         _ge.assign(size_t(nE) * 3, 0.0);
 
+        setupMark(7);
         // evaluation partitions: whole chunks, then the rows without an E block, about target rows each; the
         // boundaries depend on the problem only, so every reduction over them is thread-count independent
         const int target = std::max(512, nRows / 256 + 1);
@@ -1340,6 +1438,13 @@ class Solver
             std::copy(inner.begin(), inner.end(), _S.innerIndexPtr());
             std::fill(_S.valuePtr(), _S.valuePtr() + nnz, 0.0);
         }
+        setupMark(8);
+        if (profileEnabled() && _rows.size() >= 100000)
+            ALICEVISION_LOG_INFO("cheshire: BA own setup: " << _rows.size() << " rows: blocks " << _setupT[0] << ", index " << _setupT[1] - _setupT[0]
+                                 << ", params " << _setupT[2] - _setupT[1] << ", fixed/used " << _setupT[3] - _setupT[2] << ", rows "
+                                 << _setupT[4] - _setupT[3] << ", structure " << _setupT[5] - _setupT[4] << ", reorder " << _setupT[6] - _setupT[5]
+                                 << ", columns " << _setupT[7] - _setupT[6] << ", partitions/pattern " << _setupT[8] - _setupT[7] << " s; " << _nFixedRows
+                                 << " rows on constant blocks only");
         return true;
     }
 
@@ -1525,7 +1630,7 @@ class Solver
         }
         if (_groups.back() != nE || _groups.size() == 1)
             _groups.push_back(nE);
-        _sg.assign((_groups.size() - 1) * _sgStride, 0.0);
+        _sg.reset((_groups.size() - 1) * _sgStride);
     }
 
     // x: every free block's ambient values, E first then F (for the norms and the step)
@@ -1907,11 +2012,14 @@ class Solver
         std::string name, why;
         if (!device::available(&name))
             return;
+        const auto tv = Clock::now();
         Source::DeviceView view;
         if (!_src.deviceView(&view))
             return;
+        const double tView = since(tv);
         auto fail = [&](const std::string& w) { noteFallback("device: " + w); };
         const auto t0 = Clock::now();
+        double tRows = 0.0;
         device::Structure s;
         const ceres::LossFunction* loss = _rows.empty() ? nullptr : _rows[0].loss;
         s.loss = loss != nullptr;
@@ -1933,7 +2041,7 @@ class Solver
         }
         _devPlusJ.assign(off, 0.0);
         // the rows, in parallel; then the constant landmarks numbered in row order
-        s.rows.resize(_rows.size());
+        s.rows.allocate(_rows.size());
         std::atomic<int> bad{0};
         const std::ptrdiff_t nRowsD = std::ptrdiff_t(_rows.size());
 #pragma omp parallel for schedule(static, 4096) num_threads(_threads)
@@ -1975,6 +2083,7 @@ class Solver
             d.weight = row.lossScale;
             d.lm = d.blk[3];
         }
+        tRows = since(t0);
         if (bad == 1)
             return fail("a row the device does not take");
         if (bad == 2)
@@ -2037,13 +2146,14 @@ class Solver
         const double tStructure = since(t0);
         _dev = device::Problem::create(s, &why);
         if (profileEnabled())
-            ALICEVISION_LOG_INFO("cheshire: BA device setup: structure " << tStructure << " s, create " << since(t0) - tStructure << " s");
+            ALICEVISION_LOG_INFO("cheshire: BA device setup: " << _rows.size() << " rows: view " << tView << " s, rows " << tRows << " s, structure "
+                                 << tStructure << " s, create " << since(t0) - tStructure << " s");
         if (!_dev)
             return fail(why);
         // what the device now holds, the host no longer needs
         _J.reset(0);
         _m.reset(0);
-        std::vector<double>().swap(_sg);
+        _sg.reset(0);
         std::vector<double>().swap(_r);
         static std::once_flag said;
         std::call_once(said, [&] {

@@ -48,6 +48,28 @@ bool g_checked = false, g_available = false;
 std::string g_name;
 std::mutex g_mutex;
 
+// The device memory kept across solves: the k-th allocation of a solve reuses the k-th buffer when it is large
+// enough, else the buffer is replaced by one a quarter larger than asked. One problem at a time holds it (another
+// alive at the same time allocates for itself). The buffers stay until the process ends.
+struct Pool
+{
+    std::mutex m;
+    bool busy = false;
+    std::vector<std::pair<void*, size_t>> slots;
+};
+
+Pool& pool()
+{
+    static Pool* p = new Pool();   // never destroyed: the runtime may be gone at exit
+    return *p;
+}
+
+bool poolEnabled()
+{
+    static const bool on = ::cheshire::env::flag("CHESHIRE_BA_DEVICE_POOL", true);
+    return on;
+}
+
 // ---- the kernels ------------------------------------------------------------------------------------------
 
 struct DeviceInner
@@ -944,8 +966,17 @@ struct Problem::Impl
                 }
             std::fprintf(stderr, "%s\n", line.c_str());
         }
+        const auto t0 = std::chrono::steady_clock::now();
         for (void* p : allocs)
             cudaFree(p);
+        if (pooled)
+        {
+            cudaDeviceSynchronize();   // the pool's next holder may reuse the buffers at once
+            std::lock_guard<std::mutex> lock(pool().m);
+            pool().busy = false;
+        }
+        if (prof)
+            std::fprintf(stderr, "[cheshire] BA device free: %.4f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     }
     bool ok(cudaError_t e, const char* what)
     {
@@ -955,20 +986,74 @@ struct Problem::Impl
             err = std::string(what) + ": " + cudaGetErrorString(e);
         return false;
     }
+    double tAlloc = 0.0, tCopy = 0.0, tFree = 0.0;   // CHESHIRE_BA_DEVICE_PROFILE: the setup's allocations and copies
+    bool pooled = false;   // this problem holds the pool
+    size_t slot = 0;       // its next buffer in the pool
+    void acquirePool()
+    {
+        if (!poolEnabled())
+            return;
+        std::lock_guard<std::mutex> lock(pool().m);
+        if (!pool().busy)
+            pooled = pool().busy = true;
+    }
     template <typename T>
     bool alloc(T** p, std::int64_t count, const char* what)
     {
         void* q = nullptr;
-        if (!ok(cudaMalloc(&q, size_t(std::max<std::int64_t>(count, 1)) * sizeof(T)), what))
+        const size_t bytes = size_t(std::max<std::int64_t>(count, 1)) * sizeof(T);
+        const auto t0 = std::chrono::steady_clock::now();
+        if (pooled)
+        {
+            auto& slots = pool().slots;
+            if (slot == slots.size())
+                slots.emplace_back(nullptr, 0);
+            auto& sl = slots[slot++];
+            if (sl.second < bytes)
+            {
+                if (sl.first)
+                    cudaFree(sl.first);
+                sl.first = nullptr;
+                sl.second = 0;
+                const size_t grown = bytes + bytes / 4;
+                if (!ok(cudaMalloc(&sl.first, grown), what))
+                {
+                    sl.first = nullptr;
+                    return false;
+                }
+                sl.second = grown;
+            }
+            *p = static_cast<T*>(sl.first);
+            tAlloc += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            return true;
+        }
+        const bool good = ok(cudaMalloc(&q, bytes), what);
+        tAlloc += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        if (!good)
             return false;
         allocs.push_back(q);
         *p = static_cast<T*>(q);
         return true;
     }
     template <typename T>
+    bool upload(T** p, const T* v, size_t count, const char* what)
+    {
+        if (!alloc(p, std::int64_t(count), what))
+            return false;
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool good = count == 0 || ok(cudaMemcpy(*p, v, count * sizeof(T), cudaMemcpyHostToDevice), what);
+        tCopy += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        return good;
+    }
+    template <typename T>
     bool upload(T** p, const std::vector<T>& v, const char* what)
     {
-        return alloc(p, std::int64_t(v.size()), what) && (v.empty() || ok(cudaMemcpy(*p, v.data(), v.size() * sizeof(T), cudaMemcpyHostToDevice), what));
+        if (!alloc(p, std::int64_t(v.size()), what))
+            return false;
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool good = v.empty() || ok(cudaMemcpy(*p, v.data(), v.size() * sizeof(T), cudaMemcpyHostToDevice), what);
+        tCopy += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        return good;
     }
     bool sync(const char* what) { return ok(cudaGetLastError(), what) && ok(cudaDeviceSynchronize(), what); }
 };
@@ -1011,6 +1096,7 @@ std::unique_ptr<Problem> Problem::create(const Structure& s, std::string* why)
     auto im = std::make_unique<Impl>();
     Impl& I = *im;
     I.prof = ::cheshire::env::flag("CHESHIRE_BA_DEVICE_PROFILE");
+    I.acquirePool();
     const auto tc = std::chrono::steady_clock::now();
     I.nRows = int(s.rows.size());
     I.nE = s.nE;
@@ -1049,6 +1135,26 @@ std::unique_ptr<Problem> Problem::create(const Structure& s, std::string* why)
         manifOff[q + 1] = manifOff[q] + std::int64_t(s.manifSize[q]) * s.manifTsize[q];
     I.plusJValues = manifOff[I.nManif];
 
+    // the rows (the largest upload) go up on a thread of their own while the host builds the rest
+    if (!I.alloc(&I.rows, std::int64_t(s.rows.size()), "rows"))
+    {
+        *why = I.err;
+        return nullptr;
+    }
+    cudaError_t rowsCopy = cudaSuccess;
+    std::thread rowsUp([&] {
+        if (s.rows.size())
+            rowsCopy = cudaMemcpy(I.rows, s.rows.data(), s.rows.size() * sizeof(Row), cudaMemcpyHostToDevice);
+    });
+    struct Joiner
+    {
+        std::thread& th;
+        ~Joiner()
+        {
+            if (th.joinable())
+                th.join();
+        }
+    } joinRows{rowsUp};
     double stage[5] = {0, 0, 0, 0, 0};   // CHESHIRE_BA_DEVICE_PROFILE: create's stages
     auto stamp = [&](int k) { stage[k] = std::chrono::duration<double>(std::chrono::steady_clock::now() - tc).count(); };
     // per (partition, camera block), the partition's rows on the block, in order: each partition on its own,
@@ -1063,36 +1169,75 @@ std::unique_ptr<Problem> Problem::create(const Structure& s, std::string* why)
             std::int64_t j;
         };
         std::vector<std::vector<Entry>> per(size_t(I.P));
+        const int nFb = int(s.fTsize.size());
         hostParallel(I.P, [&](int p) {
-            std::vector<Entry>& e = per[size_t(p)];
+            // a counting sort by block over the blocks this partition touches; within a block, row order
+            std::vector<std::int32_t> cnt(size_t(nFb) + 1, 0), touched;
+            std::int64_t n = 0;
             for (int ri = s.parts[p]; ri < s.parts[p + 1]; ++ri)
             {
                 const Row& row = s.rows[size_t(ri)];
                 for (int k = 0; k < 3; ++k)
                     if (row.pj[k] >= 0)
-                        e.push_back(Entry{row.blk[k], ri, row.j + row.pj[k]});
+                    {
+                        if (cnt[size_t(row.blk[k])]++ == 0)
+                            touched.push_back(row.blk[k]);
+                        ++n;
+                    }
             }
-            std::stable_sort(e.begin(), e.end(), [](const Entry& x, const Entry& y) { return x.f < y.f; });
+            std::sort(touched.begin(), touched.end());
+            std::int32_t acc = 0;
+            for (int f : touched)
+            {
+                const std::int32_t c = cnt[size_t(f)];
+                cnt[size_t(f)] = acc;
+                acc += c;
+            }
+            std::vector<Entry>& e = per[size_t(p)];
+            e.resize(size_t(n));
+            for (int ri = s.parts[p]; ri < s.parts[p + 1]; ++ri)
+            {
+                const Row& row = s.rows[size_t(ri)];
+                for (int k = 0; k < 3; ++k)
+                    if (row.pj[k] >= 0)
+                        e[size_t(cnt[size_t(row.blk[k])]++)] = Entry{row.blk[k], ri, row.j + row.pj[k]};
+            }
         });
+        // per partition its pairs and entries, then everything placed in parallel at the prefix offsets
+        std::vector<std::int64_t> pairOff(size_t(I.P) + 1, 0), entryOff(size_t(I.P) + 1, 0);
         for (int p = 0; p < I.P; ++p)
         {
             const std::vector<Entry>& e = per[size_t(p)];
+            std::int64_t np = 0;
             for (size_t q = 0; q < e.size(); ++q)
+                np += q == 0 || e[q].f != e[q - 1].f ? 1 : 0;
+            pairOff[size_t(p) + 1] = pairOff[size_t(p)] + np;
+            entryOff[size_t(p) + 1] = entryOff[size_t(p)] + std::int64_t(e.size());
+        }
+        const size_t nPairs = size_t(pairOff[size_t(I.P)]), nEntries = size_t(entryOff[size_t(I.P)]);
+        pairPart.resize(nPairs);
+        pairF.resize(nPairs);
+        pairStart.resize(nPairs + 1);
+        listRow.resize(nEntries);
+        listJ.resize(nEntries);
+        hostParallel(I.P, [&](int p) {
+            const std::vector<Entry>& e = per[size_t(p)];
+            std::int64_t pr = pairOff[size_t(p)], at = entryOff[size_t(p)];
+            for (size_t q = 0; q < e.size(); ++q, ++at)
             {
                 if (q == 0 || e[q].f != e[q - 1].f)
                 {
-                    if (q > 0)
-                        pairStart.push_back(std::int64_t(listRow.size()));
-                    pairPart.push_back(p);
-                    pairF.push_back(e[q].f);
+                    pairPart[size_t(pr)] = p;
+                    pairF[size_t(pr)] = e[q].f;
+                    pairStart[size_t(pr)] = at;
+                    ++pr;
                 }
-                listRow.push_back(e[q].ri);
-                listJ.push_back(e[q].j);
+                listRow[size_t(at)] = e[q].ri;
+                listJ[size_t(at)] = e[q].j;
             }
-            if (!e.empty())
-                pairStart.push_back(std::int64_t(listRow.size()));
             std::vector<Entry>().swap(per[size_t(p)]);
-        }
+        });
+        pairStart[nPairs] = std::int64_t(nEntries);
         I.nPairs = int(pairPart.size());
     }
     std::vector<std::int64_t> colStart(size_t(I.nPairs) + 1, 0);
@@ -1272,11 +1417,12 @@ std::unique_ptr<Problem> Problem::create(const Structure& s, std::string* why)
     {
         std::int32_t ri, j1, j2;
     };
-    // visit(g, f): the group's records in the host's order, f(landmark or -1, f1's l, f2's l, block, rows on both)
-    auto visit = [&](int g, auto&& f) {
-        std::vector<std::int32_t> lStart, lRow, lPj, slotPos;
+    // visit(c0, c1, eless, f): the records of the landmarks [c0, c1) in the host's order (then, when eless, the rows
+    // without a landmark), f(landmark or -1, f1's l, f2's l, block, rows on both)
+    auto visit = [&](int c0, int c1, bool eless, auto&& blockOfPair, auto&& f) {
+        std::vector<std::int32_t> lStart, lRow, lPj, slotPos, cur;
         std::vector<RowOn> both;
-        for (int c = s.groups[size_t(g)]; c < s.groups[size_t(g) + 1]; ++c)
+        for (int c = c0; c < c1; ++c)
         {
             const int r0 = s.chunkStart[size_t(c)], nr = s.chunkStart[size_t(c) + 1] - r0;
             const std::int64_t l0 = s.cfStart[size_t(c)], l1 = s.cfStart[size_t(c) + 1];
@@ -1300,7 +1446,7 @@ std::unique_ptr<Problem> Problem::create(const Structure& s, std::string* why)
             lRow.assign(size_t(lStart[size_t(K)]), 0);
             lPj.assign(size_t(lStart[size_t(K)]), 0);
             {
-                std::vector<std::int32_t> cur(lStart.begin(), lStart.end() - 1);
+                cur.assign(lStart.begin(), lStart.end() - 1);
                 for (int q = 0; q < nr; ++q)
                     for (int k = 0; k < 3; ++k)
                     {
@@ -1316,7 +1462,7 @@ std::unique_ptr<Problem> Problem::create(const Structure& s, std::string* why)
                 for (int lb = la; lb < K; ++lb)
                 {
                     const int f1 = s.cf[size_t(l0 + la)], f2 = s.cf[size_t(l0 + lb)];
-                    const std::int32_t blk = blockOf(f1, f2);
+                    const std::int32_t blk = blockOfPair(f1, f2);
                     if (heavyBlock[size_t(blk)])
                         continue;
                     both.clear();
@@ -1337,7 +1483,7 @@ std::unique_ptr<Problem> Problem::create(const Structure& s, std::string* why)
                     f(c, int(l0 + la), int(l0 + lb), blk, both);
                 }
         }
-        if (g == I.G - 1)
+        if (eless)
             for (const int ri : elessRow)
             {
                 const Row& row = s.rows[size_t(ri)];
@@ -1349,7 +1495,7 @@ std::unique_ptr<Problem> Problem::create(const Structure& s, std::string* why)
                     {
                         if (row.pj[k2] < 0 || row.blk[k2] < row.blk[k1] || (row.blk[k2] == row.blk[k1] && k2 != k1))
                             continue;
-                        const std::int32_t blk = blockOf(row.blk[k1], row.blk[k2]);
+                        const std::int32_t blk = blockOfPair(row.blk[k1], row.blk[k2]);
                         if (heavyBlock[size_t(blk)])
                             continue;
                         both.assign(1, RowOn{ri, std::int32_t(row.j + row.pj[k1]), std::int32_t(row.j + row.pj[k2])});
@@ -1371,34 +1517,87 @@ std::unique_ptr<Problem> Problem::create(const Structure& s, std::string* why)
         for (auto& th : pool)
             th.join();
     };
-    // pass 1: the records per (group, block), the rows per group
-    std::vector<std::int64_t> recStart(size_t(I.G) * size_t(I.nS) + 1, 0), groupRows(size_t(I.G) + 1, 0);
-    eachGroup([&](int g) {
+    // two passes over units of work: each group split into kSub landmark ranges (the rows without a landmark in the
+    // last unit), so the host's threads stay busy; a unit's records go to (group, block) offsets after the earlier
+    // units of its group, which keeps every (group, block)'s records in the host's order
+    constexpr int kSub = 8;
+    const int nU = I.G * kSub;
+    std::vector<int> uC0(static_cast<size_t>(nU)), uC1(static_cast<size_t>(nU));
+    for (int g = 0; g < I.G; ++g)
+    {
+        const int c0 = s.groups[size_t(g)], n = s.groups[size_t(g) + 1] - c0;
+        for (int k = 0; k < kSub; ++k)
+        {
+            uC0[size_t(g * kSub + k)] = c0 + int(std::int64_t(n) * k / kSub);
+            uC1[size_t(g * kSub + k)] = c0 + int(std::int64_t(n) * (k + 1) / kSub);
+        }
+    }
+    // pass 1 looks each pair's block up (a random access into a table of nF^2) and keeps the answers in visit
+    // order; pass 2 reads them back
+    std::vector<std::vector<std::int32_t>> unitBlk(static_cast<size_t>(nU));
+    auto visitUnit = [&](int u, auto&& blockOfPair, auto&& f) { visit(uC0[size_t(u)], uC1[size_t(u)], u == nU - 1, blockOfPair, f); };
+    // pass 1: per unit, its records per block and its rows
+    std::vector<std::int32_t> unitCnt(size_t(nU) * size_t(I.nS), 0);
+    std::vector<std::int64_t> unitRows(size_t(nU) + 1, 0);
+    hostParallel(nU, [&](int u) {
+        std::int32_t* cnt = unitCnt.data() + size_t(u) * size_t(I.nS);
         std::int64_t rows = 0;
-        visit(g, [&](int, int, int, std::int32_t blk, const std::vector<RowOn>& on) {
-            ++recStart[size_t(g) * size_t(I.nS) + size_t(blk) + 1];
+        std::vector<std::int32_t>& kept = unitBlk[size_t(u)];
+        auto lookUp = [&](int f1, int f2) {
+            const std::int32_t b = blockOf(f1, f2);
+            kept.push_back(b);
+            return b;
+        };
+        visitUnit(u, lookUp, [&](int, int, int, std::int32_t blk, const std::vector<RowOn>& on) {
+            ++cnt[blk];
             rows += std::int64_t(on.size());
         });
-        groupRows[size_t(g) + 1] = rows;
+        unitRows[size_t(u) + 1] = rows;
     });
-    for (size_t q = 1; q < recStart.size(); ++q)
-        recStart[q] += recStart[q - 1];
-    for (int g = 0; g < I.G; ++g)
-        groupRows[size_t(g) + 1] += groupRows[size_t(g)];
-    if (groupRows[size_t(I.G)] >= (std::int64_t(1) << 31))
+    for (int u = 0; u < nU; ++u)
+        unitRows[size_t(u) + 1] += unitRows[size_t(u)];
+    if (unitRows[size_t(nU)] >= (std::int64_t(1) << 31))
     {
         *why = "more than 2^31 row terms";
         return nullptr;
     }
+    // per (group, block) its records, and per (unit, block) where its records start
+    std::vector<std::int64_t> recStart(size_t(I.G) * size_t(I.nS) + 1, 0);
+    for (int g = 0; g < I.G; ++g)
+        for (int b = 0; b < I.nS; ++b)
+        {
+            std::int64_t n = 0;
+            for (int k = 0; k < kSub; ++k)
+                n += unitCnt[size_t(g * kSub + k) * size_t(I.nS) + size_t(b)];
+            recStart[size_t(g) * size_t(I.nS) + size_t(b) + 1] = n;
+        }
+    for (size_t q = 1; q < recStart.size(); ++q)
+        recStart[q] += recStart[q - 1];
+    std::vector<std::int64_t> unitPos(size_t(nU) * size_t(I.nS));
+    hostParallel(I.G, [&](int g) {
+        for (int b = 0; b < I.nS; ++b)
+        {
+            std::int64_t at = recStart[size_t(g) * size_t(I.nS) + size_t(b)];
+            for (int k = 0; k < kSub; ++k)
+            {
+                const size_t q = size_t(g * kSub + k) * size_t(I.nS) + size_t(b);
+                unitPos[q] = at;
+                at += unitCnt[q];
+            }
+        }
+    });
+    std::vector<std::int32_t>().swap(unitCnt);
     // pass 2: the records and their rows
-    const size_t nRec = size_t(recStart.back()), nOn = size_t(groupRows[size_t(I.G)]);
+    const size_t nRec = size_t(recStart.back()), nOn = size_t(unitRows[size_t(nU)]);
     std::vector<std::int32_t> recChunk(nRec), recU(nRec), recM(nRec), recRowStart(nRec), recRowCount(nRec), rowJ1(nOn), rowJ2(nOn), rowR(nOn);
-    eachGroup([&](int g) {
-        std::vector<std::int64_t> pos(recStart.begin() + std::ptrdiff_t(size_t(g) * size_t(I.nS)),
-                                      recStart.begin() + std::ptrdiff_t(size_t(g + 1) * size_t(I.nS)));
-        std::int64_t at = groupRows[size_t(g)];
-        visit(g, [&](int c, int la, int lb, std::int32_t blk, const std::vector<RowOn>& on) {
-            const size_t q = size_t(pos[size_t(blk)]++);
+    hostParallel(nU, [&](int u) {
+        std::int64_t* pos = unitPos.data() + size_t(u) * size_t(I.nS);
+        std::int64_t at = unitRows[size_t(u)];
+        const std::vector<std::int32_t>& kept = unitBlk[size_t(u)];
+        size_t next = 0;
+        auto readBack = [&](int, int) { return kept[next++]; };
+        visitUnit(u, readBack, [&](int c, int la, int lb, std::int32_t blk, const std::vector<RowOn>& on) {
+            const size_t q = size_t(pos[blk]++);
             recChunk[q] = c;
             recU[q] = c >= 0 ? std::int32_t(s.cfM[size_t(la)]) : 0;
             recM[q] = c >= 0 ? std::int32_t(s.cfM[size_t(lb)]) : 0;
@@ -1433,7 +1632,7 @@ std::unique_ptr<Problem> Problem::create(const Structure& s, std::string* why)
     I.nItems = int(itemBlock.size());
 
     stamp(3);
-    const bool ok = I.upload(&I.rows, s.rows, "rows") && I.upload(&I.chunkStart, s.chunkStart, "chunks") && I.upload(&I.parts, s.parts, "parts") &&
+    const bool ok = I.upload(&I.chunkStart, s.chunkStart, "chunks") && I.upload(&I.parts, s.parts, "parts") &&
                     I.upload(&I.groups, s.groups, "groups") && I.upload(&I.fTsize, s.fTsize, "fTsize") && I.upload(&I.fCol, s.fCol, "fCol") &&
                     I.upload(&I.cfStart, s.cfStart, "cfStart") && I.upload(&I.cfM, s.cfM, "cfM") && I.upload(&I.cf, s.cf, "cf") &&
                     I.upload(&I.fcStart, s.fcStart, "fcStart") && I.upload(&I.fc, s.fc, "fc") && I.upload(&I.fcPos, s.fcPos, "fcPos") &&
@@ -1462,7 +1661,8 @@ std::unique_ptr<Problem> Problem::create(const Structure& s, std::string* why)
                     I.alloc(&I.ge, 3 * std::int64_t(I.nE), "E^T b") && I.alloc(&I.sg, std::int64_t(I.G) * I.stride, "the groups' systems") &&
                     I.alloc(&I.sv, I.stride, "the reduced system") && I.alloc(&I.yf, std::int64_t(I.nf), "y") &&
                     I.alloc(&I.yE, std::int64_t(I.ne), "y") && I.alloc(&I.flag, 1, "flag");
-    if (!ok)
+    rowsUp.join();
+    if (!ok || !I.ok(rowsCopy, "rows"))
     {
         *why = I.err;
         return nullptr;
@@ -1471,7 +1671,8 @@ std::unique_ptr<Problem> Problem::create(const Structure& s, std::string* why)
     {
         cudaDeviceSynchronize();
         stamp(4);
-        std::fprintf(stderr, "[cheshire] BA device create: columns %.4f, long chains %.4f, records %.4f, items %.4f, uploads %.4f s\n", stage[0], stage[1] - stage[0], stage[2] - stage[1], stage[3] - stage[2], stage[4] - stage[3]);
+        std::fprintf(stderr, "[cheshire] BA device create: %d rows: columns %.4f, long chains %.4f, records %.4f, items %.4f, uploads %.4f (alloc %.4f, copy %.4f) s\n",
+                     I.nRows, stage[0], stage[1] - stage[0], stage[2] - stage[1], stage[3] - stage[2], stage[4] - stage[3], I.tAlloc, I.tCopy);
         I.kt[Impl::kCreate] += std::chrono::duration<double>(std::chrono::steady_clock::now() - tc).count();
         ++I.calls[Impl::kCreate];
     }
