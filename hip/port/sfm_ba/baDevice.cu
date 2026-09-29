@@ -852,6 +852,129 @@ __global__ void kBack(const std::int64_t* cfStart, const std::int32_t* cf, const
     }
 }
 
+// ---- the minimiser's vectors (step 4d) -------------------------------------------------------------------------
+// the elementwise ops, each the host loop's expression (std::min / std::max as their comparisons)
+__global__ void kVecOp(int o, std::int64_t n, double* dst, const double* a, const double* b, double s, double t)
+{
+    const std::int64_t i = std::int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= n)
+        return;
+    switch (o)
+    {
+        case int(Problem::Op::Copy):
+            dst[i] = a[i];
+            break;
+        case int(Problem::Op::Scale):
+            dst[i] = s * a[i];
+            break;
+        case int(Problem::Op::Neg):
+            dst[i] = -a[i];
+            break;
+        case int(Problem::Op::Mul):
+            dst[i] = a[i] * b[i];
+            break;
+        case int(Problem::Op::Jacobi):
+            dst[i] = 1.0 / (1.0 + arith::baSqrt(a[i]));
+            break;
+        case int(Problem::Op::Clamp):
+        {
+            const double m = a[i] < s ? s : a[i];   // std::max(a, s)
+            dst[i] = t < m ? t : m;                 // std::min(m, t)
+            break;
+        }
+        case int(Problem::Op::SqrtDiv):
+            dst[i] = arith::baSqrt(a[i] / s);
+            break;
+        case int(Problem::Op::ScaleInPlace):
+            dst[i] = dst[i] * s;
+            break;
+        case int(Problem::Op::Add):
+            dst[i] = a[i] + b[i];
+            break;
+        case int(Problem::Op::Fill):
+            dst[i] = s;
+            break;
+        default:
+            break;
+    }
+}
+
+// psum / pmax per block of `blk` values (the host's blocks), one workgroup per block; the host combines the blocks
+// in order. A sum is the host's chain, in order from zero: the workgroup stages a tile of the values in shared
+// memory and one thread adds it in order. A maximum does not depend on the order (from zero, std::max skips a NaN,
+// as the comparison here does), so every thread takes a share and the shares meet in a tree.
+constexpr int kRedThreads = 256, kRedTile = 2048;
+
+__device__ inline double redValue(int r, const double* a, const double* b, std::int64_t i)
+{
+    switch (r)
+    {
+        case int(Problem::Red::Dot):
+            return a[i] * b[i];
+        case int(Problem::Red::Sq):
+            return a[i] * a[i];
+        case int(Problem::Red::SqDiff):
+            return (a[i] - b[i]) * (a[i] - b[i]);
+        case int(Problem::Red::MaxAbs):
+            return fabs(a[i]);
+        default:
+            return fabs(a[i] - b[i]);
+    }
+}
+
+__global__ void __launch_bounds__(kRedThreads) kVecReduce(int r, std::int64_t n, std::int64_t blk, const double* a, const double* b,
+                                                           double* partials)
+{
+    __shared__ double tile[kRedTile];
+    const std::int64_t k = blockIdx.x, s = k * blk, e = s + blk < n ? s + blk : n;
+    const int tid = int(threadIdx.x);
+    if (r == int(Problem::Red::MaxAbs) || r == int(Problem::Red::MaxAbsDiff))
+    {
+        double m = 0.0;
+        for (std::int64_t i = s + tid; i < e; i += kRedThreads)
+        {
+            const double v = redValue(r, a, b, i);
+            m = m < v ? v : m;   // std::max(m, v)
+        }
+        tile[tid] = m;
+        __syncthreads();
+        for (int w = kRedThreads / 2; w > 0; w >>= 1)
+        {
+            if (tid < w)
+            {
+                const double q = tile[tid + w];
+                tile[tid] = tile[tid] < q ? q : tile[tid];
+            }
+            __syncthreads();
+        }
+        if (tid == 0)
+            partials[k] = tile[0];
+        return;
+    }
+    double acc = 0.0;   // thread 0's
+    for (std::int64_t t0 = s; t0 < e; t0 += kRedTile)
+    {
+        const int cnt = int(e - t0 < kRedTile ? e - t0 : kRedTile);
+        for (int j = tid; j < cnt; j += kRedThreads)
+            tile[j] = redValue(r, a, b, t0 + j);
+        __syncthreads();
+        if (tid == 0)
+            for (int j = 0; j < cnt; ++j)
+                acc += tile[j];
+        __syncthreads();
+    }
+    if (tid == 0)
+        partials[k] = acc;
+}
+
+// S's values in the order the host's factorisation reads them (its sparse matrix's, column-major)
+__global__ void kOrder(const double* sv, const std::int64_t* order, std::int64_t n, double* out)
+{
+    const std::int64_t i = std::int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n)
+        out[i] = sv[order[i]];
+}
+
 unsigned gridOf(std::int64_t n, unsigned block)
 {
     return unsigned((n + block - 1) / block);
@@ -941,9 +1064,18 @@ struct Problem::Impl
     std::int32_t *recChunk = nullptr, *recU = nullptr, *recM = nullptr, *recRowStart = nullptr, *recRowCount = nullptr, *rowJ1 = nullptr,
                  *rowJ2 = nullptr, *rowR = nullptr, *itemCol = nullptr;
     double* mU = nullptr;
-    double *constLm = nullptr, *x = nullptr, *plusJ = nullptr, *J = nullptr, *r = nullptr, *Jtmp = nullptr, *rtmp = nullptr, *rowCost = nullptr,
-           *partCost = nullptr, *partF = nullptr, *vecA = nullptr, *vecB = nullptr, *terms = nullptr, *partDot = nullptr, *m = nullptr,
-           *inv = nullptr, *ge = nullptr, *sg = nullptr, *sv = nullptr, *yf = nullptr, *yE = nullptr;
+    // the minimiser's vectors (step 4d)
+    std::vector<double*> vecs;
+    std::vector<std::int64_t> vecN;
+    double* partials = nullptr;
+    std::int64_t partialsN = 0;
+    // S in the host factorisation's order (setOrder)
+    std::int64_t* order = nullptr;
+    double* ordered = nullptr;
+    std::int64_t nOrder = -1;
+    double *constLm = nullptr, *plusJ = nullptr, *J = nullptr, *r = nullptr, *Jtmp = nullptr, *rtmp = nullptr, *rowCost = nullptr,
+           *partCost = nullptr, *partF = nullptr, *terms = nullptr, *partDot = nullptr, *m = nullptr,
+           *inv = nullptr, *ge = nullptr, *sg = nullptr, *sv = nullptr;
     char *rowOk = nullptr, *partOk = nullptr;
     PoseEntry* poses = nullptr;
     CameraValues* cams = nullptr;
@@ -969,6 +1101,8 @@ struct Problem::Impl
         const auto t0 = std::chrono::steady_clock::now();
         for (void* p : allocs)
             cudaFree(p);
+        if (partials)
+            cudaFree(partials);
         if (pooled)
         {
             cudaDeviceSynchronize();   // the pool's next holder may reuse the buffers at once
@@ -1649,18 +1783,15 @@ std::unique_ptr<Problem> Problem::create(const Structure& s, std::string* why)
                     I.upload(&I.recU, recU, "records") && I.upload(&I.recM, recM, "records") && I.upload(&I.recRowStart, recRowStart, "records") &&
                     I.upload(&I.recRowCount, recRowCount, "records") && I.upload(&I.rowJ1, rowJ1, "records") && I.upload(&I.rowJ2, rowJ2, "records") &&
                     I.upload(&I.rowR, rowR, "records") && I.upload(&I.itemCol, itemCol, "items") && I.alloc(&I.mU, I.mValues, "u") &&
-                    I.alloc(&I.x, std::int64_t(I.ne), "x") &&
                     I.alloc(&I.plusJ, I.plusJValues, "plusJ") && I.alloc(&I.poses, std::int64_t(I.nPoses), "poses") &&
                     I.alloc(&I.cams, std::int64_t(I.nCam), "cameras") && I.alloc(&I.J, I.jValues, "the Jacobian") &&
                     I.alloc(&I.r, 2 * std::int64_t(I.nRows), "residuals") && I.alloc(&I.rowCost, std::int64_t(I.nRows), "rows") &&
                     I.alloc(&I.rowOk, std::int64_t(I.nRows), "rows") && I.alloc(&I.partCost, std::int64_t(I.P), "parts") &&
                     I.alloc(&I.partOk, std::int64_t(I.P), "parts") && I.alloc(&I.partF, std::int64_t(I.P) * I.nf, "parts") &&
-                    I.alloc(&I.vecA, std::int64_t(I.n), "vectors") && I.alloc(&I.vecB, std::int64_t(I.n), "vectors") &&
                     I.alloc(&I.terms, 2 * std::int64_t(I.nRows), "model") && I.alloc(&I.partDot, std::int64_t(I.P), "model") &&
                     I.alloc(&I.m, I.mValues, "E^T F") && I.alloc(&I.inv, 9 * std::int64_t(I.nE), "inverses") &&
                     I.alloc(&I.ge, 3 * std::int64_t(I.nE), "E^T b") && I.alloc(&I.sg, std::int64_t(I.G) * I.stride, "the groups' systems") &&
-                    I.alloc(&I.sv, I.stride, "the reduced system") && I.alloc(&I.yf, std::int64_t(I.nf), "y") &&
-                    I.alloc(&I.yE, std::int64_t(I.ne), "y") && I.alloc(&I.flag, 1, "flag");
+                    I.alloc(&I.sv, I.stride, "the reduced system") && I.alloc(&I.flag, 1, "flag");
     rowsUp.join();
     if (!ok || !I.ok(rowsCopy, "rows"))
     {
@@ -1679,8 +1810,71 @@ std::unique_ptr<Problem> Problem::create(const Structure& s, std::string* why)
     return std::unique_ptr<Problem>(new Problem(std::move(im)));
 }
 
-bool Problem::evaluate(Mode mode, const double* xE, const PoseEntry* poses, const CameraValues* cameras, const double* plusJacobians,
-                       double* partCost, char* partOk, double* gradient)
+bool Problem::setOrder(const std::int64_t* src, std::int64_t count)
+{
+    Impl& I = *_impl;
+    if (!I.alloc(&I.order, count, "S's order") || !I.alloc(&I.ordered, count, "S's order"))
+        return false;
+    I.nOrder = count;
+    return count == 0 || I.ok(cudaMemcpy(I.order, src, size_t(count) * sizeof(std::int64_t), cudaMemcpyHostToDevice), "S's order");
+}
+
+int Problem::vector(std::int64_t n)
+{
+    Impl& I = *_impl;
+    double* p = nullptr;
+    if (!I.alloc(&p, n, "a vector"))
+        return -1;
+    I.vecs.push_back(p);
+    I.vecN.push_back(n);
+    return int(I.vecs.size()) - 1;
+}
+
+bool Problem::upload(int v, const double* h, std::int64_t offset, std::int64_t count)
+{
+    Impl& I = *_impl;
+    return count <= 0 || I.ok(cudaMemcpy(I.vecs[size_t(v)] + offset, h, size_t(count) * sizeof(double), cudaMemcpyHostToDevice), "vector up");
+}
+
+bool Problem::download(int v, double* h, std::int64_t offset, std::int64_t count)
+{
+    Impl& I = *_impl;
+    return count <= 0 || I.ok(cudaMemcpy(h, I.vecs[size_t(v)] + offset, size_t(count) * sizeof(double), cudaMemcpyDeviceToHost), "vector down");
+}
+
+bool Problem::op(Op o, int dst, int a, int b, double s, double t, std::int64_t n)
+{
+    Impl& I = *_impl;
+    if (n <= 0)
+        return true;
+    kVecOp<<<gridOf(n, 256), 256>>>(int(o), n, I.vecs[size_t(dst)], a >= 0 ? I.vecs[size_t(a)] : nullptr, b >= 0 ? I.vecs[size_t(b)] : nullptr, s,
+                                     t);
+    return I.ok(cudaGetLastError(), "vector op");
+}
+
+bool Problem::reduce(Red r, int a, int b, std::int64_t n, std::int64_t block, std::vector<double>* partials)
+{
+    Impl& I = *_impl;
+    const std::int64_t nb = (n + block - 1) / block;
+    partials->assign(size_t(nb), 0.0);
+    if (nb == 0)
+        return true;
+    if (I.partialsN < nb)
+    {
+        if (I.partials)
+            cudaFree(I.partials);
+        I.partials = nullptr;
+        I.partialsN = 0;
+        if (!I.ok(cudaMalloc(&I.partials, size_t(nb) * sizeof(double)), "partials"))
+            return false;
+        I.partialsN = nb;
+    }
+    kVecReduce<<<unsigned(nb), kRedThreads>>>(int(r), n, block, I.vecs[size_t(a)], b >= 0 ? I.vecs[size_t(b)] : nullptr, I.partials);
+    return I.sync("vector reduce") && I.ok(cudaMemcpy(partials->data(), I.partials, size_t(nb) * sizeof(double), cudaMemcpyDeviceToHost), "partials");
+}
+
+bool Problem::evaluate(Mode mode, int xVec, const PoseEntry* poses, const CameraValues* cameras, const double* plusJacobians,
+                       double* partCost, char* partOk, int gradVec)
 {
     Impl& I = *_impl;
     const auto t0 = std::chrono::steady_clock::now();
@@ -1690,14 +1884,14 @@ bool Problem::evaluate(Mode mode, const double* xE, const PoseEntry* poses, cons
             return false;
     }
     I.tick();
-    if (!I.ok(cudaMemcpy(I.x, xE, size_t(I.ne) * sizeof(double), cudaMemcpyHostToDevice), "x") ||
-        !I.ok(cudaMemcpy(I.poses, poses, size_t(I.nPoses) * sizeof(PoseEntry), cudaMemcpyHostToDevice), "poses") ||
+    double* const gradient = gradVec >= 0 ? I.vecs[size_t(gradVec)] : nullptr;
+    if (!I.ok(cudaMemcpy(I.poses, poses, size_t(I.nPoses) * sizeof(PoseEntry), cudaMemcpyHostToDevice), "poses") ||
         !I.ok(cudaMemcpy(I.cams, cameras, size_t(I.nCam) * sizeof(CameraValues), cudaMemcpyHostToDevice), "cameras") ||
         (I.plusJValues > 0 && !I.ok(cudaMemcpy(I.plusJ, plusJacobians, size_t(I.plusJValues) * sizeof(double), cudaMemcpyHostToDevice), "plusJ")))
         return false;
     double* J = mode == Mode::Gradient ? I.Jtmp : I.J;
     double* r = mode == Mode::Gradient ? I.rtmp : I.r;
-    EvalArgs A{I.rows, I.nRows, int(mode), I.x, I.constLm, I.poses, I.cams, I.camInfo, I.plusJ, I.manifOff, I.manifSize, I.manifTsize,
+    EvalArgs A{I.rows, I.nRows, int(mode), I.vecs[size_t(xVec)], I.constLm, I.poses, I.cams, I.camInfo, I.plusJ, I.manifOff, I.manifSize, I.manifTsize,
                I.fTsize, J, r, I.rowCost, I.rowOk, I.loss, I.hubA, I.hubB};
     const unsigned B = 128;
     I.tock(Impl::kUpload);
@@ -1707,13 +1901,13 @@ bool Problem::evaluate(Mode mode, const double* xE, const PoseEntry* poses, cons
     I.tock(Impl::kPartCostK);
     if (mode != Mode::Cost && gradient)
     {
-        kColumnsE<<<gridOf(I.nE, B), B>>>(I.rows, I.chunkStart, I.nE, J, r, 0, I.vecA);
+        kColumnsE<<<gridOf(I.nE, B), B>>>(I.rows, I.chunkStart, I.nE, J, r, 0, gradient);
         I.tock(Impl::kColE);
         cudaMemsetAsync(I.partF, 0, size_t(I.P) * I.nf * sizeof(double));
         kColumnsF<<<gridOf(I.nPairCols, 64), 64>>>(I.pairStart, I.pairPart, I.pairF, I.listRow, I.listJ, I.colStart, I.nPairs, I.fTsize, I.fCol, I.nf,
                                                      J, r, 0, I.partF);
         I.tock(Impl::kColF);
-        kReduceF<<<gridOf(I.nf, 64), 64>>>(I.partF, I.P, I.nf, I.vecA + I.ne);
+        kReduceF<<<gridOf(I.nf, 64), 64>>>(I.partF, I.P, I.nf, gradient + I.ne);
         I.tock(Impl::kReduce);
     }
     if (!I.sync("evaluation"))
@@ -1721,51 +1915,42 @@ bool Problem::evaluate(Mode mode, const double* xE, const PoseEntry* poses, cons
     if (!I.ok(cudaMemcpy(partCost, I.partCost, size_t(I.P) * sizeof(double), cudaMemcpyDeviceToHost), "costs") ||
         !I.ok(cudaMemcpy(partOk, I.partOk, size_t(I.P), cudaMemcpyDeviceToHost), "costs"))
         return false;
-    if (mode != Mode::Cost && gradient && !I.ok(cudaMemcpy(gradient, I.vecA, size_t(I.n) * sizeof(double), cudaMemcpyDeviceToHost), "gradient"))
-        return false;
     I.tock(Impl::kDownload);
     I.secs[0] += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     return true;
 }
 
-bool Problem::squaredColumnNorms(double* out)
+bool Problem::squaredColumnNorms(int outVec)
 {
     Impl& I = *_impl;
+    double* const out = I.vecs[size_t(outVec)];
     const unsigned B = 128;
     I.tick();
-    kColumnsE<<<gridOf(I.nE, B), B>>>(I.rows, I.chunkStart, I.nE, I.J, I.r, 1, I.vecA);
+    kColumnsE<<<gridOf(I.nE, B), B>>>(I.rows, I.chunkStart, I.nE, I.J, I.r, 1, out);
     I.tock(Impl::kColE);
     cudaMemsetAsync(I.partF, 0, size_t(I.P) * I.nf * sizeof(double));
     kColumnsF<<<gridOf(I.nPairCols, 64), 64>>>(I.pairStart, I.pairPart, I.pairF, I.listRow, I.listJ, I.colStart, I.nPairs, I.fTsize, I.fCol, I.nf,
                                                  I.J, I.r, 1, I.partF);
     I.tock(Impl::kColF);
-    kReduceF<<<gridOf(I.nf, 64), 64>>>(I.partF, I.P, I.nf, I.vecA + I.ne);
+    kReduceF<<<gridOf(I.nf, 64), 64>>>(I.partF, I.P, I.nf, out + I.ne);
     I.tock(Impl::kReduce);
-    const bool ok = I.sync("column norms") && I.ok(cudaMemcpy(out, I.vecA, size_t(I.n) * sizeof(double), cudaMemcpyDeviceToHost), "column norms");
-    I.tock(Impl::kDownload);
-    return ok;
+    return I.sync("column norms");
 }
 
-bool Problem::scaleColumns(const double* scale)
+bool Problem::scaleColumns(int scaleVec)
 {
     Impl& I = *_impl;
     I.tick();
-    if (!I.ok(cudaMemcpy(I.vecB, scale, size_t(I.n) * sizeof(double), cudaMemcpyHostToDevice), "scale"))
-        return false;
-    I.tock(Impl::kUpload);
-    kScale<<<gridOf(I.nRows, 128), 128>>>(I.rows, I.nRows, I.fTsize, I.fCol, I.ne, I.vecB, I.J);
+    kScale<<<gridOf(I.nRows, 128), 128>>>(I.rows, I.nRows, I.fTsize, I.fCol, I.ne, I.vecs[size_t(scaleVec)], I.J);
     I.tock(Impl::kScaleK);
     return I.sync("scale");
 }
 
-bool Problem::modelCostChange(const double* step, double* partDot)
+bool Problem::modelCostChange(int stepVec, double* partDot)
 {
     Impl& I = *_impl;
     I.tick();
-    if (!I.ok(cudaMemcpy(I.vecB, step, size_t(I.n) * sizeof(double), cudaMemcpyHostToDevice), "step"))
-        return false;
-    I.tock(Impl::kUpload);
-    kModel<<<gridOf(I.nRows, 128), 128>>>(I.rows, I.nRows, I.fTsize, I.fCol, I.ne, I.vecB, I.J, I.r, I.terms);
+    kModel<<<gridOf(I.nRows, 128), 128>>>(I.rows, I.nRows, I.fTsize, I.fCol, I.ne, I.vecs[size_t(stepVec)], I.J, I.r, I.terms);
     I.tock(Impl::kModelK);
     kPartDot<<<gridOf(I.P, 64), 64>>>(I.parts, I.P, I.terms, I.partDot);
     I.tock(Impl::kPartDotK);
@@ -1774,24 +1959,25 @@ bool Problem::modelCostChange(const double* step, double* partDot)
     return ok;
 }
 
-bool Problem::eliminate(const double* D, double* sValues, double* rhs, bool* finite)
+bool Problem::eliminate(int DVec, double* sValues, double* rhs, bool* finite)
 {
     Impl& I = *_impl;
     const auto t0 = std::chrono::steady_clock::now();
     I.tick();
-    if (!I.ok(cudaMemcpy(I.vecB, D, size_t(I.n) * sizeof(double), cudaMemcpyHostToDevice), "D") || !I.ok(cudaMemset(I.flag, 0, sizeof(int)), "flag"))
+    double* const D = I.vecs[size_t(DVec)];
+    if (!I.ok(cudaMemset(I.flag, 0, sizeof(int)), "flag"))
         return false;
     I.tock(Impl::kUpload);
-    kElimChunk<<<gridOf(I.nE, 128), 128>>>(I.rows, I.chunkStart, I.nE, I.cfStart, I.cf, I.cfM, I.fTsize, I.vecB, I.J, I.r, I.m, I.mU, I.inv, I.ge, I.flag);
+    kElimChunk<<<gridOf(I.nE, 128), 128>>>(I.rows, I.chunkStart, I.nE, I.cfStart, I.cf, I.cfM, I.fTsize, D, I.J, I.r, I.m, I.mU, I.inv, I.ge, I.flag);
     I.tock(Impl::kElimK);
     const AsmArgs As{I.recStart, I.recChunk, I.recU, I.recM, I.recRowStart, I.recRowCount, I.rowJ1, I.rowJ2, I.rowR, I.itemBlock, I.itemRow,
-                     I.itemCol, I.sRow, I.sCol, I.sOff, I.fTsize, I.fCol, I.nS, I.nItems, I.G, I.ne, I.sValues, I.stride, I.vecB, I.J, I.r,
+                     I.itemCol, I.sRow, I.sCol, I.sOff, I.fTsize, I.fCol, I.nS, I.nItems, I.G, I.ne, I.sValues, I.stride, D, I.J, I.r,
                      I.mU, I.m, I.ge, I.sg};
     const std::int64_t na = std::int64_t(I.G) * I.nItems;
     if (na > 0)
         kAssembleRec<<<gridOf(na, 128), 128>>>(As);
     I.tock(Impl::kTermsK);
-    HeavyArgs H{I.rows, I.J, I.r, I.m, I.inv, I.ge, I.vecB, I.cfStart, I.cf, I.cfM, I.fTsize, I.fCol, I.hVals, I.hvStart, I.evKey, I.evStart,
+    HeavyArgs H{I.rows, I.J, I.r, I.m, I.inv, I.ge, D, I.cfStart, I.cf, I.cfM, I.fTsize, I.fCol, I.hVals, I.hvStart, I.evKey, I.evStart,
                 I.segCam, I.segGroup, I.scrBase, I.foldStart, I.nSeg, I.ne, I.stride, I.hScratch, I.sg};
     for (const auto& hb : I.heavyBatches)
     {
@@ -1802,10 +1988,14 @@ bool Problem::eliminate(const double* D, double* sValues, double* rhs, bool* fin
     }
     I.tock(Impl::kHeavyK);
     kSumGroups<<<gridOf(I.stride, 128), 128>>>(I.sg, I.G, I.stride, I.sv);
+    if (I.nOrder >= 0)
+        kOrder<<<gridOf(I.nOrder, 256), 256>>>(I.sv, I.order, I.nOrder, I.ordered);
     I.tock(Impl::kSumK);
     int nf = 0;
+    const bool ordered = I.nOrder >= 0;
     if (!I.sync("elimination") || !I.ok(cudaMemcpy(&nf, I.flag, sizeof(int), cudaMemcpyDeviceToHost), "flag") ||
-        !I.ok(cudaMemcpy(sValues, I.sv, size_t(I.sValues) * sizeof(double), cudaMemcpyDeviceToHost), "S") ||
+        !I.ok(cudaMemcpy(sValues, ordered ? I.ordered : I.sv, size_t(ordered ? I.nOrder : I.sValues) * sizeof(double), cudaMemcpyDeviceToHost),
+              "S") ||
         !I.ok(cudaMemcpy(rhs, I.sv + I.sValues, size_t(I.nf) * sizeof(double), cudaMemcpyDeviceToHost), "rhs"))
         return false;
     I.tock(Impl::kDownload);
@@ -1814,18 +2004,19 @@ bool Problem::eliminate(const double* D, double* sValues, double* rhs, bool* fin
     return true;
 }
 
-bool Problem::backSubstitute(const double* yf, double* yE, bool* finite)
+bool Problem::backSubstitute(const double* yf, int yVec, bool* finite)
 {
     Impl& I = *_impl;
     I.tick();
-    if (!I.ok(cudaMemcpy(I.yf, yf, size_t(I.nf) * sizeof(double), cudaMemcpyHostToDevice), "y") || !I.ok(cudaMemset(I.flag, 0, sizeof(int)), "flag"))
+    double* const y = I.vecs[size_t(yVec)];
+    // yf goes to y's camera part, and the landmarks' part is solved from it
+    if (!I.ok(cudaMemcpy(y + I.ne, yf, size_t(I.nf) * sizeof(double), cudaMemcpyHostToDevice), "y") || !I.ok(cudaMemset(I.flag, 0, sizeof(int)), "flag"))
         return false;
     I.tock(Impl::kUpload);
-    kBack<<<gridOf(I.nE, 128), 128>>>(I.cfStart, I.cf, I.cfM, I.fTsize, I.fCol, I.nE, I.m, I.inv, I.ge, I.yf, I.yE, I.flag);
+    kBack<<<gridOf(I.nE, 128), 128>>>(I.cfStart, I.cf, I.cfM, I.fTsize, I.fCol, I.nE, I.m, I.inv, I.ge, y + I.ne, y, I.flag);
     I.tock(Impl::kBackK);
     int nf = 0;
-    if (!I.sync("back-substitution") || !I.ok(cudaMemcpy(&nf, I.flag, sizeof(int), cudaMemcpyDeviceToHost), "flag") ||
-        !I.ok(cudaMemcpy(yE, I.yE, size_t(I.ne) * sizeof(double), cudaMemcpyDeviceToHost), "y"))
+    if (!I.sync("back-substitution") || !I.ok(cudaMemcpy(&nf, I.flag, sizeof(int), cudaMemcpyDeviceToHost), "flag"))
         return false;
     I.tock(Impl::kDownload);
     *finite = nf == 0;

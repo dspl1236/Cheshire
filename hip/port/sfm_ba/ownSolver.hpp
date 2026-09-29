@@ -336,6 +336,7 @@ struct Times
     // the passes around them (step 4a): column norms, Jacobi scaling, the model cost change, Plus, and the
     // state copies
     double norms = 0.0, scale = 0.0, model = 0.0, plus = 0.0, state = 0.0;
+    double vec = 0.0;   // the minimiser's vector passes (step 4d; on the device their launches and reductions)
     int nJ = 0, nCost = 0, nGrad = 0, nSolves = 0, threads = 1;
 };
 
@@ -936,6 +937,23 @@ class Solver
         Cost,       // the cost alone (a candidate point); _r and _J untouched
         Gradient    // the cost and the unscaled tangent gradient into *grad (the line search); _r, _J untouched
     };
+    // The minimiser's vectors (step 4d): on the host, or with the device on the device. A state (ambient) vector
+    // on the device keeps its camera part on the host as well, the mirror: the host reads the camera blocks
+    // (their objects, the poses' rotations) and applies their manifolds.
+    struct Vec
+    {
+        std::vector<double> h;   // the values; with the device a state's camera part alone (ambient, from _ne)
+        int d = -1;              // the device's vector
+    };
+    // the elementwise passes and the reductions, the host loops' expressions (baDevice.cu: kVecOp, kVecReduce)
+    enum class VOp
+    {
+        Copy, Scale, Neg, Mul, Jacobi, Clamp, SqrtDiv, ScaleInPlace, Add, Fill
+    };
+    enum class VRed
+    {
+        Dot, Sq, SqDiff, MaxAbs, MaxAbsDiff
+    };
     const Source& _src;
     Options _opt;
     std::function<void()> _prepare;
@@ -952,13 +970,16 @@ class Solver
     std::vector<int> _chunkStart;            // per E block its first row; [nE] the first row without one; [nE + 1] the end
     std::vector<int> _parts;                 // evaluation partitions (row boundaries, whole chunks)
     double _fixedCost = 0.0;
-    std::vector<double> _r, _scale, _diag, _grad;
+    std::vector<double> _r;
+    Vec _scale, _diag, _grad;                // Jacobi scaling, the LM diagonal, the gradient
+    Vec _lsScaled, _lsX, _lsGrad;            // the line search's sample: the step, the point, its gradient
     Buffer _J;
     size_t _nr = 0;
     bool _constrained = false;               // any bound on a free block: Ceres' is_constrained
     std::vector<double> _x0;                 // the starting point (Ceres puts it back on FAILURE)
     bool _qr = false;                        // no eliminated block: Ceres' DENSE_QR (LinearSolverForZeroEBlocks)
     std::vector<double> _partF;              // per partition, an F-sized accumulator (gradient, column norms)
+    std::vector<double> _plusF;              // with the device: a step's camera part, for Plus
 
     // Schur elimination: per chunk, its F blocks (sorted) with their E^T F blocks in _m
     std::vector<size_t> _cfStart, _cfM;
@@ -993,7 +1014,7 @@ class Solver
     std::vector<double> _devPlusJ;
     std::vector<size_t> _devManifOff;
 #endif
-    const double* _devX = nullptr;           // the state the next evaluation is at (the device reads its landmarks)
+    int _devXv = -1;                         // the state the next evaluation is at, a device vector (its landmarks)
 
     bool devOn() const
     {
@@ -1649,11 +1670,10 @@ class Solver
         return x;
     }
     // all: every block; with the device only the camera blocks, which the host still reads (the camera
-    // objects, the poses' rotations), unless all: the device reads the landmarks from x itself
+    // objects, the poses' rotations), unless all: the device reads the landmarks from its own state vector
     void setState(const std::vector<double>& x, bool all = false)
     {
         const auto t0 = Clock::now();
-        _devX = x.data();
         const int nE = int(_e.size()), first = devOn() && !all ? nE : 0, nb = int(_e.size() + _f.size());
 #pragma omp parallel for schedule(static, 4096) num_threads(_threads)
         for (int i = first; i < nb; ++i)
@@ -1662,6 +1682,40 @@ class Solver
             std::copy(x.begin() + std::ptrdiff_t(b.x), x.begin() + std::ptrdiff_t(b.x + size_t(b.size)), b.ptr);
         }
         _times.state += since(t0);
+    }
+    // with the device: the next evaluation at x, the camera blocks from its mirror; all: the landmarks too, from
+    // the device
+    void setState(const Vec& x, bool all = false)
+    {
+        if (!devOn())
+        {
+            setState(x.h, all);
+            return;
+        }
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+        const auto t0 = Clock::now();
+        _devXv = x.d;
+        const int nE = int(_e.size()), nF = int(_f.size());
+        if (all)
+        {
+            std::vector<double> e(static_cast<size_t>(_ne));
+            if (!_dev->download(x.d, e.data(), 0, _ne))
+                throw DeviceFailure{_dev->error()};
+#pragma omp parallel for schedule(static, 4096) num_threads(_threads)
+            for (int i = 0; i < nE; ++i)
+            {
+                PBlock& b = _e[i];
+                std::copy(e.begin() + std::ptrdiff_t(b.x), e.begin() + std::ptrdiff_t(b.x + size_t(b.size)), b.ptr);
+            }
+        }
+        const size_t ne = size_t(_ne);
+        for (int i = 0; i < nF; ++i)
+        {
+            PBlock& b = _f[i];
+            std::copy(x.h.begin() + std::ptrdiff_t(b.x - ne), x.h.begin() + std::ptrdiff_t(b.x - ne + size_t(b.size)), b.ptr);
+        }
+        _times.state += since(t0);
+#endif
     }
 
     // ---- vector passes on the threads ----------------------------------------------------------------
@@ -1712,6 +1766,156 @@ class Solver
         for (double v : part)
             m = std::max(m, v);
         return m;
+    }
+
+    // ---- the minimiser's vectors (step 4d) -----------------------------------------------------------
+    // v sized for n values (a state when ambient): on the device a vector from the pool, once, and the mirror;
+    // on the host the values (kept when the size stays)
+    void vecEnsure(Vec& v, size_t n, bool ambient)
+    {
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+        if (devOn())
+        {
+            if (v.d < 0 && (v.d = _dev->vector(std::int64_t(n))) < 0)
+                throw DeviceFailure{_dev->error()};
+            if (ambient)
+                v.h.resize(n - size_t(_ne));
+            return;
+        }
+#endif
+        (void)ambient;
+        v.h.resize(n);
+    }
+    // v = h (a state when ambient)
+    void vecSet(Vec& v, const std::vector<double>& h, bool ambient)
+    {
+        const auto t0 = Clock::now();
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+        if (devOn())
+        {
+            vecEnsure(v, h.size(), ambient);
+            if (!_dev->upload(v.d, h.data(), 0, std::int64_t(h.size())))
+                throw DeviceFailure{_dev->error()};
+            if (ambient)
+                std::copy(h.begin() + _ne, h.end(), v.h.begin());
+            _times.vec += since(t0);
+            return;
+        }
+#endif
+        (void)ambient;
+        v.h = h;
+        _times.vec += since(t0);
+    }
+    // dst = src, a state of n values
+    void vecAssign(Vec& dst, const Vec& src, size_t n)
+    {
+        const auto t0 = Clock::now();
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+        if (devOn())
+        {
+            vecEnsure(dst, n, true);
+            if (!_dev->op(device::Problem::Op::Copy, dst.d, src.d, -1, 0.0, 0.0, std::int64_t(n)))
+                throw DeviceFailure{_dev->error()};
+        }
+#endif
+        dst.h = src.h;
+        _times.vec += since(t0);
+    }
+    // dst = o(a, b; s, t) per value, i < n (a tangent vector)
+    void vop(VOp o, Vec& dst, const Vec* a, const Vec* b, size_t n, double s = 0.0, double t = 0.0)
+    {
+        const auto t0 = Clock::now();
+        vecEnsure(dst, n, false);
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+        if (devOn())
+        {
+            static_assert(int(device::Problem::Op::Fill) == int(VOp::Fill) && int(device::Problem::Op::Add) == int(VOp::Add) &&
+                              int(device::Problem::Op::Clamp) == int(VOp::Clamp),
+                          "the device's ops in VOp's order");
+            if (!_dev->op(device::Problem::Op(int(o)), dst.d, a ? a->d : -1, b ? b->d : -1, s, t, std::int64_t(n)))
+                throw DeviceFailure{_dev->error()};
+            _times.vec += since(t0);
+            return;
+        }
+#endif
+        double* d = dst.h.data();
+        const double* x = a ? a->h.data() : nullptr;
+        const double* y = b ? b->h.data() : nullptr;
+        switch (o)
+        {
+            case VOp::Copy:
+                pfor(n, [&](size_t i) { d[i] = x[i]; });
+                break;
+            case VOp::Scale:
+                pfor(n, [&](size_t i) { d[i] = s * x[i]; });
+                break;
+            case VOp::Neg:
+                pfor(n, [&](size_t i) { d[i] = -x[i]; });
+                break;
+            case VOp::Mul:
+                pfor(n, [&](size_t i) { d[i] = x[i] * y[i]; });
+                break;
+            case VOp::Jacobi:
+                pfor(n, [&](size_t i) { d[i] = 1.0 / (1.0 + std::sqrt(x[i])); });
+                break;
+            case VOp::Clamp:
+                pfor(n, [&](size_t i) { d[i] = std::min(std::max(x[i], s), t); });
+                break;
+            case VOp::SqrtDiv:
+                pfor(n, [&](size_t i) { d[i] = std::sqrt(x[i] / s); });
+                break;
+            case VOp::ScaleInPlace:
+                pfor(n, [&](size_t i) { d[i] *= s; });
+                break;
+            case VOp::Add:
+                pfor(n, [&](size_t i) { d[i] = x[i] + y[i]; });
+                break;
+            case VOp::Fill:
+                pfor(n, [&](size_t i) { d[i] = s; });
+                break;
+        }
+        _times.vec += since(t0);
+    }
+    // psum / pmax over i < n: on the device per block of kBlock values, the blocks combined here in order
+    double vred(VRed r, const Vec& a, const Vec* b, size_t n)
+    {
+        const auto t0 = Clock::now();
+        const bool isMax = r == VRed::MaxAbs || r == VRed::MaxAbsDiff;
+        double out = 0.0;
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+        if (devOn())
+        {
+            std::vector<double> part;
+            if (!_dev->reduce(device::Problem::Red(int(r)), a.d, b ? b->d : -1, std::int64_t(n), kBlock, &part))
+                throw DeviceFailure{_dev->error()};
+            for (double v : part)
+                out = isMax ? std::max(out, v) : out + v;
+            _times.vec += since(t0);
+            return out;
+        }
+#endif
+        const double* x = a.h.data();
+        const double* y = b ? b->h.data() : nullptr;
+        switch (r)
+        {
+            case VRed::Dot:
+                out = psum(n, [&](size_t i) { return x[i] * y[i]; });
+                break;
+            case VRed::Sq:
+                out = psum(n, [&](size_t i) { return x[i] * x[i]; });
+                break;
+            case VRed::SqDiff:
+                out = psum(n, [&](size_t i) { return (x[i] - y[i]) * (x[i] - y[i]); });
+                break;
+            case VRed::MaxAbs:
+                out = pmax(n, [&](size_t i) { return std::abs(x[i]); });
+                break;
+            case VRed::MaxAbsDiff:
+                out = pmax(n, [&](size_t i) { return std::abs(x[i] - y[i]); });
+                break;
+        }
+        _times.vec += since(t0);
+        return out;
     }
 
     // ---- evaluation ----------------------------------------------------------------------------------
@@ -1811,7 +2015,7 @@ class Solver
 
     // The cost of the reduced program at the current state, and per mode the rest (see Mode). The cost
     // and the F part of the gradient are summed per partition, then over the partitions in order.
-    bool evaluate(Mode mode, double* cost, std::vector<double>* gradOut = nullptr)
+    bool evaluate(Mode mode, double* cost, Vec* gradOut = nullptr)
     {
         if (devOn())
             return evaluateDevice(mode, cost, gradOut);
@@ -1832,7 +2036,7 @@ class Solver
         std::vector<double>* g = nullptr;
         if (wantJ)
         {
-            g = mode == Mode::Full ? &_grad : gradOut;
+            g = mode == Mode::Full ? &_grad.h : &gradOut->h;
             g->assign(size_t(_n), 0.0);
         }
         const int P = nParts();
@@ -1933,7 +2137,7 @@ class Solver
     }
 
     // evaluate() on the device: the same values, the same sums (baDevice.cu)
-    bool evaluateDevice(Mode mode, double* cost, std::vector<double>* gradOut)
+    bool evaluateDevice(Mode mode, double* cost, Vec* gradOut)
     {
 #ifdef ALICEVISION_HAVE_BA_DEVICE
         const auto t0 = Clock::now();
@@ -1958,14 +2162,9 @@ class Solver
         const int P = nParts();
         std::vector<double> partCost(size_t(P), 0.0);
         std::vector<char> partOk(size_t(P), 0);
-        std::vector<double>* g = nullptr;
-        if (wantJ)
-        {
-            g = mode == Mode::Full ? &_grad : gradOut;
-            g->resize(size_t(_n));
-        }
+        const int g = !wantJ ? -1 : mode == Mode::Full ? _grad.d : gradOut->d;
         const device::Mode dm = mode == Mode::Full ? device::Mode::Full : mode == Mode::Cost ? device::Mode::Cost : device::Mode::Gradient;
-        if (!_dev->evaluate(dm, _devX, _devPoses.data(), _src.cameraTable(), _devPlusJ.data(), partCost.data(), partOk.data(), g ? g->data() : nullptr))
+        if (!_dev->evaluate(dm, _devXv, _devPoses.data(), _src.cameraTable(), _devPlusJ.data(), partCost.data(), partOk.data(), g))
             throw DeviceFailure{_dev->error()};
         bool ok = true;
         for (char o : partOk)
@@ -2025,6 +2224,10 @@ class Solver
         s.loss = loss != nullptr;
         if (loss && !huberOf(loss, &s.hubA, &s.hubB))
             return fail("a loss other than Huber");
+        // the minimiser's vectors (step 4d): Plus of a landmark is x + delta, at the same place in both
+        for (const PBlock& b : _e)
+            if (b.manifold || !b.lower.empty() || !b.upper.empty() || b.size != 3 || b.tsize != 3 || b.x != size_t(b.col))
+                return fail("a landmark with a manifold or bounds");
         std::vector<int> manifOfF(_f.size(), -1);
         _devManifOff.clear();
         size_t off = 0;
@@ -2150,6 +2353,18 @@ class Solver
                                  << tStructure << " s, create " << since(t0) - tStructure << " s");
         if (!_dev)
             return fail(why);
+        // the sparse factorisation's order: the device hands S over in it, so the host runs no parallel pass right
+        // before the (single-threaded) factorisation; one there left the threads spinning beside it (step 4d)
+        if (_opt.sparse && _nf > 0)
+        {
+            const std::vector<std::int64_t> order(_cscSrc.begin(), _cscSrc.end());
+            if (!_dev->setOrder(order.data(), std::int64_t(order.size())))
+            {
+                why = _dev->error();
+                _dev.reset();
+                return fail(why);
+            }
+        }
         // what the device now holds, the host no longer needs
         _J.reset(0);
         _m.reset(0);
@@ -2163,49 +2378,72 @@ class Solver
 #endif
     }
 
+    // ParameterBlock::Plus of one block: xi + d on its manifold, then projected onto its box constraints
+    static void plusBlock(const PBlock& b, const double* xi, const double* d, double* o)
+    {
+        if (b.manifold)
+            b.manifold->Plus(xi, d, o);
+        else
+            for (int a = 0; a < b.size; ++a)
+                o[a] = xi[a] + d[a];
+        if (!b.lower.empty())
+            for (int a = 0; a < b.size; ++a)
+                o[a] = std::max(o[a], b.lower[a]);
+        if (!b.upper.empty())
+            for (int a = 0; a < b.size; ++a)
+                o[a] = std::min(o[a], b.upper[a]);
+    }
     // Plus(x, delta) per block, delta in the tangent space (E then F); out: ambient, E then F
-    void plus(const std::vector<double>& x, const std::vector<double>& delta, std::vector<double>* out) const
+    void plus(const Vec& x, const Vec& delta, Vec* out)
     {
         const auto t0 = Clock::now();
-        out->resize(x.size());
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+        if (devOn())
+        {
+            // the landmarks on the device, x + delta (setupDevice: no manifold, no bounds); the camera blocks
+            // here, from x's mirror and delta's camera part, then up to out
+            vecEnsure(*out, _nx, true);
+            if (!_dev->op(device::Problem::Op::Add, out->d, x.d, delta.d, 0.0, 0.0, _ne))
+                throw DeviceFailure{_dev->error()};
+            _plusF.resize(size_t(_nf));
+            if (!_dev->download(delta.d, _plusF.data(), _ne, _nf))
+                throw DeviceFailure{_dev->error()};
+            const size_t ne = size_t(_ne);
+            for (const PBlock& b : _f)
+                plusBlock(b, x.h.data() + (b.x - ne), _plusF.data() + (b.col - _ne), out->h.data() + (b.x - ne));
+            if (!_dev->upload(out->d, out->h.data(), _ne, std::int64_t(_nx - ne)))
+                throw DeviceFailure{_dev->error()};
+            _times.plus += since(t0);
+            return;
+        }
+#endif
+        out->h.resize(x.h.size());
         const int nb = int(_e.size() + _f.size()), nE = int(_e.size());
 #pragma omp parallel for schedule(static, 4096) num_threads(_threads)
         for (int i = 0; i < nb; ++i)
         {
             const PBlock& b = i < nE ? _e[i] : _f[i - nE];
-            const double* d = delta.data() + b.col;
-            const double* xi = x.data() + b.x;
-            double* o = out->data() + b.x;
-            if (b.manifold)
-                b.manifold->Plus(xi, d, o);
-            else
-                for (int a = 0; a < b.size; ++a)
-                    o[a] = xi[a] + d[a];
-            // ParameterBlock::Plus: project onto the box constraints
-            if (!b.lower.empty())
-                for (int a = 0; a < b.size; ++a)
-                    o[a] = std::max(o[a], b.lower[a]);
-            if (!b.upper.empty())
-                for (int a = 0; a < b.size; ++a)
-                    o[a] = std::min(o[a], b.upper[a]);
+            plusBlock(b, x.h.data() + b.x, delta.h.data() + b.col, out->h.data() + b.x);
         }
         _times.plus += since(t0);
     }
 
-    // Squared column norms of the (corrected, current) Jacobian, tangent space E then F.
-    std::vector<double> squaredColumnNorms()
+    // Squared column norms of the (corrected, current) Jacobian into *out, tangent space E then F.
+    void squaredColumnNorms(Vec* out)
     {
         const auto t0 = Clock::now();
-        std::vector<double> n(size_t(_n), 0.0);
 #ifdef ALICEVISION_HAVE_BA_DEVICE
         if (devOn())
         {
-            if (!_dev->squaredColumnNorms(n.data()))
+            vecEnsure(*out, size_t(_n), false);
+            if (!_dev->squaredColumnNorms(out->d))
                 throw DeviceFailure{_dev->error()};
             _times.norms += since(t0);
-            return n;
+            return;
         }
 #endif
+        std::vector<double>& n = out->h;
+        n.assign(size_t(_n), 0.0);
         const int P = nParts();
 #pragma omp parallel for schedule(dynamic, 1) num_threads(_threads)
         for (int part = 0; part < P; ++part)
@@ -2231,16 +2469,15 @@ class Solver
         }
         reduceF(n.data() + _ne);
         _times.norms += since(t0);
-        return n;
     }
 
-    void scaleColumns(const std::vector<double>& s)
+    void scaleColumns(const Vec& s)
     {
         const auto t0 = Clock::now();
 #ifdef ALICEVISION_HAVE_BA_DEVICE
         if (devOn())
         {
-            if (!_dev->scaleColumns(s.data()))
+            if (!_dev->scaleColumns(s.d))
                 throw DeviceFailure{_dev->error()};
             _times.scale += since(t0);
             return;
@@ -2257,7 +2494,7 @@ class Solver
                     if (_pj[row.p + k] < 0)
                         continue;
                     const PBlock& b = block(_pv[row.p + k]);
-                    const double* c = s.data() + b.col;
+                    const double* c = s.h.data() + b.col;
                     double* J = _J.data() + row.j + _pj[row.p + k];
                     for (int i = 0; i < row.nres; ++i)
                         for (int t = 0; t < b.tsize; ++t)
@@ -2269,7 +2506,7 @@ class Solver
 
     // The model cost change of a step: -(f . (r + f / 2)) with f = J step, summed per partition then in
     // order (LevenbergMarquardtStrategy / TrustRegionMinimizer::ComputeTrustRegionStep).
-    double modelCostChange(const std::vector<double>& step) const
+    double modelCostChange(const Vec& step) const
     {
         const auto t0 = Clock::now();
         const int P = nParts();
@@ -2277,7 +2514,7 @@ class Solver
         if (devOn())
         {
             std::vector<double> partDot(size_t(P), 0.0);
-            if (!_dev->modelCostChange(step.data(), partDot.data()))
+            if (!_dev->modelCostChange(step.d, partDot.data()))
                 throw DeviceFailure{_dev->error()};
             double dot = 0.0;
             for (double d : partDot)
@@ -2309,7 +2546,7 @@ class Solver
                     if (_pj[row.p + k] < 0)
                         continue;
                     const PBlock& b = block(_pv[row.p + k]);
-                    const double* yy = step.data() + b.col;
+                    const double* yy = step.h.data() + b.col;
                     const double* J = _J.data() + row.j + _pj[row.p + k];
                     for (int i = 0; i < row.nres; ++i)
                     {
@@ -2415,12 +2652,14 @@ class Solver
         return ok;
     }
 
-    bool solveStep(const std::vector<double>& D, std::vector<double>* y)
+    bool solveStep(const Vec& Dv, Vec* yv)
     {
         const auto t0 = Clock::now();
         ++_times.nSolves;
         if (_qr)
-            return solveStepQR(D, y);
+            return solveStepQR(Dv.h, &yv->h);
+        const std::vector<double>& D = Dv.h;   // the host's (with the device both stay there)
+        std::vector<double>* y = &yv->h;
         const int nE = int(_e.size()), nF = int(_f.size());
         // 1. per group of chunks, into the group's copy of (S, rhs): per chunk E^T E + D_e^2 and its inverse,
         // E^T b and E^T F (kept for the back-substitution), each row's F^T F and F^T b, then the chunk's Schur
@@ -2433,7 +2672,7 @@ class Solver
         {
             // phases 1 and 2 on the device (baDevice.cu: per landmark, then per group, block and row of the
             // block, then the groups in order)
-            if (!_dev->eliminate(D.data(), _sv.data(), _rhs.data(), &finite))
+            if (!_dev->eliminate(Dv.d, _opt.sparse && _nf > 0 ? _S.valuePtr() : _sv.data(), _rhs.data(), &finite))
                 throw DeviceFailure{_dev->error()};
             _times.elim += since(t0);
             if (!finite)
@@ -2572,11 +2811,15 @@ class Solver
             }
             else
             {
-                double* val = _S.valuePtr();
-                const int nnz = int(_cscSrc.size());
+                // S's values in the matrix's order (with the device they came in it)
+                if (!devOn())
+                {
+                    double* val = _S.valuePtr();
+                    const int nnz = int(_cscSrc.size());
 #pragma omp parallel for schedule(static) num_threads(_threads)
-                for (int q = 0; q < nnz; ++q)
-                    val[q] = _sv[_cscSrc[q]];
+                    for (int q = 0; q < nnz; ++q)
+                        val[q] = _sv[_cscSrc[q]];
+                }
                 if (!_analyzed)
                 {
                     // EigenSparseCholesky: the symbolic analysis once per solve, the numeric one per iteration
@@ -2595,21 +2838,22 @@ class Solver
 
         // 4. back-substitution: y_e = (E^T E + D_e^2)^-1 (E^T b - sum_f E^T F y_f)
         const auto t2c = Clock::now();
-        y->assign(size_t(_n), 0.0);
-        std::copy(yf.data(), yf.data() + _nf, y->begin() + _ne);
         bool ok = true;
         for (int i = 0; i < _nf; ++i)
             ok = ok && std::isfinite(yf[i]);
 #ifdef ALICEVISION_HAVE_BA_DEVICE
         if (devOn())
         {
+            // y on the device: yf into its camera part, its landmarks' part from it
             bool finiteE = true;
-            if (!_dev->backSubstitute(yf.data(), y->data(), &finiteE))
+            if (!_dev->backSubstitute(yf.data(), yv->d, &finiteE))
                 throw DeviceFailure{_dev->error()};
             _times.back += since(t2c);
             return ok && finiteE;
         }
 #endif
+        y->assign(size_t(_n), 0.0);
+        std::copy(yf.data(), yf.data() + _nf, y->begin() + _ne);
 #pragma omp parallel for schedule(dynamic, 1024) num_threads(_threads) reduction(&& : ok)
         for (int c = 0; c < nE; ++c)
         {
@@ -2650,20 +2894,21 @@ class Solver
     // each sample's gradient with its value; it is read only when the sample fails the Armijo test (the
     // cubic step), so it is taken then. One difference follows: Ceres' evaluation fails, and the sample is
     // invalid, when a Jacobian is not finite, and a sample that passes here is never asked.
-    double lineSearch(const std::vector<double>& x, double cost, std::vector<double>* delta, Iteration* info)
+    double lineSearch(const Vec& x, double cost, Vec* delta, Iteration* info)
     {
         // CHESHIRE_BA_OWN_EAGER=1: every sample with its gradient, as Ceres takes them
         static const bool eager = ::cheshire::env::flag("CHESHIRE_BA_OWN_EAGER");
-        const size_t n = delta->size();
-        const std::vector<double>& dl = *delta;
-        const double initialGradient = psum(n, [&](size_t i) { return _grad[i] * dl[i]; });
-        const double dirInf = pmax(n, [&](size_t i) { return std::abs(dl[i]); });
+        const size_t n = size_t(_n);
+        const Vec& dl = *delta;
+        const double initialGradient = vred(VRed::Dot, _grad, &dl, n);
+        const double dirInf = vred(VRed::MaxAbs, dl, nullptr, n);
         poly::Sample initial;
         initial.x = 0.0;
         initial.value = cost;
         initial.gradient = initialGradient;
         initial.valueValid = initial.gradientValid = true;
-        std::vector<double> scaled(n), xp, gg;
+        Vec &scaled = _lsScaled, &xp = _lsX, &gg = _lsGrad;
+        vecEnsure(gg, n, false);
         auto sample = [&](double a, bool withGradient, poly::Sample* s) {
             withGradient = withGradient || eager;
             ++info->lsSamples;
@@ -2671,7 +2916,7 @@ class Solver
                 ++info->lsGradients;
             s->x = a;
             s->valueValid = s->gradientValid = false;
-            pfor(n, [&](size_t i) { scaled[i] = a * dl[i]; });
+            vop(VOp::Scale, scaled, &dl, nullptr, n, a);
             plus(x, scaled, &xp);
             setState(xp);
             double c = 0.0;
@@ -2683,7 +2928,7 @@ class Solver
             s->valueValid = true;
             if (!withGradient)
                 return;
-            const double d = psum(n, [&](size_t i) { return dl[i] * gg[i]; });
+            const double d = vred(VRed::Dot, dl, &gg, n);
             if (!std::isfinite(d))
                 return;
             s->gradient = d;
@@ -2715,7 +2960,7 @@ class Solver
             sample(step, false, &current);
         }
         const double a = current.x;
-        pfor(n, [&](size_t i) { (*delta)[i] *= a; });
+        vop(VOp::ScaleInPlace, *delta, nullptr, nullptr, n, a);
         info->lsStep = current.x;
         info->lsOk = true;
         return current.value;
@@ -2723,15 +2968,31 @@ class Solver
 
     void minimize(Result* res)
     {
-        std::vector<double> x = stateVector();
-        _x0 = x;
-        _devX = x.data();
+        const size_t n = size_t(_n);
+        _x0 = stateVector();
+        Vec x, xg, best, candidate, neg, delta, step, y, D, zero;
+        vecSet(x, _x0, true);
+        if (devOn())
+        {
+            // the device's vectors at once, in a fixed order (the pool's slots)
+            for (Vec* v : {&xg, &best, &candidate})
+                vecEnsure(*v, _nx, true);
+            for (Vec* v : {&neg, &delta, &step, &y, &D, &_diag, &_scale, &_grad})
+                vecEnsure(*v, n, false);
+            if (_constrained)
+            {
+                vecEnsure(_lsX, _nx, true);
+                for (Vec* v : {&zero, &_lsScaled, &_lsGrad})
+                    vecEnsure(*v, n, false);
+            }
+        }
+        _devXv = x.d;
         if (_constrained)
         {
             // IterationZero: project the starting point onto the feasible set
-            std::vector<double> zero(size_t(_n), 0.0), xp;
-            plus(x, zero, &xp);
-            x = xp;
+            vop(VOp::Fill, zero, nullptr, nullptr, n, 0.0);
+            plus(x, zero, &_lsX);
+            std::swap(x, _lsX);   // x = Plus(x, 0)
             setState(x);
         }
         double xCost = 0.0;
@@ -2742,22 +3003,19 @@ class Solver
             _prepare();
             return;
         }
-        const int n = _n;
-        // Jacobi scaling, from iteration 0's Jacobian
-        _scale.assign(size_t(n), 1.0);
+        // Jacobi scaling, from iteration 0's Jacobian (its column norms in _diag until the first iteration's)
         if (_opt.jacobiScaling)
         {
-            const auto c = squaredColumnNorms();
-            for (int i = 0; i < n; ++i)
-                _scale[i] = 1.0 / (1.0 + std::sqrt(c[i]));
+            squaredColumnNorms(&_diag);
+            vop(VOp::Jacobi, _scale, &_diag, nullptr, n);
             scaleColumns(_scale);
         }
+        else
+            vop(VOp::Fill, _scale, nullptr, nullptr, n, 1.0);
         auto gradientNorms = [&](double* maxNorm) {
-            std::vector<double> neg(_grad.size());
-            pfor(neg.size(), [&](size_t i) { neg[i] = -_grad[i]; });
-            std::vector<double> xg;
+            vop(VOp::Neg, neg, &_grad, nullptr, n);
             plus(x, neg, &xg);
-            *maxNorm = pmax(x.size(), [&](size_t i) { return std::abs(x[i] - xg[i]); });
+            *maxNorm = vred(VRed::MaxAbsDiff, x, &xg, _nx);
         };
 
         res->initialCost = xCost + _fixedCost;
@@ -2776,16 +3034,20 @@ class Solver
         it0.stepIsSuccessful = true;
         it0.radius = radius;
         res->iterations.push_back(it0);
-        std::vector<double> best = x;
+        vecAssign(best, x, _nx);
         double bestCost = xCost;
+        double xNorm = 0.0;
+        bool xNormStale = true;   // x changed since xNorm
         int consecutiveInvalid = 0;
         bool atLeastOneSuccessful = false;
-        std::vector<double> y, step, delta, candidate, D(static_cast<size_t>(n));
         Iteration cur = it0;
         auto finish = [&](const std::string& why) {
             res->termination = why;
             // Solver::Solve: the minimizer's best point when the solution is usable, else the starting point
-            setState(why.rfind("FAILURE", 0) == 0 ? _x0 : best, true);
+            if (why.rfind("FAILURE", 0) == 0)
+                setState(_x0, true);
+            else
+                setState(best, true);
             _prepare();
             res->finalCost = bestCost + _fixedCost;
             res->ok = true;
@@ -2809,18 +3071,17 @@ class Solver
             // ComputeTrustRegionStep: the LM diagonal from the scaled Jacobian
             if (!reuseDiagonal)
             {
-                _diag = squaredColumnNorms();
-                pfor(_diag.size(), [&](size_t i) { _diag[i] = std::min(std::max(_diag[i], _opt.minDiagonal), _opt.maxDiagonal); });
+                squaredColumnNorms(&_diag);
+                vop(VOp::Clamp, _diag, &_diag, nullptr, n, _opt.minDiagonal, _opt.maxDiagonal);
             }
-            pfor(size_t(n), [&](size_t i) { D[i] = std::sqrt(_diag[i] / radius); });
+            vop(VOp::SqrtDiv, D, &_diag, nullptr, n, radius);
             const bool solved = solveStep(D, &y);
             reuseDiagonal = true;
             double modelChange = 0.0;
             nx.stepIsValid = false;
             if (solved)
             {
-                step.resize(size_t(n));
-                pfor(size_t(n), [&](size_t i) { step[i] = -y[i]; });
+                vop(VOp::Neg, step, &y, nullptr, n);
                 modelChange = modelCostChange(step);
                 nx.stepIsValid = modelChange > 0.0;
             }
@@ -2840,8 +3101,7 @@ class Solver
                 continue;
             }
             consecutiveInvalid = 0;
-            delta.resize(size_t(n));
-            pfor(size_t(n), [&](size_t i) { delta[i] = step[i] * _scale[i]; });
+            vop(VOp::Mul, delta, &step, &_scale, n);
             // ComputeCandidatePointAndEvaluateCost; with bounds, Ceres first searches along the step
             // (max_num_line_search_step_size_iterations > 0), and the search has the candidate's cost
             double candidateCost = std::numeric_limits<double>::max();
@@ -2859,8 +3119,13 @@ class Solver
             }
 
             // ParameterToleranceReached (after at least one successful step)
-            const double xNorm = std::sqrt(psum(x.size(), [&](size_t i) { return x[i] * x[i]; }));
-            nx.stepNorm = std::sqrt(psum(x.size(), [&](size_t i) { return (x[i] - candidate[i]) * (x[i] - candidate[i]); }));
+            // |x|: the same until a step is taken, so from the last pass over x
+            if (xNormStale)
+            {
+                xNorm = std::sqrt(vred(VRed::Sq, x, nullptr, _nx));
+                xNormStale = false;
+            }
+            nx.stepNorm = std::sqrt(vred(VRed::SqDiff, x, &candidate, _nx));
             if (atLeastOneSuccessful && nx.stepNorm <= _opt.parameterTolerance * (xNorm + _opt.parameterTolerance))
                 return finish("CONVERGENCE (parameter tolerance)");
             // FunctionToleranceReached
@@ -2883,7 +3148,8 @@ class Solver
             {
                 atLeastOneSuccessful = true;
                 // HandleSuccessfulStep
-                x = candidate;
+                std::swap(x, candidate);   // x = candidate (the next candidate is written whole)
+                xNormStale = true;
                 setState(x);
                 if (!evaluate(Mode::Full, &xCost))
                     return finish("FAILURE (evaluation at the accepted point)");
@@ -2926,7 +3192,7 @@ class Solver
                 if (xCost < bestCost)
                 {
                     bestCost = xCost;
-                    best = x;
+                    vecAssign(best, x, _nx);
                 }
             }
             else
@@ -3125,12 +3391,12 @@ inline bool solveSource(const Source& src, const ceres::Solver::Options& options
     {
         const Times& t = r.time;
         const double known = t.setup + t.evalJ + t.evalCost + t.evalGrad + t.elim + t.schur + t.factor + t.back + t.norms + t.scale + t.model +
-                             t.plus + t.state;
+                             t.plus + t.state + t.vec;
         ALICEVISION_LOG_INFO("cheshire: BA own profile: " << r.seconds << " s = setup " << t.setup << " + evalJ " << t.evalJ << " (" << t.nJ
                              << ") + evalCost " << t.evalCost << " (" << t.nCost << ") + evalGrad " << t.evalGrad << " (" << t.nGrad
                              << ") + elim " << t.elim << " + schur " << t.schur << " + factor " << t.factor << " + back " << t.back << " ("
                              << t.nSolves << ") + norms " << t.norms << " + scale " << t.scale << " + model " << t.model << " + plus "
-                             << t.plus << " + state " << t.state << " + other " << r.seconds - known << "; rows " << r.rows << ", E "
+                             << t.plus << " + state " << t.state << " + vec " << t.vec << " + other " << r.seconds - known << "; rows " << r.rows << ", E "
                              << r.eBlocks << ", F " << r.fBlocks << " (" << r.fColumns << " columns), J " << r.jValues << ", S "
                              << r.sBlocks << " blocks " << r.sValues << " values, groups " << r.groups << ", parts " << r.parts << ", "
                              << (r.denseQR ? "dense QR" : o.sparse ? "sparse" : "dense") << ", " << r.iterations.size() - 1

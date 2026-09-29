@@ -608,6 +608,86 @@ the same output (`a5cc84375086fdec`):
 A first set of these runs overlapped a video playing on the box. Their timings were discarded;
 their output was the same.
 
+## Step 4d: the vectors on the device (2026-09-29)
+
+When the device takes a solve, the minimiser's vectors live there too: the state, the candidate,
+the best point, the step, the LM diagonal, the Jacobi scaling, the gradient, and the line search's
+sample. A state vector also keeps its camera part on the host, the "mirror": the host still reads
+the camera blocks (their objects, the poses' rotations) and applies their manifolds. An iteration
+now moves only the camera parts (a few thousand values), the reduced camera system and single
+numbers between host and device. Before, it moved whole vectors of about 4 M values.
+
+- **One minimiser for both.** `minimize()` and `lineSearch()` work on `Vec`, and every pass
+  (`vop`, `vred`, `plus`, `setState`) runs on the host or on the device. The host path computes
+  what it did before.
+- **Plus.** A landmark's Plus is x + delta, on the device. Setup checks that no landmark has a
+  manifold or bounds, and that its place is the same in the state and the tangent vector. The
+  camera blocks are done on the host, from the state's mirror and the step's camera part, and
+  their result goes up.
+- **The elementwise passes** (`kVecOp`) are each the host loop's expression.
+- **The sums keep the host's order.** The host's `psum` adds fixed blocks of 32,768 values, each in
+  order from zero, then the blocks in order. The device takes the same blocks: one workgroup per
+  block stages a tile in shared memory, and one thread adds it in order. A maximum does not depend
+  on the order, so its blocks use a tree.
+- **‖x‖ is kept across rejected steps,** since x does not change until a step is taken. Same value,
+  one pass fewer.
+
+**The first reduction was slow.** It used one thread per block, reading global memory. The loads
+were not overlapped, so a reduction took about 10 ms, and the passes cost 7.8 s over the False Door.
+Staged through shared memory, the same sums take 1.5 s.
+
+**The factorisation and OpenMP's threads.** With the vectors gone from the host, the large solves'
+factorisation took 15.7 s against 10.7 s. That is the same code on the same matrices. It showed
+only on the device's solves, and only at the False Door's size (a memory-bound LDLT of up to about
+0.3 s per call). What happened:
+- Right before the single-threaded factorisation, a parallel pass copies S into the sparse matrix's
+  order.
+- After a parallel region, OpenMP's workers spin for `KMP_BLOCKTIME` (200 ms by default) before they
+  sleep, so they were spinning beside the factorisation.
+- The host path has the same pass, but its threads are busy all iteration.
+- `KMP_BLOCKTIME=0` took the factorisation to 9.0 s. Which contention it is (SMT siblings, or
+  cores unparked late) was not measured.
+
+**The fix:** the device now hands S over already in the matrix's order (`kOrder`, `setOrder`), and
+the host runs no parallel pass there. The environment variable is process-wide, so it is not used.
+One observation for later: with `KMP_BLOCKTIME=0` the whole SfM run took 434 s, against 451 s for
+the fix. The spinning may cost other stages of SfM as well.
+
+**Exactness.** Nothing the solver computes changed:
+
+| check | result |
+|---|---|
+| 41 views | `801d1fb7…` |
+| engine bay | `814ae0d5…` |
+| False Door | `a5cc8437…` |
+| device check, 41 views | 29 / 29 |
+| device check, engine bay | 35 / 35 (including line-search solves on the device) |
+| direct check | 68 / 68 |
+| host path alone (`CHESHIRE_BA_DEVICE=0`) | the same digests |
+
+**Timing.** False Door, back to back on an idle box, both with the same output:
+
+| | committed build (4c) | 4d |
+|---|---|---|
+| SfM wall | 467.2 s | 451.3 s |
+| bundle adjustment | 67.5 s | 52.6 s |
+| solves ≥ 1 M rows | 54.1 s | 39.8 s |
+| of these: evaluations | 6.2 s | 4.3 s |
+| of these: elimination | 9.8 s | 9.6 s |
+| of these: factorisation | 10.7 s | 8.6 s |
+| of these: back-substitution | 1.0 s | 0.4 s |
+| of these: norms, scaling, model | 3.7 s | 2.0 s |
+| of these: Plus | 4.6 s | 0.4 s |
+| of these: vector passes | (in "other") | 1.5 s |
+| of these: other (mostly the device's per-solve setup) | 12.0 s | 6.9 s |
+
+Against the host alone (121.8 s, 4c's runs), bundle adjustment is now 57 % shorter.
+
+**Next:**
+- The factorisation (8.6 s) and the elimination (9.6 s) are the largest phases left.
+- The per-solve setup is about 13 s: the solver's own 6.0 s, and most of "other".
+- The CUDA build (house-pc) is still not compiled.
+
 ## Scope
 
 The solver covers the problems incremental SfM builds most:

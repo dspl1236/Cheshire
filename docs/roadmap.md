@@ -625,7 +625,15 @@ reaches it. The design is in docs/notes/ba-own-solver.md; the steps, each a go/n
       now 200,000 rows. False Door, back to back on an idle box: bundle adjustment 121.8 s (host) →
       68.0 s, SfM 541 s → 483 s, the same output.
     - Next: the vectors on the device; the factorisation; the CUDA build.
-  - 4d: vectors on the device, CUDA.
+  - **4d, the vectors on the device** (2026-09-29). With the device, the minimiser's vectors stay
+    there. A state keeps only its camera part on the host as well. An iteration moves the camera
+    parts, the reduced camera system and single numbers.
+    - The sums keep the host's blocks and order.
+    - The device hands S over in the sparse factorisation's order. The host's pass there had left
+      OpenMP's threads spinning beside the single-threaded factorisation (15.7 s against 10.7 s).
+    - The same bytes on all three sets and in every check.
+    - False Door, back to back on an idle box: bundle adjustment 67.5 s → 52.6 s, SfM 467 s → 451 s.
+    - Next: the factorisation, the elimination, the per-solve setup; the CUDA build.
 
 Beside it:
 

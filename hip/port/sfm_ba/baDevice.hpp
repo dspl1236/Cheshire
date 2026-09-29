@@ -122,18 +122,53 @@ class Problem
     static std::unique_ptr<Problem> create(const Structure& s, std::string* why);
     ~Problem();
 
-    // One evaluation at the landmarks xE (3 nE values, E order); the poses', cameras' and manifolds' values of
-    // this evaluation. Per partition its cost and whether every row evaluated; the gradient (n) when asked.
-    bool evaluate(Mode mode, const double* xE, const PoseEntry* poses, const arith::CameraValues* cameras, const double* plusJacobians,
-                  double* partCost, char* partOk, double* gradient);
-    bool squaredColumnNorms(double* out);                      // n
-    bool scaleColumns(const double* scale);                    // n; the kept Jacobian's columns
-    bool modelCostChange(const double* step, double* partDot); // step n; per partition
-    // The reduced camera system at the LM diagonal D (n): S's values and rhs (nf); false in *finite when an
-    // inverse is not finite
-    bool eliminate(const double* D, double* sValues, double* rhs, bool* finite);
-    // y's E part (ne) from the camera part yf (nf); false in *finite when a value is not finite
-    bool backSubstitute(const double* yf, double* yE, bool* finite);
+    // ---- the minimiser's vectors (step 4d): device vectors, by id ----------------------------------------
+    int vector(std::int64_t n);   // a vector of n doubles, its contents undefined; -1 on failure
+    bool upload(int v, const double* h, std::int64_t offset, std::int64_t count);
+    bool download(int v, double* h, std::int64_t offset, std::int64_t count);
+    enum class Op
+    {
+        Copy,          // dst = a
+        Scale,         // dst = s a
+        Neg,           // dst = -a
+        Mul,           // dst = a b
+        Jacobi,        // dst = 1 / (1 + sqrt(a))
+        Clamp,         // dst = min(max(a, s), t), as std::min / std::max
+        SqrtDiv,       // dst = sqrt(a / s)
+        ScaleInPlace,  // dst = dst s
+        Add,           // dst = a + b
+        Fill           // dst = s
+    };
+    bool op(Op o, int dst, int a, int b, double s, double t, std::int64_t n);
+    enum class Red
+    {
+        Dot,        // sum a b
+        Sq,         // sum a a
+        SqDiff,     // sum (a - b) (a - b)
+        MaxAbs,     // max |a|
+        MaxAbsDiff  // max |a - b|
+    };
+    // per block of `block` values, in order: the sum from zero, or the maximum from zero as std::max; the host
+    // combines the blocks in order
+    bool reduce(Red r, int a, int b, std::int64_t n, std::int64_t block, std::vector<double>* partials);
+
+    // One evaluation at the state x (a device vector; the landmarks are its first 3 nE values); the poses',
+    // cameras' and manifolds' values of this evaluation. Per partition its cost and whether every row
+    // evaluated; the gradient into the vector `gradient` when it is not -1.
+    bool evaluate(Mode mode, int x, const PoseEntry* poses, const arith::CameraValues* cameras, const double* plusJacobians,
+                  double* partCost, char* partOk, int gradient);
+    bool squaredColumnNorms(int out);                          // n
+    bool scaleColumns(int scale);                              // the kept Jacobian's columns
+    bool modelCostChange(int step, double* partDot);           // per partition
+    // The reduced camera system at the LM diagonal D (a vector): S's values and rhs (nf); false in *finite when
+    // an inverse is not finite
+    bool eliminate(int D, double* sValues, double* rhs, bool* finite);
+    // The order the host's factorisation reads S's values in (count positions into them): eliminate then hands
+    // over those values, in that order, in place of all of S's
+    bool setOrder(const std::int64_t* src, std::int64_t count);
+    // y (a vector): its E part from the camera part yf (nf, the host's), and yf itself; false in *finite when
+    // an E value is not finite
+    bool backSubstitute(const double* yf, int y, bool* finite);
 
     std::string error() const;
     double seconds(int phase) const;   // device time per phase (see baDevice.cu)
