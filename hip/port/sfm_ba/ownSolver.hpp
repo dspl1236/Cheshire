@@ -30,6 +30,9 @@
 // The references to Ceres below are to the 2.2.0 source Cheshire builds.
 #pragma once
 
+// the arithmetic shared with the device, and its no-contraction pragma (step 4b)
+#include <aliceVision/sfm/bundle/costfunctions/baArith.hpp>
+
 #include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
 #include <aliceVision/system/Logger.hpp>
 
@@ -392,49 +395,8 @@ inline Result& lastResult()
     return r;
 }
 
-// Ceres' corrector (corrector.cc): scale by sqrt(rho'), and the rank-one curvature correction in the
-// inlier region only when rho'' > 0 (never for Huber).
-struct Corrector
-{
-    double sqrtRho1 = 1.0, residualScaling = 1.0, alphaSqNorm = 0.0;
-    Corrector(double sqNorm, const double rho[3])
-    {
-        sqrtRho1 = std::sqrt(rho[1]);
-        if (sqNorm == 0.0 || rho[2] <= 0.0)
-        {
-            residualScaling = sqrtRho1;
-            alphaSqNorm = 0.0;
-            return;
-        }
-        const double D = 1.0 + 2.0 * sqNorm * rho[2] / rho[1];
-        const double alpha = 1.0 - std::sqrt(D);
-        residualScaling = sqrtRho1 / (1 - alpha);
-        alphaSqNorm = alpha / sqNorm;
-    }
-    void correctResiduals(int n, double* r) const
-    {
-        for (int i = 0; i < n; ++i)
-            r[i] *= residualScaling;
-    }
-    // J := sqrt(rho1) * (J - alpha/|r|^2 * r r^T J), row-major n x c (corrector.cc CorrectJacobian)
-    void correctJacobian(int n, int c, const double* r, double* J) const
-    {
-        if (alphaSqNorm == 0.0)
-        {
-            for (int i = 0; i < n * c; ++i)
-                J[i] *= sqrtRho1;
-            return;
-        }
-        for (int j = 0; j < c; ++j)
-        {
-            double rtj = 0.0;
-            for (int i = 0; i < n; ++i)
-                rtj += r[i] * J[i * c + j];
-            for (int i = 0; i < n; ++i)
-                J[i * c + j] = sqrtRho1 * (J[i * c + j] - alphaSqNorm * r[i] * rtj);
-        }
-    }
-};
+// Ceres' corrector (corrector.cc): baArith.hpp's, shared with the device (step 4c)
+using arith::Corrector;
 
 // ---- small dense kernels -------------------------------------------------------------------------
 // out (t1 x t2) += A^T B, A n x t1 and B n x t2, all row-major. Per entry the sum over i in order from
@@ -607,6 +569,8 @@ class Source
     // ScaledLoss's factor on top of rowLoss (ScaledLoss::Evaluate's arithmetic); 1 for none
     virtual double rowLossScale(int) const { return 1.0; }
     virtual bool evaluate(int i, double const* const* params, double* residuals, double** jacobians) const = 0;
+    // called before each evaluation's rows, after the parameter blocks hold its point and prepare() ran
+    virtual void beforeEvaluation() const {}
     // what Solver::Summary reports of the problem as given
     virtual void counts(int* parameterBlocks, int* parameters, int* residualBlocks, int* residuals) const = 0;
 };
@@ -1627,6 +1591,7 @@ class Solver
     {
         const auto t0 = Clock::now();
         _prepare();
+        _src.beforeEvaluation();
         const bool wantJ = mode != Mode::Cost;
         if (wantJ)
         {
@@ -2035,14 +2000,11 @@ class Solver
                     }
                     rowTerms(row, S, rhs);
                 }
-                const Eigen::Matrix3d invM = Eigen::Map<const Eigen::Matrix<double, 3, 3, Eigen::RowMajor>>(ete).inverse();   // InvertPSDMatrix<3>, full rank
+                // InvertPSDMatrix<3>, full rank: Eigen's 3x3 inverse, without contraction (baArith.hpp, step 4b)
                 double* inv = _inv.data() + size_t(c) * 9;
-                for (int p = 0; p < 3; ++p)
-                    for (int q = 0; q < 3; ++q)
-                    {
-                        inv[p * 3 + q] = invM(p, q);
-                        finite = finite && std::isfinite(invM(p, q));
-                    }
+                arith::inverse3(ete, inv);
+                for (int p = 0; p < 9; ++p)
+                    finite = finite && std::isfinite(inv[p]);
                 std::copy(g, g + 3, _ge.data() + size_t(c) * 3);
                 for (size_t la = l0; la < l1; ++la)
                 {

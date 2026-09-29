@@ -3556,6 +3556,9 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
     #     and reports.
     shutil.copy2(ROOT / "hip" / "port" / "sfm_ba" / "projectionCheshire.hpp",
                  AV / "src/aliceVision/sfm/bundle/costfunctions/projectionCheshire.hpp")
+    # its arithmetic without contraction, shared with the device (0.3.7, step 4b)
+    shutil.copy2(ROOT / "hip" / "port" / "sfm_ba" / "baArith.hpp",
+                 AV / "src/aliceVision/sfm/bundle/costfunctions/baArith.hpp")
     t = bac.read_text(encoding="utf-8")
     if "projectionCheshire.hpp" not in t:
         old = "#include <aliceVision/sfm/bundle/costfunctions/projection.hpp>" + NL

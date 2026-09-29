@@ -603,7 +603,15 @@ reaches it. The design is in docs/notes/ba-own-solver.md; the steps, each a go/n
     - The sparse factorisation (40 s) stays on the host.
     - The Windows host rounds the rotation and the 3x3 inverse with FMA (Ceres' and Eigen's
       headers, parsed before the pragma), which 4b removes.
-  - 4b: the host without FMA; 4c: the device with a check mode; 4d: vectors on the device, CUDA.
+  - **4b, the host without FMA** (2026-09-29). `baArith.hpp`: the rotation (its part per pose once
+    per pose), the fused projection, the loss, the corrector and the 3x3 inverse, shared with the
+    device.
+    - Bit for bit Ceres' and Eigen's formulas without contraction, over 2 M test cases.
+    - New digests: 41 `801d1fb7…`, engine bay `814ae0d5…`, False Door `a5cc8437…`.
+    - Quality gate as in step 3: 41 WARN (landmarks, zero spread), engine bay PASS.
+    - A Jacobian evaluation of the large solves takes 55 ms against 84 ms. The False Door took 511 s,
+      mostly because its trajectory changed (268 large iterations against 562).
+  - 4c: the device with a check mode; 4d: vectors on the device, CUDA.
 
 Beside it:
 

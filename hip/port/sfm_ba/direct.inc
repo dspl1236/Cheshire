@@ -20,14 +20,15 @@ namespace sfm {
 namespace cheshire {
 namespace own {
 
-// the projection an observation row evaluates: CheshireIntrinsicsProject's Evaluate on a fused model
+// the projection an observation row evaluates: CheshireIntrinsicsProject's Evaluate on a fused model, with the
+// camera's values of this evaluation
 struct DirectInner
 {
-    const FusedCamera* cam;
+    const arith::CameraValues* cam;
     const sfmData::Observation* obs;
     bool Evaluate(double const* const* parameters, double* residuals, double** jacobians) const
     {
-        return fusedProject(*cam, *obs, parameters, residuals, jacobians);
+        return arith::fusedProjectValues(*cam, obs->getX(), obs->getY(), obs->getScale(), parameters, residuals, jacobians);
     }
 };
 
@@ -37,6 +38,7 @@ struct DirectRow
     double* params[4];
     const sfmData::Observation* obs;
     int camera;       // into DirectSource's cameras
+    int pose;         // into DirectSource's poses
     double weight;    // ScaledLoss's factor, 1 for none
 };
 
@@ -55,6 +57,7 @@ class DirectSource final : public Source
 
     std::vector<DirectCamera> cameras;
     std::vector<DirectRow> rows;
+    std::vector<const double*> poses;   // the pose blocks the rows use
     // the landmark blocks in _landmarksBlocks' order (their address order), with their constant flags
     std::vector<double*> landmarks;
     std::vector<char> landmarkConstant;
@@ -122,13 +125,23 @@ class DirectSource final : public Source
     int rowNumResiduals(int) const override { return 2; }
     const ceres::LossFunction* rowLoss(int) const override { return _loss; }
     double rowLossScale(int i) const override { return rows[i].weight; }
+    // the part of the rotation per pose, and the cameras' values, once per evaluation (step 4b)
+    void beforeEvaluation() const override
+    {
+        _poseRot.resize(poses.size());
+        for (size_t i = 0; i < poses.size(); ++i)
+            arith::poseRotation(poses[i], &_poseRot[i]);
+        _camValues.resize(cameras.size());
+        for (size_t c = 0; c < cameras.size(); ++c)
+            _camValues[c] = cameraValues(cameras[c].fused);
+    }
     bool evaluate(int i, double const* const* params, double* residuals, double** jacobians) const override
     {
         const DirectRow& row = rows[i];
         const DirectCamera& cam = cameras[row.camera];
         const EvalTimer cheshireEvalTimer(jacobians != nullptr);  // step A1, as the cost function times it
-        const DirectInner inner{&cam.fused, row.obs};
-        return projectSimple(inner, cam.hasDistortion, cam.fused.sizes[1], params, residuals, jacobians);
+        const DirectInner inner{&_camValues[row.camera], row.obs};
+        return arith::projectSimpleRot(inner, _poseRot[row.pose], cam.hasDistortion, cam.fused.sizes[1], params, residuals, jacobians);
     }
     void counts(int* parameterBlocks, int* parameters, int* residualBlocks, int* residuals) const override
     {
@@ -141,6 +154,8 @@ class DirectSource final : public Source
   private:
     const ceres::Problem& _small;
     const ceres::LossFunction* _loss;
+    mutable std::vector<arith::PoseRotation> _poseRot;
+    mutable std::vector<arith::CameraValues> _camValues;
 };
 
 }  // namespace own
@@ -247,11 +262,13 @@ bool BundleAdjustmentCeres::cheshireDirectAdjust(sfmData::SfMData& sfmData, ERef
         double* intrinsic = nullptr;
         double* distortion = nullptr;
         int camera = -1;
+        int poseIndex = -1;
         bool ok = false;
     };
     std::unordered_map<IndexT, ViewBlocks> views;
     views.reserve(sfmData.getViews().size());
     std::map<IndexT, int> cameraOf;
+    std::unordered_map<const double*, int> poseOf;
     std::set<const double*> ordered;   // the camera blocks entered in the ordering, once each
     const bool refineStructure = refineOptions & REFINE_STRUCTURE;
     double* fakeDistortionBlockPtr = &_fakeDistortionBlock;
@@ -308,6 +325,13 @@ bool BundleAdjustmentCeres::cheshireDirectAdjust(sfmData::SfMData& sfmData, ERef
                         src.cameras.push_back(cam);
                     }
                     e.camera = c->second;
+                    auto pi = poseOf.find(e.pose);
+                    if (pi == poseOf.end())
+                    {
+                        pi = poseOf.emplace(e.pose, int(src.poses.size())).first;
+                        src.poses.push_back(e.pose);
+                    }
+                    e.poseIndex = pi->second;
                     const std::pair<int, double*> blocks[3] = {{cheshirePoseGroup(view.getPoseId()), e.pose},
                                                                {cheshireIntrinsicGroup(intrinsicId), e.intrinsic},
                                                                {cheshireDistortionGroup(intrinsicId, e.distortion == fakeDistortionBlockPtr), e.distortion}};
@@ -327,6 +351,7 @@ bool BundleAdjustmentCeres::cheshireDirectAdjust(sfmData::SfMData& sfmData, ERef
             row.params[3] = landmarkBlockPtr;
             row.obs = &observation;
             row.camera = vb.camera;
+            row.pose = vb.poseIndex;
             row.weight = observation.getWeight();
             src.rows.push_back(row);
             _statistics.addState(EParameter::LANDMARK, constant ? EEstimatorParameterState::CONSTANT : EEstimatorParameterState::REFINED);

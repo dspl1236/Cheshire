@@ -433,6 +433,51 @@ that validation stays a digest comparison. That requires:
   - The small solves stay on the host.
 - **4d: the vectors on the device**, if the profile then says so; and the CUDA build (house-pc).
 
+## Step 4b: the host without FMA (2026-09-29)
+
+`hip/port/sfm_ba/baArith.hpp` holds the arithmetic the host solver and the device share, all under
+`fp contract(off)`:
+- the Jet<3> operators, restated operation by operation from Ceres' `jet.h`;
+- the angle-axis rotation, split into its part per pose (`poseRotation`: `hypot`, `sin`, `cos`, the
+  Jets of the angle, the rotation matrix; host only, it uses libm) and its part per point
+  (`rotatePoint`, `rotateWithDerivative`);
+- the fused projection over plain camera values (`fusedProjectValues`), the chain rule
+  (`projectSimpleRot`), the Huber loss, Ceres' corrector;
+- Eigen's 3x3 inverse (`inverse3`).
+
+The host uses it everywhere the solver runs. The direct path also computes the part per pose once
+per pose and evaluation (`Source::beforeEvaluation`) instead of once per row.
+
+**Checked against the originals.** A standalone test (`hip/tests/sfm_ba/arith_test.cpp`, the build's
+clang-cl with `/arch:AVX2`) compares 2 million random cases, including zero and tiny angles:
+- **With Ceres' and Eigen's headers under the same pragma:** every value is the same bit for bit
+  (the plain rotation, the Jet rotation, the rotation matrix, the inverse).
+- **With the Windows build's contraction:** the plain rotation differs in 62 % of the cases, the
+  rotation matrix in 67 %, the inverse in 95 %, the Jet rotation in none.
+
+The IR of the rebuilt `BundleAdjustmentCeres.cpp` has no fused operation left on the solver's path
+except `getPrincipalPoint`, which is read once per camera.
+
+**The new default digests** (each set run twice, identical):
+
+| set | sfm.abc | cameras.sfm | poses | landmarks | RMSE |
+|---|---|---|---|---|---|
+| 41 views | `801d1fb7b32bdd32` | `361ddd5cf663cfe6` | 41 | 80,799 (the same) | 1.23336 (the same) |
+| engine bay | `814ae0d5b664d733` | `af98cde31a5f153c` | 107 | 140,394 (was 140,429) | 1.68300 (was 1.68441) |
+| False Door | `a5cc84375086fdec` | `e05e2fa4df94376b` | 833 (was 828) | 1,355,323 | 1.36812 (was 1.37536) |
+
+- **Quality gate** against step 3's ten Ceres runs (`scripts/quality_gate.py report`):
+  - 41 views: WARN on landmarks, as in step 3 (4 fewer, significant only because a deterministic leg
+    has no spread, inside the tolerance). RMSE better.
+  - Engine bay: PASS, RMSE better.
+- **The direct check** (`CHESHIRE_BA_DIRECT=check`): 68 of 68 solves the same. The Problem path
+  computes the rotation per row, the direct path per pose.
+
+**Time.** Per iteration of the large False Door solves, a Jacobian evaluation takes 55 ms against
+84 ms, now that the part per pose is computed once. The False Door's run took 511 s against 787 s,
+and bundle adjustment 123 s against 356 s. Most of that is the trajectory, not the arithmetic: the
+large solves took 268 iterations against 562. Ceres' own runs span 241 to 666.
+
 ## Scope
 
 The solver covers the problems incremental SfM builds most:
