@@ -5,7 +5,7 @@
     e.g. build_targets.py hip6.2 gfx1010 gfx1012 gfx1030 gfx1031 gfx1032 gfx1034
          build_targets.py rocm7.2 gfx11-generic gfx12-generic
 
-Only six DLLs differ per GPU target (GPU_DLLS), so each target after the first reuses the family's build tree
+Only seven DLLs differ per GPU target (GPU_DLLS), so each target after the first reuses the family's build tree
 and changes CHESHIRE_HIP_ARCHS: the CPU objects stay cached and a target costs minutes rather than a
 full AliceVision build. They are harvested into build/payload/<family>/<target>/.
 
@@ -19,8 +19,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 # aliceVision_image.dll since 0.3.5: step 6r builds CheshireJPG (the direct read's device JPEG decode)
 # into it, so it carries the target's code objects like the other five.
+# aliceVision_sfm_bundle.dll since 0.3.7: step 7f builds the bundle adjustment's device work (baDevice.cu)
+# into it. The bundler files a GPU-bearing DLL under its target only, so a payload without it would leave
+# that target with no sfm_bundle.dll at all and incrementalSfM unable to load.
 GPU_DLLS = ['aliceVision_matching.dll', 'popsift.dll', 'aliceVision_fuseCut.dll',
-            'aliceVision_mesh.dll', 'aliceVision_depthMap_cuda.dll', 'aliceVision_image.dll']
+            'aliceVision_mesh.dll', 'aliceVision_depthMap_cuda.dll', 'aliceVision_image.dll',
+            'aliceVision_sfm_bundle.dll']
 OFFLOAD = re.compile(rb'amdhsa--([0-9a-z:+\-]+)')
 
 # PopSIFT must NOT be built for a generic target. A generic code object makes it exit 0xC0000094
