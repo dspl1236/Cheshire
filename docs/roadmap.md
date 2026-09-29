@@ -586,6 +586,14 @@ reaches it. The design is in docs/notes/ba-own-solver.md; the steps, each a go/n
   projection residuals, the pose and intrinsics manifolds, constant blocks. Ceres takes the rest
   (rigs, mesh points, depth, constraints, priors). Gated by the SfM quality gate on 41 views, the
   engine bay and the False Door, then time.
+- **Step 3b: the solve built from the SfM data directly** (M). **Done 2026-09-29** (step 7e,
+  `CHESHIRE_BA_DIRECT=0` to turn off):
+  - No `ceres::Problem` per solve. The camera blocks go through upstream's own functions into a small
+    Problem, and the landmarks and observations become the solver's rows.
+  - The same bytes as the Problem path: every solve on 41 views and the engine bay
+    (`CHESHIRE_BA_DIRECT=check`), and whole runs on all three sets.
+  - False Door: 1340 s → 787 s, on the same trajectory. Build 218 s → 11 s, teardown 40 s → 0, and
+    bundle adjustment 529 s → 356 s.
 - **Step 4: the device** (L). Residuals, Jacobians and the per-landmark Schur blocks on the GPU; the
   reduced system on the host first.
 

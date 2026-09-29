@@ -360,6 +360,26 @@ inline bool digestEnabled()
     return on;
 }
 
+// CHESHIRE_BA_DIRECT (step 7e, direct.inc): 1 the solve built from the SfM data (the default), 0 off, check
+// both on every solve and compare. Returns 0, 1 or 2.
+inline int directMode()
+{
+    static const int mode = [] {
+        const std::string s = ::cheshire::env::text("CHESHIRE_BA_DIRECT", "1");
+        if (s == "check")
+            return 2;
+        return ::cheshire::env::flag("CHESHIRE_BA_DIRECT", true) ? 1 : 0;
+    }();
+    return mode;
+}
+
+// the last solve's account on this thread, kept in the direct check mode (it compares two solves)
+inline Result& lastResult()
+{
+    thread_local Result r;
+    return r;
+}
+
 // Ceres' corrector (corrector.cc): scale by sqrt(rho'), and the rank-one curvature correction in the
 // inlier region only when rho'' > 0 (never for Huber).
 struct Corrector
@@ -547,14 +567,191 @@ struct Buffer
     const double* data() const { return p.get(); }
 };
 
+// ---- what the solver solves ------------------------------------------------------------------------
+// A Source lays a problem out as Ceres' preprocessor sees it: its parameter blocks as candidates in
+// Ceres' order (the first elimination group, then the others, each in the order Ceres keeps it), with
+// their properties, and its residual blocks in the program's order; it evaluates a residual block.
+// ProblemSource reads a ceres::Problem (steps 1-3); the direct source builds from the SfM data (3b).
+struct BlockInfo
+{
+    double* ptr = nullptr;
+    int size = 0, tsize = 0;
+    const ceres::Manifold* manifold = nullptr;
+    bool constant = false;                 // or missing: not a free block
+    bool eliminate = false;                // in the first elimination group
+    std::vector<double> lower, upper;      // ambient bounds, empty when the block has none
+};
+
+class Source
+{
+  public:
+    virtual ~Source() = default;
+    virtual bool blocks(std::vector<BlockInfo>* out, int threads, std::string* why) const = 0;
+    virtual int numRows() const = 0;
+    virtual int rowNumParams(int i) const = 0;
+    virtual void rowParams(int i, double** out) const = 0;
+    virtual int rowNumResiduals(int i) const = 0;
+    virtual const ceres::LossFunction* rowLoss(int i) const = 0;
+    // ScaledLoss's factor on top of rowLoss (ScaledLoss::Evaluate's arithmetic); 1 for none
+    virtual double rowLossScale(int) const { return 1.0; }
+    virtual bool evaluate(int i, double const* const* params, double* residuals, double** jacobians) const = 0;
+    // what Solver::Summary reports of the problem as given
+    virtual void counts(int* parameterBlocks, int* parameters, int* residualBlocks, int* residuals) const = 0;
+};
+
+// rho of a row's loss, with ScaledLoss's arithmetic for a scale; false when the row has no loss at all
+inline bool rowRho(const ceres::LossFunction* loss, double scale, double s, double rho[3])
+{
+    if (scale == 1.0)
+    {
+        if (!loss)
+            return false;
+        loss->Evaluate(s, rho);
+        return true;
+    }
+    if (!loss)
+    {
+        rho[0] = scale * s;
+        rho[1] = scale;
+        rho[2] = 0.0;
+        return true;
+    }
+    loss->Evaluate(s, rho);
+    rho[0] *= scale;
+    rho[1] *= scale;
+    rho[2] *= scale;
+    return true;
+}
+
+// A ceres::Problem as the solver's source: the candidates from the elimination ordering (the groups in
+// order, a group's blocks in its set's order, then the blocks the ordering does not name), the residual
+// blocks in the program's order. The per-block queries are std::map lookups in Ceres; they are const,
+// so in parallel.
+class ProblemSource final : public Source
+{
+  public:
+    ProblemSource(ceres::Problem& problem, const ceres::ParameterBlockOrdering& ordering)
+      : _problem(problem), _ordering(ordering)
+    {
+        _problem.GetResidualBlocks(&_rids);
+        _cost.resize(_rids.size());
+        _loss.resize(_rids.size());
+        for (size_t i = 0; i < _rids.size(); ++i)
+        {
+            _cost[i] = _problem.GetCostFunctionForResidualBlock(_rids[i]);
+            _loss[i] = _problem.GetLossFunctionForResidualBlock(_rids[i]);
+        }
+    }
+
+    bool blocks(std::vector<BlockInfo>* out, int threads, std::string* why) const override
+    {
+        const auto& groups = _ordering.group_to_elements();
+        if (groups.empty())
+        {
+            *why = "no ordering";
+            return false;
+        }
+        const int eGroup = groups.begin()->first;
+        std::vector<double*> cand;
+        std::vector<char> candE;
+        cand.reserve(size_t(_ordering.NumElements()));
+        candE.reserve(size_t(_ordering.NumElements()));
+        for (const auto& [group, elements] : groups)
+            for (double* p : elements)
+            {
+                cand.push_back(p);
+                candE.push_back(char(group == eGroup));
+            }
+        if (_ordering.NumElements() != _problem.NumParameterBlocks())
+        {
+            // blocks the ordering does not name (Ceres puts them in the last group)
+            PtrIndex member;
+            member.reserve(cand.size());
+            for (double* p : cand)
+                member.set(p, 0);
+            std::vector<double*> blocks;
+            _problem.GetParameterBlocks(&blocks);
+            for (double* p : blocks)
+                if (member.get(p) < 0)
+                {
+                    cand.push_back(p);
+                    candE.push_back(0);
+                }
+        }
+        const int nc = int(cand.size());
+        out->assign(static_cast<size_t>(nc), BlockInfo());
+        const double big = std::numeric_limits<double>::max();
+#pragma omp parallel for schedule(dynamic, 4096) num_threads(threads)
+        for (int i = 0; i < nc; ++i)
+        {
+            double* p = cand[i];
+            BlockInfo& b = (*out)[i];
+            b.ptr = p;
+            b.eliminate = candE[i] != 0;
+            if (!_problem.HasParameterBlock(p) || _problem.IsParameterBlockConstant(p))
+            {
+                b.constant = true;
+                continue;
+            }
+            b.size = _problem.ParameterBlockSize(p);
+            b.tsize = _problem.ParameterBlockTangentSize(p);
+            b.manifold = _problem.GetManifold(p);
+            if (b.tsize == 0)
+                continue;
+            // bounds (Program::IsBoundsConstrained): -max / +max when a coordinate has none
+            bool any = false;
+            std::vector<double> lo(static_cast<size_t>(b.size)), hi(static_cast<size_t>(b.size));
+            for (int k = 0; k < b.size; ++k)
+            {
+                lo[k] = _problem.GetParameterLowerBound(p, k);
+                hi[k] = _problem.GetParameterUpperBound(p, k);
+                any = any || lo[k] > -big || hi[k] < big;
+            }
+            if (any)
+            {
+                b.lower = std::move(lo);
+                b.upper = std::move(hi);
+            }
+        }
+        return true;
+    }
+    int numRows() const override { return int(_rids.size()); }
+    int rowNumParams(int i) const override { return int(_cost[i]->parameter_block_sizes().size()); }
+    void rowParams(int i, double** out) const override
+    {
+        thread_local std::vector<double*> tmp;
+        _problem.GetParameterBlocksForResidualBlock(_rids[i], &tmp);
+        std::copy(tmp.begin(), tmp.end(), out);
+    }
+    int rowNumResiduals(int i) const override { return _cost[i]->num_residuals(); }
+    const ceres::LossFunction* rowLoss(int i) const override { return _loss[i]; }
+    bool evaluate(int i, double const* const* params, double* residuals, double** jacobians) const override
+    {
+        return _cost[i]->Evaluate(params, residuals, jacobians);
+    }
+    void counts(int* parameterBlocks, int* parameters, int* residualBlocks, int* residuals) const override
+    {
+        *parameterBlocks = _problem.NumParameterBlocks();
+        *parameters = _problem.NumParameters();
+        *residualBlocks = _problem.NumResidualBlocks();
+        *residuals = _problem.NumResiduals();
+    }
+
+  private:
+    ceres::Problem& _problem;
+    const ceres::ParameterBlockOrdering& _ordering;
+    std::vector<ceres::ResidualBlockId> _rids;
+    std::vector<const ceres::CostFunction*> _cost;
+    std::vector<const ceres::LossFunction*> _loss;
+};
+
 class Solver
 {
   public:
     // prepare(): what Ceres' EvaluationCallback does before a new evaluation point (AliceVision pushes
     // the intrinsics and distortion blocks into its camera objects, which the cost functions read).
-    Solver(ceres::Problem& problem, const ceres::ParameterBlockOrdering& ordering, const Options& options,
-           std::function<void()> prepare)
-      : _problem(problem), _ordering(ordering), _opt(options), _prepare(std::move(prepare)), _threads(std::max(1, options.threads))
+    Solver(const Source& source, const Options& options, std::function<void()> prepare)
+      : _src(source), _opt(options), _prepare(std::move(prepare)), _threads(std::max(1, options.threads))
     {
         // CHESHIRE_BA_OWN_THREADS: this solver's threads alone, Ceres' unchanged (the independence check)
         static const long own = static_cast<long>(::cheshire::env::integer("CHESHIRE_BA_OWN_THREADS", 0));
@@ -581,7 +778,7 @@ class Solver
             res.constrained = _constrained;
             res.fixedCost = _fixedCost;
             minimize(&res);
-            if (res.ok && (shadowEnabled() || digestEnabled()))
+            if (res.ok && (shadowEnabled() || digestEnabled() || directMode() == 2))
             {
                 res.digest = digestOf(stateVector());
                 res.digestIn = digestOf(_x0);
@@ -613,8 +810,9 @@ class Solver
     // from j (or -1).
     struct Row
     {
-        const ceres::CostFunction* cost = nullptr;
+        int src = 0;                         // the source's residual block
         const ceres::LossFunction* loss = nullptr;
+        double lossScale = 1.0;
         int nres = 0;
         int np = 0;
         size_t p = 0;
@@ -628,8 +826,7 @@ class Solver
         Cost,       // the cost alone (a candidate point); _r and _J untouched
         Gradient    // the cost and the unscaled tangent gradient into *grad (the line search); _r, _J untouched
     };
-    ceres::Problem& _problem;
-    const ceres::ParameterBlockOrdering& _ordering;
+    const Source& _src;
     Options _opt;
     std::function<void()> _prepare;
     int _threads = 1;
@@ -691,102 +888,44 @@ class Solver
     // the residual blocks on at least one free block, grouped by their E block.
     bool setup(std::string* why)
     {
-        const auto& groups = _ordering.group_to_elements();
-        if (groups.empty())
-        {
-            *why = "no ordering";
+        std::vector<BlockInfo> info;
+        if (!_src.blocks(&info, _threads, why))
             return false;
-        }
-        const int eGroup = groups.begin()->first;
-        std::vector<double*> cand;
-        std::vector<char> candE;
-        cand.reserve(size_t(_ordering.NumElements()));
-        candE.reserve(size_t(_ordering.NumElements()));
-        for (const auto& [group, elements] : groups)
-            for (double* p : elements)
-            {
-                cand.push_back(p);
-                candE.push_back(char(group == eGroup));
-            }
-        if (_ordering.NumElements() != _problem.NumParameterBlocks())
-        {
-            // blocks the ordering does not name (Ceres puts them in the last group)
-            PtrIndex member;
-            member.reserve(cand.size());
-            for (double* p : cand)
-                member.set(p, 0);
-            std::vector<double*> blocks;
-            _problem.GetParameterBlocks(&blocks);
-            for (double* p : blocks)
-                if (member.get(p) < 0)
-                {
-                    cand.push_back(p);
-                    candE.push_back(0);
-                }
-        }
-        // the per-block queries are std::map lookups in Ceres; they are const, so in parallel
-        const int nc = int(cand.size());
-        std::vector<PBlock> info(static_cast<size_t>(nc));
-        std::vector<char> keep(size_t(nc), 0);
-        const double big = std::numeric_limits<double>::max();
-#pragma omp parallel for schedule(dynamic, 4096) num_threads(_threads)
-        for (int i = 0; i < nc; ++i)
-        {
-            double* p = cand[i];
-            if (!_problem.HasParameterBlock(p) || _problem.IsParameterBlockConstant(p))
-                continue;
-            PBlock& b = info[i];
-            b.ptr = p;
-            b.size = _problem.ParameterBlockSize(p);
-            b.tsize = _problem.ParameterBlockTangentSize(p);
-            b.manifold = _problem.GetManifold(p);
-            if (b.tsize == 0)
-                continue;
-            // bounds (Program::IsBoundsConstrained): -max / +max when a coordinate has none
-            bool any = false;
-            std::vector<double> lo(size_t(b.size)), hi(static_cast<size_t>(b.size));
-            for (int k = 0; k < b.size; ++k)
-            {
-                lo[k] = _problem.GetParameterLowerBound(p, k);
-                hi[k] = _problem.GetParameterUpperBound(p, k);
-                any = any || lo[k] > -big || hi[k] < big;
-            }
-            if (any)
-            {
-                b.lower = std::move(lo);
-                b.upper = std::move(hi);
-            }
-            keep[i] = 1;
-        }
+        const int nc = int(info.size());
         // provisional indices, in candidate order
         std::vector<PBlock> tE, tF;
         PtrIndex index;
-        index.reserve(cand.size());
+        index.reserve(info.size());
         for (int i = 0; i < nc; ++i)
         {
-            if (!keep[i])
+            BlockInfo& bi = info[i];
+            if (bi.constant || bi.tsize == 0)
                 continue;
-            if (candE[i])
+            PBlock b;
+            b.ptr = bi.ptr;
+            b.size = bi.size;
+            b.tsize = bi.tsize;
+            b.manifold = bi.manifold;
+            b.lower = std::move(bi.lower);
+            b.upper = std::move(bi.upper);
+            if (bi.eliminate)
             {
-                index.set(info[i].ptr, int(tE.size()));
-                tE.push_back(std::move(info[i]));
+                index.set(b.ptr, int(tE.size()));
+                tE.push_back(std::move(b));
             }
             else
             {
-                index.set(info[i].ptr, -2 - int(tF.size()));
-                tF.push_back(std::move(info[i]));
+                index.set(b.ptr, -2 - int(tF.size()));
+                tF.push_back(std::move(b));
             }
         }
         info.clear();
-        cand.clear();
 
         // residual blocks
-        std::vector<ceres::ResidualBlockId> rids;
-        _problem.GetResidualBlocks(&rids);
-        const int nR = int(rids.size());
+        const int nR = _src.numRows();
         std::vector<size_t> pStart(size_t(nR) + 1, 0);
         for (int i = 0; i < nR; ++i)
-            pStart[i + 1] = pStart[i] + _problem.GetCostFunctionForResidualBlock(rids[i])->parameter_block_sizes().size();
+            pStart[i + 1] = pStart[i] + size_t(_src.rowNumParams(i));
         _pp.resize(pStart[nR]);
         _pv.resize(pStart[nR]);
         _pj.assign(pStart[nR], -1);
@@ -794,18 +933,14 @@ class Solver
         std::vector<char> rowFree(size_t(nR), 0), rowBad(size_t(nR), 0);
 #pragma omp parallel num_threads(_threads)
         {
-            std::vector<double*> tmp;
 #pragma omp for schedule(dynamic, 4096)
             for (int i = 0; i < nR; ++i)
             {
-                _problem.GetParameterBlocksForResidualBlock(rids[i], &tmp);
-                size_t p = pStart[i];
-                for (double* q : tmp)
+                _src.rowParams(i, _pp.data() + pStart[i]);
+                for (size_t p = pStart[i]; p < pStart[i + 1]; ++p)
                 {
-                    const int v = index.get(q);
-                    _pp[p] = q;
+                    const int v = index.get(_pp[p]);
                     _pv[p] = v;
-                    ++p;
                     if (v >= 0)
                     {
                         if (rowE[i] >= 0)
@@ -829,10 +964,8 @@ class Solver
         {
             if (rowFree[i])
                 continue;
-            const ceres::CostFunction* cf = _problem.GetCostFunctionForResidualBlock(rids[i]);
-            const ceres::LossFunction* lf = _problem.GetLossFunctionForResidualBlock(rids[i]);
-            std::vector<double> r(size_t(cf->num_residuals()));
-            if (!cf->Evaluate(_pp.data() + pStart[i], r.data(), nullptr))
+            std::vector<double> r(static_cast<size_t>(_src.rowNumResiduals(i)));
+            if (!_src.evaluate(i, _pp.data() + pStart[i], r.data(), nullptr))
             {
                 *why = "a fixed residual block failed to evaluate";
                 return false;
@@ -840,12 +973,9 @@ class Solver
             double s = 0.0;
             for (double v : r)
                 s += v * v;
-            if (lf)
-            {
-                double rho[3];
-                lf->Evaluate(s, rho);
+            double rho[3];
+            if (rowRho(_src.rowLoss(i), _src.rowLossScale(i), s, rho))
                 _fixedCost += 0.5 * rho[0];
-            }
             else
                 _fixedCost += 0.5 * s;
         }
@@ -941,9 +1071,10 @@ class Solver
         {
             const int i = order[ri];
             Row& row = _rows[ri];
-            row.cost = _problem.GetCostFunctionForResidualBlock(rids[i]);
-            row.loss = _problem.GetLossFunctionForResidualBlock(rids[i]);
-            row.nres = row.cost->num_residuals();
+            row.src = i;
+            row.loss = _src.rowLoss(i);
+            row.lossScale = _src.rowLossScale(i);
+            row.nres = _src.rowNumResiduals(i);
             row.p = pStart[i];
             row.np = int(pStart[i + 1] - pStart[i]);
             row.r = _nr;
@@ -1404,7 +1535,7 @@ class Solver
                     jptr[k] = jb + _pj[p + k];
             }
         }
-        if (!row.cost->Evaluate(_pp.data() + p, r, jb ? jptr.data() : nullptr))
+        if (!_src.evaluate(row.src, _pp.data() + p, r, jb ? jptr.data() : nullptr))
             return false;
         double s = 0.0;
         for (int i = 0; i < row.nres; ++i)
@@ -1436,13 +1567,12 @@ class Solver
                     if (!std::isfinite(J[i]))
                         return false;
             }
-        if (!row.loss)
+        double rho[3];
+        if (!rowRho(row.loss, row.lossScale, s, rho))
         {
             *cost = 0.5 * s;
             return true;
         }
-        double rho[3];
-        row.loss->Evaluate(s, rho);
         *cost = 0.5 * rho[0];
         if (jb)
         {
@@ -2370,29 +2500,25 @@ inline void noteFallback(const std::string& why)
         ALICEVISION_LOG_INFO("cheshire: BA solver: this solve goes to Ceres (" << why << "); further ones for the same reason are not logged");
 }
 
-// Solve with this solver in place of ceres::Solve and fill the Summary as Ceres would, or return false
-// (the problem untouched) for Ceres to solve. requestedThreads: the threads BundleAdjustmentCeres asked
+// The solver's options from Ceres', with its threads: requestedThreads is what BundleAdjustmentCeres asked
 // for; the deterministic mode's single thread is Ceres' need, not this solver's (its result does not
-// depend on the count), so CHESHIRE_BA_THREADS alone lowers it.
-inline bool solveInstead(ceres::Problem& problem, const ceres::Solver::Options& options, int requestedThreads,
-                         std::function<void()> prepare, ceres::Solver::Summary* summary)
+// depend on the count), so CHESHIRE_BA_THREADS alone lowers it. False (and why) when Ceres was asked for
+// something this solver does not do.
+inline bool solverOptions(const ceres::Solver::Options& options, int requestedThreads, Options* o, std::string* why)
 {
-    if (!solverEnabled())
+    if (!optionsFrom(options, o, why))
         return false;
-    static std::once_flag said;
-    std::call_once(said, [] {
-        ALICEVISION_LOG_INFO("cheshire: BA solver: Cheshire's own for the Schur solves (CHESHIRE_BA_SOLVER=ceres for Ceres)");
-    });
-    Options o;
-    std::string why;
-    if (!optionsFrom(options, &o, &why))
-    {
-        noteFallback(why);
-        return false;
-    }
     static const long forced = static_cast<long>(::cheshire::env::integer("CHESHIRE_BA_THREADS", 0));
-    o.threads = forced > 0 ? int(forced) : std::max(1, requestedThreads);
-    Solver solver(problem, *options.linear_solver_ordering, o, std::move(prepare));
+    o->threads = forced > 0 ? int(forced) : std::max(1, requestedThreads);
+    return true;
+}
+
+// Solve a Source with this solver and fill the Summary as Ceres would; false (the reason noted, the blocks
+// untouched) when it cannot. *out, when given, receives the solver's own account.
+inline bool solveSource(const Source& src, const ceres::Solver::Options& options, const Options& o, std::function<void()> prepare,
+                        ceres::Solver::Summary* summary, Result* out = nullptr)
+{
+    Solver solver(src, o, std::move(prepare));
     const Result r = solver.solve();
     if (!r.ok)
     {
@@ -2435,10 +2561,7 @@ inline bool solveInstead(ceres::Problem& problem, const ceres::Solver::Options& 
         s.num_line_search_steps += std::max(0, it.lsSamples - 1);
     }
     s.is_constrained = r.constrained;
-    s.num_parameter_blocks = problem.NumParameterBlocks();
-    s.num_parameters = problem.NumParameters();
-    s.num_residual_blocks = problem.NumResidualBlocks();
-    s.num_residuals = problem.NumResiduals();
+    src.counts(&s.num_parameter_blocks, &s.num_parameters, &s.num_residual_blocks, &s.num_residuals);
     s.num_parameter_blocks_reduced = r.eBlocks + r.fBlocks;
     s.num_residual_blocks_reduced = r.rows;
     s.num_residuals_reduced = int(r.residuals);
@@ -2460,7 +2583,33 @@ inline bool solveInstead(ceres::Problem& problem, const ceres::Solver::Options& 
     for (const auto& i : s.iterations)
         for (ceres::IterationCallback* cb : options.callbacks)
             (*cb)(i);
+    if (out)
+        *out = r;
+    if (directMode() == 2)
+        lastResult() = r;
     return true;
+}
+
+// Solve AliceVision's ceres::Problem with this solver in place of ceres::Solve, or return false (the problem
+// untouched) for Ceres to solve it.
+inline bool solveInstead(ceres::Problem& problem, const ceres::Solver::Options& options, int requestedThreads,
+                         std::function<void()> prepare, ceres::Solver::Summary* summary)
+{
+    if (!solverEnabled())
+        return false;
+    static std::once_flag said;
+    std::call_once(said, [] {
+        ALICEVISION_LOG_INFO("cheshire: BA solver: Cheshire's own for the Schur solves (CHESHIRE_BA_SOLVER=ceres for Ceres)");
+    });
+    Options o;
+    std::string why;
+    if (!solverOptions(options, requestedThreads, &o, &why))
+    {
+        noteFallback(why);
+        return false;
+    }
+    const ProblemSource src(problem, *options.linear_solver_ordering);
+    return solveSource(src, options, o, std::move(prepare), summary);
 }
 
 // Ceres' trajectory, for the comparison.

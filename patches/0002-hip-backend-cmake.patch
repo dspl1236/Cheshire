@@ -8782,7 +8782,7 @@ index 9500f70..b12c078 100644
          numAddedEdges += addIntrinsicEdgesToTheGraph(sfmData, addedViewsId);
      }
 diff --git a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
-index bd0bf27..cd5e638 100644
+index bd0bf27..3eb6d70 100644
 --- a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
 +++ b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
 @@ -5,6 +5,10 @@
@@ -9092,7 +9092,21 @@ index bd0bf27..cd5e638 100644
  
              std::array<double, 3> lblock = block;
  
-@@ -1309,13 +1366,45 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1301,6 +1358,13 @@ ceres::CallbackReturnType BundleAdjustmentCeres::IterationInfos::operator()(cons
+ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions refineOptions)
+ {
+     ALICEVISION_LOG_INFO("BundleAdjustmentCeres::adjust start");
++    // cheshire (step 7e, 0.3.7): the solve built from the SfM data directly, without a ceres::Problem
++    // (direct.inc); anything it does not cover, and its check mode, carry on below as always
++    {
++        bool cheshireDirectOk = false;
++        if (cheshireDirectAdjust(sfmData, refineOptions, &cheshireDirectOk))
++            return cheshireDirectOk;
++    }
+ 
+     std::vector<ceres::ResidualBlockId> landmarksBlockIds;
+     std::vector<ceres::ResidualBlockId> temporalConstraintBlockIds;
+@@ -1309,13 +1373,46 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      ceres::Problem::Options problemOptions;
      problemOptions.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
      problemOptions.evaluation_callback = this;
@@ -9118,7 +9132,8 @@ index bd0bf27..cd5e638 100644
 +    // cheshire (step 5r): the persistent Problem when the scene allows it, else the rebuild
 +    std::unique_ptr<ceres::Problem> cheshireLocalProblem;
 +    ceres::Problem* cheshireProblemPtr = nullptr;
-+    if (cheshirePersistAllowed(sfmData, refineOptions) && cheshirePersistentBuild(sfmData, refineOptions, landmarksBlockIds))
++    // (not while CHESHIRE_BA_DIRECT=check compares: the direct build is createProblem's program)
++    if (!_cheshireDirectPending && cheshirePersistAllowed(sfmData, refineOptions) && cheshirePersistentBuild(sfmData, refineOptions, landmarksBlockIds))
 +        cheshireProblemPtr = _cheshireProblem.get();
 +    else
 +    {
@@ -9142,7 +9157,7 @@ index bd0bf27..cd5e638 100644
      problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
      ALICEVISION_LOG_INFO("landmarksBlocks cost : " << cost);
  
-@@ -1325,6 +1414,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1325,6 +1422,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
          problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
          ALICEVISION_LOG_INFO("temporalConstraintBlocks cost : " << cost);
      }
@@ -9151,7 +9166,7 @@ index bd0bf27..cd5e638 100644
  
      // configure a Bundle Adjustment engine and run it
      // make Ceres automatically detect the bundle structure.
-@@ -1335,10 +1426,131 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1335,10 +1434,133 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      IterationInfos iterationInfos;
      options.callbacks.push_back(&iterationInfos);
  
@@ -9205,7 +9220,8 @@ index bd0bf27..cd5e638 100644
 +        }
 +        else
 +        {
-+            cheshire::own::Solver cheshireSolver(problem, *options.linear_solver_ordering, o, [this] { PrepareForEvaluation(true, true); });
++            const cheshire::own::ProblemSource cheshireSource(problem, *options.linear_solver_ordering);
++            cheshire::own::Solver cheshireSolver(cheshireSource, o, [this] { PrepareForEvaluation(true, true); });
 +            cheshireShadow = cheshireSolver.solve();
 +        }
 +        cheshireShadowFinal.resize(cheshireShadowBlocks.size());
@@ -9227,6 +9243,7 @@ index bd0bf27..cd5e638 100644
 +    if (cheshireShadowOn || !cheshire::own::solveInstead(problem, options, int(_ceresOptions.nbThreads),
 +                                                          [this] { PrepareForEvaluation(true, true); }, &summary))
 +        ceres::Solve(options, &problem, &summary);
++    cheshireDirectCompare();  // cheshire (step 7e): CHESHIRE_BA_DIRECT=check
 +    const double cheshireSolveS = std::chrono::duration<double>(cheshireAdjustClock::now() - cheshireT2).count();
 +    if (cheshireShadowOn)
 +    {
@@ -9284,7 +9301,7 @@ index bd0bf27..cd5e638 100644
      ALICEVISION_LOG_INFO("landmarksBlockIds : " << landmarksBlockIds.size());
      evaluateOptions.residual_blocks = landmarksBlockIds;
      problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
-@@ -1350,6 +1562,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1350,6 +1572,8 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
          problem.Evaluate(evaluateOptions, &cost, NULL, NULL, NULL);
          ALICEVISION_LOG_INFO("temporalConstraintBlocks cost : " << cost);
      }
@@ -9293,7 +9310,7 @@ index bd0bf27..cd5e638 100644
  
      // print summary
      if (_ceresOptions.summary)
-@@ -1365,6 +1579,7 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1365,6 +1589,7 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      }
  
      // update input sfmData with the solution
@@ -9301,7 +9318,7 @@ index bd0bf27..cd5e638 100644
      updateFromSolution(sfmData, refineOptions);
  
      // Info from surveys
-@@ -1378,6 +1593,16 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
+@@ -1378,6 +1603,16 @@ bool BundleAdjustmentCeres::adjust(sfmData::SfMData& sfmData, ERefineOptions ref
      _statistics.RMSEinitial = std::sqrt(summary.initial_cost / summary.num_residuals);
      _statistics.RMSEfinal = std::sqrt(summary.final_cost / summary.num_residuals);
  
@@ -9318,14 +9335,15 @@ index bd0bf27..cd5e638 100644
      ALICEVISION_LOG_INFO("BundleAdjustmentCeres::adjust end");
  
      return true;
-@@ -1411,3 +1636,5 @@ void BundleAdjustmentCeres::PrepareForEvaluation(bool evaluate_jacobians, bool n
+@@ -1411,3 +1646,6 @@ void BundleAdjustmentCeres::PrepareForEvaluation(bool evaluate_jacobians, bool n
  
  }  // namespace sfm
  }  // namespace aliceVision
 +
 +#include "aliceVision/sfm/bundle/persistent.inc"  // cheshire: step 5r
++#include "aliceVision/sfm/bundle/direct.inc"  // cheshire: step 7e
 diff --git a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp
-index ee14887..e6ab8e2 100644
+index ee14887..1a082f3 100644
 --- a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp
 +++ b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp
 @@ -10,6 +10,7 @@
@@ -9369,7 +9387,7 @@ index ee14887..e6ab8e2 100644
      /// rig sub-poses blocks wrapper
      /// block: ceres angleAxis(3) + translation(3)
      std::map<IndexT, std::map<IndexT, std::array<double, 6>>> _rigBlocks;
-@@ -292,6 +296,51 @@ class BundleAdjustmentCeres : public BundleAdjustment, ceres::EvaluationCallback
+@@ -292,6 +296,59 @@ class BundleAdjustmentCeres : public BundleAdjustment, ceres::EvaluationCallback
      /// hinted order for ceres to eliminate blocks when solving.
      /// note: this ceres parameter is built internally and must be reset on each call to the solver.
      ceres::ParameterBlockOrdering _linearSolverOrdering;
@@ -9411,6 +9429,14 @@ index ee14887..e6ab8e2 100644
 +    void cheshireDropPersistent();
 +    bool cheshirePersistentBuild(const sfmData::SfMData& sfmData, ERefineOptions refineOptions, std::vector<ceres::ResidualBlockId>& landmarksBlockIds);
 +    void cheshirePersistCheck(const sfmData::SfMData& sfmData, const ceres::Problem& problem, bool preSync) const;
++    // cheshire (step 7e, 0.3.7): the solve built from the SfM data directly (direct.inc)
++    bool cheshireDirectInScope(const sfmData::SfMData& sfmData, ERefineOptions refineOptions, std::string* why) const;
++    bool cheshireDirectAdjust(sfmData::SfMData& sfmData, ERefineOptions refineOptions, bool* ok);
++    void cheshireDirectCompare() const;
++    bool _cheshireDirectPending = false;
++    unsigned long long _cheshireDirectDigest = 0, _cheshireDirectDigestIn = 0;
++    int _cheshireDirectIterations = -1;
++    double _cheshireDirectFinalCost = 0.0;
 +    int cheshireRigGroup(IndexT rigId, IndexT subPoseId)
 +    {
 +        int& g = _cheshireRigGroup[std::make_pair(rigId, subPoseId)];

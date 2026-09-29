@@ -292,6 +292,74 @@ same every run.
 Two False Door runs then gave the same bytes: 828 poses, 1,348,092 landmarks, RMSE 1.38079, and all
 549 stage digests equal. So SfM is reproducible by default on every set so far, and with every thread.
 
+## Step 3b: the solve built from the SfM data directly (2026-09-29)
+
+Generator step 7e, `hip/port/sfm_ba/direct.inc`. Until now every solve still paid for the Problem
+upstream builds: a cost-function object and a residual block per observation (about 5 M on the False
+Door's large solves), read back by the solver and freed again. That was a third of the False Door's
+bundle-adjustment time with persistence off, and still 158 s of build and 26 s of destruction with it
+on.
+
+**What it does** (`BundleAdjustmentCeres::cheshireDirectAdjust`, at the start of `adjust`):
+- **The camera blocks go through upstream's own code.** `addExtrinsicsToProblem` and
+  `addIntrinsicsToProblem` add them to a small Problem that holds only them (a few hundred blocks), so
+  their constant flags, manifolds and bounds are upstream's.
+- **The landmarks and observations become the solver's rows directly.** They are taken in the order
+  `addLandmarksToProblem` adds them, with its statistics and error logs.
+- **Each row evaluates the fused projection itself.** It runs the same code the cost functions run,
+  now shared as `fusedProject` and `projectSimple` in `projectionCheshire.hpp`.
+- **The solver reads blocks and rows through a `Source`.** A `ProblemSource` walks a `ceres::Problem`
+  as before; the direct build is a second source. The solver itself did not change.
+
+**The program is the one Ceres' preprocessor would build from `createProblem`'s Problem:** the same
+blocks, rows, order and ordering groups. So the result is the same bytes.
+- `CHESHIRE_BA_DIRECT=check` runs both on every solve and compares their digests: 68 of 68 solves the
+  same on 41 views, and 141 of 141 on the engine bay.
+- Whole runs give the same `sfm.abc` and `cameras.sfm` as the Problem path with persistence off
+  (`CHESHIRE_BA_PERSIST=0`), on all three sets:
+  - 41 views: `331c2705c4845713`;
+  - engine bay: `3285152e129cf314`;
+  - False Door: `d2e34fd8d903fb79` (828 poses, 1,351,227 landmarks, RMSE 1.37536).
+- On the False Door all 939 solves took the direct path.
+
+**Persistence (step 5r) is not used on this path,** because no Problem is left to keep. A kept
+Problem's output is not byte for byte a fresh build's, so the default's digests change with 3b (41 views `feeaa42f96cc22fb` → `331c2705c4845713`, False Door
+`14611aadf00ede49` → `d2e34fd8d903fb79`), to exactly the non-persistent path's.
+
+**Scope.** It covers a solve when the solver is on and:
+- the scene has no rigs, survey points, 2-D or point constraints, rotation priors, temporal
+  smoothness, mesh-referenced landmarks or depth observations;
+- the parameter ordering is on;
+- the Jacobians are analytic, with no Jacobian check;
+- every camera model is one the fused projection covers (pinhole, with no distortion or with radial
+  K1, radial K3 or Brown).
+
+Anything else takes the Problem path as before (and the solver or Ceres from there), with the reason
+logged once. `CHESHIRE_BA_DIRECT=0` turns it off, and the shadow modes always use the Problem path.
+
+**Time on the False Door** (same bytes, back to back):
+
+| | SfM wall | bundle adjustment | build | destroy | preprocessor |
+|---|---|---|---|---|---|
+| Problem path, persistence off | 1340 s | 529 s | 218 s | 40 s | 37.7 s |
+| direct | 787 s | 356 s | 11 s | 0 | 14.6 s |
+
+Bundle adjustment itself also got faster: the Jacobians took 96 s against 148 s, and the residuals
+35 s against 72 s. The rows are evaluated without a virtual call through a cost-function object, and
+their data sit in one array instead of scattered over millions of small allocations.
+
+The persistent default before 3b ran 1065-1138 s on a slightly different trajectory (948 solves, not
+939): 158 s build, 26 s destroy, 423 s BA.
+
+**On the small sets**, against the persistent default before 3b (`CHESHIRE_BA_DIRECT=0`, which still
+gives its committed digests `feeaa42f96cc22fb` and `8fbb7e604ea6b79c`), one run each on the installed
+build:
+
+| set | SfM wall | bundle adjustment | build | preprocessor |
+|---|---|---|---|---|
+| 41 views | 33.3 s → 28.9 s | 5.7 s → 4.2 s | 1.71 s → 0.56 s | 1.46 s → 0.66 s |
+| engine bay | 36.2 s → 33.0 s | 9.5 s → 9.3 s | 2.92 s → 0.63 s | 1.41 s → 0.77 s |
+
 ## Scope
 
 The solver covers the problems incremental SfM builds most:
@@ -376,7 +444,7 @@ This has three consequences:
 - **The numbers are Ceres' numbers**, because the same cost-function objects compute them.
 - **The problem build is not removed yet.** It is B1's 145 s of the False Door's rebuilds, and goes
   when the solver builds its structures from the SfM data directly (step 3b, after it has proved
-  itself).
+  itself; done, above).
 
 Validation moves into the run: **shadow mode**. `CHESHIRE_BA_SHADOW=1` runs the new solver on a copy
 of the parameters beside Ceres, in every solve of a real SfM run, and logs both trajectories. Ceres
@@ -417,6 +485,7 @@ the same operations in the same order, so the new solver and Ceres evaluate the 
 | 1 | shadow mode: the solver beside Ceres on every solve, traces logged | the harness itself is exact: a copy of the parameters, Ceres' output unchanged |
 | 2 | host solver, dense then sparse | iterates match Ceres to rounding, and time per solve beats Ceres |
 | 3 | `CHESHIRE_BA_SOLVER=cheshire` in SfM | quality gate passes on 41 / engine bay / False Door; faster |
+| 3b | the solve built from the SfM data, no Problem | same bytes as the Problem path on every solve; faster |
 | 4 | residuals, Jacobians and landmark blocks on the device | faster than the host solver on the large solves |
 
 ## Risks
