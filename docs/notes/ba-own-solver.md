@@ -688,6 +688,56 @@ Against the host alone (121.8 s, 4c's runs), bundle adjustment is now 57 % short
 - The per-solve setup is about 13 s: the solver's own 6.0 s, and most of "other".
 - The CUDA build (house-pc) is still not compiled.
 
+### The other builds and cards (2026-09-29)
+
+The solver had only been built by the Windows HIP toolchain (clang-cl, ROCm 7.2) and run on the RX 9070.
+Every other build now compiles it:
+- **HIP 6.2 (RDNA1/2):** its older clang builds `baDevice.cu` unchanged.
+- **Linux CUDA:** GCC builds the host code, and nvcc (sm_61) builds `baDevice.cu` with `--fmad=false`,
+  step 7f.
+- **Windows CUDA:** MSVC and nvcc build the solver and incrementalSfM.
+
+The Linux build targets a generic x86-64 without AVX or FMA, so GCC cannot fuse a multiply-add there.
+MSVC does not fuse without `/fp:contract`.
+
+`scripts/windows/sfm-exactness.ps1` and `scripts/linux/sfm-exactness.sh` run the checks on a test box.
+They use the 41-view and engine-bay inputs copied over, with colours off (the images stay behind).
+Each set runs six ways:
+- the host alone, twice;
+- the device from 1,000 rows;
+- the device check;
+- the direct check;
+- the defaults.
+
+| build, card | 41 views | engine bay | device check | direct check |
+|---|---|---|---|---|
+| Windows ROCm 7.2 gfx12, RX 9070 | `12668473…` ×6 | `c5d68cd8…` ×6 | 29/29, 35/35 | 68/68, 140/140 |
+| Windows HIP 6.2 gfx1012, RX 5500 XT | `e347b791…` ×6 | `5b6d80ba…` ×6 | 29/29, 34/34 | 68/68, 140/140 |
+| Linux CUDA sm_61 (GCC), GTX 1080 Ti | `e7712237…` ×6 | `9668ad9a…` ×6 | 29/29, 36/36 | 68/68, 141/141 |
+
+**Exactness.** Within each build every run gives the same bytes: the host twice, the device, both
+checks and the defaults, and every checked solve is the same on the device as on the host. The builds
+do not agree with each other. The HIP 6.2 family is compiled with `/arch:AVX` and the gfx12 one with
+AVX2, the Linux one without AVX and with glibc's maths, so Eigen's code and the trigonometry round
+differently all through SfM. That is also why the number of solves the device check sees differs
+by one or two between them. Byte identity is a property of a build, and these checks confirm it.
+
+**Timing.** The device from 1,000 rows against the host alone:
+
+| box | 41 views | engine bay |
+|---|---|---|
+| house-pc: 4-core Haswell, GTX 1080 Ti (Pascal, FP64 at 1/32) | 57.8 → 51.4 s | 47.5 → 37.7 s |
+| bench-pc, RX 5500 XT | 107.4 → 105.1 s | 120.3 → 116.8 s |
+
+With the defaults (200,000 rows), house-pc took 54.3 s and 41.0 s. On a slow host the device pays on
+far smaller solves, so the threshold may want to follow the machine. The Windows CUDA build still has
+to run on a card (a GTX in a Windows box), and so does the Linux HIP build (an AMD card in house-pc).
+
+**Packaging (02cb3a9).** `aliceVision_sfm_bundle.dll` carries the target's code objects since step 7f.
+The bundled Windows package files a GPU-bearing DLL under its target only. `build_targets.py` harvests
+it now as the seventh per-target DLL; without that, every target but the two base packages' would
+have had no `sfm_bundle.dll` at all.
+
 ## Scope
 
 The solver covers the problems incremental SfM builds most:
