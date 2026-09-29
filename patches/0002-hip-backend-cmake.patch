@@ -8753,6 +8753,43 @@ index bb91d4e..7590c1d 100644
                      better = true;
                      minNFA = best.first;
                      vec_inliers.resize(best.second);
+diff --git a/src/aliceVision/sfm/CMakeLists.txt b/src/aliceVision/sfm/CMakeLists.txt
+index 9f273ef..c184d94 100644
+--- a/src/aliceVision/sfm/CMakeLists.txt
++++ b/src/aliceVision/sfm/CMakeLists.txt
+@@ -107,6 +107,20 @@ set(sfm_files_sources
+     sfmTriangulation.cpp
+ )
+ 
++# cheshire (step 7f, 0.3.7): bundle adjustment's work per row and per landmark on the device (baDevice.cu); the
++# CUDA build rounds a*b+c twice, as the host and the HIP build do (step 5l)
++set(sfm_bundle_gpu_links "")
++if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
++    list(APPEND sfm_bundle_files_headers bundle/gpu/baDevice.hpp)
++    list(APPEND sfm_bundle_files_sources bundle/gpu/baDevice.cu)
++    if (ALICEVISION_HAVE_HIP)
++        set_source_files_properties(bundle/gpu/baDevice.cu PROPERTIES LANGUAGE HIP)
++    else()
++        set_source_files_properties(bundle/gpu/baDevice.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
++    endif()
++    set(sfm_bundle_gpu_links ${ALICEVISION_CUDA_LIBRARIES})
++endif()
++
+ alicevision_add_library(aliceVision_sfm_bundle
+     SOURCES ${sfm_bundle_files_headers} ${sfm_bundle_files_sources}
+     PUBLIC_LINKS
+@@ -117,7 +131,11 @@ alicevision_add_library(aliceVision_sfm_bundle
+         aliceVision_sfmData
+         Boost::boost
+         ${CERES_LIBRARIES}
++        ${sfm_bundle_gpu_links}
+ )
++if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
++    target_compile_definitions(aliceVision_sfm_bundle PRIVATE ALICEVISION_HAVE_BA_DEVICE=1)  # cheshire: step 7f
++endif()
+ 
+ alicevision_add_library(aliceVision_sfm
+     SOURCES ${sfm_files_headers} ${sfm_files_sources}
 diff --git a/src/aliceVision/sfm/LocalBundleAdjustmentGraph.cpp b/src/aliceVision/sfm/LocalBundleAdjustmentGraph.cpp
 index 9500f70..b12c078 100644
 --- a/src/aliceVision/sfm/LocalBundleAdjustmentGraph.cpp

@@ -32,6 +32,9 @@
 
 // the arithmetic shared with the device, and its no-contraction pragma (step 4b)
 #include <aliceVision/sfm/bundle/costfunctions/baArith.hpp>
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+#include <aliceVision/sfm/bundle/gpu/baDevice.hpp>   // step 4c
+#endif
 
 #include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
 #include <aliceVision/system/Logger.hpp>
@@ -46,15 +49,18 @@
 #include <Eigen/QR>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <sstream>
+#include <unordered_map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -80,6 +86,7 @@ struct Options
     double minDiagonal = 1e-6;
     double maxDiagonal = 1e32;
     bool jacobiScaling = true;
+    bool device = true;                // the device for the work per row and per landmark, when it takes the problem (4c)
     // the projected line search Ceres runs when the problem has bounds (Solver::Options defaults)
     int lineSearchMaxIterations = 20;
     double lineSearchSufficientDecrease = 1e-4;
@@ -343,6 +350,7 @@ struct Result
     size_t sBlocks = 0, sValues = 0, jValues = 0;   // the reduced camera system's blocks and values; the Jacobian's
     int groups = 0, parts = 0;
     bool denseQR = false;          // no eliminated block: Ceres' DENSE_QR in place of DENSE_SCHUR
+    bool device = false;           // the device took the work per row and per landmark (step 4c)
     size_t residuals = 0;          // scalar residuals of the reduced program
     bool constrained = false;
     double seconds = 0.0;
@@ -387,6 +395,42 @@ inline int directMode()
     }();
     return mode;
 }
+
+// CHESHIRE_BA_DEVICE (step 4c, baDevice.hpp): 1 the device for the large solves (the default), 0 the host
+// alone, check: every solve the device takes is first solved on the host from the same start, and the two
+// compared. Returns 0, 1 or 2.
+inline int deviceMode()
+{
+    static const int mode = [] {
+        const std::string s = ::cheshire::env::text("CHESHIRE_BA_DEVICE", "1");
+        if (s == "check")
+            return 2;
+        return ::cheshire::env::flag("CHESHIRE_BA_DEVICE", true) ? 1 : 0;
+    }();
+    return mode;
+}
+
+// the smallest problem, in rows, the device takes (CHESHIRE_BA_DEVICE_MIN_ROWS): below about a million rows the
+// device's per-solve setup (the structure, the uploads) is not yet paid back
+inline long deviceMinRows()
+{
+    static const long v = static_cast<long>(::cheshire::env::integer("CHESHIRE_BA_DEVICE_MIN_ROWS", 1000000));
+    return v;
+}
+
+// set when a device call failed in a solve: the rest of the run stays on the host
+inline std::atomic<bool>& deviceBroken()
+{
+    static std::atomic<bool> broken{false};
+    return broken;
+}
+
+struct DeviceFailure
+{
+    std::string what;
+};
+
+inline void noteFallback(const std::string& why);   // below
 
 // the last solve's account on this thread, kept in the direct check mode (it compares two solves)
 inline Result& lastResult()
@@ -571,6 +615,21 @@ class Source
     virtual bool evaluate(int i, double const* const* params, double* residuals, double** jacobians) const = 0;
     // called before each evaluation's rows, after the parameter blocks hold its point and prepare() ran
     virtual void beforeEvaluation() const {}
+    // What the device needs of the rows (step 4c); only the direct build has it. Per source row its pose and
+    // camera (into the tables below) and its observation; per camera whether it has a distortion and the
+    // sizes of its intrinsics and distortion blocks.
+    struct DeviceView
+    {
+        std::vector<int> rowPose, rowCamera;
+        std::vector<double> rowObs;   // x, y, scale per source row
+        std::vector<int> camHasDistortion, camNd, camIsize;
+        int nPoses = 0;
+    };
+    virtual bool deviceView(DeviceView*) const { return false; }
+    // after beforeEvaluation: the rotation's part per pose, the pose blocks, the cameras' values
+    virtual const arith::PoseRotation* poseTable() const { return nullptr; }
+    virtual const double* poseBlock(int) const { return nullptr; }
+    virtual const arith::CameraValues* cameraTable() const { return nullptr; }
     // what Solver::Summary reports of the problem as given
     virtual void counts(int* parameterBlocks, int* parameters, int* residualBlocks, int* residuals) const = 0;
 };
@@ -596,6 +655,31 @@ inline bool rowRho(const ceres::LossFunction* loss, double scale, double s, doub
     rho[0] *= scale;
     rho[1] *= scale;
     rho[2] *= scale;
+    return true;
+}
+
+// The Huber loss's scale, read back from the loss itself: at s = 2^80, rho' = a / 2^40 exactly. Then the loss
+// must agree with arith::huber bit for bit on a spread of values, or the device does not take the problem.
+inline bool huberOf(const ceres::LossFunction* loss, double* a, double* b)
+{
+    if (!dynamic_cast<const ceres::HuberLoss*>(loss))
+        return false;
+    double rho[3];
+    const double s = std::ldexp(1.0, 80);
+    loss->Evaluate(s, rho);
+    const double aa = rho[1] * std::ldexp(1.0, 40), bb = aa * aa;
+    const double probe[] = {0.0, 1e-300, 1e-8, 0.25, 1.0, 3.0, bb * 0.5, std::nextafter(bb, 0.0), bb, std::nextafter(bb, 1e308), bb * 1.5,
+                            1e3, 12345.678, 1e10, 1e200, s};
+    for (double v : probe)
+    {
+        double r1[3], r2[3];
+        loss->Evaluate(v, r1);
+        arith::huber(aa, bb, v, r2);
+        if (std::memcmp(r1, r2, sizeof r1) != 0)
+            return false;
+    }
+    *a = aa;
+    *b = bb;
     return true;
 }
 
@@ -758,8 +842,23 @@ class Solver
             res.jValues = _J.n;
             res.groups = int(_groups.size()) - 1;
             res.parts = nParts();
-            minimize(&res);
-            if (res.ok && (shadowEnabled() || digestEnabled() || directMode() == 2))
+            setupDevice();
+            res.device = devOn();
+            try
+            {
+                minimize(&res);
+            }
+            catch (const DeviceFailure& e)
+            {
+                // the start back, the rest of the run on the host (the caller takes this solve elsewhere)
+                deviceBroken() = true;
+                setState(_x0, true);
+                _prepare();
+                res.ok = false;
+                res.why = "device: " + e.what;
+                ALICEVISION_LOG_WARNING("cheshire: BA device failed (" << e.what << "); the host solves from here");
+            }
+            if (res.ok && (shadowEnabled() || digestEnabled() || directMode() == 2 || deviceMode() == 2))
             {
                 res.digest = digestOf(stateVector());
                 res.digestIn = digestOf(_x0);
@@ -857,6 +956,23 @@ class Solver
     // does (AreJacobianColumnsOrdered: NATURAL for SPARSE_SCHUR with EIGEN_SPARSE)
     Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>, Eigen::Upper, Eigen::NaturalOrdering<int>> _ldlt;
     bool _analyzed = false;
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+    // step 4c: the device's problem, and what the host hands it per evaluation
+    std::unique_ptr<device::Problem> _dev;
+    std::vector<device::PoseEntry> _devPoses;
+    std::vector<double> _devPlusJ;
+    std::vector<size_t> _devManifOff;
+#endif
+    const double* _devX = nullptr;           // the state the next evaluation is at (the device reads its landmarks)
+
+    bool devOn() const
+    {
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+        return _dev != nullptr;
+#else
+        return false;
+#endif
+    }
 
     PBlock& block(int v) { return v >= 0 ? _e[v] : _f[-2 - v]; }
     const PBlock& block(int v) const { return v >= 0 ? _e[v] : _f[-2 - v]; }
@@ -1427,12 +1543,15 @@ class Solver
         _times.state += since(t0);
         return x;
     }
-    void setState(const std::vector<double>& x)
+    // all: every block; with the device only the camera blocks, which the host still reads (the camera
+    // objects, the poses' rotations), unless all: the device reads the landmarks from x itself
+    void setState(const std::vector<double>& x, bool all = false)
     {
         const auto t0 = Clock::now();
-        const int nb = int(_e.size() + _f.size()), nE = int(_e.size());
+        _devX = x.data();
+        const int nE = int(_e.size()), first = devOn() && !all ? nE : 0, nb = int(_e.size() + _f.size());
 #pragma omp parallel for schedule(static, 4096) num_threads(_threads)
-        for (int i = 0; i < nb; ++i)
+        for (int i = first; i < nb; ++i)
         {
             PBlock& b = i < nE ? _e[i] : _f[i - nE];
             std::copy(x.begin() + std::ptrdiff_t(b.x), x.begin() + std::ptrdiff_t(b.x + size_t(b.size)), b.ptr);
@@ -1589,6 +1708,8 @@ class Solver
     // and the F part of the gradient are summed per partition, then over the partitions in order.
     bool evaluate(Mode mode, double* cost, std::vector<double>* gradOut = nullptr)
     {
+        if (devOn())
+            return evaluateDevice(mode, cost, gradOut);
         const auto t0 = Clock::now();
         _prepare();
         _src.beforeEvaluation();
@@ -1706,6 +1827,232 @@ class Solver
         return ok;
     }
 
+    // evaluate() on the device: the same values, the same sums (baDevice.cu)
+    bool evaluateDevice(Mode mode, double* cost, std::vector<double>* gradOut)
+    {
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+        const auto t0 = Clock::now();
+        _prepare();
+        _src.beforeEvaluation();
+        const bool wantJ = mode != Mode::Cost;
+        if (wantJ)
+            for (size_t i = 0; i < _mb.size(); ++i)
+            {
+                PBlock& b = block(_mb[i]);
+                b.manifold->PlusJacobian(b.ptr, b.plusJacobian.data());
+                std::copy(b.plusJacobian.begin(), b.plusJacobian.end(), _devPlusJ.begin() + std::ptrdiff_t(_devManifOff[i]));
+            }
+        const arith::PoseRotation* rot = _src.poseTable();
+        for (size_t i = 0; i < _devPoses.size(); ++i)
+        {
+            _devPoses[i].rot = rot[i];
+            const double* p = _src.poseBlock(int(i));
+            for (int k = 0; k < 3; ++k)
+                _devPoses[i].center[k] = p[3 + k];
+        }
+        const int P = nParts();
+        std::vector<double> partCost(size_t(P), 0.0);
+        std::vector<char> partOk(size_t(P), 0);
+        std::vector<double>* g = nullptr;
+        if (wantJ)
+        {
+            g = mode == Mode::Full ? &_grad : gradOut;
+            g->resize(size_t(_n));
+        }
+        const device::Mode dm = mode == Mode::Full ? device::Mode::Full : mode == Mode::Cost ? device::Mode::Cost : device::Mode::Gradient;
+        if (!_dev->evaluate(dm, _devX, _devPoses.data(), _src.cameraTable(), _devPlusJ.data(), partCost.data(), partOk.data(), g ? g->data() : nullptr))
+            throw DeviceFailure{_dev->error()};
+        bool ok = true;
+        for (char o : partOk)
+            ok = ok && o;
+        if (ok)
+        {
+            double total = 0.0;
+            for (double c : partCost)
+                total += c;
+            *cost = total;
+        }
+        const double dt = since(t0);
+        if (mode == Mode::Full)
+        {
+            _times.evalJ += dt;
+            ++_times.nJ;
+        }
+        else if (mode == Mode::Cost)
+        {
+            _times.evalCost += dt;
+            ++_times.nCost;
+        }
+        else
+        {
+            _times.evalGrad += dt;
+            ++_times.nGrad;
+        }
+        return ok;
+#else
+        (void)mode;
+        (void)cost;
+        (void)gradOut;
+        return false;
+#endif
+    }
+
+    // The device's problem from the solver's own tables (step 4c): only the direct build's rows, a Huber loss (or
+    // none), landmarks without a manifold, and problems of at least deviceMinRows() rows.
+    void setupDevice()
+    {
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+        if (!_opt.device || _qr || deviceMode() == 0 || deviceBroken() || long(_rows.size()) < deviceMinRows())
+            return;
+        std::string name, why;
+        if (!device::available(&name))
+            return;
+        Source::DeviceView view;
+        if (!_src.deviceView(&view))
+            return;
+        auto fail = [&](const std::string& w) { noteFallback("device: " + w); };
+        const auto t0 = Clock::now();
+        device::Structure s;
+        const ceres::LossFunction* loss = _rows.empty() ? nullptr : _rows[0].loss;
+        s.loss = loss != nullptr;
+        if (loss && !huberOf(loss, &s.hubA, &s.hubB))
+            return fail("a loss other than Huber");
+        std::vector<int> manifOfF(_f.size(), -1);
+        _devManifOff.clear();
+        size_t off = 0;
+        for (size_t i = 0; i < _mb.size(); ++i)
+        {
+            if (_mb[i] >= 0)
+                return fail("a landmark with a manifold");
+            const int f = -2 - _mb[i];
+            manifOfF[size_t(f)] = int(i);
+            s.manifSize.push_back(_f[f].size);
+            s.manifTsize.push_back(_f[f].tsize);
+            _devManifOff.push_back(off);
+            off += size_t(_f[f].size) * size_t(_f[f].tsize);
+        }
+        _devPlusJ.assign(off, 0.0);
+        // the rows, in parallel; then the constant landmarks numbered in row order
+        s.rows.resize(_rows.size());
+        std::atomic<int> bad{0};
+        const std::ptrdiff_t nRowsD = std::ptrdiff_t(_rows.size());
+#pragma omp parallel for schedule(static, 4096) num_threads(_threads)
+        for (std::ptrdiff_t ri = 0; ri < nRowsD; ++ri)
+        {
+            const Row& row = _rows[size_t(ri)];
+            if (row.np != 4 || row.nres != 2 || row.loss != loss)
+            {
+                bad = 1;
+                continue;
+            }
+            device::Row& d = s.rows[size_t(ri)];
+            d.j = std::int64_t(row.j);
+            for (int k = 0; k < 4; ++k)
+            {
+                const int v = _pv[row.p + size_t(k)];
+                d.pj[k] = _pj[row.p + size_t(k)];
+                if (k < 3)
+                {
+                    if (v >= 0)
+                        bad = 2;
+                    d.blk[k] = v <= -2 ? -2 - v : -1;
+                    d.manif[k] = v <= -2 ? manifOfF[size_t(-2 - v)] : -1;
+                }
+                else
+                {
+                    if (v <= -2)
+                        bad = 3;
+                    d.blk[3] = v;
+                    d.manif[3] = -1;
+                }
+            }
+            const int src = row.src;
+            d.pose = view.rowPose[size_t(src)];
+            d.camera = view.rowCamera[size_t(src)];
+            d.ox = view.rowObs[3 * size_t(src)];
+            d.oy = view.rowObs[3 * size_t(src) + 1];
+            d.os = view.rowObs[3 * size_t(src) + 2];
+            d.weight = row.lossScale;
+            d.lm = d.blk[3];
+        }
+        if (bad == 1)
+            return fail("a row the device does not take");
+        if (bad == 2)
+            return fail("an eliminated block in a camera slot");
+        if (bad == 3)
+            return fail("a landmark that is not eliminated");
+        std::unordered_map<const double*, int> constLm;
+        for (size_t ri = 0; ri < _rows.size(); ++ri)
+        {
+            device::Row& d = s.rows[ri];
+            if (d.blk[3] >= 0)
+                continue;
+            const double* p = _pp[_rows[ri].p + 3];
+            auto it = constLm.find(p);
+            if (it == constLm.end())
+            {
+                it = constLm.emplace(p, int(s.constLandmarks.size() / 3)).first;
+                s.constLandmarks.insert(s.constLandmarks.end(), p, p + 3);
+            }
+            d.lm = -1 - it->second;
+        }
+        s.chunkStart = _chunkStart;
+        s.parts = _parts;
+        s.groups = _groups;
+        s.nE = int(_e.size());
+        s.ne = _ne;
+        s.nf = _nf;
+        s.n = _n;
+        for (const auto& b : _f)
+        {
+            s.fTsize.push_back(b.tsize);
+            s.fCol.push_back(b.col - _ne);
+        }
+        s.cfStart.assign(_cfStart.begin(), _cfStart.end());
+        s.cfM.assign(_cfM.begin(), _cfM.end());
+        s.cf = _cf;
+        s.mValues = std::int64_t(_m.n);
+        s.fcStart.assign(_fcStart.begin(), _fcStart.end());
+        s.fc = _fc;
+        s.fcPos = _fcPos;
+        s.fcChunks.assign(_f.size(), 0);
+        for (size_t f = 0; f < _f.size(); ++f)
+            for (size_t k = _fcStart[f]; k < _fcStart[f + 1]; ++k)
+                if (_fc[k] >= 0)
+                    ++s.fcChunks[f];
+        s.sStart.assign(_sStart.begin(), _sStart.end());
+        s.sOff.assign(_sOff.begin(), _sOff.end());
+        s.sCol = _sCol;
+        s.sValues = std::int64_t(_sv.size());
+        s.jValues = std::int64_t(_J.n);
+        s.nPoses = view.nPoses;
+        s.cameras.resize(view.camNd.size());
+        for (size_t c = 0; c < s.cameras.size(); ++c)
+        {
+            s.cameras[c].hasDistortion = view.camHasDistortion[c];
+            s.cameras[c].nd = view.camNd[c];
+            s.cameras[c].isize = view.camIsize[c];
+        }
+        _devPoses.assign(size_t(view.nPoses), device::PoseEntry());
+        const double tStructure = since(t0);
+        _dev = device::Problem::create(s, &why);
+        if (profileEnabled())
+            ALICEVISION_LOG_INFO("cheshire: BA device setup: structure " << tStructure << " s, create " << since(t0) - tStructure << " s");
+        if (!_dev)
+            return fail(why);
+        // what the device now holds, the host no longer needs
+        _J.reset(0);
+        _m.reset(0);
+        std::vector<double>().swap(_sg);
+        std::vector<double>().swap(_r);
+        static std::once_flag said;
+        std::call_once(said, [&] {
+            ALICEVISION_LOG_INFO("cheshire: BA device: " << name << " for the solves of " << deviceMinRows()
+                                 << " rows or more (CHESHIRE_BA_DEVICE=0 for the host alone)");
+        });
+#endif
+    }
+
     // Plus(x, delta) per block, delta in the tangent space (E then F); out: ambient, E then F
     void plus(const std::vector<double>& x, const std::vector<double>& delta, std::vector<double>* out) const
     {
@@ -1740,6 +2087,15 @@ class Solver
     {
         const auto t0 = Clock::now();
         std::vector<double> n(size_t(_n), 0.0);
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+        if (devOn())
+        {
+            if (!_dev->squaredColumnNorms(n.data()))
+                throw DeviceFailure{_dev->error()};
+            _times.norms += since(t0);
+            return n;
+        }
+#endif
         const int P = nParts();
 #pragma omp parallel for schedule(dynamic, 1) num_threads(_threads)
         for (int part = 0; part < P; ++part)
@@ -1771,6 +2127,15 @@ class Solver
     void scaleColumns(const std::vector<double>& s)
     {
         const auto t0 = Clock::now();
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+        if (devOn())
+        {
+            if (!_dev->scaleColumns(s.data()))
+                throw DeviceFailure{_dev->error()};
+            _times.scale += since(t0);
+            return;
+        }
+#endif
         const int P = nParts();
 #pragma omp parallel for schedule(dynamic, 1) num_threads(_threads)
         for (int part = 0; part < P; ++part)
@@ -1798,6 +2163,19 @@ class Solver
     {
         const auto t0 = Clock::now();
         const int P = nParts();
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+        if (devOn())
+        {
+            std::vector<double> partDot(size_t(P), 0.0);
+            if (!_dev->modelCostChange(step.data(), partDot.data()))
+                throw DeviceFailure{_dev->error()};
+            double dot = 0.0;
+            for (double d : partDot)
+                dot += d;
+            _times.model += since(t0);
+            return -dot;
+        }
+#endif
         std::vector<double> partDot(size_t(P), 0.0);
 #pragma omp parallel for schedule(dynamic, 1) num_threads(_threads)
         for (int part = 0; part < P; ++part)
@@ -1940,6 +2318,20 @@ class Solver
         const int G = int(_groups.size()) - 1;
         const size_t svn = _sv.size();
         bool finite = true;
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+        if (devOn())
+        {
+            // phases 1 and 2 on the device (baDevice.cu: per landmark, then per group, block and row of the
+            // block, then the groups in order)
+            if (!_dev->eliminate(D.data(), _sv.data(), _rhs.data(), &finite))
+                throw DeviceFailure{_dev->error()};
+            _times.elim += since(t0);
+            if (!finite)
+                return false;
+        }
+        else
+#endif
+        {
 #pragma omp parallel for schedule(dynamic, 1) num_threads(_threads) reduction(&& : finite)
         for (int gi = 0; gi < G; ++gi)
         {
@@ -2040,6 +2432,7 @@ class Solver
                 _rhs[i - svn] = s;
         });
         _times.schur += since(t0s);
+        }
 
         // 3. the reduced camera system
         const auto t1c = Clock::now();
@@ -2097,6 +2490,16 @@ class Solver
         bool ok = true;
         for (int i = 0; i < _nf; ++i)
             ok = ok && std::isfinite(yf[i]);
+#ifdef ALICEVISION_HAVE_BA_DEVICE
+        if (devOn())
+        {
+            bool finiteE = true;
+            if (!_dev->backSubstitute(yf.data(), y->data(), &finiteE))
+                throw DeviceFailure{_dev->error()};
+            _times.back += since(t2c);
+            return ok && finiteE;
+        }
+#endif
 #pragma omp parallel for schedule(dynamic, 1024) num_threads(_threads) reduction(&& : ok)
         for (int c = 0; c < nE; ++c)
         {
@@ -2212,6 +2615,7 @@ class Solver
     {
         std::vector<double> x = stateVector();
         _x0 = x;
+        _devX = x.data();
         if (_constrained)
         {
             // IterationZero: project the starting point onto the feasible set
@@ -2224,7 +2628,7 @@ class Solver
         if (!evaluate(Mode::Full, &xCost))
         {
             res->why = "initial evaluation failed";
-            setState(_x0);
+            setState(_x0, true);
             _prepare();
             return;
         }
@@ -2271,7 +2675,7 @@ class Solver
         auto finish = [&](const std::string& why) {
             res->termination = why;
             // Solver::Solve: the minimizer's best point when the solution is usable, else the starting point
-            setState(why.rfind("FAILURE", 0) == 0 ? _x0 : best);
+            setState(why.rfind("FAILURE", 0) == 0 ? _x0 : best, true);
             _prepare();
             res->finalCost = bestCost + _fixedCost;
             res->ok = true;
@@ -2509,8 +2913,48 @@ inline bool solverOptions(const ceres::Solver::Options& options, int requestedTh
 inline bool solveSource(const Source& src, const ceres::Solver::Options& options, const Options& o, std::function<void()> prepare,
                         ceres::Solver::Summary* summary, Result* out = nullptr)
 {
-    Solver solver(src, o, std::move(prepare));
-    const Result r = solver.solve();
+    Result r;
+    bool done = false;
+    if (deviceMode() == 2 && o.device)
+    {
+        // CHESHIRE_BA_DEVICE=check: the host first, from a copy of every free block; then the solve as always
+        // (the device when it takes it) from the same start, and the two compared
+        std::vector<BlockInfo> info;
+        std::string why;
+        if (src.blocks(&info, o.threads, &why))
+        {
+            std::vector<std::vector<double>> start(info.size());
+            for (size_t i = 0; i < info.size(); ++i)
+                start[i].assign(info[i].ptr, info[i].ptr + info[i].size);
+            Options oh = o;
+            oh.device = false;
+            Result rh;
+            {
+                Solver host(src, oh, prepare);
+                rh = host.solve();
+            }
+            for (size_t i = 0; i < info.size(); ++i)
+                std::copy(start[i].begin(), start[i].end(), info[i].ptr);
+            prepare();
+            Solver solver(src, o, prepare);
+            r = solver.solve();
+            done = true;
+            if (r.device && rh.ok && r.ok)
+            {
+                const bool same = r.digest == rh.digest && r.digestIn == rh.digestIn;
+                ALICEVISION_LOG_INFO("cheshire: BA device check: " << (same ? "same" : "DIFFERENT") << ", " << r.rows << " rows, iterations "
+                                     << int(rh.iterations.size()) - 1 << " / " << int(r.iterations.size()) - 1 << ", final cost "
+                                     << rh.finalCost << " / " << r.finalCost << ", digests in " << std::hex << rh.digestIn << " / " << r.digestIn
+                                     << " out " << rh.digest << " / " << r.digest << std::dec << ", host " << rh.seconds << " s, device "
+                                     << r.seconds << " s");
+            }
+        }
+    }
+    if (!done)
+    {
+        Solver solver(src, o, std::move(prepare));
+        r = solver.solve();
+    }
     if (!r.ok)
     {
         noteFallback(r.why);
@@ -2580,7 +3024,7 @@ inline bool solveSource(const Source& src, const ceres::Solver::Options& options
                              << r.eBlocks << ", F " << r.fBlocks << " (" << r.fColumns << " columns), J " << r.jValues << ", S "
                              << r.sBlocks << " blocks " << r.sValues << " values, groups " << r.groups << ", parts " << r.parts << ", "
                              << (r.denseQR ? "dense QR" : o.sparse ? "sparse" : "dense") << ", " << r.iterations.size() - 1
-                             << " iterations, " << t.threads << " threads");
+                             << " iterations, " << t.threads << " threads" << (r.device ? ", device" : ""));
     }
     if (digestEnabled())
         ALICEVISION_LOG_INFO("cheshire: BA digest: " << r.rows << " rows, " << r.fColumns << " columns, in " << std::hex << r.digestIn << " out "

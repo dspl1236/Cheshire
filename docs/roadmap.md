@@ -611,7 +611,17 @@ reaches it. The design is in docs/notes/ba-own-solver.md; the steps, each a go/n
     - Quality gate as in step 3: 41 WARN (landmarks, zero spread), engine bay PASS.
     - A Jacobian evaluation of the large solves takes 55 ms against 84 ms. The False Door took 511 s,
       mostly because its trajectory changed (268 large iterations against 562).
-  - 4c: the device with a check mode; 4d: vectors on the device, CUDA.
+  - **4c, the device** (2026-09-29, step 7f, `baDevice.cu`). The default for the solves of at least
+    a million rows; `CHESHIRE_BA_DEVICE=0` for the host alone, `=check` to compare every solve.
+    - Evaluation, the passes over the Jacobian, the landmark elimination, the assembly of the reduced
+      system in the host's order, and the back-substitution run on the device. The factorisation
+      stays on the host.
+    - The host's bytes: every checked solve the same (41 views 29/29, engine bay 35/35), and the
+      False Door's whole run gives the host's digests.
+    - False Door, same build back to back: SfM 594.7 s → 543.6 s, bundle adjustment 141.3 s → 93.0 s.
+    - Next: the per-solve setup (about 0.4 s per large solve), then the threshold; the vectors on
+      the device; the CUDA build.
+  - 4d: vectors on the device, CUDA.
 
 Beside it:
 

@@ -125,6 +125,33 @@ class DirectSource final : public Source
     int rowNumResiduals(int) const override { return 2; }
     const ceres::LossFunction* rowLoss(int) const override { return _loss; }
     double rowLossScale(int i) const override { return rows[i].weight; }
+    // the device's view (step 4c): per row its pose, camera and observation; per camera its blocks' sizes
+    bool deviceView(DeviceView* v) const override
+    {
+        v->nPoses = int(poses.size());
+        v->rowPose.resize(rows.size());
+        v->rowCamera.resize(rows.size());
+        v->rowObs.resize(3 * rows.size());
+        for (size_t i = 0; i < rows.size(); ++i)
+        {
+            v->rowPose[i] = rows[i].pose;
+            v->rowCamera[i] = rows[i].camera;
+            v->rowObs[3 * i] = rows[i].obs->getX();
+            v->rowObs[3 * i + 1] = rows[i].obs->getY();
+            v->rowObs[3 * i + 2] = rows[i].obs->getScale();
+        }
+        for (const DirectCamera& c : cameras)
+        {
+            v->camHasDistortion.push_back(c.hasDistortion ? 1 : 0);
+            v->camNd.push_back(c.fused.sizes[1]);
+            v->camIsize.push_back(c.fused.sizes[0]);
+        }
+        return true;
+    }
+    const arith::PoseRotation* poseTable() const override { return _poseRot.data(); }
+    const double* poseBlock(int i) const override { return poses[size_t(i)]; }
+    const arith::CameraValues* cameraTable() const override { return _camValues.data(); }
+
     // the part of the rotation per pose, and the cameras' values, once per evaluation (step 4b)
     void beforeEvaluation() const override
     {

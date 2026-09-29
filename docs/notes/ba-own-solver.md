@@ -478,6 +478,87 @@ except `getPrincipalPoint`, which is read once per camera.
 and bundle adjustment 123 s against 356 s. Most of that is the trajectory, not the arithmetic: the
 large solves took 268 iterations against 562. Ceres' own runs span 241 to 666.
 
+## Step 4c: the device (2026-09-29)
+
+Generator step 7f, `hip/port/sfm_ba/baDevice.hpp` / `baDevice.cu` (CUDA dialect, HIP through the
+compat header, `--fmad=false` on CUDA). It is the default, for the solves of at least a million rows
+(`CHESHIRE_BA_DEVICE_MIN_ROWS`); `CHESHIRE_BA_DEVICE=0` keeps everything on the host.
+
+**What runs where.** The host keeps the trust-region loop, the vectors, Plus, the line search's
+polynomials and the factorisation of the reduced camera system. The device holds the rows, the
+Jacobian and the residuals, and runs:
+- the evaluation: residuals, Jacobians, the manifolds' products, the loss and the corrector, the
+  cost and the gradient;
+- the column norms, the Jacobi scaling and the model cost change;
+- the elimination per landmark (E^T E + D², its inverse, E^T b, E^T F, u = m^T inv), the assembly of
+  the reduced system, and the back-substitution.
+
+Per evaluation the host sends the landmarks' part of the state and three small tables: the poses'
+rotations (their `hypot`, `sin`, `cos` are the host's), the cameras' values, and the manifolds'
+Jacobians. It receives the partitions' costs and the gradient. `setState` writes only the camera blocks
+while the device works; the landmarks go back at the end of the solve.
+
+**The same bytes.** Every value comes from `baArith.hpp` or from ownSolver's loops restated operation
+by operation, and every sum runs in the host's order:
+- **Per row, per landmark, per partition:** one thread each, in order.
+- **The F columns of the gradient and the norms:** one thread per (partition, camera block, column),
+  over the partition's rows on the block.
+- **The reduced system.** The host adds, per assembly group, landmark after landmark, each row's
+  F^T F terms and then the landmark's Schur term. So an entry of a group's copy is a sum in a fixed
+  order.
+  - `kAssembleRec` follows that order, one thread per entry. It reads its (group, block)'s records,
+    which the host builds once per solve.
+  - The blocks inside one camera's intrinsics and distortion collect a term from every row of the
+    camera: chains of up to a hundred thousand terms per group. A parallel pass writes their terms
+    to a scratch array, one entry's terms contiguous, and a streaming pass adds them in order. A
+    Schur term is stored negated, since x - y is x + (-y) exactly.
+- **The groups' copies:** summed in group order.
+
+`CHESHIRE_BA_DEVICE=check` solves every problem the device takes twice: first on the host from a copy
+of every free block, then on the device from the same start. It compares the digests, iterations and
+final costs. Results:
+- 41 views: all 29 device solves the same, with the threshold at 1,000 rows. That held through
+  every kernel revision.
+- Engine bay: all 35 the same.
+- The False Door's whole runs (device on its 29 solves of a million rows or more) give the host's
+  digests: `a5cc84375086fdec` / `e05e2fa4df94376b`.
+
+**Time on the False Door** (same build, back to back, the same output):
+
+| | host | device (≥ 1 M rows) |
+|---|---|---|
+| SfM wall | 594.7 s | 543.6 s (-8.6 %) |
+| bundle adjustment | 141.3 s | 93.0 s (-34 %) |
+
+In the solves the device took (29, 73.5 s in all):
+
+| phase | host (4b run) | device |
+|---|---|---|
+| evaluations | 29.7 s | 8.5 s |
+| column norms, scaling, model cost | 18.3 s | 4.2 s |
+| elimination | 19.1 s | 15.4 s |
+| factorisation (host) | 11.2 s | 11.2 s |
+| setup and the device's per-solve setup ("other") | 15.6 s | 27.9 s |
+
+**What did not work**, on the way to `kAssembleRec`:
+- **Walking each block pair's landmarks per entry:** latency chains of dependent loads (about 3 µs
+  per row); 85-240 ms per elimination at 1-3 M rows.
+- **Every term into a scratch array, then ordered folds:** far more memory traffic than the host.
+  Scanning every row of a landmark for every block pair also cost k² R per landmark, which long tracks
+  blow up.
+- **One thread per row of a block, all columns in registers:** slower than one thread per entry.
+
+**The device's FP64.** The RX 9070's double-precision rate is only two to three times this box's six
+cores. What wins is memory bandwidth: the evaluation and the passes over the Jacobian are memory-bound.
+The Schur terms are arithmetic, and the device is only level with the host there.
+
+**Left for later:**
+- **The per-solve setup:** the records, the lists and the uploads, about 0.4 s per large solve.
+  With it paid back sooner, the threshold could come down from a million rows.
+- **The vectors on the device** (4d).
+- **The factorisation**, the largest host phase left.
+- **The CUDA build** (house-pc), not compiled yet.
+
 ## Scope
 
 The solver covers the problems incremental SfM builds most:
