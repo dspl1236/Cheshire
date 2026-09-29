@@ -9548,7 +9548,7 @@ index 1f23958..5491985 100644
  
          if (N == 0)
 diff --git a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
-index 097f8c9..2de5de2 100644
+index 097f8c9..eff26dd 100644
 --- a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 +++ b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 @@ -5,6 +5,10 @@
@@ -9570,7 +9570,7 @@ index 097f8c9..2de5de2 100644
  
  #include <dependencies/htmlDoc/htmlDoc.hpp>
  
-@@ -171,6 +176,56 @@ ReconstructionEngine_sequentialSfM::ReconstructionEngine_sequentialSfM(const SfM
+@@ -171,11 +176,118 @@ ReconstructionEngine_sequentialSfM::ReconstructionEngine_sequentialSfM(const SfM
      }
  }
  
@@ -9624,10 +9624,101 @@ index 097f8c9..2de5de2 100644
 +                                                   << s.getLandmarks().size() << " landmarks)");
 +}
 +
++// cheshire (step 7h, 0.3.7): CHESHIRE_SFM_PROFILE=1 - where the reconstruction's time goes, one line when it ends.
++// Each call site is timed where it does not nest in another; "other" is the rest.
++namespace {
++struct CheshireSfmPhases
++{
++    enum Phase
++    {
++        Pyramid, Tracks, InitialPairs, NextViews, Resect, Apply, ResectSerial, Triangulate, GraphUpdate, GraphDistances,
++        GraphStates, Adjust, Stats, PostAdjust, Register, Statistics, N
++    };
++    double t[N] = {};
++    long n[N] = {};
++};
++CheshireSfmPhases& cheshirePhases()
++{
++    static CheshireSfmPhases p;
++    return p;
++}
++void cheshireAddPhase(int k, std::chrono::steady_clock::time_point t0)
++{
++    cheshirePhases().t[k] += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
++    ++cheshirePhases().n[k];
++}
++struct CheshirePhase
++{
++    int k;
++    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
++    explicit CheshirePhase(int phase) : k(phase) {}
++    ~CheshirePhase() { cheshireAddPhase(k, t0); }
++};
++void cheshireLogPhases(double total)
++{
++    static const char* names[CheshireSfmPhases::N] = {"pyramid scoring", "tracks", "initial pairs", "next views", "resection",
++                                                      "apply", "resection (first use)", "triangulation", "graph update",
++                                                      "graph distances", "graph states", "adjust", "statistics per adjust",
++                                                      "post-adjust", "register", "statistics"};
++    const CheshireSfmPhases& P = cheshirePhases();
++    std::ostringstream os;
++    double known = 0.0;
++    for (int k = 0; k < CheshireSfmPhases::N; ++k)
++    {
++        os << (k ? ", " : "") << names[k] << " " << P.t[k] << " (" << P.n[k] << ")";
++        known += P.t[k];
++    }
++    ALICEVISION_LOG_INFO("cheshire: SfM profile: " << total << " s = " << os.str() << ", other " << total - known);
++}
++}  // namespace
++
  bool ReconstructionEngine_sequentialSfM::process()
  {
-     initializePyramidScoring();
-@@ -452,6 +507,12 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+-    initializePyramidScoring();
++    const auto cheshireProcessT0 = std::chrono::steady_clock::now();
++    {
++        CheshirePhase cheshireP(CheshireSfmPhases::Pyramid);
++        initializePyramidScoring();
++    }
+ 
+-    if (fuseMatchesIntoTracks() == 0)
++    std::size_t cheshireTracks = 0;
++    {
++        CheshirePhase cheshireP(CheshireSfmPhases::Tracks);
++        cheshireTracks = fuseMatchesIntoTracks();
++    }
++    if (cheshireTracks == 0)
+     {
+         throw std::runtime_error("No valid tracks.");
+     }
+@@ -207,7 +319,11 @@ bool ReconstructionEngine_sequentialSfM::process()
+     // initial pair choice
+     if (_sfmData.getPoses().empty())
+     {
+-        std::vector<Pair> initialImagePairCandidates = getInitialImagePairsCandidates();
++        std::vector<Pair> initialImagePairCandidates;
++        {
++            CheshirePhase cheshireP(CheshireSfmPhases::InitialPairs);
++            initialImagePairCandidates = getInitialImagePairsCandidates();
++        }
+         createInitialReconstruction(initialImagePairCandidates);
+     }
+     else
+@@ -227,7 +343,12 @@ bool ReconstructionEngine_sequentialSfM::process()
+     // reconstruction
+     const double elapsedTime = incrementalReconstruction();
+ 
+-    exportStatistics(elapsedTime);
++    {
++        CheshirePhase cheshireP(CheshireSfmPhases::Statistics);
++        exportStatistics(elapsedTime);
++    }
++    if (cheshire::sfmProfileEnabled())
++        cheshireLogPhases(std::chrono::duration<double>(std::chrono::steady_clock::now() - cheshireProcessT0).count());
+ 
+     return !_sfmData.getPoses().empty();
+ }
+@@ -452,6 +573,12 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
      aliceVision::system::Timer timer;
      std::size_t nbValidPoses = 0;
      std::size_t globalIteration = 0;
@@ -9640,7 +9731,20 @@ index 097f8c9..2de5de2 100644
  
      do
      {
-@@ -490,8 +551,10 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+@@ -477,7 +604,11 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+         std::set<IndexT> prevReconstructedViews = _sfmData.getValidViews();
+ 
+         // compute robust resection of remaining images
+-        while (findNextBestViews(bestViewCandidates, viewsToVisit))
++        auto cheshireNextViews = [&] {
++            CheshirePhase cheshireP(CheshireSfmPhases::NextViews);
++            return findNextBestViews(bestViewCandidates, viewsToVisit);
++        };
++        while (cheshireNextViews())
+         {
+             ALICEVISION_LOG_INFO("Update Reconstruction:" << std::endl
+                                                           << "\t- resection id: " << _resectionId << std::endl
+@@ -490,8 +621,10 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
                  viewsToVisit.erase(v);
              }
  
@@ -9651,7 +9755,7 @@ index 097f8c9..2de5de2 100644
              if (newReconstructedViews.empty())
              {
                  continue;
-@@ -518,6 +581,7 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+@@ -518,15 +651,19 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
              }
  
              triangulate(prevReconstructedViews, newReconstructedViews);
@@ -9659,7 +9763,22 @@ index 097f8c9..2de5de2 100644
              bundleAdjustment(newReconstructedViews);
  
              // Only update prevReconstructedViews after the resectioned views have been refined
-@@ -544,6 +608,31 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+             prevReconstructedViews = _sfmData.getValidViews();
+ 
+             // Compute the connected views to inform we have new information !
+-            registerChanges(linkedViewIds, newReconstructedViews);
+-            std::set_union(
+-              potentials.begin(), potentials.end(), linkedViewIds.begin(), linkedViewIds.end(), std::inserter(potentials, potentials.end()));
++            {
++                CheshirePhase cheshireP(CheshireSfmPhases::Register);
++                registerChanges(linkedViewIds, newReconstructedViews);
++                std::set_union(
++                  potentials.begin(), potentials.end(), linkedViewIds.begin(), linkedViewIds.end(), std::inserter(potentials, potentials.end()));
++            }
+ 
+             // scene logging for visual debug
+             if (_params.logIntermediateSteps && (_resectionId % 3) == 0)
+@@ -544,6 +681,31 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
              ++_resectionId;
          }
  
@@ -9691,7 +9810,7 @@ index 097f8c9..2de5de2 100644
          if (_params.rig.useRigConstraint && !_sfmData.getRigs().empty())
          {
              ALICEVISION_LOG_INFO("Rig(s) calibration start");
-@@ -587,9 +676,22 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
+@@ -587,9 +749,22 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
      auto chrono_start = std::chrono::steady_clock::now();
  
      // add images to the 3D reconstruction
@@ -9717,7 +9836,7 @@ index 097f8c9..2de5de2 100644
          const IndexT viewId = bestViewIds.at(i);
          const View& view = *_sfmData.getViews().at(viewId);
  
-@@ -604,7 +706,7 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
+@@ -604,7 +779,7 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
                                                              << "\t- rig id: " << view.getRigId() << std::endl
                                                              << "\t- sub-pose id: " << view.getSubPoseId());
  
@@ -9726,7 +9845,7 @@ index 097f8c9..2de5de2 100644
              }
  
              // we cannot localize a view if it is part of an initialized rig with unknown rig pose and unknown sub-pose
-@@ -620,28 +722,37 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
+@@ -620,27 +795,45 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
                                                              << "\t- rig id: " << view.getRigId() << std::endl
                                                              << "\t- sub-pose id: " << view.getSubPoseId());
  
@@ -9765,21 +9884,64 @@ index 097f8c9..2de5de2 100644
 +        else if (cheshireStatus[i] == 0)
 +        {
 +            ALICEVISION_LOG_DEBUG("Resection of image " << i << " ( view id: " << viewId << " ) was not possible.");
-         }
++        }
 +    };
-+#pragma omp parallel for
-+    for (int k = 0; k < static_cast<int>(cheshireParallel.size()); ++k)
-+        cheshireStatus[cheshireParallel[k]] = cheshireResect(cheshireParallel[k]);
-+    for (int i : cheshireParallel)
-+        cheshireApply(i);
-+    for (int i : cheshireFirstUse)
 +    {
-+        cheshireStatus[i] = cheshireResect(i);
-+        cheshireApply(i);
++        CheshirePhase cheshireP(CheshireSfmPhases::Resect);
++#pragma omp parallel for
++        for (int k = 0; k < static_cast<int>(cheshireParallel.size()); ++k)
++            cheshireStatus[cheshireParallel[k]] = cheshireResect(cheshireParallel[k]);
++    }
++    {
++        CheshirePhase cheshireP(CheshireSfmPhases::Apply);
++        for (int i : cheshireParallel)
++            cheshireApply(i);
++    }
++    {
++        CheshirePhase cheshireP(CheshireSfmPhases::ResectSerial);
++        for (int i : cheshireFirstUse)
++        {
++            cheshireStatus[i] = cheshireResect(i);
++            cheshireApply(i);
+         }
      }
  
-     ALICEVISION_LOG_DEBUG(
-@@ -740,7 +851,14 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+@@ -667,6 +860,7 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
+ void ReconstructionEngine_sequentialSfM::triangulate(const std::set<IndexT>& prevReconstructedViews, const std::set<IndexT>& newReconstructedViews)
+ {
+     auto chrono_start = std::chrono::steady_clock::now();
++    CheshirePhase cheshireP(CheshireSfmPhases::Triangulate);
+ 
+     // allow to use to the old triangulatation algorithm (using 2 views only)
+     if (_params.minNbObservationsForTriangulation == 0)
+@@ -711,15 +905,24 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+ 
+     // add the new reconstructed views to the graph
+     if (_params.useLocalBundleAdjustment)
++    {
++        CheshirePhase cheshireP(CheshireSfmPhases::GraphUpdate);
+         _localStrategyGraph->updateGraphWithNewViews(_sfmData, _map_tracksPerView, newReconstructedViews, _params.kMinNbOfMatches);
++    }
+ 
+     if (enableLocalStrategy)
+     {
+         // compute the graph-distance between each newly reconstructed views and all the reconstructed views
+-        _localStrategyGraph->computeGraphDistances(_sfmData, newReconstructedViews);
++        {
++            CheshirePhase cheshireP(CheshireSfmPhases::GraphDistances);
++            _localStrategyGraph->computeGraphDistances(_sfmData, newReconstructedViews);
++        }
+ 
+         // use the graph-distances to assign a state (Refine, Constant & Ignore) for each parameter (poses, intrinsics & landmarks)
+-        _localStrategyGraph->convertDistancesToStates(_sfmData);
++        {
++            CheshirePhase cheshireP(CheshireSfmPhases::GraphStates);
++            _localStrategyGraph->convertDistancesToStates(_sfmData);
++        }
+ 
+         const std::size_t nbRefinedPoses = _localStrategyGraph->getNbPosesPerState(EEstimatorParameterState::REFINED);
+         const std::size_t nbConstantPoses = _localStrategyGraph->getNbPosesPerState(EEstimatorParameterState::CONSTANT);
+@@ -740,11 +943,19 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
          }
      }
  
@@ -9795,15 +9957,31 @@ index 097f8c9..2de5de2 100644
  
      // give the local strategy graph is local strategy is enable
      if (!enableLocalStrategy)
-@@ -760,6 +878,7 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+     {
++        CheshirePhase cheshireP(CheshireSfmPhases::GraphStates);
+         _sfmData.resetParameterStates();
+     }
+ 
+@@ -756,11 +967,17 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+ 
+         // bundle adjustment iteration
+         {
+-            const bool success = BA.adjust(_sfmData, refineOptions);
++            bool success = false;
++            {
++                CheshirePhase cheshireP(CheshireSfmPhases::Adjust);
++                success = BA.adjust(_sfmData, refineOptions);
++            }
  
              if (!success)
                  return false;  // not usable solution
 +            cheshireSceneDigest(_sfmData, "adjusted", _resectionId);
  
++            CheshirePhase cheshireP(CheshireSfmPhases::Stats);
              // save the current focal lengths values (for each intrinsic) in the history
              if (_params.useLocalBundleAdjustment)
-@@ -771,11 +890,27 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+                 _localStrategyGraph->saveIntrinsicsToHistory(_sfmData);
+@@ -771,17 +988,35 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
              statistics.show();
          }
  
@@ -9826,6 +10004,7 @@ index 097f8c9..2de5de2 100644
 +        cheshire::eraseUnstableAfterAdjust(_sfmData, _map_tracksPerView, _params.minPointsPerPose, _params.minTrackLength,
 +                                           enableLocalStrategy && !cheshireFullPass, cheshireViewsWithErasures, newReconstructedViews,
 +                                           &removedViewsIdIteration, cheshirePosesChecked);
++        cheshireAddPhase(CheshireSfmPhases::PostAdjust, cheshirePostT0);
 +        if (cheshire::sfmProfileEnabled())
 +            ALICEVISION_LOG_INFO("cheshire: post-adjust: " << (cheshireFullPass ? "full" : "restricted") << ", candidates " << cheshireCandidates << " of "
 +                                                           << cheshireLandmarksBefore << " landmarks, poses recounted " << cheshirePosesChecked << ", "
@@ -9835,7 +10014,14 @@ index 097f8c9..2de5de2 100644
          for (IndexT v : removedViewsIdIteration)
              newReconstructedViews.erase(v);
  
-@@ -1010,7 +1145,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
+         if (_params.useLocalBundleAdjustment && !removedViewsIdIteration.empty())
+         {
+             // remove views from localBA graph
++            CheshirePhase cheshireP(CheshireSfmPhases::GraphUpdate);
+             _localStrategyGraph->removeViews(_sfmData, removedViewsIdIteration);
+             ALICEVISION_LOG_DEBUG("Views removed from the local BA graph: " << removedViewsIdIteration);
+         }
+@@ -1010,7 +1245,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
  
      // Sort by the image score
      std::sort(out_connectedViews.begin(), out_connectedViews.end(), [](const ViewConnectionScore& t1, const ViewConnectionScore& t2) {
@@ -9845,7 +10031,7 @@ index 097f8c9..2de5de2 100644
      });
      return !out_connectedViews.empty();
  }
-@@ -1545,13 +1681,18 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
+@@ -1545,13 +1781,18 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
      // C. Do the resectioning: compute the camera pose.
      ALICEVISION_LOG_INFO("[" << _sfmData.getValidViews().size() + 1 << "/" << _sfmData.getViews().size() << "] Robust Resection of view: " << viewId);
  
@@ -9865,7 +10051,7 @@ index 097f8c9..2de5de2 100644
      if (!_htmlLogFile.empty())
      {
          using namespace htmlDocument;
-@@ -1842,7 +1983,10 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+@@ -1842,7 +2083,10 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
              Vec4 X_homogeneous = Vec4::Zero();
              std::vector<std::size_t> inliersIndex;
  
@@ -10244,10 +10430,55 @@ index a3a04a0..51e9df2 100644
      const auto basePath = fs::path(outputFile).parent_path();
      if (!basePath.empty() && !utils::exists(basePath))
 diff --git a/src/software/pipeline/main_incrementalSfM.cpp b/src/software/pipeline/main_incrementalSfM.cpp
-index cfbdfe8..560e390 100644
+index cfbdfe8..7abafc1 100644
 --- a/src/software/pipeline/main_incrementalSfM.cpp
 +++ b/src/software/pipeline/main_incrementalSfM.cpp
-@@ -166,7 +166,7 @@ int aliceVision_main(int argc, char** argv)
+@@ -5,6 +5,7 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include <aliceVision/sfmData/SfMData.hpp>
+ #include <aliceVision/alicevision_omp.hpp>
+ #include <aliceVision/sfmDataIO/sfmDataIO.hpp>
+@@ -24,9 +25,17 @@
+ 
+ #include <boost/program_options.hpp>
+ 
++#include <chrono>   // cheshire: step 7h
++#include <sstream>
+ #include <cstdlib>
+ #include <filesystem>
+ 
++#if defined(_WIN32)
++// cheshire (step 7g, 0.3.7): LLVM's OpenMP runtime (libomp140 on Windows)
++extern "C" void kmp_set_blocktime(int);
++extern "C" int kmp_get_blocktime(void);
++#endif
++
+ // These constants define the current software version.
+ // They must be updated when the command line is changed.
+ #define ALICEVISION_SOFTWARE_VERSION_MAJOR 2
+@@ -42,6 +51,18 @@ using namespace aliceVision::sfm;
+ 
+ int aliceVision_main(int argc, char** argv)
+ {
++#if defined(_WIN32)
++    // cheshire (step 7g, 0.3.7): after a parallel region, LLVM's OpenMP runtime keeps its threads spinning for
++    // KMP_BLOCKTIME (200 ms); beside the single-threaded passes that follow one, that spinning cost the False
++    // Door's SfM about 5 % (and the bundle adjustment's factorisation half again, until 4d removed the pass
++    // before it). The threads sleep at once instead: KMP_BLOCKTIME in the environment, before the runtime
++    // starts, so every team takes it. Only the timing changes. CHESHIRE_OMP_BLOCKTIME=<ms> for another time;
++    // a KMP_BLOCKTIME of the user's own is left as it is.
++    const int cheshireBlocktime = static_cast<int>(::cheshire::env::integer("CHESHIRE_OMP_BLOCKTIME", 0));
++    const bool cheshireOwnBlocktime = std::getenv("KMP_BLOCKTIME") == nullptr;
++    if (cheshireOwnBlocktime)
++        _putenv_s("KMP_BLOCKTIME", std::to_string(cheshireBlocktime).c_str());
++#endif
+     // command-line parameters
+     std::string sfmDataFilename;
+     std::vector<std::string> featuresFolders;
+@@ -166,7 +187,7 @@ int aliceVision_main(int argc, char** argv)
           "If set to true, the current state of the scene will be dumped as an SfMData file every 3 resections.");
      // clang-format on
  
@@ -10256,6 +10487,117 @@ index cfbdfe8..560e390 100644
                      "This program performs incremental SfM (Initial Pair Essential + Resection).\n"
                      "AliceVision incrementalSfM");
  
+@@ -180,6 +201,17 @@ int aliceVision_main(int argc, char** argv)
+     // set maxThreads
+     HardwareContext hwc = cmdline.getHardwareContext();
+     omp_set_num_threads(hwc.getMaxThreads());
++#if defined(_WIN32)
++    // cheshire (step 7g): the environment took unless the runtime had started before; then this thread's teams
++    if (cheshireOwnBlocktime)
++    {
++        const bool cheshireFromEnvironment = kmp_get_blocktime() == cheshireBlocktime;
++        if (!cheshireFromEnvironment)
++            kmp_set_blocktime(cheshireBlocktime);
++        ALICEVISION_LOG_INFO("cheshire: OpenMP threads wait " << kmp_get_blocktime() << " ms after a parallel region (CHESHIRE_OMP_BLOCKTIME"
++                             << (cheshireFromEnvironment ? ")" : "; the runtime had started: this thread's teams only)"));
++    }
++#endif
+ 
+     const double defaultLoRansacLocalizationError = 4.0;
+     if (!robustEstimation::adjustRobustEstimatorThreshold(
+@@ -188,6 +220,17 @@ int aliceVision_main(int argc, char** argv)
+         return EXIT_FAILURE;
+     }
+ 
++    // cheshire (step 7h, 0.3.7): CHESHIRE_SFM_PROFILE=1 - this program's phases, one line at the end
++    const bool cheshireProfile = ::cheshire::env::flag("CHESHIRE_SFM_PROFILE");
++    auto cheshireT = std::chrono::steady_clock::now();
++    const auto cheshireT0 = cheshireT;
++    std::ostringstream cheshireLine;
++    auto cheshireLap = [&](const char* what) {
++        const auto now = std::chrono::steady_clock::now();
++        cheshireLine << (cheshireLine.tellp() > 0 ? ", " : "") << what << " " << std::chrono::duration<double>(now - cheshireT).count();
++        cheshireT = now;
++    };
++
+     // load input SfMData scene
+     sfmData::SfMData sfmData;
+     if (!sfmDataIO::load(sfmData, sfmDataFilename, sfmDataIO::ESfMData::ALL))
+@@ -195,6 +238,7 @@ int aliceVision_main(int argc, char** argv)
+         ALICEVISION_LOG_ERROR("The input SfMData file '" + sfmDataFilename + "' cannot be read.");
+         return EXIT_FAILURE;
+     }
++    cheshireLap("scene");
+ 
+     // lock scene previously reconstructed
+     if (lockScenePreviouslyReconstructed)
+@@ -224,6 +268,7 @@ int aliceVision_main(int argc, char** argv)
+         ALICEVISION_LOG_ERROR("Invalid features.");
+         return EXIT_FAILURE;
+     }
++    cheshireLap("features");
+ 
+     // matches reading
+     matching::PairwiseMatches pairwiseMatches;
+@@ -233,6 +278,7 @@ int aliceVision_main(int argc, char** argv)
+         ALICEVISION_LOG_ERROR("Unable to load matches.");
+         return EXIT_FAILURE;
+     }
++    cheshireLap("matches");
+ 
+     if (extraInfoFolder.empty())
+         extraInfoFolder = fs::path(outputSfM).parent_path().string();
+@@ -289,11 +335,13 @@ int aliceVision_main(int argc, char** argv)
+     sfmEngine.setFeatures(&featuresPerView);
+     sfmEngine.setMatches(&pairwiseMatches);
+ 
++    cheshireLap("setup");
+     if (!sfmEngine.process())
+     {
+         ALICEVISION_LOG_ERROR("Failed to reconstruct.");
+         return EXIT_FAILURE;
+     }
++    cheshireLap("reconstruction");
+ 
+     // Mimic sfmTransform "EAlignmentMethod::AUTO"
+     if (useAutoTransform)
+@@ -310,6 +358,7 @@ int aliceVision_main(int argc, char** argv)
+         sfm::computeNewCoordinateSystemGroundAuto(sfmEngine.getSfMData(), t);
+         sfm::applyTransform(sfmEngine.getSfMData(), 1.0, Eigen::Matrix3d::Identity(), t);
+     }
++    cheshireLap("alignment");
+ 
+     // set featuresFolders and matchesFolders relative paths
+     {
+@@ -323,13 +372,16 @@ int aliceVision_main(int argc, char** argv)
+     {
+         sfmEngine.colorize();
+     }
++    cheshireLap("colours");
+ 
+     sfmEngine.retrieveMarkersId();
++    cheshireLap("markers");
+ 
+     ALICEVISION_LOG_INFO("Structure from motion took (s): " + std::to_string(timer.elapsed()));
+     ALICEVISION_LOG_INFO("Generating HTML report...");
+ 
+     sfm::generateSfMReport(sfmEngine.getSfMData(), (fs::path(extraInfoFolder) / "sfm_report.html").string());
++    cheshireLap("report");
+ 
+     // export to disk computed scene (data & visualizable results)
+     ALICEVISION_LOG_INFO("Export SfMData to disk: " + outputSfM);
+@@ -343,6 +395,11 @@ int aliceVision_main(int argc, char** argv)
+         sfmDataIO::save(
+           sfmEngine.getSfMData(), outputSfMViewsAndPoses, sfmDataIO::ESfMData(sfmDataIO::VIEWS | sfmDataIO::EXTRINSICS | sfmDataIO::INTRINSICS));
+ 
++    cheshireLap("save");
++    if (cheshireProfile)
++        ALICEVISION_LOG_INFO("cheshire: SfM profile (main): "
++                             << std::chrono::duration<double>(std::chrono::steady_clock::now() - cheshireT0).count() << " s = "
++                             << cheshireLine.str());
+     ALICEVISION_LOG_INFO("Structure from Motion results:" << std::endl
+                                                           << "\t- # input images: " << sfmEngine.getSfMData().getViews().size() << std::endl
+                                                           << "\t- # cameras calibrated: " << sfmEngine.getSfMData().getValidViews().size()
 diff --git a/src/software/pipeline/main_meshing.cpp b/src/software/pipeline/main_meshing.cpp
 index 4fe193b..0145801 100644
 --- a/src/software/pipeline/main_meshing.cpp
