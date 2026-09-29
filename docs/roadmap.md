@@ -595,7 +595,15 @@ reaches it. The design is in docs/notes/ba-own-solver.md; the steps, each a go/n
   - False Door: 1340 s → 787 s, on the same trajectory. Build 218 s → 11 s, teardown 40 s → 0, and
     bundle adjustment 529 s → 356 s.
 - **Step 4: the device** (L). Residuals, Jacobians and the per-landmark Schur blocks on the GPU; the
-  reduced system on the host first.
+  reduced system on the host first. Byte for byte the host's result, like 3b (plan in the design note).
+  - **4a, the profile** (2026-09-29). `CHESHIRE_BA_PROFILE` logs one line per solve with the phases.
+    - On the False Door, 315 of 352 s are the 33 solves of over a million rows. The per-row and
+      per-landmark work is 263 s of that: evaluations 122, elimination 57, passes over the
+      Jacobian 42, vector passes 42.
+    - The sparse factorisation (40 s) stays on the host.
+    - The Windows host rounds the rotation and the 3x3 inverse with FMA (Ceres' and Eigen's
+      headers, parsed before the pragma), which 4b removes.
+  - 4b: the host without FMA; 4c: the device with a check mode; 4d: vectors on the device, CUDA.
 
 Beside it:
 

@@ -360,6 +360,79 @@ build:
 | 41 views | 33.3 s → 28.9 s | 5.7 s → 4.2 s | 1.71 s → 0.56 s | 1.46 s → 0.66 s |
 | engine bay | 36.2 s → 33.0 s | 9.5 s → 9.3 s | 2.92 s → 0.63 s | 1.41 s → 0.77 s |
 
+## Step 4a: where the host solver's time is (2026-09-29)
+
+`CHESHIRE_BA_PROFILE=1` now also logs one line per solve with the solver's time per phase:
+- the evaluations (Jacobian, cost, gradient);
+- the elimination, the Schur sum, the factorisation and the back-substitution;
+- the passes around them (column norms, Jacobi scaling, the model cost change, Plus, the state
+  copies);
+- the problem's sizes.
+
+On the False Door (939 solves, 352.5 s of bundle adjustment, the output unchanged) the 33 solves of
+over a million rows take 315 s. Split by phase:
+
+| phase | time | |
+|---|---|---|
+| evaluations | 122 s | Jacobian 47 s (554), cost 32 s (1066), gradient 43 s (512) |
+| elimination, Schur sum, back-substitution | 57 s | 589 linear solves |
+| column norms, Jacobi scaling, model cost | 42 s | |
+| Plus, state copies, vector passes | 42 s | |
+| factorisation | 40 s | Eigen's `SimplicialLDLT`, one thread |
+| setup | 12 s | the structure, once per solve |
+
+- **Why so many cost and gradient evaluations:** these problems have bounds (the intrinsics), so
+  every step runs Ceres' line search (the constrained case). Each iteration costs about two cost
+  evaluations and one gradient evaluation besides the Jacobian.
+- **The 868 pose refinements** (dense QR, 22-9,295 rows) take 7 s in all.
+- **The problem sizes:** the largest solve has 3.9 M rows, 900 k landmarks, 2,358 camera columns, a
+  57 M-value Jacobian and a 558 k-value reduced system.
+
+So nine tenths of the time is work per row or per landmark, which a device does well. The
+factorisation is a sparse Cholesky of the reduced camera system, and stays on the host.
+
+**Host arithmetic with FMA.** The Windows build compiles with `/arch:AVX2`, and clang contracts
+`a*b + c` within an expression unless told not to. The solver's own code and the fused projection
+sit under `#pragma clang fp contract(off)`. The code they call from Ceres' and Eigen's headers, which
+are parsed earlier, does not. The LLVM IR of `BundleAdjustmentCeres.cpp` (with line tables) names
+every fused operation:
+- **`AngleAxisRotatePoint<double>`** (rotation.h:822-849): the rotation in the cost-only path. Its
+  Jet version, which the Jacobian path uses, is not contracted: the Jet operators go through Eigen.
+- **`AngleAxisToRotationMatrix`** (rotation.h:472-480): the rotation matrix in the Jacobian path.
+- **Eigen's 3x3 inverse** (`cofactor_3x3`, InverseImpl.h:135): the landmark blocks' inverses in the
+  elimination.
+- **`getPrincipalPoint`**, read once per camera.
+
+The Linux build (GCC, generic x86-64) has no FMA, so the two hosts already round these differently.
+
+## Step 4: the plan
+
+**Same bytes as the host.** The device path must give the host solver's result, byte for byte, so
+that validation stays a digest comparison. That requires:
+- **The same arithmetic.** The device code is the host code, with no contraction: the clang pragma
+  on HIP, and `--fmad=false` on CUDA (step 5l).
+- **No libm.** The only transcendental functions are per pose (`hypot`, `sin`, `cos` in the
+  angle-axis rotation). The host computes them once per pose and evaluation and hands them over; the
+  device computes everything per row.
+- **The same summation orders.** Every sum is over fixed partitions, groups, chunks or rows, in
+  order, and can be run by one device thread per partial sum:
+  - the cost and the model cost change: per row, then per partition in order;
+  - the gradient and the column norms: per landmark for the E part, per partition and camera block
+    for the F part (lists built once per solve);
+  - the reduced system: one thread per (group, camera block, row of the block), walking the chunks
+    that touch the block in chunk order. Each thread adds, per chunk, the rows' F^T F terms and then
+    the chunk's Schur term, as the host does. The groups are then summed in order.
+
+**The steps:**
+- **4b: the host without FMA.** Cheshire's own FMA-free versions of the rotation (with the per-pose
+  part computed once per pose) and of the 3x3 inverse, which the device will share. The Windows
+  digests change once, to what the arithmetic says without contraction.
+- **4c: the device.** Evaluation, the passes over the Jacobian, the elimination and the
+  back-substitution on the device; the factorisation and the vectors on the host.
+  - `CHESHIRE_BA_DEVICE=check` runs both on every solve and compares their digests.
+  - The small solves stay on the host.
+- **4d: the vectors on the device**, if the profile then says so; and the CUDA build (house-pc).
+
 ## Scope
 
 The solver covers the problems incremental SfM builds most:

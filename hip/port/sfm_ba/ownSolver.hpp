@@ -323,6 +323,9 @@ struct Iteration
 struct Times
 {
     double setup = 0.0, evalJ = 0.0, evalCost = 0.0, evalGrad = 0.0, elim = 0.0, schur = 0.0, factor = 0.0, back = 0.0;
+    // the passes around them (step 4a): column norms, Jacobi scaling, the model cost change, Plus, and the
+    // state copies
+    double norms = 0.0, scale = 0.0, model = 0.0, plus = 0.0, state = 0.0;
     int nJ = 0, nCost = 0, nGrad = 0, nSolves = 0, threads = 1;
 };
 
@@ -334,6 +337,8 @@ struct Result
     double initialCost = 0.0, finalCost = 0.0, fixedCost = 0.0;
     std::string termination;
     int eBlocks = 0, fBlocks = 0, fColumns = 0, rows = 0;
+    size_t sBlocks = 0, sValues = 0, jValues = 0;   // the reduced camera system's blocks and values; the Jacobian's
+    int groups = 0, parts = 0;
     bool denseQR = false;          // no eliminated block: Ceres' DENSE_QR in place of DENSE_SCHUR
     size_t residuals = 0;          // scalar residuals of the reduced program
     bool constrained = false;
@@ -354,6 +359,13 @@ inline std::uint64_t digestOf(const std::vector<double>& x)
 }
 
 // CHESHIRE_BA_DIGEST=1: one line per solve with the digests of its starting and final states
+// CHESHIRE_BA_PROFILE: also one line per solve with the solver's time per phase (step 4a)
+inline bool profileEnabled()
+{
+    static const bool on = ::cheshire::env::flag("CHESHIRE_BA_PROFILE");
+    return on;
+}
+
 inline bool digestEnabled()
 {
     static const bool on = ::cheshire::env::flag("CHESHIRE_BA_DIGEST");
@@ -777,6 +789,11 @@ class Solver
             res.denseQR = _qr;
             res.constrained = _constrained;
             res.fixedCost = _fixedCost;
+            res.sBlocks = _sCol.size();
+            res.sValues = _sv.size();
+            res.jValues = _J.n;
+            res.groups = int(_groups.size()) - 1;
+            res.parts = nParts();
             minimize(&res);
             if (res.ok && (shadowEnabled() || digestEnabled() || directMode() == 2))
             {
@@ -830,7 +847,7 @@ class Solver
     Options _opt;
     std::function<void()> _prepare;
     int _threads = 1;
-    Times _times;
+    mutable Times _times;
 
     std::vector<PBlock> _e, _f;              // free blocks, in Ceres' order
     int _ne = 0, _nf = 0, _n = 0;            // tangent sizes: E, F, both
@@ -1434,6 +1451,7 @@ class Solver
     // x: every free block's ambient values, E first then F (for the norms and the step)
     std::vector<double> stateVector() const
     {
+        const auto t0 = Clock::now();
         std::vector<double> x(_nx);
         const int nb = int(_e.size() + _f.size()), nE = int(_e.size());
 #pragma omp parallel for schedule(static, 4096) num_threads(_threads)
@@ -1442,10 +1460,12 @@ class Solver
             const PBlock& b = i < nE ? _e[i] : _f[i - nE];
             std::copy(b.ptr, b.ptr + b.size, x.begin() + std::ptrdiff_t(b.x));
         }
+        _times.state += since(t0);
         return x;
     }
     void setState(const std::vector<double>& x)
     {
+        const auto t0 = Clock::now();
         const int nb = int(_e.size() + _f.size()), nE = int(_e.size());
 #pragma omp parallel for schedule(static, 4096) num_threads(_threads)
         for (int i = 0; i < nb; ++i)
@@ -1453,6 +1473,7 @@ class Solver
             PBlock& b = i < nE ? _e[i] : _f[i - nE];
             std::copy(x.begin() + std::ptrdiff_t(b.x), x.begin() + std::ptrdiff_t(b.x + size_t(b.size)), b.ptr);
         }
+        _times.state += since(t0);
     }
 
     // ---- vector passes on the threads ----------------------------------------------------------------
@@ -1723,6 +1744,7 @@ class Solver
     // Plus(x, delta) per block, delta in the tangent space (E then F); out: ambient, E then F
     void plus(const std::vector<double>& x, const std::vector<double>& delta, std::vector<double>* out) const
     {
+        const auto t0 = Clock::now();
         out->resize(x.size());
         const int nb = int(_e.size() + _f.size()), nE = int(_e.size());
 #pragma omp parallel for schedule(static, 4096) num_threads(_threads)
@@ -1745,11 +1767,13 @@ class Solver
                 for (int a = 0; a < b.size; ++a)
                     o[a] = std::min(o[a], b.upper[a]);
         }
+        _times.plus += since(t0);
     }
 
     // Squared column norms of the (corrected, current) Jacobian, tangent space E then F.
     std::vector<double> squaredColumnNorms()
     {
+        const auto t0 = Clock::now();
         std::vector<double> n(size_t(_n), 0.0);
         const int P = nParts();
 #pragma omp parallel for schedule(dynamic, 1) num_threads(_threads)
@@ -1775,11 +1799,13 @@ class Solver
             }
         }
         reduceF(n.data() + _ne);
+        _times.norms += since(t0);
         return n;
     }
 
     void scaleColumns(const std::vector<double>& s)
     {
+        const auto t0 = Clock::now();
         const int P = nParts();
 #pragma omp parallel for schedule(dynamic, 1) num_threads(_threads)
         for (int part = 0; part < P; ++part)
@@ -1798,12 +1824,14 @@ class Solver
                             J[i * b.tsize + t] *= c[t];
                 }
             }
+        _times.scale += since(t0);
     }
 
     // The model cost change of a step: -(f . (r + f / 2)) with f = J step, summed per partition then in
     // order (LevenbergMarquardtStrategy / TrustRegionMinimizer::ComputeTrustRegionStep).
     double modelCostChange(const std::vector<double>& step) const
     {
+        const auto t0 = Clock::now();
         const int P = nParts();
         std::vector<double> partDot(size_t(P), 0.0);
 #pragma omp parallel for schedule(dynamic, 1) num_threads(_threads)
@@ -1847,6 +1875,7 @@ class Solver
         double dot = 0.0;
         for (double d : partDot)
             dot += d;
+        _times.model += since(t0);
         return -dot;
     }
 
@@ -2576,6 +2605,21 @@ inline bool solveSource(const Source& src, const ceres::Solver::Options& options
     s.jacobian_evaluation_time_in_seconds = r.time.evalJ + r.time.evalGrad;
     s.residual_evaluation_time_in_seconds = r.time.evalCost;
     s.linear_solver_time_in_seconds = r.time.elim + r.time.schur + r.time.factor + r.time.back;
+    if (profileEnabled())
+    {
+        const Times& t = r.time;
+        const double known = t.setup + t.evalJ + t.evalCost + t.evalGrad + t.elim + t.schur + t.factor + t.back + t.norms + t.scale + t.model +
+                             t.plus + t.state;
+        ALICEVISION_LOG_INFO("cheshire: BA own profile: " << r.seconds << " s = setup " << t.setup << " + evalJ " << t.evalJ << " (" << t.nJ
+                             << ") + evalCost " << t.evalCost << " (" << t.nCost << ") + evalGrad " << t.evalGrad << " (" << t.nGrad
+                             << ") + elim " << t.elim << " + schur " << t.schur << " + factor " << t.factor << " + back " << t.back << " ("
+                             << t.nSolves << ") + norms " << t.norms << " + scale " << t.scale << " + model " << t.model << " + plus "
+                             << t.plus << " + state " << t.state << " + other " << r.seconds - known << "; rows " << r.rows << ", E "
+                             << r.eBlocks << ", F " << r.fBlocks << " (" << r.fColumns << " columns), J " << r.jValues << ", S "
+                             << r.sBlocks << " blocks " << r.sValues << " values, groups " << r.groups << ", parts " << r.parts << ", "
+                             << (r.denseQR ? "dense QR" : o.sparse ? "sparse" : "dense") << ", " << r.iterations.size() - 1
+                             << " iterations, " << t.threads << " threads");
+    }
     if (digestEnabled())
         ALICEVISION_LOG_INFO("cheshire: BA digest: " << r.rows << " rows, " << r.fColumns << " columns, in " << std::hex << r.digestIn << " out "
                                                      << r.digest << std::dec << ", " << r.iterations.size() - 1 << " iterations");
