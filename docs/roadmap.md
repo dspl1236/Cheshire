@@ -634,6 +634,23 @@ reaches it. The design is in docs/notes/ba-own-solver.md; the steps, each a go/n
     - The same bytes on all three sets and in every check.
     - False Door, back to back on an idle box: bundle adjustment 67.5 s → 52.6 s, SfM 467 s → 451 s.
     - Next: the factorisation, the elimination, the per-solve setup; the CUDA build.
+- **SfM around the solver** (2026-09-29, docs/04 "OpenMP's threads after a parallel region").
+  - **7g:** incrementalSfM's OpenMP threads sleep at once after a parallel region, on Windows (the
+    runtime's default spins them 200 ms). False Door 523 s → 498 s, the same output.
+  - **7h:** `CHESHIRE_SFM_PROFILE=1` prints the phase profile. On the False Door the solver is now
+    17 % of the reconstruction. Around it:
+
+    | phase | time |
+    |---|---|
+    | resection | 88 s |
+    | the passes after each solve | 62 s |
+    | the colours | 55 s |
+    | triangulation | 47 s |
+    | the features' read | 42 s |
+    | the next-views scoring | 37 s |
+    | the local-BA graph | 37 s |
+
+  - Next: those, largest first, each exact.
 
 Beside it:
 

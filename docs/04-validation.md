@@ -2986,3 +2986,71 @@ Pairing installed the matching DepthMap override on each Meshroom, and `--unpair
 own node in every run. The last two rows ran on 2026-09-28 after a card swap (the GTX 1080 Ti into
 house-pc, the RX 5500 XT into bench-pc), so every package and both halves of the Windows AMD package
 are gated. 105 runs, none failed.
+
+## 0.3.7: OpenMP's threads after a parallel region (step 7g), and where incremental SfM's time goes (7h) (2026-09-29)
+
+**Spinning threads.** After a parallel region, LLVM's OpenMP runtime (libomp140 on Windows) keeps its
+threads spinning for `KMP_BLOCKTIME`, 200 ms by default, before they sleep. Beside a single-threaded
+pass that follows a region, that spinning costs time. It was found in the bundle adjustment's
+factorisation (docs/notes/ba-own-solver.md, 4d), where it took the large solves from 10.7 s to
+15.7 s. It costs the rest of SfM too.
+
+Step 7g sets `KMP_BLOCKTIME=0` in incrementalSfM's environment, at the top of `aliceVision_main`,
+before the runtime starts:
+- **Why the environment.** It reaches every team. `kmp_set_blocktime` reached only the main thread's
+  teams, and missed the loading's and the colours' work. It stays as the fallback if the runtime has
+  already started, and the log line says which took.
+- **Switches.** `CHESHIRE_OMP_BLOCKTIME=<ms>` sets another time. A `KMP_BLOCKTIME` of the user's own
+  is left alone.
+- **Scope.** Windows only. On Linux it is not measured yet: GCC's libgomp (the CUDA build) spins for
+  far shorter by default, while the HIP build's clang may link LLVM's runtime.
+
+Only the timing changes. False Door, the same build one run after another (a browser was using
+about 1.5 cores throughout), all with the same output `a5cc8437…`:
+
+| threads after a region | SfM wall |
+|---|---|
+| spin 200 ms (the runtime's default) | 523.4 s |
+| sleep, `kmp_set_blocktime(0)` from main | 506.6 s |
+| sleep, `KMP_BLOCKTIME=0` in the environment (7g) | 498.3 s |
+
+The environment's extra 8 s is in the loading (6.4 s) and the colours (2.3 s). The 41-view and
+engine-bay digests are unchanged.
+
+**Where the time goes (7h).** `CHESHIRE_SFM_PROFILE=1` prints two lines:
+- the engine's phases, each timed at its call sites where they do not nest, with "other" the rest;
+- the program's steps.
+
+False Door with 7g, 490.6 s in all:
+
+| program step | s |
+|---|---|
+| features (read) | 41.5 |
+| matches (read) | 3.1 |
+| reconstruction | 385.6 |
+| colours (every image read) | 55.2 |
+| report, save, alignment | 5.1 |
+
+| reconstruction phase | s | calls |
+|---|---|---|
+| resection (parallel over the group's views) | 88.3 | 128 |
+| bundle adjustment's solve (`adjust`) | 64.7 | 64 |
+| after each solve: outliers, unstable views (5s) | 61.7 | 64 |
+| triangulation | 47.5 | 63 |
+| choosing the next views | 36.8 | 131 |
+| local-BA graph: update 21.5 s, states 15.5 s | 37.0 | |
+| initial pairs | 16.2 | 1 |
+| tracks | 14.6 | 1 |
+| register changes | 9.1 | 61 |
+| resection of new cameras (serial), apply | 4.3 | |
+| statistics | 4.9 | 1 |
+| other | 0.5 | |
+
+The solver is now 17 % of the reconstruction. The next targets are around it, largest first:
+- resection;
+- the passes after each solve;
+- the colours: 884 JPEG decodes, where CheshireJPG decodes identically;
+- triangulation;
+- the features' read;
+- the next-views scoring;
+- the local-BA graph.
