@@ -903,9 +903,15 @@ class Solver
                 if (rowE[i] >= 0)
                     rowE[i] = mapE[rowE[i]];
         }
-        // No eliminated block left: Ceres gives up the Schur solver (LinearSolverForZeroEBlocks) and, not
-        // reordering for it, keeps the program in the problem's own order. DENSE_SCHUR becomes DENSE_QR,
-        // done here; SPARSE_SCHUR becomes SPARSE_NORMAL_CHOLESKY, left to Ceres.
+        // No eliminated block left: Ceres gives up the Schur solver (LinearSolverForZeroEBlocks), and without
+        // the Schur reordering its program keeps the order the blocks were added in. DENSE_SCHUR becomes
+        // DENSE_QR, done here; SPARSE_SCHUR becomes SPARSE_NORMAL_CHOLESKY, left to Ceres.
+        // The column order matters to the QR's rounding. The public API does not give the program order
+        // (GetParameterBlocks is in address order, which changes from run to run: it once made two False
+        // Door runs part at a new camera's first view). The ordering groups do: BundleAdjustmentCeres adds
+        // the poses, then each camera's intrinsics and distortion, and numbers the groups the same way, so
+        // for the resection refinements (one pose, one camera) _f is already Ceres' order; elsewhere it is
+        // at least the same order every run.
         if (_e.empty())
         {
             if (_opt.sparse)
@@ -914,28 +920,6 @@ class Solver
                 return false;
             }
             _qr = true;
-            std::vector<double*> blocks;
-            _problem.GetParameterBlocks(&blocks);
-            PtrIndex position;
-            position.reserve(blocks.size());
-            for (size_t i = 0; i < blocks.size(); ++i)
-                position.set(blocks[i], int(i));
-            const int nF0 = int(_f.size());
-            std::vector<int> order(static_cast<size_t>(nF0));
-            for (int i = 0; i < nF0; ++i)
-                order[i] = i;
-            std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return position.get(_f[a].ptr) < position.get(_f[b].ptr); });
-            std::vector<int> inv(static_cast<size_t>(nF0));
-            std::vector<PBlock> nf(static_cast<size_t>(nF0));
-            for (int i = 0; i < nF0; ++i)
-            {
-                inv[order[i]] = i;
-                nf[i] = std::move(_f[order[i]]);
-            }
-            _f.swap(nf);
-            for (auto& v : _pv)
-                if (v <= -2)
-                    v = -2 - inv[-2 - v];
         }
 
         // rows grouped by E block in residual order (a stable counting sort), then the rows without one

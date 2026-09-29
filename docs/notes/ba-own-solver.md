@@ -1,6 +1,6 @@
 # A bundle-adjustment solver of Cheshire's own: design (0.3.7)
 
-Status: 2026-09-28. Steps 0-3 done. The solver takes Ceres' iterates to rounding and solves in a third of Ceres' time. It is now the default in SfM (`CHESHIRE_BA_SOLVER=ceres` for Ceres), and passes the SfM quality gate on 41 views, the engine bay and the False Door (below). Background and the measurements
+Status: 2026-09-29. Steps 0-3 done. The solver takes Ceres' iterates to rounding and solves in a third of Ceres' time. It is now the default in SfM (`CHESHIRE_BA_SOLVER=ceres` for Ceres), and passes the SfM quality gate on 41 views, the engine bay and the False Door (below). Background and the measurements
 behind the decision are in docs/notes/ba-device-plan.md.
 
 ## Why
@@ -268,16 +268,29 @@ solver is 2.6x faster (the reverse shadow: 174 s against 453 s). A run, though, 
 its trajectory brings, and the trajectories differ by hundreds of iterations of large solves, for
 Ceres as much as for the solver.
 
-**Still open: the False Door is not yet reproducible.** Two runs with step 7c still end apart (830
-and 831 poses). The solve digests place the first difference (`CHESHIRE_BA_DIGEST=1`: one line per
-solve with its starting and final states):
-- The main solves agree, input and output, to the 35th.
-- The first solve whose input differs is a new camera's first view (10 columns, pose and intrinsics).
-  Under step 7c it is resected on its own.
+**The False Door reproducible too (2026-09-29).** With step 7c, two runs still ended apart (830 and
+831 poses). Two digest diagnostics found where:
+- **Per solve:** `CHESHIRE_BA_DIGEST=1`, one line per solve with its starting and final states.
+- **Per stage:** step 7d, `CHESHIRE_SFM_DIGEST=1`, the scene (intrinsics, poses, landmarks,
+  observations) at every stage of the incremental loop.
 
-So the intrinsics of a camera no reconstructed view uses are left in a state that differs between
-runs, and finding how is the next thing. The one-camera sets are unaffected: 41 views and the engine
-bay give the same bytes on every run.
+The trail:
+- Both runs had the same scene at a resection batch's start.
+- They had the same RANSAC input, draw and result for a new camera's first view.
+- Its pose-and-intrinsics refinement then started from the same values, in a different block order:
+  pose, distortion, intrinsics in one run; intrinsics, distortion, pose in the other.
+
+The cause was the solver's `DENSE_QR` path. It follows Ceres' program order (the order the blocks
+were added), and took that order from `Problem::GetParameterBlocks`. That call walks a map keyed by
+pointer, so it returns address order, which changes from run to run. Householder QR without pivoting
+rounds differently when the columns are swapped.
+
+The fix keeps the ordering groups' order. `BundleAdjustmentCeres` numbers the groups as it adds the
+blocks, so for a one-camera refinement that is exactly Ceres' order, and elsewhere it is at least the
+same every run.
+
+Two False Door runs then gave the same bytes: 828 poses, 1,348,092 landmarks, RMSE 1.38079, and all
+549 stage digests equal. So SfM is reproducible by default on every set so far, and with every thread.
 
 ## Scope
 
