@@ -714,6 +714,16 @@ Each set runs six ways:
 | Windows ROCm 7.2 gfx12, RX 9070 | `12668473…` ×6 | `c5d68cd8…` ×6 | 29/29, 35/35 | 68/68, 140/140 |
 | Windows HIP 6.2 gfx1012, RX 5500 XT | `e347b791…` ×6 | `5b6d80ba…` ×6 | 29/29, 34/34 | 68/68, 140/140 |
 | Linux CUDA sm_61 (GCC), GTX 1080 Ti | `e7712237…` ×6 | `9668ad9a…` ×6 | 29/29, 36/36 | 68/68, 141/141 |
+| Linux HIP (house-pc after a card swap), RX 6750 XT | `e7712237…` ×6 | `9668ad9a…` ×6 | 29/29, 36/36 | 68/68, 141/141 |
+| Windows CUDA (MSVC + nvcc; bench-pc after a swap), GTX 1080 Ti | `7259fcf6…` ×6 | `81387335…` ×6 | 29/29, 34/34 | 68/68, 140/140 |
+
+The last two rows ran the same evening, at 859d0a8, which also carries SfM steps 7i-7m (docs/04). The
+Windows HIP 6.2, Linux CUDA and Linux HIP builds were run both before and after those steps. Each
+gave the same digests both times, so steps 7i-7m are exact on those builds too.
+
+**The two Linux builds agree byte for byte**, although one runs its device work on an NVIDIA Pascal
+card and the other on an AMD RDNA2 card. Their host code is built the same way, so the device path
+reproduces the host's arithmetic exactly on both vendors.
 
 **Exactness.** Within each build every run gives the same bytes: the host twice, the device, both
 checks and the defaults, and every checked solve is the same on the device as on the host. The builds
@@ -730,8 +740,8 @@ by one or two between them. Byte identity is a property of a build, and these ch
 | bench-pc, RX 5500 XT | 107.4 → 105.1 s | 120.3 → 116.8 s |
 
 With the defaults (200,000 rows), house-pc took 54.3 s and 41.0 s. On a slow host the device pays on
-far smaller solves, so the threshold may want to follow the machine. The Windows CUDA build still has
-to run on a card (a GTX in a Windows box), and so does the Linux HIP build (an AMD card in house-pc).
+far smaller solves, so the threshold may want to follow the machine. The RX 6750 XT in house-pc
+gives the same picture: engine bay 47.5 s → 34.6 s from 1,000 rows, 40.1 s with the defaults.
 
 **Packaging (02cb3a9).** `aliceVision_sfm_bundle.dll` carries the target's code objects since step 7f.
 The bundled Windows package files a GPU-bearing DLL under its target only. `build_targets.py` harvests
