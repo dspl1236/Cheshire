@@ -712,15 +712,25 @@ first, then AC-RANSAC's hypothesis loop and PrepareDenseScene on four-thread hos
   False Door, back to back: SfM 307.8 s (0.3.7 bundle) to 240.9 s, features 44.1 to 0.84 s, colours 38.0 to
   14.4 s (the rest is the disk), the same digests. Next by the new profile: adjust 60.7 s, resection 42.1 s,
   triangulation 40.3 s, post-adjust 16.7 s, initial pairs 12.8 s, tracks 12.5 s (docs/04).
+- the tracks (12.5 s). **Done 2026-09-30** (step 8c, e21ef52): TracksBuilder marks the features per (view,
+  describer) instead of filling a `std::set`, and the pyramid runs its views on every core; the same
+  digests, the engine bay's tracks 0.85 to 0.35 s. The False Door run waits for the next benchmark window.
 - resection's and triangulation's arithmetic;
 - inside Grin: the sparse factorisation (8.6 s) and the elimination (9.6 s) of the False Door's large
   solves, and the per-solve setup (about 13 s).
 
 **Then:**
 
-- **AC-RANSAC's hypothesis loop on the device** (M-L). Meshroom 2025.1's defaults spend 21 s to 488 s
+- **AC-RANSAC's hypothesis loop** (M-L). Meshroom 2025.1's defaults spend 21 s to 488 s
   of geometric filtering on the engine bay and 105 s to 2234 s on the False Door, for the same
-  reconstruction (docs/04, 0.3.6).
+  reconstruction (docs/04, 0.3.6). The user's order (2026-09-30): the exact CPU work first, then decide
+  on the iteration default and the device port.
+  - **Step 8d, done 2026-09-30:** a model whose NFA bound cannot beat the best so far skips the residual
+    sort and the NFA scan (99.7 % of the models). Geometric filtering 36.8 to 18.8 s on 41 views at
+    50,000 iterations, the same bytes (docs/15, docs/04).
+  - Left after it: `kernel.fit` 63.5 % of AC-RANSAC's CPU time, `kernel.errors` 19.8 %, the bound
+    10.2 %. The residual loop is next, exact. The solver's nullspace would be several times faster
+    through another factorisation, but not bit-identical (docs/15, "What is left").
 - **PrepareDenseScene on four-thread hosts** (M, measure first). About 21 minutes of each 524-photo
   zoo job on house-pc.
 

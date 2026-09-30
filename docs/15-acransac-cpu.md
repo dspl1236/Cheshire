@@ -223,6 +223,60 @@ small, while `logc_n[k] + logc_k[k]` grows only sub-linearly, so the bound runs 
 infinity down the tail and certifies nothing. Tightening it needs a lower bound on `e(k)` for every
 k past the cut, which is the sorted order - the thing being avoided.
 
+## The question the caller asks (0.3.8, step 8d)
+
+The dead end above tried to prove where the minimum is. `ACRANSAC` never asks that. It does one
+thing with `bestNFA`'s answer:
+
+```
+if (best.first < minNFA)   // a better model: keep it and its inliers
+```
+
+A model that loses changes nothing, and almost every model loses. At Meshroom 2025.1's 50,000
+iterations on 41 views, 17 of 47,310 sampled models beat the running `minNFA` (0.036 %). For the
+rest it is enough to prove that no `k` goes below `minNFA`. That is a much weaker claim, and it does
+not need the sorted order.
+
+A histogram of the unsorted residuals gives it. Each squared residual falls in a bucket a quarter of
+a binade wide over [2^-54, 2^36), with one bucket below it (lower edge 0) and one from 2^36 up; the
+bucket is the key's top 14 bits, shifted and clamped. After counting, rank `k` of the sorted order
+lies in a known bucket, so `e(k)` is at least that bucket's lower edge, and since `nfa(k)` rises
+with `e(k)` (`dim > 0`, `k > s`):
+
+```
+nfa(k) >= lb(k) := loge0 + (logalpha0 + dim*G[b])*(k - s) + logc_n[k] + logc_k[k]
+G[b] = log10(sqrt(lower edge of b) + FLT_EPSILON) - 1e-12      (a static table)
+```
+
+Unlike the tail bound, every rank gets its own floor, so the bound does not run off down the tail.
+Within one bucket, `lb(k)` is `a*(k - s)` plus `log10 C(n,k) + log10 C(k,s)`, which is concave in
+`k`. Its minimum over the bucket's ranks is therefore at the first or the last one: two evaluations
+per bucket, with no `log10` and no sort. The float tables are not exactly concave. Once per
+`ACRANSAC` call, the setup measures how far they are from the exact sums (at most 0.0073 on these
+calls) and adds twice that to the slack, beside a margin for the rounding of both expressions.
+
+If every bucket's bound clears `minNFA` plus the slack, `bestNFA` could not have returned a better
+model, and the model skips the sort and the scan. Everything else takes the old path: a call with no
+model yet (`minNFA` infinite), a negative or NaN residual, a kernel with `dim <= 0`, or a bound that
+does not clear. So the only models that change path are ones `bestNFA` would have discarded.
+
+The 47,310 models were captured from a real run (every 499th on the key path) and replayed by
+`hip/tests/acrbound`:
+
+| | per model |
+|---|---|
+| radix sort + `bestNFA` | 5.42 us |
+| the bound, then the sort and the scan where it does not settle | 0.59 us |
+
+The bound settles 99.67 % of the models (99.84 % of their residuals), and `bestNFA` puts none of
+them below `minNFA`. Of the 0.59 us, the histogram pass is 0.25 us and the walk over the buckets
+0.34 us; a branchless walk and split histograms were no faster. At Meshroom 2023.3's 2048
+iterations the share is 99.0 %: more of those models come early, while `minNFA` is still high.
+
+Over the whole run, `CHESHIRE_ACR_BOUND_CHECK=1` sorts and scans every skipped model as well:
+23,526,805 of 23,607,436 skipped, none below `minNFA`. Geometric filtering goes from 36.8 s to
+18.8 s, and the match file is byte for byte the same ([docs/04](04-validation.md), 0.3.8).
+
 ## Why this did not go to the GPU
 
 The work is per image pair and already parallel across pairs, so the shape would be one workgroup
@@ -244,7 +298,21 @@ algorithm's reputation.
 
 ## What is left
 
-`kernel.fit` is now the largest phase at 1589.4 s, 39 % of the stage. It is
+After step 8d, on 41 views at Meshroom 2025.1's 50,000 iterations (CPU time summed over 12 threads,
+from a temporary instrumentation pass; 23,607,436 models, 333 residuals each):
+
+| phase | CPU time | share |
+|---|---|---|
+| `kernel.fit` (7-point solver) | 143.7 s | 63.5 % |
+| `kernel.errors` | 44.9 s | 19.8 % |
+| the bound (8d) | 23.2 s | 10.2 % |
+| sampling | 8.8 s | 3.9 % |
+| sort + `bestNFA`, 80,631 models | 0.6 s | 0.25 % |
+| the better-model branch | 0.5 s | 0.2 % |
+| each iteration, all told | 226.3 s | |
+
+On the engine bay before 0.3.8, `kernel.fit` was already the largest phase at 1589.4 s, 39 % of the
+stage. It is
 `Nullspace2` in [`numeric/algebra.hpp`](../third_party/aliceVision/src/aliceVision/numeric/algebra.hpp),
 which runs `Eigen::JacobiSVD<Mat9>` with `ComputeFullV` - Eigen's slowest SVD - on a 9x9 matrix
 whose bottom two rows are zero, 111.7 M times, to extract a two-dimensional nullspace from what is

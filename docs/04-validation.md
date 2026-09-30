@@ -3276,3 +3276,42 @@ The reconstruction's own profile now reads:
 | next views | 5.1 s |
 | statistics | 4.4 s |
 | graph update | 2.9 s |
+
+## 0.3.8: AC-RANSAC skips the models that cannot win (step 8d, 2026-09-30)
+
+`ACRANSAC` uses `bestNFA`'s answer only when it beats the best model so far, and 0.036 % of the
+models do. Step 8d bounds the NFA a model could reach from a histogram of its unsorted residuals,
+and skips the residual sort and the scan when the bound cannot beat `minNFA`. The method is in
+[docs/15](15-acransac-cpu.md), "The question the caller asks". `scripts/fmbench.py` runs
+FeatureMatching from `sfmbench.py`'s cache with the development install. It reports the log's
+geometric-filtering time and one digest over the match files.
+
+41 views at Meshroom 2025.1's 50,000 iterations, RX 9070 box, alternating runs:
+
+| run | geometric filtering | wall | digest |
+|---|---|---|---|
+| `CHESHIRE_ACR_BOUND=0` | 36.9 s | 43.4 s | `2b4452a79d79b819` |
+| bound | 18.8 s | 25.4 s | the same |
+| `CHESHIRE_ACR_BOUND=0` | 36.7 s | 43.3 s | the same |
+| bound | 18.8 s | 25.4 s | the same |
+
+The digest is `base50k`'s, taken before this round's AC-RANSAC work. With
+`CHESHIRE_ACR_BOUND_CHECK=1`, every skipped model is sorted and scanned as well:
+
+| set, iterations | models skipped | below `minNFA` in `bestNFA` | digest |
+|---|---|---|---|
+| 41 views, 50,000 | 23,526,805 of 23,607,436 (99.66 %) | 0 | `2b4452a79d79b819` |
+| 41 views, 2048 | 1,063,685 of 1,074,515 (98.99 %) | 0 | `64397675b2fed423`, the same as before |
+| engine bay, 2048 | 22,888,066 of 22,991,443 (99.55 %) | 0 | `f063ea6d15c0aa2e`, the same as with the bound off |
+
+The engine bay at 2048 iterations goes from 20.2 s to 14.6 s of geometric filtering (one run each).
+
+**Tried first, and not kept.** A bounded scan with the same answers: a cheap `log10` of proven error
+bounded `nfa(k)` at every rank, and the library's `log10` ran only where the bound reached the
+smallest upper bound. It was exact on all 23.6 M models, but geometric filtering took 38.8 s against
+about 40 s. On its own it ran at 0.61-0.79x the full scan's speed, because the library's `log10`
+costs only 4-7 ns an element, no more than the cheap one. The sort and the scan had to go for
+most models, not just get cheaper.
+
+After 8d, `kernel.fit` (the 7-point solver) is 63.5 % of AC-RANSAC's CPU time and `kernel.errors`
+19.8 % (docs/15, "What is left").

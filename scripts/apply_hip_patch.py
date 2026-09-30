@@ -344,6 +344,223 @@ STEP8C_PYRAMID = [
 ]
 
 
+# 8d (0.3.8): AC-RANSAC skips the residual sort and bestNFA's scan for a model a histogram shows cannot beat minNFA.
+STEP8D_ACR = [
+    ("    return bestIndex;\n}\n\n/**\n * @brief An implementation of the \"Random Sample Consensus\"",
+     r"""    return bestIndex;
+}
+
+// cheshire (step 8d, 0.3.8): a model changes nothing unless bestNFA puts it below minNFA, and almost none gets there
+// (0.036 % of geometric filtering's models on 41 views at Meshroom 2025.1's 50,000 iterations), yet every one paid for
+// the residual sort and bestNFA's scan: half of AC-RANSAC's time. A histogram of the unsorted residuals, a quarter binade
+// per bucket, gives every rank k a residual it cannot be below (its bucket's lower edge), so an nfa it cannot be below:
+// loge0 + (logalpha0 + dim log10(sqrt(edge) + FLT_EPSILON)) (k - s) + logc_n[k] + logc_k[k] rises with the residual
+// (dim > 0, k > s). Over one bucket's ranks it is concave in k - log10 C(n,k) and log10 C(k,s) are, and the float tables
+// are within `gap` of them - so the bucket's first and last rank bound it. When every bucket's bound is at least minNFA
+// plus a margin for the rounding on both sides, bestNFA could not have returned a better model and the sort and the scan
+// are skipped: 99.7 % of the models there, the bound costing a twentieth of what it replaces. Anything else - no model yet
+// (minNFA infinite), a negative or NaN residual, a kernel with dim <= 0 - sorts and scans as before.
+// CHESHIRE_ACR_BOUND=0 sorts every model; CHESHIRE_ACR_BOUND_CHECK=1 also sorts and scans every skipped model and
+// counts those bestNFA would have taken.
+inline bool cheshireAcrBoundCheck()
+{
+    static const bool on = ::cheshire::env::flag("CHESHIRE_ACR_BOUND_CHECK");
+    return on;
+}
+
+struct CheshireAcrBoundStats
+{
+    std::atomic<long long> models{0}, skipped{0}, wrong{0};
+    std::atomic<bool> announced{false};
+};
+
+inline CheshireAcrBoundStats& cheshireAcrBoundStats()
+{
+    static CheshireAcrBoundStats s;
+    return s;
+}
+
+/// Buckets of the squared residual: a quarter binade each over [2^-54, 2^36), one below (lower edge 0) and one from 2^36
+/// up. A key's bucket comes from its top 14 bits (sign, exponent and two mantissa bits).
+struct CheshireAcrBuckets
+{
+    static constexpr int shift = 50;
+    static constexpr std::int64_t u0 = std::int64_t(1023 - 54) * 4;  // key >> shift of 2^-54
+    static constexpr std::int64_t u1 = std::int64_t(1023 + 36) * 4;  // key >> shift of 2^36
+    static constexpr int count = int(u1 - u0) + 2;
+    /// below log10(sqrt(e) + FLT_EPSILON) for every e in the bucket: its value at the lower edge, less 1e-12
+    double g[count];
+    CheshireAcrBuckets()
+    {
+        for (int b = 0; b < count; ++b)
+        {
+            const double edge = b == 0 ? 0.0 : std::bit_cast<double>(std::uint64_t(u0 + b - 1) << shift);
+            g[b] = std::log10(std::sqrt(edge) + double(std::numeric_limits<float>::epsilon())) - 1e-12;
+        }
+    }
+};
+
+/// What the bound needs of one ACRANSAC call: logc_n[k] + logc_k[k] per k, and the slack its comparisons carry
+struct CheshireAcrBoundSetup
+{
+    std::vector<double> c;
+    double slack = 0.0;
+    bool usable = false;
+};
+
+inline CheshireAcrBoundSetup cheshireAcrBoundSetup(std::size_t s,
+                                                   double logalpha0,
+                                                   double loge0,
+                                                   double dim,
+                                                   const std::vector<float>& logc_n,
+                                                   const std::vector<float>& logc_k)
+{
+    CheshireAcrBoundSetup r;
+    static const bool on = ::cheshire::env::flag("CHESHIRE_ACR_BOUND", true);
+    if (!on || !(dim > 0.0 && std::isfinite(dim) && std::isfinite(logalpha0) && std::isfinite(loge0)) || logc_n.size() < 2 ||
+        logc_n.size() != logc_k.size())
+        return r;
+    const std::size_t n = logc_n.size() - 1;
+    r.c.resize(n + 1);
+    // gap: how far the tables are from log10 C(n,k) + log10 C(k,s), which the sums below track within 1e-6 + 1e-15 n^2
+    double cn = 0.0, ck = 0.0, maxc = 0.0, gap = 0.0;
+    for (std::size_t k = 0; k <= n; ++k)
+    {
+        r.c[k] = double(logc_n[k]) + double(logc_k[k]);
+        maxc = std::max(maxc, std::abs(r.c[k]));
+        if (k == 0)
+            continue;
+        cn += std::log10(double(n - k + 1) / double(k));
+        if (k > s)
+        {
+            ck += std::log10(double(k) / double(k - s));
+            gap = std::max(gap, std::abs(r.c[k] - (cn + ck)));
+        }
+    }
+    if (!std::isfinite(maxc) || !std::isfinite(gap))
+        return r;
+    // the margin: the rounding of bestNFA's expression and of the bound's, each a few ulps of terms below
+    // |loge0| + |logc| + n (|logalpha0| + 7 dim), and the library's log10 within an ulp - covered a million times over
+    const double margin = 1e-6 + 1e-9 * (std::abs(loge0) + maxc + double(n) * (std::abs(logalpha0) + 8.0 * dim + 1.0));
+    r.slack = margin + 2.0 * (gap + 1e-6 + 1e-15 * double(n) * double(n));
+    r.usable = true;
+    CheshireAcrBoundStats& st = cheshireAcrBoundStats();
+    if (!st.announced.load(std::memory_order_relaxed) && !st.announced.exchange(true))
+        ALICEVISION_LOG_INFO("cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far "
+                             "(CHESHIRE_ACR_BOUND=0 to sort every model, CHESHIRE_ACR_BOUND_CHECK=1 to check every skip)");
+    return r;
+}
+
+/// True when bestNFA cannot find an nfa below minNFA among these residuals (as kernel.errors left them, unsorted)
+inline bool cheshireAcrCannotBeat(const CheshireAcrBoundSetup& setup,
+                                  const std::vector<double>& residuals,
+                                  std::size_t s,
+                                  double logalpha0,
+                                  double loge0,
+                                  double maxThreshold,
+                                  double dim,
+                                  double minNFA)
+{
+    using B = CheshireAcrBuckets;
+    static const B buckets;
+    if (!setup.usable || !(minNFA < std::numeric_limits<double>::infinity()) || !(maxThreshold >= 0.0) ||
+        residuals.size() + 1 != setup.c.size())
+        return false;
+    const std::size_t n = residuals.size();
+    std::uint32_t hist[B::count] = {};
+    const std::uint64_t tkey = std::bit_cast<std::uint64_t>(maxThreshold);
+    bool odd = false;
+    std::size_t last = 0;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const std::uint64_t key = std::bit_cast<std::uint64_t>(residuals[i]);
+        odd |= key > 0x7FF0000000000000ull;  // negative, -0.0 or NaN
+        last += key <= tkey;                 // not above maxThreshold
+        std::int64_t b = std::int64_t(key >> B::shift) - B::u0 + 1;
+        b = b < 0 ? 0 : (b > B::count - 1 ? B::count - 1 : b);
+        ++hist[b];
+    }
+    if (odd)
+        return false;
+    // bestNFA evaluates k = s+1 .. last (it stops at the first residual above maxThreshold); in sorted order the ranks of
+    // bucket b follow those of bucket b-1
+    const double limit = minNFA + setup.slack;
+    std::size_t r = 0;
+    for (int b = 0; b < B::count && r < last; ++b)
+    {
+        const std::uint32_t cnt = hist[b];
+        if (!cnt)
+            continue;
+        const std::size_t lo = std::max(r + 1, s + 1), hi = std::min(r + cnt, last);
+        r += cnt;
+        if (lo > hi)
+            continue;
+        const double a = logalpha0 + dim * buckets.g[b];
+        if (loge0 + a * double(lo - s) + setup.c[lo] < limit || loge0 + a * double(hi - s) + setup.c[hi] < limit)
+            return false;
+    }
+    return true;
+}
+
+/// CHESHIRE_ACR_BOUND_CHECK=1, on a skipped model: bestNFA's answer for it must not be below minNFA
+inline void cheshireAcrBoundCompare(const ErrorIndex& full, double minNFA)
+{
+    ++cheshireAcrBoundStats().skipped;
+    if (full.first < minNFA)
+    {
+        ++cheshireAcrBoundStats().wrong;
+        ALICEVISION_LOG_WARNING("cheshire: AC-RANSAC bound check: a skipped model has nfa " << full.first << " at " << full.second
+                                                                                            << ", below minNFA " << minNFA);
+    }
+}
+
+/// cheshire (step 8d): what CHESHIRE_ACR_BOUND_CHECK=1 found, once the caller's estimations are done
+inline void cheshireAcrBoundReport()
+{
+    const CheshireAcrBoundStats& s = cheshireAcrBoundStats();
+    if (s.models.load())
+        ALICEVISION_LOG_INFO("cheshire: AC-RANSAC bound check: " << s.skipped.load() << " of " << s.models.load()
+                                                                 << " models skipped the sort and the NFA scan, " << s.wrong.load()
+                                                                 << " of them below minNFA in bestNFA");
+}
+
+""" + "/**\n * @brief An implementation of the \"Random Sample Consensus\""),
+    ("    makelogcombi(sizeSample, nData, vec_logc_k, vec_logc_n);\n",
+     r"""    makelogcombi(sizeSample, nData, vec_logc_k, vec_logc_n);
+    // cheshire (step 8d): what the bound on each model's NFA needs of this call
+    const CheshireAcrBoundSetup cheshireBound =
+      cheshireAcrBoundSetup(sizeSample, kernel.logalpha0(), loge0, kernel.errorVectorDimension(), vec_logc_n, vec_logc_k);
+"""),
+    ("                    for (size_t i = 0; i < nData; ++i)\n"
+     "                        vec_keys[i] = std::bit_cast<std::uint64_t>(vec_residuals_[i]);\n"
+     "                    cheshireRadixSortResiduals(vec_keys, vec_keysScratch);\n"
+     "                    // Most meaningful discrimination inliers/outliers\n"
+     "                    best = bestNFA(sizeSample, kernel.logalpha0(), vec_keys, loge0, maxThreshold, vec_logc_n, vec_logc_k, kernel.errorVectorDimension());\n",
+     r"""                    // cheshire (step 8d): most models cannot beat minNFA, which the unsorted residuals show
+                    const bool cheshireSkip = cheshireAcrCannotBeat(cheshireBound, vec_residuals_, sizeSample, kernel.logalpha0(), loge0,
+                                                                    maxThreshold, kernel.errorVectorDimension(), minNFA);
+                    if (cheshireAcrBoundCheck())
+                        ++cheshireAcrBoundStats().models;
+                    if (!cheshireSkip || cheshireAcrBoundCheck())
+                    {
+                        for (size_t i = 0; i < nData; ++i)
+                            vec_keys[i] = std::bit_cast<std::uint64_t>(vec_residuals_[i]);
+                        cheshireRadixSortResiduals(vec_keys, vec_keysScratch);
+                        // Most meaningful discrimination inliers/outliers
+                        best = bestNFA(sizeSample, kernel.logalpha0(), vec_keys, loge0, maxThreshold, vec_logc_n, vec_logc_k, kernel.errorVectorDimension());
+                        if (cheshireSkip)
+                            cheshireAcrBoundCompare(best, minNFA);
+                    }
+                    if (cheshireSkip)
+                        best = ErrorIndex(std::numeric_limits<double>::infinity(), sizeSample);  // not below minNFA
+"""),
+]
+STEP8D_GF = [
+    ("#include <aliceVision/config.hpp>\n", "#include <aliceVision/config.hpp>\n#include <aliceVision/robustEstimation/ACRansac.hpp>  // cheshire: step 8d\n"),
+    ("        ++progressDisplay;\n    }\n}\n", "        ++progressDisplay;\n    }\n    robustEstimation::cheshireAcrBoundReport();  // cheshire (step 8d): CHESHIRE_ACR_BOUND_CHECK's count\n}\n"),
+]
+
+
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
     if new in text:
@@ -357,6 +574,7 @@ def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker:
 TRACKED = [
     "src/aliceVision/feature/PointFeature.hpp",
     "src/aliceVision/track/TracksBuilder.cpp",
+    "src/aliceVision/matchingImageCollection/GeometricFilter.hpp",
     "src/cmake/config.hpp.in",
     "CMakeLists.txt",
     "src/CMakeLists.txt",
@@ -5414,6 +5632,22 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                     sys.exit("an anchor of the tracks not found once in " + rel + " (8c)")
                 t = t.replace(old, new, 1)
         f8c.write_text(t, encoding="utf-8", newline="")
+
+    # 8d (0.3.8). AC-RANSAC: a histogram of a model's unsorted residuals bounds the NFA bestNFA could find for it; a
+    #     model the bound puts at or above minNFA cannot be better, so its sort and scan are skipped (99.7 % of geometric
+    #     filtering's models). The rest sort and scan as before. GeometricFilter reports CHESHIRE_ACR_BOUND_CHECK's count
+    #     (both overloads of robustModelEstimation).
+    for rel, pairs, count in (("src/aliceVision/robustEstimation/ACRansac.hpp", STEP8D_ACR, None),
+                              ("src/aliceVision/matchingImageCollection/GeometricFilter.hpp", STEP8D_GF, {1: 2})):
+        f8d = AV / rel
+        t = f8d.read_text(encoding="utf-8")
+        if "step 8d" not in t:
+            for i, (old, new) in enumerate(pairs):
+                want = (count or {}).get(i, 1)
+                if t.count(old) != want:
+                    sys.exit(f"an anchor of the AC-RANSAC bound not found {want} time(s) in {rel} (8d)")
+                t = t.replace(old, new)
+        f8d.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports
