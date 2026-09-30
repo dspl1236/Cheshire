@@ -9814,7 +9814,7 @@ index 1f23958..5491985 100644
  
          if (N == 0)
 diff --git a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
-index 097f8c9..d363c9e 100644
+index 097f8c9..5e25775 100644
 --- a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 +++ b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 @@ -5,6 +5,10 @@
@@ -9836,7 +9836,23 @@ index 097f8c9..d363c9e 100644
  
  #include <dependencies/htmlDoc/htmlDoc.hpp>
  
-@@ -171,11 +176,118 @@ ReconstructionEngine_sequentialSfM::ReconstructionEngine_sequentialSfM(const SfM
+@@ -94,10 +99,13 @@ void computeTracksPyramidPerView(const track::TracksPerView& tracksPerView,
+         trackPyramid.reserve(500 * pyramidDepth);
+     }
+ 
+-    for (const auto& viewTracks : tracksPerView)
++    // cheshire (step 8c, 0.3.8): the views on every core; each view's index is its own and is filled in the same order
++#pragma omp parallel for schedule(dynamic)
++    for (std::ptrdiff_t cheshireV = 0; cheshireV < static_cast<std::ptrdiff_t>(tracksPerView.size()); ++cheshireV)
+     {
++        const auto& viewTracks = *(tracksPerView.begin() + cheshireV);
+         const auto viewId = viewTracks.first;
+-        auto& tracksPyramidIndex = tracksPyramidPerView[viewId];
++        auto& tracksPyramidIndex = tracksPyramidPerView.find(viewId)->second;
+         const View& view = *views.at(viewId).get();
+         std::vector<double> cellWidthPerLevel(pyramidDepth);
+         std::vector<double> cellHeightPerLevel(pyramidDepth);
+@@ -171,11 +179,118 @@ ReconstructionEngine_sequentialSfM::ReconstructionEngine_sequentialSfM(const SfM
      }
  }
  
@@ -9957,7 +9973,7 @@ index 097f8c9..d363c9e 100644
      {
          throw std::runtime_error("No valid tracks.");
      }
-@@ -207,7 +319,11 @@ bool ReconstructionEngine_sequentialSfM::process()
+@@ -207,7 +322,11 @@ bool ReconstructionEngine_sequentialSfM::process()
      // initial pair choice
      if (_sfmData.getPoses().empty())
      {
@@ -9970,7 +9986,7 @@ index 097f8c9..d363c9e 100644
          createInitialReconstruction(initialImagePairCandidates);
      }
      else
-@@ -227,7 +343,12 @@ bool ReconstructionEngine_sequentialSfM::process()
+@@ -227,7 +346,12 @@ bool ReconstructionEngine_sequentialSfM::process()
      // reconstruction
      const double elapsedTime = incrementalReconstruction();
  
@@ -9984,7 +10000,7 @@ index 097f8c9..d363c9e 100644
  
      return !_sfmData.getPoses().empty();
  }
-@@ -452,6 +573,12 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+@@ -452,6 +576,12 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
      aliceVision::system::Timer timer;
      std::size_t nbValidPoses = 0;
      std::size_t globalIteration = 0;
@@ -9997,7 +10013,7 @@ index 097f8c9..d363c9e 100644
  
      do
      {
-@@ -477,7 +604,11 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+@@ -477,7 +607,11 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
          std::set<IndexT> prevReconstructedViews = _sfmData.getValidViews();
  
          // compute robust resection of remaining images
@@ -10010,7 +10026,7 @@ index 097f8c9..d363c9e 100644
          {
              ALICEVISION_LOG_INFO("Update Reconstruction:" << std::endl
                                                            << "\t- resection id: " << _resectionId << std::endl
-@@ -490,8 +621,10 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+@@ -490,8 +624,10 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
                  viewsToVisit.erase(v);
              }
  
@@ -10021,7 +10037,7 @@ index 097f8c9..d363c9e 100644
              if (newReconstructedViews.empty())
              {
                  continue;
-@@ -518,15 +651,19 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+@@ -518,15 +654,19 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
              }
  
              triangulate(prevReconstructedViews, newReconstructedViews);
@@ -10044,7 +10060,7 @@ index 097f8c9..d363c9e 100644
  
              // scene logging for visual debug
              if (_params.logIntermediateSteps && (_resectionId % 3) == 0)
-@@ -544,6 +681,31 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
+@@ -544,6 +684,31 @@ double ReconstructionEngine_sequentialSfM::incrementalReconstruction()
              ++_resectionId;
          }
  
@@ -10076,7 +10092,7 @@ index 097f8c9..d363c9e 100644
          if (_params.rig.useRigConstraint && !_sfmData.getRigs().empty())
          {
              ALICEVISION_LOG_INFO("Rig(s) calibration start");
-@@ -587,9 +749,22 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
+@@ -587,9 +752,22 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
      auto chrono_start = std::chrono::steady_clock::now();
  
      // add images to the 3D reconstruction
@@ -10102,7 +10118,7 @@ index 097f8c9..d363c9e 100644
          const IndexT viewId = bestViewIds.at(i);
          const View& view = *_sfmData.getViews().at(viewId);
  
-@@ -604,7 +779,7 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
+@@ -604,7 +782,7 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
                                                              << "\t- rig id: " << view.getRigId() << std::endl
                                                              << "\t- sub-pose id: " << view.getSubPoseId());
  
@@ -10111,7 +10127,7 @@ index 097f8c9..d363c9e 100644
              }
  
              // we cannot localize a view if it is part of an initialized rig with unknown rig pose and unknown sub-pose
-@@ -620,27 +795,45 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
+@@ -620,27 +798,45 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
                                                              << "\t- rig id: " << view.getRigId() << std::endl
                                                              << "\t- sub-pose id: " << view.getSubPoseId());
  
@@ -10172,7 +10188,7 @@ index 097f8c9..d363c9e 100644
          }
      }
  
-@@ -667,6 +860,7 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
+@@ -667,6 +863,7 @@ std::set<IndexT> ReconstructionEngine_sequentialSfM::resection(IndexT resectionI
  void ReconstructionEngine_sequentialSfM::triangulate(const std::set<IndexT>& prevReconstructedViews, const std::set<IndexT>& newReconstructedViews)
  {
      auto chrono_start = std::chrono::steady_clock::now();
@@ -10180,7 +10196,7 @@ index 097f8c9..d363c9e 100644
  
      // allow to use to the old triangulatation algorithm (using 2 views only)
      if (_params.minNbObservationsForTriangulation == 0)
-@@ -711,15 +905,24 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+@@ -711,15 +908,24 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
  
      // add the new reconstructed views to the graph
      if (_params.useLocalBundleAdjustment)
@@ -10207,7 +10223,7 @@ index 097f8c9..d363c9e 100644
  
          const std::size_t nbRefinedPoses = _localStrategyGraph->getNbPosesPerState(EEstimatorParameterState::REFINED);
          const std::size_t nbConstantPoses = _localStrategyGraph->getNbPosesPerState(EEstimatorParameterState::CONSTANT);
-@@ -740,11 +943,19 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+@@ -740,11 +946,19 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
          }
      }
  
@@ -10228,7 +10244,7 @@ index 097f8c9..d363c9e 100644
          _sfmData.resetParameterStates();
      }
  
-@@ -756,11 +967,17 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+@@ -756,11 +970,17 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
  
          // bundle adjustment iteration
          {
@@ -10247,7 +10263,7 @@ index 097f8c9..d363c9e 100644
              // save the current focal lengths values (for each intrinsic) in the history
              if (_params.useLocalBundleAdjustment)
                  _localStrategyGraph->saveIntrinsicsToHistory(_sfmData);
-@@ -771,17 +988,35 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
+@@ -771,17 +991,35 @@ bool ReconstructionEngine_sequentialSfM::bundleAdjustment(std::set<IndexT>& newR
              statistics.show();
          }
  
@@ -10287,7 +10303,7 @@ index 097f8c9..d363c9e 100644
              _localStrategyGraph->removeViews(_sfmData, removedViewsIdIteration);
              ALICEVISION_LOG_DEBUG("Views removed from the local BA graph: " << removedViewsIdIteration);
          }
-@@ -935,6 +1170,17 @@ void ReconstructionEngine_sequentialSfM::calibrateRigs(std::set<IndexT>& updated
+@@ -935,6 +1173,17 @@ void ReconstructionEngine_sequentialSfM::calibrateRigs(std::set<IndexT>& updated
      }
  }
  
@@ -10305,7 +10321,7 @@ index 097f8c9..d363c9e 100644
  bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConnectionScore>& out_connectedViews,
                                                              const std::set<IndexT>& remainingViewIds) const
  {
-@@ -944,11 +1190,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
+@@ -944,11 +1193,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
          return false;
  
      // Collect tracksIds
@@ -10319,7 +10335,7 @@ index 097f8c9..d363c9e 100644
  
      const std::set<IndexT> reconstructedIntrinsics = _sfmData.getReconstructedIntrinsics();
  
-@@ -994,11 +1237,10 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
+@@ -994,11 +1240,10 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
          //  with the already 3D reconstructed trackId
          std::vector<std::size_t> vec_trackIdForResection;
          vec_trackIdForResection.reserve(set_tracksIds.size());
@@ -10335,7 +10351,7 @@ index 097f8c9..d363c9e 100644
          // Compute an image score based on the number of matches to the 3D scene
          // and the repartition of these features in the image.
          std::size_t score = computeCandidateImageScore(viewId, vec_trackIdForResection);
-@@ -1010,7 +1252,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
+@@ -1010,7 +1255,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
  
      // Sort by the image score
      std::sort(out_connectedViews.begin(), out_connectedViews.end(), [](const ViewConnectionScore& t1, const ViewConnectionScore& t2) {
@@ -10345,7 +10361,7 @@ index 097f8c9..d363c9e 100644
      });
      return !out_connectedViews.empty();
  }
-@@ -1493,18 +1736,13 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
+@@ -1493,18 +1739,13 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
      const aliceVision::track::TrackIdSet& set_tracksIds = _map_tracksPerView.at(viewId);
  
      // A2. intersects the track list with the reconstructed
@@ -10369,7 +10385,7 @@ index 097f8c9..d363c9e 100644
  
      if (resectionData.tracksId.empty())
      {
-@@ -1545,13 +1783,18 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
+@@ -1545,13 +1786,18 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
      // C. Do the resectioning: compute the camera pose.
      ALICEVISION_LOG_INFO("[" << _sfmData.getValidViews().size() + 1 << "/" << _sfmData.getViews().size() << "] Robust Resection of view: " << viewId);
  
@@ -10389,7 +10405,7 @@ index 097f8c9..d363c9e 100644
      if (!_htmlLogFile.empty())
      {
          using namespace htmlDocument;
-@@ -1669,45 +1912,40 @@ void ReconstructionEngine_sequentialSfM::getTracksToTriangulate(const std::set<I
+@@ -1669,45 +1915,40 @@ void ReconstructionEngine_sequentialSfM::getTracksToTriangulate(const std::set<I
      std::set<IndexT> allTracksInNewViews;
      track::getTracksInImagesFast(newReconstructedViews, _map_tracksPerView, allTracksInNewViews);
  
@@ -10409,14 +10425,14 @@ index 097f8c9..d363c9e 100644
 -                const std::size_t trackId = *it;
 -
 -                const track::Track& track = _map_tracks.at(trackId);
-+        const std::size_t trackId = cheshireTracks[static_cast<std::size_t>(k)];
- 
+-
 -                std::set<IndexT> allViewsSharingTheTrack;
 -                std::transform(track.featPerView.begin(),
 -                               track.featPerView.end(),
 -                               std::inserter(allViewsSharingTheTrack, allViewsSharingTheTrack.begin()),
 -                               stl::RetrieveKey());
--
++        const std::size_t trackId = cheshireTracks[static_cast<std::size_t>(k)];
+ 
 -                std::set<IndexT> allReconstructedViewsSharingTheTrack;
 -                std::set_intersection(allViewsSharingTheTrack.begin(),
 -                                      allViewsSharingTheTrack.end(),
@@ -10459,7 +10475,7 @@ index 097f8c9..d363c9e 100644
      Pose3 pose;
      Mat34 P;
      Vec2 x;
-@@ -1716,27 +1954,49 @@ struct ObservationData
+@@ -1716,27 +1957,49 @@ struct ObservationData
      bool isEmpty() const { return cam == nullptr; }
  };
  
@@ -10517,7 +10533,7 @@ index 097f8c9..d363c9e 100644
  }
  
  }  // namespace
-@@ -1756,6 +2016,15 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+@@ -1756,6 +2019,15 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
      std::vector<IndexT> setTracksId;  // <trackId>
      std::transform(mapTracksToTriangulate.begin(), mapTracksToTriangulate.end(), std::inserter(setTracksId, setTracksId.begin()), stl::RetrieveKey());
  
@@ -10533,7 +10549,7 @@ index 097f8c9..d363c9e 100644
  #pragma omp parallel for
      for (int i = 0; i < setTracksId.size(); i++)  // each track (already reconstructed or not)
      {
-@@ -1783,8 +2052,8 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+@@ -1783,8 +2055,8 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
              IndexT I = *(observations.begin());
              IndexT J = *(observations.rbegin());
  
@@ -10544,7 +10560,7 @@ index 097f8c9..d363c9e 100644
  
              if (oi.isEmpty() || oj.isEmpty())
              {
-@@ -1804,7 +2073,7 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+@@ -1804,7 +2076,7 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
              const double& acThresholdI = (acThresholdItI != _map_ACThreshold.end()) ? acThresholdItI->second : 4.0;
              const double& acThresholdJ = (acThresholdItJ != _map_ACThreshold.end()) ? acThresholdItJ->second : 4.0;
  
@@ -10553,7 +10569,7 @@ index 097f8c9..d363c9e 100644
                  oi.pose.depth(X_euclidean) < 0 || oj.pose.depth(X_euclidean) < 0 ||
                  oi.cam->residual(oi.pose, X_euclidean.homogeneous(), oi.x).norm() > acThresholdI ||
                  oj.cam->residual(oj.pose, X_euclidean.homogeneous(), oj.x).norm() > acThresholdJ)
-@@ -1825,7 +2094,7 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+@@ -1825,7 +2097,7 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
                  int i = 0;
                  for (const IndexT& viewId : observations)
                  {
@@ -10562,7 +10578,7 @@ index 097f8c9..d363c9e 100644
  
                      if (o.isEmpty())
                      {
-@@ -1842,7 +2111,10 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+@@ -1842,7 +2114,10 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
              Vec4 X_homogeneous = Vec4::Zero();
              std::vector<std::size_t> inliersIndex;
  
@@ -10574,7 +10590,7 @@ index 097f8c9..d363c9e 100644
  
              homogeneousToEuclidean(X_homogeneous, X_euclidean);
  
-@@ -1872,20 +2144,23 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+@@ -1872,20 +2147,23 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
                  const double scale = (_params.featureConstraint == EFeatureConstraint::BASIC) ? 0.0 : p.scale();
                  landmark.getObservations()[viewId] = Observation(x, track.featPerView.at(viewId).featureId, scale);
              }
@@ -10686,6 +10702,101 @@ index 0724197..6c5fcba 100644
      }
  
      std::random_device randomDevice;
+diff --git a/src/aliceVision/track/TracksBuilder.cpp b/src/aliceVision/track/TracksBuilder.cpp
+index 8f2d1c4..96fee8f 100644
+--- a/src/aliceVision/track/TracksBuilder.cpp
++++ b/src/aliceVision/track/TracksBuilder.cpp
+@@ -48,43 +48,47 @@ TracksBuilder::~TracksBuilder() = default;
+ 
+ void TracksBuilder::build(const matching::PairwiseMatches& pairwiseMatches)
+ {
+-    typedef std::set<IndexedFeaturePair> SetIndexedPair;
+-
+-    // set of all features of all images: (imageIndex, featureIndex)
+-    SetIndexedPair allFeatures;
+-
+-    // for each couple of images make the union according the pair matches
++    // cheshire (step 8c, 0.3.8): the features of the matches marked per (view, describer), then one node each in
++    // (view, describer, feature) order - the order the std::set<IndexedFeaturePair> upstream filled iterated in, so the
++    // same nodes get the same ids - and each node found by index in the union below instead of by a binary search per
++    // match end. Upstream inserted both ends of every match into the set: tens of millions of tree nodes on 884 views.
++    std::map<std::pair<std::size_t, feature::EImageDescriberType>, std::vector<int>> cheshireNodes;  // per feature: node id + 1, 0 = in no match
+     for (const auto& matchesPerDescIt : pairwiseMatches)
+     {
+-        const std::size_t& I = matchesPerDescIt.first.first;
+-        const std::size_t& J = matchesPerDescIt.first.second;
+-        const matching::MatchesPerDescType& matchesPerDesc = matchesPerDescIt.second;
+-
+-        for (const auto& matchesIt : matchesPerDesc)
++        const std::size_t I = matchesPerDescIt.first.first;
++        const std::size_t J = matchesPerDescIt.first.second;
++        for (const auto& matchesIt : matchesPerDescIt.second)
+         {
+-            const feature::EImageDescriberType descType = matchesIt.first;
+-            const matching::IndMatches& matches = matchesIt.second;
+-            // we have correspondences between I and J image index.
+-            for (const matching::IndMatch& m : matches)
++            std::vector<int>& markI = cheshireNodes[std::make_pair(I, matchesIt.first)];
++            std::vector<int>& markJ = cheshireNodes[std::make_pair(J, matchesIt.first)];
++            for (const matching::IndMatch& m : matchesIt.second)
+             {
+-                IndexedFeaturePair pairI(I, KeypointId(descType, m._i));
+-                IndexedFeaturePair pairJ(J, KeypointId(descType, m._j));
+-                allFeatures.insert(pairI);
+-                allFeatures.insert(pairJ);
++                if (m._i >= markI.size())
++                    markI.resize(std::max<std::size_t>(std::size_t(m._i) + 1, markI.size() * 2), 0);
++                markI[m._i] = 1;
++                if (m._j >= markJ.size())
++                    markJ.resize(std::max<std::size_t>(std::size_t(m._j) + 1, markJ.size() * 2), 0);
++                markJ[m._j] = 1;
+             }
+         }
+     }
+ 
+     // build the node indirection for each referenced feature
+-    MapIndexToNode map_indexToNode;
+-    map_indexToNode.reserve(allFeatures.size());
+-    _d->map_nodeToIndex.reserve(allFeatures.size());
+-
+-    for (const IndexedFeaturePair& featPair : allFeatures)
++    std::size_t cheshireCount = 0;
++    for (const auto& vd : cheshireNodes)
++        cheshireCount += static_cast<std::size_t>(std::count(vd.second.begin(), vd.second.end(), 1));
++    _d->map_nodeToIndex.reserve(cheshireCount);
++    for (auto& vd : cheshireNodes)
+     {
+-        lemon::ListDigraph::Node node = _d->graph.addNode();
+-        map_indexToNode.insert(std::make_pair(featPair, node));
+-        _d->map_nodeToIndex.insert(std::make_pair(node, featPair));
++        std::vector<int>& nodes = vd.second;
++        for (std::size_t f = 0; f < nodes.size(); ++f)
++        {
++            if (!nodes[f])
++                continue;
++            lemon::ListDigraph::Node node = _d->graph.addNode();
++            _d->map_nodeToIndex.insert(_d->map_nodeToIndex.end(), std::make_pair(node, IndexedFeaturePair(vd.first.first, KeypointId(vd.first.second, f))));
++            nodes[f] = _d->graph.id(node) + 1;
++        }
+     }
+ 
+     // add the element of myset to the UnionFind insert method.
+@@ -108,11 +112,12 @@ void TracksBuilder::build(const matching::PairwiseMatches& pairwiseMatches)
+             const feature::EImageDescriberType descType = matchesIt.first;
+             const matching::IndMatches& matches = matchesIt.second;
+             // we have correspondences between I and J image index.
++            // cheshire (step 8c): the nodes by index
++            const std::vector<int>& nodesI = cheshireNodes.at(std::make_pair(I, descType));
++            const std::vector<int>& nodesJ = cheshireNodes.at(std::make_pair(J, descType));
+             for (const matching::IndMatch& m : matches)
+             {
+-                IndexedFeaturePair pairI(I, KeypointId(descType, m._i));
+-                IndexedFeaturePair pairJ(J, KeypointId(descType, m._j));
+-                _d->tracksUF->join(map_indexToNode[pairI], map_indexToNode[pairJ]);
++                _d->tracksUF->join(_d->graph.nodeFromId(nodesI[m._i] - 1), _d->graph.nodeFromId(nodesJ[m._j] - 1));
+             }
+         }
+     }
 diff --git a/src/cmake/config.hpp.in b/src/cmake/config.hpp.in
 index 27e3ec0..027ba01 100644
 --- a/src/cmake/config.hpp.in

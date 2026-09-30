@@ -228,6 +228,122 @@ bool cheshireReadDirect(const std::string& path, oiio::TypeDesc format, int ncha
 ]
 
 
+# 8c (0.3.8): the tracks' build without a set of every match end, and the tracks' pyramid on every core.
+STEP8C_BUILDER = [
+    (r"""    typedef std::set<IndexedFeaturePair> SetIndexedPair;
+
+    // set of all features of all images: (imageIndex, featureIndex)
+    SetIndexedPair allFeatures;
+
+    // for each couple of images make the union according the pair matches
+    for (const auto& matchesPerDescIt : pairwiseMatches)
+    {
+        const std::size_t& I = matchesPerDescIt.first.first;
+        const std::size_t& J = matchesPerDescIt.first.second;
+        const matching::MatchesPerDescType& matchesPerDesc = matchesPerDescIt.second;
+
+        for (const auto& matchesIt : matchesPerDesc)
+        {
+            const feature::EImageDescriberType descType = matchesIt.first;
+            const matching::IndMatches& matches = matchesIt.second;
+            // we have correspondences between I and J image index.
+            for (const matching::IndMatch& m : matches)
+            {
+                IndexedFeaturePair pairI(I, KeypointId(descType, m._i));
+                IndexedFeaturePair pairJ(J, KeypointId(descType, m._j));
+                allFeatures.insert(pairI);
+                allFeatures.insert(pairJ);
+            }
+        }
+    }
+
+    // build the node indirection for each referenced feature
+    MapIndexToNode map_indexToNode;
+    map_indexToNode.reserve(allFeatures.size());
+    _d->map_nodeToIndex.reserve(allFeatures.size());
+
+    for (const IndexedFeaturePair& featPair : allFeatures)
+    {
+        lemon::ListDigraph::Node node = _d->graph.addNode();
+        map_indexToNode.insert(std::make_pair(featPair, node));
+        _d->map_nodeToIndex.insert(std::make_pair(node, featPair));
+    }
+""", r"""    // cheshire (step 8c, 0.3.8): the features of the matches marked per (view, describer), then one node each in
+    // (view, describer, feature) order - the order the std::set<IndexedFeaturePair> upstream filled iterated in, so the
+    // same nodes get the same ids - and each node found by index in the union below instead of by a binary search per
+    // match end. Upstream inserted both ends of every match into the set: tens of millions of tree nodes on 884 views.
+    std::map<std::pair<std::size_t, feature::EImageDescriberType>, std::vector<int>> cheshireNodes;  // per feature: node id + 1, 0 = in no match
+    for (const auto& matchesPerDescIt : pairwiseMatches)
+    {
+        const std::size_t I = matchesPerDescIt.first.first;
+        const std::size_t J = matchesPerDescIt.first.second;
+        for (const auto& matchesIt : matchesPerDescIt.second)
+        {
+            std::vector<int>& markI = cheshireNodes[std::make_pair(I, matchesIt.first)];
+            std::vector<int>& markJ = cheshireNodes[std::make_pair(J, matchesIt.first)];
+            for (const matching::IndMatch& m : matchesIt.second)
+            {
+                if (m._i >= markI.size())
+                    markI.resize(std::max<std::size_t>(std::size_t(m._i) + 1, markI.size() * 2), 0);
+                markI[m._i] = 1;
+                if (m._j >= markJ.size())
+                    markJ.resize(std::max<std::size_t>(std::size_t(m._j) + 1, markJ.size() * 2), 0);
+                markJ[m._j] = 1;
+            }
+        }
+    }
+
+    // build the node indirection for each referenced feature
+    std::size_t cheshireCount = 0;
+    for (const auto& vd : cheshireNodes)
+        cheshireCount += static_cast<std::size_t>(std::count(vd.second.begin(), vd.second.end(), 1));
+    _d->map_nodeToIndex.reserve(cheshireCount);
+    for (auto& vd : cheshireNodes)
+    {
+        std::vector<int>& nodes = vd.second;
+        for (std::size_t f = 0; f < nodes.size(); ++f)
+        {
+            if (!nodes[f])
+                continue;
+            lemon::ListDigraph::Node node = _d->graph.addNode();
+            _d->map_nodeToIndex.insert(_d->map_nodeToIndex.end(), std::make_pair(node, IndexedFeaturePair(vd.first.first, KeypointId(vd.first.second, f))));
+            nodes[f] = _d->graph.id(node) + 1;
+        }
+    }
+"""),
+    (r"""            for (const matching::IndMatch& m : matches)
+            {
+                IndexedFeaturePair pairI(I, KeypointId(descType, m._i));
+                IndexedFeaturePair pairJ(J, KeypointId(descType, m._j));
+                _d->tracksUF->join(map_indexToNode[pairI], map_indexToNode[pairJ]);
+            }
+""", r"""            // cheshire (step 8c): the nodes by index
+            const std::vector<int>& nodesI = cheshireNodes.at(std::make_pair(I, descType));
+            const std::vector<int>& nodesJ = cheshireNodes.at(std::make_pair(J, descType));
+            for (const matching::IndMatch& m : matches)
+            {
+                _d->tracksUF->join(_d->graph.nodeFromId(nodesI[m._i] - 1), _d->graph.nodeFromId(nodesJ[m._j] - 1));
+            }
+"""),
+]
+STEP8C_PYRAMID = [
+    (r"""    for (const auto& viewTracks : tracksPerView)
+    {
+        const auto viewId = viewTracks.first;
+        auto& tracksPyramidIndex = tracksPyramidPerView[viewId];
+        const View& view = *views.at(viewId).get();
+""", r"""    // cheshire (step 8c, 0.3.8): the views on every core; each view's index is its own and is filled in the same order
+#pragma omp parallel for schedule(dynamic)
+    for (std::ptrdiff_t cheshireV = 0; cheshireV < static_cast<std::ptrdiff_t>(tracksPerView.size()); ++cheshireV)
+    {
+        const auto& viewTracks = *(tracksPerView.begin() + cheshireV);
+        const auto viewId = viewTracks.first;
+        auto& tracksPyramidIndex = tracksPyramidPerView.find(viewId)->second;
+        const View& view = *views.at(viewId).get();
+"""),
+]
+
+
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
     if new in text:
@@ -240,6 +356,7 @@ def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker:
 
 TRACKED = [
     "src/aliceVision/feature/PointFeature.hpp",
+    "src/aliceVision/track/TracksBuilder.cpp",
     "src/cmake/config.hpp.in",
     "CMakeLists.txt",
     "src/CMakeLists.txt",
@@ -5282,6 +5399,21 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                 sys.exit("an anchor of the 8-bit direct read not found once in image/io.cpp (8b)")
             t = t.replace(old, new, 1)
     io8b.write_text(t, encoding="utf-8", newline="")
+
+    # 8c (0.3.8). The tracks: TracksBuilder::build marks the features of the matches per (view, describer) and makes
+    #     their nodes in the order upstream's std::set of every match end iterated (the same node ids), finding each by
+    #     index in the union instead of by a binary search; and the tracks' pyramid (computeTracksPyramidPerView) on
+    #     every core, each view's index filled as before. The same tracks.
+    for rel, pairs in (("src/aliceVision/track/TracksBuilder.cpp", STEP8C_BUILDER),
+                       ("src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp", STEP8C_PYRAMID)):
+        f8c = AV / rel
+        t = f8c.read_text(encoding="utf-8")
+        if "step 8c" not in t:
+            for old, new in pairs:
+                if t.count(old) != 1:
+                    sys.exit("an anchor of the tracks not found once in " + rel + " (8c)")
+                t = t.replace(old, new, 1)
+        f8c.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports
