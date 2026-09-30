@@ -4653,6 +4653,101 @@ index 514487d..8f5fb98 100644
  endif()
  
  # Link OpenCV library
+diff --git a/src/aliceVision/feature/PointFeature.hpp b/src/aliceVision/feature/PointFeature.hpp
+index 4d09efb..bc1c92d 100644
+--- a/src/aliceVision/feature/PointFeature.hpp
++++ b/src/aliceVision/feature/PointFeature.hpp
+@@ -6,12 +6,16 @@
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
+ #pragma once
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ 
+ #include "aliceVision/numeric/numeric.hpp"
++#include <charconv>  // cheshire: step 8a
+ #include <iostream>
+ #include <iterator>
+ #include <fstream>
+ #include <string>
++#include <system_error>
++#include <type_traits>
+ #include <vector>
+ 
+ namespace aliceVision {
+@@ -85,12 +89,73 @@ inline std::istream& operator>>(std::istream& in, PointFeature& obj)
+     return in >> obj._coords(0) >> obj._coords(1) >> obj._scale >> obj._orientation;
+ }
+ 
++// cheshire (step 8a, 0.3.8): a PointFeature file is read in one go and parsed with std::from_chars. Upstream's
++// istream_iterator over operator>> took 42.5 s for the 884-view False Door's 20 M features on 12 threads on Windows,
++// and 30.8 s on one - MSVC's stream extraction serialises on its locale - where this takes 0.8 s. The same floats
++// to the bit: both round correctly, and every feature of the False Door was compared under MSVC and libstdc++. It
++// stops where the stream stops - at the end of the file, or at the first token the stream would not take, "nan"
++// and "inf" included - and keeps only whole features. CHESHIRE_FEAT_READ=0 restores upstream's read.
++namespace cheshire_feat {
++inline bool space(char c) { return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\v' || c == '\f'; }
++
++inline void parse(const char* p, const char* e, std::vector<PointFeature>& out)
++{
++    out.reserve(static_cast<std::size_t>(e - p) / 32);
++    for (;;)
++    {
++        float v[4];
++        int k = 0;
++        for (; k < 4; ++k)
++        {
++            while (p < e && space(*p))
++                ++p;
++            if (p < e && *p == '+')  // the stream takes a leading '+', from_chars does not
++            {
++                ++p;
++                if (p < e && *p == '-')
++                    break;
++            }
++            if (p == e)
++                break;
++            const char c = (*p == '-' && p + 1 < e) ? p[1] : *p;
++            if (!((c >= '0' && c <= '9') || c == '.'))
++                break;
++            const auto r = std::from_chars(p, e, v[k]);
++            if (r.ec != std::errc())
++                break;
++            p = r.ptr;
++        }
++        if (k < 4)
++            return;
++        out.emplace_back(v[0], v[1], v[2], v[3]);
++    }
++}
++}  // namespace cheshire_feat
++
+ /// Read feats from file
+ template<typename FeaturesT>
+ inline void loadFeatsFromFile(const std::string& sfileNameFeats, FeaturesT& vec_feat)
+ {
+     vec_feat.clear();
+ 
++    if constexpr (std::is_same_v<FeaturesT, std::vector<PointFeature>>)
++    {
++        if (::cheshire::env::flag("CHESHIRE_FEAT_READ", true))
++        {
++            std::ifstream in(sfileNameFeats, std::ios::binary);
++            if (!in.is_open())
++                throw std::runtime_error("Can't load features file, can't open '" + sfileNameFeats + "' !");
++            in.seekg(0, std::ios::end);
++            const std::streamoff n = in.tellg();
++            in.seekg(0, std::ios::beg);
++            std::string buf(n > 0 ? static_cast<std::size_t>(n) : 0, '\0');
++            if (n > 0 && !in.read(&buf[0], n))
++                throw std::runtime_error("Can't load features file, '" + sfileNameFeats + "' is incorrect !");
++            cheshire_feat::parse(buf.data(), buf.data() + buf.size(), vec_feat);
++            return;
++        }
++    }
++
+     std::ifstream fileIn(sfileNameFeats);
+ 
+     if (!fileIn.is_open())
 diff --git a/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp b/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp
 index 97f4ed5..08742bc 100644
 --- a/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp
@@ -6231,7 +6326,7 @@ index 1f29fe2..7055c2a 100644
                     image::Image<float>& outBuffer,
                     const std::string& kernel = "gaussian",
 diff --git a/src/aliceVision/image/io.cpp b/src/aliceVision/image/io.cpp
-index 8c5e1d3..009177b 100644
+index 8c5e1d3..0e1ea3a 100644
 --- a/src/aliceVision/image/io.cpp
 +++ b/src/aliceVision/image/io.cpp
 @@ -6,7 +6,9 @@
@@ -6270,7 +6365,7 @@ index 8c5e1d3..009177b 100644
  
  #include <boost/algorithm/string.hpp>
  
-@@ -601,6 +622,364 @@ bool isRawFormat(const std::string& path)
+@@ -601,6 +622,433 @@ bool isRawFormat(const std::string& path)
      return (imgFormat.compare("raw") == 0);
  }
  
@@ -6307,7 +6402,7 @@ index 8c5e1d3..009177b 100644
 +struct CheshireReadDirectStats
 +{
 +    std::atomic<long long> direct{0}, checked{0}, identical{0};
-+    std::atomic<bool> announced{false};
++    std::atomic<bool> announced{false}, announced8{false};  // announced8: step 8b
 +    ~CheshireReadDirectStats()
 +    {
 +        if (checked.load())
@@ -6454,10 +6549,35 @@ index 8c5e1d3..009177b 100644
 +}
 +#endif
 +
++// cheshire (step 8b, 0.3.8): does OpenImageIO's uint8 -> float -> uint8 - upstream's way from an 8-bit file to an 8-bit
++// image: a float ImageBuf read, then get_pixels as UINT8 - give every value back? Checked once per process, through
++// the same calls, for all 256 values; the 8-bit direct read below is used only if it does.
++bool cheshireUint8RoundTrip()
++{
++    static const bool same = [] {
++        oiio::ImageBuf buf(oiio::ImageSpec(256, 1, 1, oiio::TypeDesc::FLOAT));
++        if (!buf.set_pixels(buf.roi(), oiio::TypeDesc::FLOAT, cheshireUint8ToFloat()))
++            return false;
++        std::array<unsigned char, 256> back{};
++        if (!buf.get_pixels(buf.roi(), oiio::TypeDesc::UINT8, back.data()))
++            return false;
++        for (int v = 0; v < 256; ++v)
++            if (back[v] != v)
++                return false;
++        return true;
++    }();
++    return same;
++}
++
 +template<typename T>
 +bool cheshireReadDirect(const std::string& path, oiio::TypeDesc format, int nchannels, Image<T>& image, const ImageReadOptions& imageReadOptions)
 +{
-+    if (format != oiio::TypeDesc::FLOAT || (nchannels != 3 && nchannels != 4) || sizeof(T) != static_cast<std::size_t>(nchannels) * sizeof(float))
++    // step 8b: an 8-bit RGB file read as 8-bit RGB (Image<RGBColor>: the SfM's colours, among others) with no colour
++    // conversion in upstream's path, which reads it into a float ImageBuf and hands the pixels back as 8 bits - the
++    // same bytes when the round trip above is the identity. Here the decoder's bytes are copied out: the decode and
++    // none of the 144 MB float buffer of a 12 MP photo.
++    const bool rgb8 = format == oiio::TypeDesc::UINT8 && nchannels == 3 && sizeof(T) == 3;
++    if (!rgb8 && (format != oiio::TypeDesc::FLOAT || (nchannels != 3 && nchannels != 4) || sizeof(T) != static_cast<std::size_t>(nchannels) * sizeof(float)))
 +        return false;
 +    if (imageReadOptions.workingColorSpace == EImageColorSpace::AUTO)
 +        return false;  // upstream throws
@@ -6515,6 +6635,9 @@ index 8c5e1d3..009177b 100644
 +            processor.reset();  // colorconvert copies
 +    }
 +
++    if (rgb8 && (processor || !cheshireUint8RoundTrip()))
++        return false;  // step 8b: upstream converts the colour, or its conversions would not give the bytes back
++
 +    // the 8-bit pixels: from the device decoder (step 6r) when it takes the file, else from OpenImageIO
 +    int width = 0, height = 0;
 +    const unsigned char* src = nullptr;
@@ -6550,6 +6673,30 @@ index 8c5e1d3..009177b 100644
 +        src = static_cast<const unsigned char*>(inBuf.localpixels());
 +        xstride = inBuf.pixel_stride();
 +        ystride = inBuf.scanline_stride();
++    }
++    if (rgb8)  // step 8b: the bytes, row by row
++    {
++        image.resize(width, height, false);
++        unsigned char* dst8 = reinterpret_cast<unsigned char*>(image.data());
++        for (int y = 0; y < height; ++y)
++        {
++            const unsigned char* s = src + y * ystride;
++            unsigned char* d = dst8 + static_cast<std::size_t>(y) * width * 3;
++            if (xstride == 3)
++                std::memcpy(d, s, static_cast<std::size_t>(width) * 3);
++            else
++                for (int x = 0; x < width; ++x, s += xstride, d += 3)
++                {
++                    d[0] = s[0];
++                    d[1] = s[1];
++                    d[2] = s[2];
++                }
++        }
++        ++cheshireReadDirectStats.direct;
++        if (!cheshireReadDirectStats.announced8.exchange(true))
++            ALICEVISION_LOG_INFO("cheshire: 8-bit images read as 8-bit RGB directly where no colour is converted, OpenImageIO's round trip "
++                                 "through float being the identity (CHESHIRE_READ_DIRECT=0 to disable, CHESHIRE_READ_DIRECT_CHECK=1 to compare)");
++        return true;
 +    }
 +    const float* toFloat = cheshireUint8ToFloat();
 +    image.resize(width, height, false);
@@ -6610,6 +6757,23 @@ index 8c5e1d3..009177b 100644
 +                                                                        << " against OpenImageIO's " << upstream.width() << "x" << upstream.height());
 +        return;
 +    }
++    if constexpr (sizeof(T) % sizeof(float) != 0)  // step 8b: 8-bit pixels, compared byte for byte
++    {
++        const std::size_t px = static_cast<std::size_t>(direct.width()) * direct.height();
++        std::size_t diff8 = 0, first8 = px;
++        for (std::size_t i = 0; i < px; ++i)
++            if (std::memcmp(direct.data() + i, upstream.data() + i, sizeof(T)) != 0)
++            {
++                if (!diff8)
++                    first8 = i;
++                ++diff8;
++            }
++        if (!diff8)
++            ++cheshireReadDirectStats.identical;
++        else
++            ALICEVISION_LOG_WARNING("cheshire: direct 8-bit read check: " << path << ": " << diff8 << " of " << px << " pixels differ, first at " << first8);
++        return;
++    }
 +    const std::size_t n = static_cast<std::size_t>(direct.width()) * direct.height() * sizeof(T) / sizeof(float);
 +    const float* a = reinterpret_cast<const float*>(direct.data());
 +    const float* b = reinterpret_cast<const float*>(upstream.data());
@@ -6635,7 +6799,7 @@ index 8c5e1d3..009177b 100644
  template<typename T>
  void readImage(const std::string& path, oiio::TypeDesc format, int nchannels, Image<T>& image, const ImageReadOptions& imageReadOptions)
  {
-@@ -612,6 +991,48 @@ void readImage(const std::string& path, oiio::TypeDesc format, int nchannels, Im
+@@ -612,6 +1060,48 @@ void readImage(const std::string& path, oiio::TypeDesc format, int nchannels, Im
      if (nchannels == 2)
          ALICEVISION_THROW_ERROR("Load of 2 channels is not supported. Image file: '" + path + "'.")
  

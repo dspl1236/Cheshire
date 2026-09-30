@@ -50,6 +50,183 @@ STEP7A_PRE = '    // cheshire (step 7a, 0.3.7): shadow mode. Cheshire\'s own sol
 STEP7A_POST = '    if (cheshireShadowOn)\n    {\n        double maxAbs = 0.0, maxRel = 0.0;\n        for (size_t i = 0; i < cheshireShadowBlocks.size(); ++i)\n            for (size_t k = 0; k < cheshireShadowFinal[i].size(); ++k)\n            {\n                const double a = cheshireShadowBlocks[i][k], b = cheshireShadowFinal[i][k];\n                maxAbs = std::max(maxAbs, std::abs(a - b));\n                maxRel = std::max(maxRel, cheshire::own::relDiff(a, b));\n            }\n        ALICEVISION_LOG_INFO("cheshire: BA shadow (" << ceres::LinearSolverTypeToString(options.linear_solver_type) << "): "\n                             << cheshire::own::compare(cheshireShadow, cheshireRecorder.iterations, summary, maxAbs, maxRel, cheshireSolveS));\n        if (cheshire::own::shadowVerbose() && cheshireShadow.ok &&\n            (cheshireShadow.iterations.size() != cheshireRecorder.iterations.size() ||\n             cheshire::own::relDiff(cheshireShadow.finalCost, summary.final_cost) > 1e-9))\n            ALICEVISION_LOG_INFO("cheshire: BA shadow traces:" << cheshire::own::traces(cheshireShadow, cheshireRecorder.iterations));\n        // =4, the reverse: Cheshire\'s result is kept, so its trajectory drives and Ceres is the shadow\n        if (::cheshire::env::integer("CHESHIRE_BA_SHADOW", 0) == 4 && cheshireShadow.ok && cheshireShadow.termination.rfind("FAILURE", 0) != 0)\n        {\n            for (size_t i = 0; i < cheshireShadowBlocks.size(); ++i)\n                std::copy(cheshireShadowFinal[i].begin(), cheshireShadowFinal[i].end(), cheshireShadowBlocks[i]);\n            PrepareForEvaluation(true, true);\n            summary.final_cost = cheshireShadow.finalCost;\n        }\n    }\n'
 
 
+# 8a (0.3.8): the .feat parse (applied in main(), before 6q).
+STEP8A = [
+    ("#include <iostream>\n#include <iterator>\n#include <fstream>\n#include <string>\n#include <vector>\n",
+     "#include <charconv>  // cheshire: step 8a\n#include <iostream>\n#include <iterator>\n#include <fstream>\n"
+     "#include <string>\n#include <system_error>\n#include <type_traits>\n#include <vector>\n"),
+    (r"""/// Read feats from file
+template<typename FeaturesT>
+inline void loadFeatsFromFile(const std::string& sfileNameFeats, FeaturesT& vec_feat)
+{
+    vec_feat.clear();
+
+    std::ifstream fileIn(sfileNameFeats);
+""", r"""// cheshire (step 8a, 0.3.8): a PointFeature file is read in one go and parsed with std::from_chars. Upstream's
+// istream_iterator over operator>> took 42.5 s for the 884-view False Door's 20 M features on 12 threads on Windows,
+// and 30.8 s on one - MSVC's stream extraction serialises on its locale - where this takes 0.8 s. The same floats
+// to the bit: both round correctly, and every feature of the False Door was compared under MSVC and libstdc++. It
+// stops where the stream stops - at the end of the file, or at the first token the stream would not take, "nan"
+// and "inf" included - and keeps only whole features. CHESHIRE_FEAT_READ=0 restores upstream's read.
+namespace cheshire_feat {
+inline bool space(char c) { return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\v' || c == '\f'; }
+
+inline void parse(const char* p, const char* e, std::vector<PointFeature>& out)
+{
+    out.reserve(static_cast<std::size_t>(e - p) / 32);
+    for (;;)
+    {
+        float v[4];
+        int k = 0;
+        for (; k < 4; ++k)
+        {
+            while (p < e && space(*p))
+                ++p;
+            if (p < e && *p == '+')  // the stream takes a leading '+', from_chars does not
+            {
+                ++p;
+                if (p < e && *p == '-')
+                    break;
+            }
+            if (p == e)
+                break;
+            const char c = (*p == '-' && p + 1 < e) ? p[1] : *p;
+            if (!((c >= '0' && c <= '9') || c == '.'))
+                break;
+            const auto r = std::from_chars(p, e, v[k]);
+            if (r.ec != std::errc())
+                break;
+            p = r.ptr;
+        }
+        if (k < 4)
+            return;
+        out.emplace_back(v[0], v[1], v[2], v[3]);
+    }
+}
+}  // namespace cheshire_feat
+
+/// Read feats from file
+template<typename FeaturesT>
+inline void loadFeatsFromFile(const std::string& sfileNameFeats, FeaturesT& vec_feat)
+{
+    vec_feat.clear();
+
+    if constexpr (std::is_same_v<FeaturesT, std::vector<PointFeature>>)
+    {
+        if (::cheshire::env::flag("CHESHIRE_FEAT_READ", true))
+        {
+            std::ifstream in(sfileNameFeats, std::ios::binary);
+            if (!in.is_open())
+                throw std::runtime_error("Can't load features file, can't open '" + sfileNameFeats + "' !");
+            in.seekg(0, std::ios::end);
+            const std::streamoff n = in.tellg();
+            in.seekg(0, std::ios::beg);
+            std::string buf(n > 0 ? static_cast<std::size_t>(n) : 0, '\0');
+            if (n > 0 && !in.read(&buf[0], n))
+                throw std::runtime_error("Can't load features file, '" + sfileNameFeats + "' is incorrect !");
+            cheshire_feat::parse(buf.data(), buf.data() + buf.size(), vec_feat);
+            return;
+        }
+    }
+
+    std::ifstream fileIn(sfileNameFeats);
+"""),
+]
+
+# 8b (0.3.8): 8-bit RGB read as 8-bit RGB, in 6n's direct read (applied in main(), after 6n, before 6q).
+STEP8B = [
+    ("    std::atomic<bool> announced{false};\n    ~CheshireReadDirectStats()",
+     "    std::atomic<bool> announced{false}, announced8{false};  // announced8: step 8b\n    ~CheshireReadDirectStats()"),
+    (r"""template<typename T>
+bool cheshireReadDirect(const std::string& path, oiio::TypeDesc format, int nchannels, Image<T>& image, const ImageReadOptions& imageReadOptions)
+{
+    if (format != oiio::TypeDesc::FLOAT || (nchannels != 3 && nchannels != 4) || sizeof(T) != static_cast<std::size_t>(nchannels) * sizeof(float))
+        return false;
+""", r"""// cheshire (step 8b, 0.3.8): does OpenImageIO's uint8 -> float -> uint8 - upstream's way from an 8-bit file to an 8-bit
+// image: a float ImageBuf read, then get_pixels as UINT8 - give every value back? Checked once per process, through
+// the same calls, for all 256 values; the 8-bit direct read below is used only if it does.
+bool cheshireUint8RoundTrip()
+{
+    static const bool same = [] {
+        oiio::ImageBuf buf(oiio::ImageSpec(256, 1, 1, oiio::TypeDesc::FLOAT));
+        if (!buf.set_pixels(buf.roi(), oiio::TypeDesc::FLOAT, cheshireUint8ToFloat()))
+            return false;
+        std::array<unsigned char, 256> back{};
+        if (!buf.get_pixels(buf.roi(), oiio::TypeDesc::UINT8, back.data()))
+            return false;
+        for (int v = 0; v < 256; ++v)
+            if (back[v] != v)
+                return false;
+        return true;
+    }();
+    return same;
+}
+
+template<typename T>
+bool cheshireReadDirect(const std::string& path, oiio::TypeDesc format, int nchannels, Image<T>& image, const ImageReadOptions& imageReadOptions)
+{
+    // step 8b: an 8-bit RGB file read as 8-bit RGB (Image<RGBColor>: the SfM's colours, among others) with no colour
+    // conversion in upstream's path, which reads it into a float ImageBuf and hands the pixels back as 8 bits - the
+    // same bytes when the round trip above is the identity. Here the decoder's bytes are copied out: the decode and
+    // none of the 144 MB float buffer of a 12 MP photo.
+    const bool rgb8 = format == oiio::TypeDesc::UINT8 && nchannels == 3 && sizeof(T) == 3;
+    if (!rgb8 && (format != oiio::TypeDesc::FLOAT || (nchannels != 3 && nchannels != 4) || sizeof(T) != static_cast<std::size_t>(nchannels) * sizeof(float)))
+        return false;
+"""),
+    ("    // the 8-bit pixels: from the device decoder (step 6r) when it takes the file, else from OpenImageIO\n",
+     "    if (rgb8 && (processor || !cheshireUint8RoundTrip()))\n"
+     "        return false;  // step 8b: upstream converts the colour, or its conversions would not give the bytes back\n\n"
+     "    // the 8-bit pixels: from the device decoder (step 6r) when it takes the file, else from OpenImageIO\n"),
+    ("    const float* toFloat = cheshireUint8ToFloat();\n    image.resize(width, height, false);\n",
+     r"""    if (rgb8)  // step 8b: the bytes, row by row
+    {
+        image.resize(width, height, false);
+        unsigned char* dst8 = reinterpret_cast<unsigned char*>(image.data());
+        for (int y = 0; y < height; ++y)
+        {
+            const unsigned char* s = src + y * ystride;
+            unsigned char* d = dst8 + static_cast<std::size_t>(y) * width * 3;
+            if (xstride == 3)
+                std::memcpy(d, s, static_cast<std::size_t>(width) * 3);
+            else
+                for (int x = 0; x < width; ++x, s += xstride, d += 3)
+                {
+                    d[0] = s[0];
+                    d[1] = s[1];
+                    d[2] = s[2];
+                }
+        }
+        ++cheshireReadDirectStats.direct;
+        if (!cheshireReadDirectStats.announced8.exchange(true))
+            ALICEVISION_LOG_INFO("cheshire: 8-bit images read as 8-bit RGB directly where no colour is converted, OpenImageIO's round trip "
+                                 "through float being the identity (CHESHIRE_READ_DIRECT=0 to disable, CHESHIRE_READ_DIRECT_CHECK=1 to compare)");
+        return true;
+    }
+    const float* toFloat = cheshireUint8ToFloat();
+    image.resize(width, height, false);
+"""),
+    ("    const std::size_t n = static_cast<std::size_t>(direct.width()) * direct.height() * sizeof(T) / sizeof(float);\n",
+     r"""    if constexpr (sizeof(T) % sizeof(float) != 0)  // step 8b: 8-bit pixels, compared byte for byte
+    {
+        const std::size_t px = static_cast<std::size_t>(direct.width()) * direct.height();
+        std::size_t diff8 = 0, first8 = px;
+        for (std::size_t i = 0; i < px; ++i)
+            if (std::memcmp(direct.data() + i, upstream.data() + i, sizeof(T)) != 0)
+            {
+                if (!diff8)
+                    first8 = i;
+                ++diff8;
+            }
+        if (!diff8)
+            ++cheshireReadDirectStats.identical;
+        else
+            ALICEVISION_LOG_WARNING("cheshire: direct 8-bit read check: " << path << ": " << diff8 << " of " << px << " pixels differ, first at " << first8);
+        return;
+    }
+    const std::size_t n = static_cast<std::size_t>(direct.width()) * direct.height() * sizeof(T) / sizeof(float);
+"""),
+]
+
 
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
@@ -62,6 +239,7 @@ def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker:
 
 
 TRACKED = [
+    "src/aliceVision/feature/PointFeature.hpp",
     "src/cmake/config.hpp.in",
     "CMakeLists.txt",
     "src/CMakeLists.txt",
@@ -5078,6 +5256,32 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                 sys.exit("the graph header include not found once in LocalBundleAdjustmentGraph.cpp (7m)")
             t = t.replace(inc, inc + "\n#include <unordered_map>  // cheshire: step 7m", 1)
     g7m.write_text(t, encoding="utf-8", newline="")
+
+    # 8a (0.3.8). The .feat parse: a PointFeature file read in one go and parsed with std::from_chars instead of an
+    #     istream_iterator over operator>>, the same floats to the bit (both round correctly; the False Door's 20 M
+    #     features compared under MSVC and libstdc++). 42.5 s to 0.8 s for the False Door's features on 12 threads on
+    #     Windows, where the stream's extraction serialises on its locale; every node that reads features gains.
+    pf8a = AV / "src/aliceVision/feature/PointFeature.hpp"
+    t = pf8a.read_text(encoding="utf-8")
+    if "step 8a" not in t:
+        for old, new in STEP8A:
+            if t.count(old) != 1:
+                sys.exit("an anchor of the feature read not found once in PointFeature.hpp (8a)")
+            t = t.replace(old, new, 1)
+    pf8a.write_text(t, encoding="utf-8", newline="")
+
+    # 8b (0.3.8). 6n's direct read takes an 8-bit RGB file read as 8-bit RGB too (Image<RGBColor>: the SfM's colours,
+    #     one full read per view, 37 s of the False Door's SfM), when upstream's path converts no colour and
+    #     OpenImageIO's uint8 -> float -> uint8 gives every value back (checked once per process): the decoder's bytes,
+    #     which are upstream's, without the float buffer. The check mode compares these byte for byte.
+    io8b = AV / "src/aliceVision/image/io.cpp"
+    t = io8b.read_text(encoding="utf-8")
+    if "step 8b" not in t:
+        for old, new in STEP8B:
+            if t.count(old) != 1:
+                sys.exit("an anchor of the 8-bit direct read not found once in image/io.cpp (8b)")
+            t = t.replace(old, new, 1)
+    io8b.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports
