@@ -1,8 +1,8 @@
 // This file is part of the Cheshire patch set for AliceVision (https://github.com/dspl1236/Cheshire).
 //
-// 0.3.7: a bundle-adjustment solver of Cheshire's own (docs/notes/ba-own-solver.md): step 1 shadow mode,
-// step 2 the parallel, block-sparse implementation, step 3 in SfM in place of Ceres (the default;
-// CHESHIRE_BA_SOLVER=ceres for Ceres).
+// 0.3.7: Grin, a bundle-adjustment solver of Cheshire's own (docs/notes/ba-own-solver.md) - the grin without
+// the cat: Ceres' algorithm without Ceres. Step 1 shadow mode, step 2 the parallel, block-sparse
+// implementation, step 3 in SfM in place of Ceres (the default; CHESHIRE_BA_SOLVER=ceres for Ceres).
 //
 // It walks the ceres::Problem BundleAdjustmentCeres has built, through Ceres' public API, and solves it
 // with Ceres' own algorithm specialised for this shape: Levenberg-Marquardt in a trust region, Jacobi
@@ -3212,10 +3212,11 @@ class Solver
 };
 
 // ---- step 3: in place of Ceres ---------------------------------------------------------------------------
-// CHESHIRE_BA_SOLVER: Cheshire's solver by default (since 0.3.7), Ceres with "ceres"
+// CHESHIRE_BA_SOLVER: Grin, Cheshire's solver, by default (since 0.3.7; "grin", or any value but "ceres"),
+// Ceres with "ceres"
 inline bool solverEnabled()
 {
-    static const bool on = ::cheshire::env::text("CHESHIRE_BA_SOLVER", "cheshire") != "ceres";
+    static const bool on = ::cheshire::env::text("CHESHIRE_BA_SOLVER", "grin") != "ceres";
     return on;
 }
 
@@ -3293,7 +3294,7 @@ inline bool solveSource(const Source& src, const ceres::Solver::Options& options
     // until 0.3.7's release round it was said only on the Problem path, which the direct build bypasses)
     static std::once_flag said;
     std::call_once(said, [] {
-        ALICEVISION_LOG_INFO("cheshire: BA solver: Cheshire's own for the Schur solves (CHESHIRE_BA_SOLVER=ceres for Ceres)");
+        ALICEVISION_LOG_INFO("cheshire: BA solver: Grin, Cheshire's own, for the Schur solves (CHESHIRE_BA_SOLVER=ceres for Ceres)");
     });
     Result r;
     bool done = false;

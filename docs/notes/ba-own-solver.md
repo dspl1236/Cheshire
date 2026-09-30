@@ -1,4 +1,7 @@
-# A bundle-adjustment solver of Cheshire's own: design (0.3.7)
+# Grin, a bundle-adjustment solver of Cheshire's own: design (0.3.7)
+
+**The name** (2026-09-29): Grin, for the grin without the cat - Ceres' algorithm, step for step, without
+Ceres. It announces itself once per run: `cheshire: BA solver: Grin, Cheshire's own, for the Schur solves`.
 
 Status: 2026-09-29. Steps 0-3 done. The solver takes Ceres' iterates to rounding and solves in a third of Ceres' time. It is now the default in SfM (`CHESHIRE_BA_SOLVER=ceres` for Ceres), and passes the SfM quality gate on 41 views, the engine bay and the False Door (below). Background and the measurements
 behind the decision are in docs/notes/ba-device-plan.md.

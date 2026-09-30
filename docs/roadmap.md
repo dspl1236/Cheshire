@@ -537,7 +537,7 @@ passing the SfM gate); GPS pairing is validated on a public survey, OpenDroneMap
 
 ## 0.3.7
 
-Started 2026-09-28. **Headline: a bundle-adjustment solver of Cheshire's own** (XL), decided in 0.3.6
+Started 2026-09-28. **Headline: Grin, a bundle-adjustment solver of Cheshire's own** (XL), decided in 0.3.6
 after the step-0/A1/B1 measurements (docs/notes/ba-device-plan.md). Bundle adjustment is 82 % of a
 large set's SfM, and nearly all of it sits in Ceres' generic machinery rather than in the arithmetic.
 That machinery is the per-block evaluation around our analytic Jacobians and the per-solve problem
