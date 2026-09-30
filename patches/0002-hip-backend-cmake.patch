@@ -8791,10 +8791,18 @@ index 9f273ef..c184d94 100644
  alicevision_add_library(aliceVision_sfm
      SOURCES ${sfm_files_headers} ${sfm_files_sources}
 diff --git a/src/aliceVision/sfm/LocalBundleAdjustmentGraph.cpp b/src/aliceVision/sfm/LocalBundleAdjustmentGraph.cpp
-index 9500f70..b12c078 100644
+index 9500f70..3751968 100644
 --- a/src/aliceVision/sfm/LocalBundleAdjustmentGraph.cpp
 +++ b/src/aliceVision/sfm/LocalBundleAdjustmentGraph.cpp
-@@ -296,8 +296,22 @@ void LocalBundleAdjustmentGraph::updateGraphWithNewViews(const sfmData::SfMData&
+@@ -16,6 +16,7 @@
+ #include <fstream>
+ #include <filesystem>
+ #include <algorithm>
++#include <unordered_map>  // cheshire: step 7m
+ 
+ namespace fs = std::filesystem;
+ 
+@@ -296,8 +297,22 @@ void LocalBundleAdjustmentGraph::updateGraphWithNewViews(const sfmData::SfMData&
          std::vector<Pair> newEdges = getNewEdges(sfmData, map_tracksPerView, addedViewsId, minNbOfMatches, minNbOfEdgesPerView);
          numAddedEdges = newEdges.size();
  
@@ -8818,6 +8826,100 @@ index 9500f70..b12c078 100644
  
          numAddedEdges += addIntrinsicEdgesToTheGraph(sfmData, addedViewsId);
      }
+@@ -415,9 +430,24 @@ void LocalBundleAdjustmentGraph::convertDistancesToStates(sfmData::SfMData& sfmD
+     }
+ 
+     // landmarks
+-    for (auto& itLandmark : sfmData.getLandmarks())
++    // cheshire (step 7m, 0.3.7): each view's state once, the landmarks' states on every core, and the map refilled in
++    // id order with an end hint (the landmarks come sorted by id); the same states in the same map
++    std::unordered_map<IndexT, EEstimatorParameterState> cheshireViewState;
++    cheshireViewState.reserve(_distancePerViewId.size());
++    for (const auto& [viewId, distance] : _distancePerViewId)
++        cheshireViewState.emplace(viewId, getStateFromDistance(distance));
++    const EEstimatorParameterState cheshireOutside = getStateFromDistance(-1);   // getViewDistance of a view not in the graph
++
++    std::vector<sfmData::Landmarks::iterator> cheshireLandmarks;
++    cheshireLandmarks.reserve(sfmData.getLandmarks().size());
++    for (auto it = sfmData.getLandmarks().begin(); it != sfmData.getLandmarks().end(); ++it)
++        cheshireLandmarks.push_back(it);
++    std::vector<EEstimatorParameterState> cheshireStates(cheshireLandmarks.size());
++
++#pragma omp parallel for schedule(static, 4096)
++    for (std::ptrdiff_t li = 0; li < static_cast<std::ptrdiff_t>(cheshireLandmarks.size()); ++li)
+     {
+-        const IndexT landmarkId = itLandmark.first;
++        auto& itLandmark = *cheshireLandmarks[static_cast<std::size_t>(li)];
+         const sfmData::Observations& observations = itLandmark.second.getObservations();
+ 
+         assert(observations.size() >= 2);
+@@ -425,8 +455,8 @@ void LocalBundleAdjustmentGraph::convertDistancesToStates(sfmData::SfMData& sfmD
+         std::array<bool, 3> states = {false, false, false};
+         for (const auto& observationIt : observations)
+         {
+-            const int distance = getViewDistance(observationIt.first);
+-            const EEstimatorParameterState viewState = getStateFromDistance(distance);
++            const auto vs = cheshireViewState.find(observationIt.first);
++            const EEstimatorParameterState viewState = vs == cheshireViewState.end() ? cheshireOutside : vs->second;
+             states.at(static_cast<std::size_t>(viewState)) = true;
+         }
+ 
+@@ -436,18 +466,15 @@ void LocalBundleAdjustmentGraph::convertDistancesToStates(sfmData::SfMData& sfmD
+         // for these particular cases, we can have landmarks with refined AND ignored cameras.
+         // in this particular case, we prefer to ignore the landmark to avoid wrong/unconstraint refinements.
+ 
+-        if (!states.at(static_cast<std::size_t>(EEstimatorParameterState::REFINED)) ||
+-            states.at(static_cast<std::size_t>(EEstimatorParameterState::IGNORED)))
+-        {
+-            itLandmark.second.setState(EEstimatorParameterState::IGNORED);
+-            _statePerLandmarkId[landmarkId] = EEstimatorParameterState::IGNORED;
+-        }
+-        else
+-        {
+-            itLandmark.second.setState(EEstimatorParameterState::REFINED);
+-            _statePerLandmarkId[landmarkId] = EEstimatorParameterState::REFINED;
+-        }
++        const EEstimatorParameterState state = (!states.at(static_cast<std::size_t>(EEstimatorParameterState::REFINED)) ||
++                                                states.at(static_cast<std::size_t>(EEstimatorParameterState::IGNORED)))
++                                                 ? EEstimatorParameterState::IGNORED
++                                                 : EEstimatorParameterState::REFINED;
++        itLandmark.second.setState(state);
++        cheshireStates[static_cast<std::size_t>(li)] = state;
+     }
++    for (std::size_t li = 0; li < cheshireLandmarks.size(); ++li)
++        _statePerLandmarkId.emplace_hint(_statePerLandmarkId.end(), cheshireLandmarks[li]->first, cheshireStates[li]);
+ }
+ 
+ std::vector<Pair> LocalBundleAdjustmentGraph::getNewEdges(const sfmData::SfMData& sfmData,
+@@ -459,9 +486,12 @@ std::vector<Pair> LocalBundleAdjustmentGraph::getNewEdges(const sfmData::SfMData
+     std::vector<Pair> newEdges;
+ 
+     // get landmarks id. of all the reconstructed 3D points (: landmarks)
+-    // TODO: avoid copy and use boost::transform_iterator
+-    std::set<IndexT> landmarkIds;
+-    std::transform(sfmData.getLandmarks().begin(), sfmData.getLandmarks().end(), std::inserter(landmarkIds, landmarkIds.begin()), stl::RetrieveKey());
++    // cheshire (step 7j, 0.3.7): which track ids have a landmark, a byte per id built once per call, in place of a
++    // std::set of all the landmarks' ids; each new view's sorted track list is filtered by it below, which gives
++    // exactly the ids std::set_intersection copied, in the same order
++    std::vector<char> landmarkIds(sfmData.getLandmarks().empty() ? 0 : static_cast<std::size_t>(sfmData.getLandmarks().rbegin()->first) + 1, 0);
++    for (const auto& landmark : sfmData.getLandmarks())
++        landmarkIds[landmark.first] = 1;
+ 
+     for (IndexT viewId : newViewsId)
+     {
+@@ -474,8 +504,10 @@ std::vector<Pair> LocalBundleAdjustmentGraph::getNewEdges(const sfmData::SfMData
+         std::vector<IndexT> newViewLandmarks;  // all landmarks (already reconstructed) visible from the new view
+ 
+         newViewLandmarks.reserve(newViewTrackIds.size());
+-        std::set_intersection(
+-          newViewTrackIds.begin(), newViewTrackIds.end(), landmarkIds.begin(), landmarkIds.end(), std::back_inserter(newViewLandmarks));
++        for (const std::size_t trackId : newViewTrackIds)
++            if (trackId < landmarkIds.size() && landmarkIds[trackId] &&
++                (newViewLandmarks.empty() || newViewLandmarks.back() != static_cast<IndexT>(trackId)))
++                newViewLandmarks.push_back(static_cast<IndexT>(trackId));
+ 
+         // retrieve the common track Ids
+         for (IndexT landmarkId : newViewLandmarks)
 diff --git a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp b/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
 index bd0bf27..3eb6d70 100644
 --- a/src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp
@@ -9548,7 +9650,7 @@ index 1f23958..5491985 100644
  
          if (N == 0)
 diff --git a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
-index 097f8c9..eff26dd 100644
+index 097f8c9..d363c9e 100644
 --- a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 +++ b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 @@ -5,6 +5,10 @@
@@ -10021,7 +10123,55 @@ index 097f8c9..eff26dd 100644
              _localStrategyGraph->removeViews(_sfmData, removedViewsIdIteration);
              ALICEVISION_LOG_DEBUG("Views removed from the local BA graph: " << removedViewsIdIteration);
          }
-@@ -1010,7 +1245,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
+@@ -935,6 +1170,17 @@ void ReconstructionEngine_sequentialSfM::calibrateRigs(std::set<IndexT>& updated
+     }
+ }
+ 
++// cheshire (step 7j, 0.3.7): which track ids have a landmark (landmark ids are track ids), a byte per id, built
++// once per use in place of a std::set of all the landmarks' ids; a view's sorted track list is then filtered by it,
++// which gives exactly the ids std::set_intersection copied, in the same order
++std::vector<char> cheshireLandmarkMask(const sfmData::Landmarks& landmarks)
++{
++    std::vector<char> mask(landmarks.empty() ? 0 : static_cast<std::size_t>(landmarks.rbegin()->first) + 1, 0);
++    for (const auto& landmark : landmarks)
++        mask[landmark.first] = 1;
++    return mask;
++}
++
+ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConnectionScore>& out_connectedViews,
+                                                             const std::set<IndexT>& remainingViewIds) const
+ {
+@@ -944,11 +1190,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
+         return false;
+ 
+     // Collect tracksIds
+-    std::set<size_t> reconstructed_trackId;
+-    std::transform(_sfmData.getLandmarks().begin(),
+-                   _sfmData.getLandmarks().end(),
+-                   std::inserter(reconstructed_trackId, reconstructed_trackId.begin()),
+-                   stl::RetrieveKey());
++    // cheshire (step 7j): a mask by track id, built once per call, not a std::set of every landmark's id
++    const std::vector<char> cheshireReconstructed = cheshireLandmarkMask(_sfmData.getLandmarks());
+ 
+     const std::set<IndexT> reconstructedIntrinsics = _sfmData.getReconstructedIntrinsics();
+ 
+@@ -994,11 +1237,10 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
+         //  with the already 3D reconstructed trackId
+         std::vector<std::size_t> vec_trackIdForResection;
+         vec_trackIdForResection.reserve(set_tracksIds.size());
+-        std::set_intersection(set_tracksIds.begin(),
+-                              set_tracksIds.end(),
+-                              reconstructed_trackId.begin(),
+-                              reconstructed_trackId.end(),
+-                              std::back_inserter(vec_trackIdForResection));
++        for (const std::size_t trackId : set_tracksIds)
++            if (trackId < cheshireReconstructed.size() && cheshireReconstructed[trackId] &&
++                (vec_trackIdForResection.empty() || vec_trackIdForResection.back() != trackId))
++                vec_trackIdForResection.push_back(trackId);
+         // Compute an image score based on the number of matches to the 3D scene
+         // and the repartition of these features in the image.
+         std::size_t score = computeCandidateImageScore(viewId, vec_trackIdForResection);
+@@ -1010,7 +1252,8 @@ bool ReconstructionEngine_sequentialSfM::findConnectedViews(std::vector<ViewConn
  
      // Sort by the image score
      std::sort(out_connectedViews.begin(), out_connectedViews.end(), [](const ViewConnectionScore& t1, const ViewConnectionScore& t2) {
@@ -10031,7 +10181,31 @@ index 097f8c9..eff26dd 100644
      });
      return !out_connectedViews.empty();
  }
-@@ -1545,13 +1781,18 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
+@@ -1493,18 +1736,13 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
+     const aliceVision::track::TrackIdSet& set_tracksIds = _map_tracksPerView.at(viewId);
+ 
+     // A2. intersects the track list with the reconstructed
+-    std::set<std::size_t> reconstructed_trackId;
+-    std::transform(_sfmData.getLandmarks().begin(),
+-                   _sfmData.getLandmarks().end(),
+-                   std::inserter(reconstructed_trackId, reconstructed_trackId.begin()),
+-                   stl::RetrieveKey());
++    // cheshire (step 7j): a mask by track id, not a std::set of every landmark's id per view
++    const std::vector<char> cheshireReconstructed = cheshireLandmarkMask(_sfmData.getLandmarks());
+ 
+     // Get the ids of the already reconstructed tracks
+-    std::set_intersection(set_tracksIds.begin(),
+-                          set_tracksIds.end(),
+-                          reconstructed_trackId.begin(),
+-                          reconstructed_trackId.end(),
+-                          std::inserter(resectionData.tracksId, resectionData.tracksId.begin()));
++    for (const std::size_t trackId : set_tracksIds)
++        if (trackId < cheshireReconstructed.size() && cheshireReconstructed[trackId])
++            resectionData.tracksId.insert(resectionData.tracksId.end(), trackId);
+ 
+     if (resectionData.tracksId.empty())
+     {
+@@ -1545,13 +1783,18 @@ bool ReconstructionEngine_sequentialSfM::computeResection(const IndexT viewId, R
      // C. Do the resectioning: compute the camera pose.
      ALICEVISION_LOG_INFO("[" << _sfmData.getValidViews().size() + 1 << "/" << _sfmData.getViews().size() << "] Robust Resection of view: " << viewId);
  
@@ -10051,7 +10225,180 @@ index 097f8c9..eff26dd 100644
      if (!_htmlLogFile.empty())
      {
          using namespace htmlDocument;
-@@ -1842,7 +2083,10 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+@@ -1669,45 +1912,40 @@ void ReconstructionEngine_sequentialSfM::getTracksToTriangulate(const std::set<I
+     std::set<IndexT> allTracksInNewViews;
+     track::getTracksInImagesFast(newReconstructedViews, _map_tracksPerView, allTracksInNewViews);
+ 
+-    std::set<IndexT>::iterator it;
+-#pragma omp parallel private(it)
++    // cheshire (step 7k, 0.3.7): a slot per track in a parallel loop, then the map filled in track order; upstream
++    // handed the set's elements out one `omp single` at a time and inserted each under a critical section
++    const std::vector<IndexT> cheshireTracks(allTracksInNewViews.begin(), allTracksInNewViews.end());
++    std::vector<std::set<IndexT>> cheshireShared(cheshireTracks.size());
++#pragma omp parallel for schedule(dynamic, 256)
++    for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(cheshireTracks.size()); ++k)
+     {
+-        for (it = allTracksInNewViews.begin(); it != allTracksInNewViews.end(); ++it)
+-        {
+-#pragma omp single nowait
+-            {
+-                const std::size_t trackId = *it;
+-
+-                const track::Track& track = _map_tracks.at(trackId);
++        const std::size_t trackId = cheshireTracks[static_cast<std::size_t>(k)];
+ 
+-                std::set<IndexT> allViewsSharingTheTrack;
+-                std::transform(track.featPerView.begin(),
+-                               track.featPerView.end(),
+-                               std::inserter(allViewsSharingTheTrack, allViewsSharingTheTrack.begin()),
+-                               stl::RetrieveKey());
+-
+-                std::set<IndexT> allReconstructedViewsSharingTheTrack;
+-                std::set_intersection(allViewsSharingTheTrack.begin(),
+-                                      allViewsSharingTheTrack.end(),
+-                                      allReconstructedViews.begin(),
+-                                      allReconstructedViews.end(),
+-                                      std::inserter(allReconstructedViewsSharingTheTrack, allReconstructedViewsSharingTheTrack.begin()));
++        const track::Track& track = _map_tracks.at(trackId);
+ 
+-                if (allReconstructedViewsSharingTheTrack.size() >= _params.minNbObservationsForTriangulation)
+-                {
+-#pragma omp critical
+-                    mapTracksToTriangulate[trackId] = allReconstructedViewsSharingTheTrack;
+-                }
+-            }
+-        }
++        std::set<IndexT> allViewsSharingTheTrack;
++        std::transform(track.featPerView.begin(),
++                       track.featPerView.end(),
++                       std::inserter(allViewsSharingTheTrack, allViewsSharingTheTrack.begin()),
++                       stl::RetrieveKey());
++
++        std::set<IndexT>& allReconstructedViewsSharingTheTrack = cheshireShared[static_cast<std::size_t>(k)];
++        std::set_intersection(allViewsSharingTheTrack.begin(),
++                              allViewsSharingTheTrack.end(),
++                              allReconstructedViews.begin(),
++                              allReconstructedViews.end(),
++                              std::inserter(allReconstructedViewsSharingTheTrack, allReconstructedViewsSharingTheTrack.begin()));
+     }
++    for (std::size_t k = 0; k < cheshireTracks.size(); ++k)
++        if (cheshireShared[k].size() >= _params.minNbObservationsForTriangulation)
++            mapTracksToTriangulate[cheshireTracks[k]] = std::move(cheshireShared[k]);
+ }
+ 
+ namespace {
+ 
+ struct ObservationData
+ {
+-    std::shared_ptr<camera::Pinhole> cam;
++    camera::Pinhole* cam;   // cheshire (step 7k): a plain pointer, the scene holds the camera
+     Pose3 pose;
+     Mat34 P;
+     Vec2 x;
+@@ -1716,27 +1954,49 @@ struct ObservationData
+     bool isEmpty() const { return cam == nullptr; }
+ };
+ 
+-ObservationData getObservationData(const SfMData& scene, feature::FeaturesPerView* featuresPerView, IndexT viewId, const track::Track& track)
++// cheshire (step 7k, 0.3.7): a view's camera, pose and projection matrix, once per triangulation call (upstream
++// computed them per observation, copying the camera's shared_ptr each time)
++struct CheshireViewData
+ {
++    camera::Pinhole* cam = nullptr;
++    Pose3 pose;
++    Mat34 P;
++};
++
++CheshireViewData cheshireViewData(const SfMData& scene, IndexT viewId)
++{
++    CheshireViewData d;
+     const View* view = scene.getViews().at(viewId).get();
+ 
+-    std::shared_ptr<camera::IntrinsicBase> cam = scene.getIntrinsics().at(view->getIntrinsicId());
+-    std::shared_ptr<camera::Pinhole> camPinHole = std::dynamic_pointer_cast<camera::Pinhole>(cam);
++    camera::IntrinsicBase* cam = scene.getIntrinsics().at(view->getIntrinsicId()).get();
++    camera::Pinhole* camPinHole = dynamic_cast<camera::Pinhole*>(cam);
+ 
+     if (!camPinHole)
+     {
+         ALICEVISION_LOG_ERROR("Camera is not pinhole in triangulateMultiViewsLORANSAC");
+-        return {nullptr, {}, {}, {}, {}};
++        return d;
+     }
+ 
+-    Pose3 pose = scene.getPose(*view).getTransform();
+-    Mat34 P = camPinHole->getProjectiveEquivalent(pose);
++    d.cam = camPinHole;
++    d.pose = scene.getPose(*view).getTransform();
++    d.P = camPinHole->getProjectiveEquivalent(d.pose);
++    return d;
++}
++
++ObservationData getObservationData(const std::map<IndexT, CheshireViewData>& views,
++                                   feature::FeaturesPerView* featuresPerView,
++                                   IndexT viewId,
++                                   const track::Track& track)
++{
++    const CheshireViewData& v = views.at(viewId);
++    if (!v.cam)
++        return {nullptr, {}, {}, {}, {}};
+ 
+     const auto& feature = featuresPerView->getFeatures(viewId, track.descType)[track.featPerView.at(viewId).featureId];
+     Vec2 x = feature.coords().cast<double>();
+-    Vec2 xUd = cam->getUndistortedPixel(x);  // undistorted 2D point
++    Vec2 xUd = v.cam->getUndistortedPixel(x);  // undistorted 2D point
+ 
+-    return {camPinHole, pose, P, x, xUd};
++    return {v.cam, v.pose, v.P, x, xUd};
+ }
+ 
+ }  // namespace
+@@ -1756,6 +2016,15 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+     std::vector<IndexT> setTracksId;  // <trackId>
+     std::transform(mapTracksToTriangulate.begin(), mapTracksToTriangulate.end(), std::inserter(setTracksId, setTracksId.begin()), stl::RetrieveKey());
+ 
++    // cheshire (step 7k, 0.3.7): each posed view's data once; each track's result in its own slot, applied below
++    std::map<IndexT, CheshireViewData> cheshireViews;
++    for (const std::set<IndexT>* views : {&previousReconstructedViews, &newReconstructedViews})
++        for (const IndexT viewId : *views)
++            if (!cheshireViews.count(viewId))
++                cheshireViews.emplace(viewId, cheshireViewData(scene, viewId));
++    std::vector<unsigned char> cheshireOutcome(setTracksId.size(), 0);   // 0 untouched, 1 landmark, 2 removed
++    std::vector<Landmark> cheshireLandmarks(setTracksId.size());
++
+ #pragma omp parallel for
+     for (int i = 0; i < setTracksId.size(); i++)  // each track (already reconstructed or not)
+     {
+@@ -1783,8 +2052,8 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+             IndexT I = *(observations.begin());
+             IndexT J = *(observations.rbegin());
+ 
+-            const auto oi = getObservationData(scene, _featuresPerView, I, track);
+-            const auto oj = getObservationData(scene, _featuresPerView, J, track);
++            const auto oi = getObservationData(cheshireViews, _featuresPerView, I, track);
++            const auto oj = getObservationData(cheshireViews, _featuresPerView, J, track);
+ 
+             if (oi.isEmpty() || oj.isEmpty())
+             {
+@@ -1804,7 +2073,7 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+             const double& acThresholdI = (acThresholdItI != _map_ACThreshold.end()) ? acThresholdItI->second : 4.0;
+             const double& acThresholdJ = (acThresholdItJ != _map_ACThreshold.end()) ? acThresholdItJ->second : 4.0;
+ 
+-            if (angleBetweenRays(oi.pose, oi.cam.get(), oj.pose, oj.cam.get(), oi.x, oj.x) < _params.minAngleForTriangulation ||
++            if (angleBetweenRays(oi.pose, oi.cam, oj.pose, oj.cam, oi.x, oj.x) < _params.minAngleForTriangulation ||
+                 oi.pose.depth(X_euclidean) < 0 || oj.pose.depth(X_euclidean) < 0 ||
+                 oi.cam->residual(oi.pose, X_euclidean.homogeneous(), oi.x).norm() > acThresholdI ||
+                 oj.cam->residual(oj.pose, X_euclidean.homogeneous(), oj.x).norm() > acThresholdJ)
+@@ -1825,7 +2094,7 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+                 int i = 0;
+                 for (const IndexT& viewId : observations)
+                 {
+-                    const auto o = getObservationData(scene, _featuresPerView, viewId, track);
++                    const auto o = getObservationData(cheshireViews, _featuresPerView, viewId, track);
+ 
+                     if (o.isEmpty())
+                     {
+@@ -1842,7 +2111,10 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
              Vec4 X_homogeneous = Vec4::Zero();
              std::vector<std::size_t> inliersIndex;
  
@@ -10063,6 +10410,39 @@ index 097f8c9..eff26dd 100644
  
              homogeneousToEuclidean(X_homogeneous, X_euclidean);
  
+@@ -1872,20 +2144,23 @@ void ReconstructionEngine_sequentialSfM::triangulateMultiViewsLORANSAC(SfMData&
+                 const double scale = (_params.featureConstraint == EFeatureConstraint::BASIC) ? 0.0 : p.scale();
+                 landmark.getObservations()[viewId] = Observation(x, track.featPerView.at(viewId).featureId, scale);
+             }
+-#pragma omp critical
+-            {
+-                scene.getLandmarks()[trackId] = landmark;
+-            }
++            cheshireLandmarks[i] = std::move(landmark);
++            cheshireOutcome[i] = 1;
+         }
+         else
+         {
+-#pragma omp critical
+-            {
+-                if (scene.getLandmarks().find(trackId) != scene.getLandmarks().end())
+-                    scene.getLandmarks().erase(trackId);
+-            }
++            cheshireOutcome[i] = 2;
+         }
+     }  // for all shared tracks
++
++    // cheshire (step 7k): the results into the scene, in track order (each track id once)
++    for (std::size_t i = 0; i < setTracksId.size(); ++i)
++    {
++        if (cheshireOutcome[i] == 1)
++            scene.getLandmarks()[setTracksId[i]] = std::move(cheshireLandmarks[i]);
++        else if (cheshireOutcome[i] == 2)
++            scene.getLandmarks().erase(setTracksId[i]);
++    }
+ }
+ 
+ void ReconstructionEngine_sequentialSfM::triangulate2Views(SfMData& scene,
 diff --git a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.hpp b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.hpp
 index 9825380..863dc95 100644
 --- a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.hpp
@@ -10085,6 +10465,63 @@ index 9825380..863dc95 100644
  
      // Data providers
  
+diff --git a/src/aliceVision/sfmData/colorize.cpp b/src/aliceVision/sfmData/colorize.cpp
+index 0724197..6c5fcba 100644
+--- a/src/aliceVision/sfmData/colorize.cpp
++++ b/src/aliceVision/sfmData/colorize.cpp
+@@ -15,6 +15,7 @@
+ 
+ #include <map>
+ #include <random>
++#include <unordered_map>  // cheshire: step 7i
+ #include <vector>
+ #include <functional>
+ namespace aliceVision {
+@@ -64,28 +65,27 @@ void colorizeTracks(SfMData& sfmData)
+     }
+ 
+     // assign each landmark to a view
+-    for (ViewInfo& viewCardinal : sortedViewsCardinal)
++    // cheshire (step 7i, 0.3.7): each landmark goes to the first view of the order above that observes it. Upstream
++    // found it by one pass per view over the landmarks still unassigned (views x landmarks); here each view's rank in
++    // the order, then one pass over the landmarks, in their order: the same view for each, and each view's landmarks
++    // in the same order.
+     {
+-        std::vector<std::reference_wrapper<Landmark>> toKeep;
+-        const IndexT viewId = viewCardinal.viewId;
+-
+-        for (int i = 0; i < remainingLandmarksToColor.size(); ++i)
++        std::unordered_map<IndexT, std::size_t> cheshireRank;
++        cheshireRank.reserve(sortedViewsCardinal.size());
++        for (std::size_t r = 0; r < sortedViewsCardinal.size(); ++r)
++            cheshireRank.emplace(sortedViewsCardinal[r].viewId, r);
++        for (Landmark& landmark : remainingLandmarksToColor)
+         {
+-            Landmark& landmark = remainingLandmarksToColor.at(i);
+-            auto it = landmark.getObservations().find(viewId);
+-            if (it != landmark.getObservations().end())
+-            {
+-                viewCardinal.landmarks.push_back(landmark);
+-            }
+-            else
++            std::size_t best = sortedViewsCardinal.size();
++            for (const auto& observationPair : landmark.getObservations())
+             {
+-                toKeep.push_back(landmark);
++                const auto it = cheshireRank.find(observationPair.first);
++                if (it != cheshireRank.end() && it->second < best)
++                    best = it->second;
+             }
++            if (best < sortedViewsCardinal.size())
++                sortedViewsCardinal[best].landmarks.push_back(landmark);
+         }
+-        std::swap(toKeep, remainingLandmarksToColor);
+-
+-        if (remainingLandmarksToColor.empty())
+-            break;
+     }
+ 
+     std::random_device randomDevice;
 diff --git a/src/cmake/config.hpp.in b/src/cmake/config.hpp.in
 index 27e3ec0..027ba01 100644
 --- a/src/cmake/config.hpp.in

@@ -26,6 +26,9 @@
 // upstream full pass runs for the rest of that iteration (rare, and the full pass is exact).
 // Without the local strategy every pose is refined and the upstream passes run unchanged.
 // CHESHIRE_SFM_PROFILE=1 prints one line per iteration.
+//
+// Step 7l (0.3.7): the full passes themselves - upstream's pixel-residual filter and unstable-pose count - run on
+// every core with each view's pose read once; the verdicts and counts are upstream's, applied in its order.
 
 #include <aliceVision/sfm/sfmFilters.hpp>
 #include <aliceVision/track/Track.hpp>
@@ -33,8 +36,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <map>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace aliceVision {
@@ -260,6 +265,223 @@ inline IndexT poseObservationCount(const sfmData::SfMData& sfmData, const track:
     return count;
 }
 
+// ---- step 7l (0.3.7): upstream's full passes on every core ----------------------------------------
+// Without the local passes (the default) every adjust is followed by upstream's full passes. The pixel-residual filter
+// and the count behind eraseUnstablePoses walk every observation on one thread, with map lookups and a pose copy per
+// observation: about 5 M observations on the False Door, 64 times, about 40 s. Here each view's pose and intrinsic
+// are read once, the verdicts and counts are made on every core, and the erasures are applied in the order upstream
+// makes them. The same tests on the same values, so the same scene.
+
+// a posed view's pose and intrinsic, as upstream reads them for each of its observations
+struct ViewPose
+{
+    geometry::Pose3 pose;
+    const camera::IntrinsicBase* intrinsic = nullptr;
+};
+
+inline std::unordered_map<IndexT, ViewPose> viewPoses(const sfmData::SfMData& sfmData)
+{
+    std::unordered_map<IndexT, ViewPose> out;
+    out.reserve(sfmData.getViews().size());
+    for (const auto& [viewId, view] : sfmData.getViews())
+    {
+        if (!sfmData.existsPose(*view))
+            continue;
+        const auto intrinsic = sfmData.getIntrinsics().find(view->getIntrinsicId());
+        if (intrinsic == sfmData.getIntrinsics().end())
+            continue;
+        ViewPose v;
+        v.pose = sfmData.getPose(*view).getTransform();
+        v.intrinsic = intrinsic->second.get();
+        out.emplace(viewId, v);
+    }
+    return out;
+}
+
+// removeOutliersWithPixelResidualError (sfmFilters.cpp:19-61): each observation's verdict on every core, then the
+// erasures in landmark order, and the landmarks left short
+inline IndexT removeOutliersWithPixelResidualErrorAll(sfmData::SfMData& sfmData,
+                                                     EFeatureConstraint featureConstraint,
+                                                     const double dThresholdPixel,
+                                                     const unsigned int minTrackLength)
+{
+    const std::unordered_map<IndexT, ViewPose> views = viewPoses(sfmData);
+    sfmData::Landmarks& landmarks = sfmData.getLandmarks();
+    const std::size_t n = landmarks.size();
+    std::vector<sfmData::Landmarks::iterator> its;
+    its.reserve(n);
+    std::vector<std::size_t> first(n + 1, 0);
+    for (auto it = landmarks.begin(); it != landmarks.end(); ++it)
+    {
+        first[its.size() + 1] = first[its.size()] + it->second.getObservations().size();
+        its.push_back(it);
+    }
+    std::vector<unsigned char> outlier(first[n], 0), touched(n, 0);
+#pragma omp parallel for schedule(dynamic, 4096)
+    for (std::ptrdiff_t li = 0; li < static_cast<std::ptrdiff_t>(n); ++li)
+    {
+        const sfmData::Landmark& landmark = its[static_cast<std::size_t>(li)]->second;
+        std::size_t k = first[static_cast<std::size_t>(li)];
+        for (const auto& [viewId, obs] : landmark.getObservations())
+        {
+            const ViewPose& v = views.at(viewId);
+            Vec2 residual = v.intrinsic->residual(v.pose, landmark.getX().homogeneous(), obs.getCoordinates());
+            if (featureConstraint == EFeatureConstraint::SCALE && obs.getScale() > 0.0)
+            {
+                // Apply the scale of the feature to get a residual value
+                // relative to the feature precision.
+                residual /= obs.getScale();
+            }
+            if ((v.pose.depth(landmark.getX()) < 0) || (residual.norm() > dThresholdPixel))
+            {
+                outlier[k] = 1;
+                touched[static_cast<std::size_t>(li)] = 1;
+            }
+            ++k;
+        }
+    }
+    IndexT outlierCount = 0;
+    for (std::size_t li = 0; li < n; ++li)
+    {
+        sfmData::Observations& observations = its[li]->second.getObservations();
+        if (touched[li])
+        {
+            std::size_t k = first[li];
+            for (auto itObs = observations.begin(); itObs != observations.end(); ++k)
+            {
+                if (outlier[k])
+                {
+                    ++outlierCount;
+                    itObs = observations.erase(itObs);
+                }
+                else
+                    ++itObs;
+            }
+        }
+        if (observations.empty() || observations.size() < minTrackLength)
+            landmarks.erase(its[li]);
+    }
+    return outlierCount;
+}
+
+// eraseUnstablePoses (sfmFilters.cpp:161-232): the observations per pose counted on every core (integer counts, the
+// same in any order), then the same removal
+inline bool eraseUnstablePosesAll(sfmData::SfMData& sfmData, const IndexT minPointsPerPose, std::set<IndexT>* outRemovedViewsId)
+{
+    IndexT removedElements = 0;
+    const sfmData::Landmarks& landmarks = sfmData.getLandmarks();
+
+    // Count the observation poses occurrence
+    std::map<IndexT, IndexT> posesCount;
+    for (auto& [poseId, pose] : sfmData.getPoses().valueRange())
+    {
+        if (!pose.isRemovable())
+            continue;
+        posesCount[poseId] = 0;
+    }
+
+    // each view's slot in posesCount (-1: its pose is not counted)
+    std::map<IndexT, int> poseSlot;
+    for (const auto& [poseId, count] : posesCount)
+        poseSlot.emplace(poseId, static_cast<int>(poseSlot.size()));
+    std::unordered_map<IndexT, int> viewSlot;
+    viewSlot.reserve(sfmData.getViews().size());
+    for (const auto& [viewId, view] : sfmData.getViews())
+    {
+        const auto it = poseSlot.find(view->getPoseId());
+        viewSlot.emplace(viewId, it == poseSlot.end() ? -1 : it->second);
+    }
+    std::vector<const sfmData::Landmark*> all;
+    all.reserve(landmarks.size());
+    for (const auto& [idLandmark, landmark] : landmarks)
+        all.push_back(&landmark);
+    const int S = static_cast<int>(poseSlot.size());
+    std::vector<IndexT> total(static_cast<std::size_t>(S), 0);
+#pragma omp parallel
+    {
+        std::vector<IndexT> local(static_cast<std::size_t>(S), 0);
+#pragma omp for schedule(static)
+        for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(all.size()); ++i)
+            for (const auto& [viewId, obs] : all[static_cast<std::size_t>(i)]->getObservations())
+            {
+                const int s = viewSlot.at(viewId);
+                if (s >= 0)
+                    ++local[static_cast<std::size_t>(s)];
+            }
+#pragma omp critical
+        for (int s = 0; s < S; ++s)
+            total[static_cast<std::size_t>(s)] += local[static_cast<std::size_t>(s)];
+    }
+    for (auto& [poseId, count] : posesCount)
+        count = total[static_cast<std::size_t>(poseSlot.at(poseId))];
+
+    // If usage count is smaller than the threshold, remove the Pose
+    for (const auto& [idPose, count] : posesCount)
+    {
+        if (count < minPointsPerPose)
+        {
+            sfmData.erasePose(idPose, true);  // no throw
+
+            for (auto& [viewId, view] : sfmData.getViews())
+            {
+                if (view->getPoseId() == idPose)
+                {
+                    if (view->isPartOfRig())
+                    {
+                        // the pose is now independant
+                        view->setPoseId(idPose);
+                        view->setIndependantPose(true);
+                    }
+
+                    // add view id to the removedViewsId set
+                    if (outRemovedViewsId != NULL)
+                    {
+                        outRemovedViewsId->insert(viewId);
+                    }
+                }
+            }
+            ++removedElements;
+        }
+    }
+
+    if (removedElements)
+    {
+        ALICEVISION_LOG_DEBUG("eraseUnstablePoses: " << removedElements);
+    }
+
+    return removedElements > 0;
+}
+
+// eraseUnstablePosesAndObservations (sfmFilters.cpp:293-321) with eraseUnstablePosesAll; the passes after a pose went
+// (rare) are upstream's
+inline bool eraseUnstablePosesAndObservationsAll(sfmData::SfMData& sfmData,
+                                                 const IndexT minPointsPerPose,
+                                                 const IndexT minPointsPerLandmark,
+                                                 std::set<IndexT>* outRemovedViewsId)
+{
+    bool removedContent = false;
+    bool removedPoses = false;
+    bool removedObservations = false;
+    do
+    {
+        removedContent = false;
+        if (eraseUnstablePosesAll(sfmData, minPointsPerPose, outRemovedViewsId))
+        {
+            removedPoses = true;
+            removedContent = eraseObservationsWithMissingPoses(sfmData, minPointsPerLandmark);
+            if (removedContent)
+            {
+                removedObservations = true;
+            }
+
+            removedContent = eraseLandmarksWithMissingReferenceView(sfmData);
+            // Erase some observations can make some Poses index disappear so perform the process in a loop
+        }
+    } while (removedContent);
+
+    return removedPoses || removedObservations;
+}
+
 // eraseUnstablePosesAndObservations, with the count done only for the poses that can have changed.
 inline void eraseUnstableAfterAdjust(sfmData::SfMData& sfmData,
                                      const track::TracksPerView& tracksPerView,
@@ -274,7 +496,7 @@ inline void eraseUnstableAfterAdjust(sfmData::SfMData& sfmData,
     posesChecked = 0;
     if (!localStrategy || !localPassesEnabled())
     {
-        eraseUnstablePosesAndObservations(sfmData, minPointsPerPose, minPointsPerLandmark, outRemovedViewsId);
+        eraseUnstablePosesAndObservationsAll(sfmData, minPointsPerPose, minPointsPerLandmark, outRemovedViewsId);
         return;
     }
     std::set<IndexT> poses;
@@ -316,7 +538,7 @@ inline void eraseUnstableAfterAdjust(sfmData::SfMData& sfmData,
         // short - upstream's full pass finishes the iteration exactly
         eraseObservationsWithMissingPoses(sfmData, minPointsPerLandmark);
         eraseLandmarksWithMissingReferenceView(sfmData);
-        eraseUnstablePosesAndObservations(sfmData, minPointsPerPose, minPointsPerLandmark, outRemovedViewsId);
+        eraseUnstablePosesAndObservationsAll(sfmData, minPointsPerPose, minPointsPerLandmark, outRemovedViewsId);
     }
 }
 
@@ -337,7 +559,7 @@ inline std::size_t removeOutliersAfterAdjust(sfmData::SfMData& sfmData,
     if (full)
     {
         candidates = sfmData.getLandmarks().size();
-        nbResidual = removeOutliersWithPixelResidualError(sfmData, featureConstraint, maxReprojectionError, 2);
+        nbResidual = removeOutliersWithPixelResidualErrorAll(sfmData, featureConstraint, maxReprojectionError, 2);   // step 7l
         nbAngle = removeOutliersWithAngleError(sfmData, minAngleForLandmark);
     }
     else

@@ -3054,3 +3054,82 @@ The solver is now 17 % of the reconstruction. The next targets are around it, la
 - the features' read;
 - the next-views scoring;
 - the local-BA graph.
+
+
+## 0.3.7: incremental SfM around the solver, exact (steps 7i-7m) (2026-09-29)
+
+The 7h profile pointed at host code around the solver that grew with the scene. Each step keeps
+every value and every order that reaches the output: the output of all three sets is unchanged
+(41 `801d1fb7…`, engine bay `814ae0d5…`, False Door `a5cc8437…`). Each False Door pair below ran
+one after the other on the same box, and each step is judged by its own phase. Other phases move by
+±5 s from run to run here.
+
+- **7i, the colours' view assignment.**
+  - **Before:** `colorizeTracks` gives each landmark the first view, in order of how many landmarks
+    each view sees, that observes it. It found that view by re-scanning every unassigned landmark
+    once per view: about 560 M observation lookups on the False Door, on one thread.
+  - **Now:** each view's rank is looked up once, and one pass over the landmarks makes the same
+    assignment, with each view's landmarks in the same order.
+  - **False Door:** colours 47.2 s → 36.7 s.
+- **7j, the landmark-id sets.** Three places copied every landmark's id into a `std::set`, 1.35 M
+  nodes, to intersect a view's track list with it:
+  - the next-views scoring, once per call;
+  - every view's resection, inside the parallel loop;
+  - the local-BA graph's update.
+
+  **Now:** a byte per track id is built once per use, and the view's sorted list is filtered by it.
+  The result is exactly the ids `std::set_intersection` copied, in the same order.
+  - **A first version was worse in two places.** It intersected against the landmarks' map
+    directly. That helped the resection, but walked the map's large nodes once per view elsewhere:
+    next views 30.5 s → 44.2 s, graph update 18.2 s → 42.6 s.
+  - **With the mask:** next views 29.4 s → 7.7 s, resection 79.0 s → 42.1 s, graph update
+    16.7 s → 3.5 s.
+  - **A side effect:** the solver's own phase no longer swings between 58 s and 74 s from run to
+    run. The million-node sets had churned the heap it allocates from.
+- **7k, triangulation's critical sections.**
+  - **Where the time went:** tracks were handed out one `omp single` at a time, and each result was
+    inserted under a critical section. Each observation also copied the camera's `shared_ptr`
+    (shared atomic counts) and recomputed the view's projection matrix.
+  - **Now:** a slot per track, each view's data once per call, and the results applied in track
+    order.
+  - **False Door:** triangulation 38.6 s → 34.8 s. Most of the rest is the LO-RANSAC arithmetic.
+- **7l, the full passes after each solve** (`postAdjust.inc`).
+  - **Where the time went:** upstream's pixel-residual filter and the observation count behind
+    `eraseUnstablePoses` ran on one thread over every observation, with map lookups and a pose copy
+    each.
+  - **Now:** each view's pose and intrinsic are read once, and the verdicts and integer counts are
+    made on every core. The erasures are applied in upstream's order.
+  - **False Door:** post-adjust 54.5 s → 15.1 s.
+- **7m, the local-BA graph's landmark states.**
+  - **Where the time went:** each observation's view was looked up twice, on one thread, and every
+    landmark was inserted from the root into a map that is cleared each call.
+  - **Now:** each view's state once, the states on every core, and the map refilled in id order
+    with an end hint.
+  - **False Door:** graph states 12.6 s → 6.7 s.
+
+**The whole run.** False Door on this box, all with the same output:
+- The build before 7i took 436-448 s.
+- The installed build with 7i-7m takes 284.3 s, 36 % less.
+- Bundle adjustment is 46.9 s of it.
+
+MSVC (the Windows CUDA tree) compiles the changed libraries.
+
+| program step | s | | reconstruction phase | s |
+|---|---|---|---|---|
+| features (read) | 45.9 | | the solve (`adjust`) | 55.9 |
+| colours | 36.9 | | resection | 38.0 |
+| reconstruction | 192.8 | | triangulation | 32.8 |
+| report, save, alignment, matches | 7.2 | | post-adjust | 14.9 |
+| | | | initial pairs | 11.6 |
+| | | | tracks | 11.4 |
+| | | | register changes | 7.7 |
+| | | | graph states | 6.7 |
+| | | | next views | 4.5 |
+| | | | statistics | 4.2 |
+| | | | graph update | 2.5 |
+
+The largest pieces left outside the solver are:
+- the features' read, 46 s;
+- resection's arithmetic;
+- the colours' image reads;
+- triangulation's LO-RANSAC.

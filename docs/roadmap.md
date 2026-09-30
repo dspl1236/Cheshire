@@ -650,7 +650,15 @@ reaches it. The design is in docs/notes/ba-own-solver.md; the steps, each a go/n
     | the next-views scoring | 37 s |
     | the local-BA graph | 37 s |
 
-  - Next: those, largest first, each exact.
+  - **7i-7m**, each exact (docs/04):
+    - the colours' view assignment in one pass;
+    - a track-id mask in place of million-node sets in the next views, the resection and the graph;
+    - triangulation without critical sections;
+    - the full passes after each solve on every core;
+    - the graph's states on every core.
+
+    False Door 436-448 s → 284 s, the same output.
+  - Next: the features' read (46 s), resection's and triangulation's arithmetic, the colours' reads.
 
 Beside it:
 
