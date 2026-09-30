@@ -130,7 +130,7 @@ index 8e3e862..456b000 100644
  # SYCL/AdaptiveCpp
  # ==============================================================================
 diff --git a/src/aliceVision/camera/cameraUndistortImage.hpp b/src/aliceVision/camera/cameraUndistortImage.hpp
-index ef0d52f..458d8a2 100644
+index ef0d52f..6960f60 100644
 --- a/src/aliceVision/camera/cameraUndistortImage.hpp
 +++ b/src/aliceVision/camera/cameraUndistortImage.hpp
 @@ -6,6 +6,7 @@
@@ -141,11 +141,15 @@ index ef0d52f..458d8a2 100644
  
  #include <aliceVision/config.hpp>
  #include <aliceVision/system/Logger.hpp>
-@@ -17,6 +18,102 @@
+@@ -17,6 +18,147 @@
  #include <aliceVision/camera/Pinhole.hpp>
  #include <aliceVision/camera/Undistortion.hpp>
  #include <aliceVision/image/io.hpp>
 +#include <cstdlib>   // cheshire: undistortion map cache (scripts/apply_hip_patch.py, step 5h)
++#include <aliceVision/image/cheshireUndistort.hpp>  // cheshire: step 8g
++#include <cstring>  // cheshire
++#include <limits>  // cheshire
++#include <type_traits>  // cheshire
 +#include <memory>
 +#include <mutex>
 +#include <vector>
@@ -238,23 +242,86 @@ index ef0d52f..458d8a2 100644
 +    return m;
 +}
 +
++// cheshire (step 8g): the map as the device remap takes it - per output pixel the source position the sampler is
++// called with (Sampler2d's parameters are floats), or NaN in x where Image::contains, which truncates the double
++// coordinates to int, rejects the pixel and UndistortImage leaves the fill colour. Once per map and source size.
++template<typename ImageT>
++inline std::shared_ptr<const std::vector<float>> deviceCoords(const std::shared_ptr<const std::vector<Vec2>>& map, int roiW, int roiH,
++                                                              const ImageT& imageIn)
++{
++    struct Entry
++    {
++        const void* map;
++        int w, h;
++        std::shared_ptr<const std::vector<float>> coords;
++    };
++    static std::mutex m;
++    static std::vector<Entry> entries;  // the maps themselves are never dropped (cache() above), so neither are these
++    std::lock_guard<std::mutex> g(m);
++    for (const Entry& e : entries)
++        if (e.map == map.get() && e.w == imageIn.width() && e.h == imageIn.height())
++            return e.coords;
++    const std::size_t n = std::size_t(roiW) * roiH;
++    auto c = std::make_shared<std::vector<float>>(2 * n);
++    const Vec2* d = map->data();
++    float* out = c->data();
++    for (std::size_t i = 0; i < n; ++i)
++    {
++        if (imageIn.contains(d[i](1), d[i](0)))
++        {
++            const float x = d[i](0), y = d[i](1);  // as the sampler's float parameters take them
++            out[2 * i] = x;
++            out[2 * i + 1] = y;
++        }
++        else
++        {
++            out[2 * i] = std::numeric_limits<float>::quiet_NaN();
++            out[2 * i + 1] = 0.0f;
++        }
++    }
++    entries.push_back(Entry{map.get(), imageIn.width(), imageIn.height(), c});
++    return c;
++}
++
 +}  // namespace cheshire_undistort
 +}  // namespace camera
 +}  // namespace aliceVision
  
  #include <memory>
  
-@@ -120,6 +217,9 @@ void UndistortImage(const image::Image<T>& imageIn,
+@@ -120,6 +262,31 @@ void UndistortImage(const image::Image<T>& imageIn,
      image_ud.resize(widthRoi, heightRoi, true, fillcolor);
      const image::Sampler2d<image::SamplerLinear> sampler;
  
 +    // cheshire: the distorted coordinates come from the per-intrinsic map when there is one
 +    const auto cheshireMap = cheshire_undistort::mapFor(intrinsicPtr, widthRoi, heightRoi, xOffset, yOffset, ppCorrection);
 +    const Vec2* cheshireLut = cheshireMap ? cheshireMap->data() : nullptr;
++    // cheshire (step 8g): inside PrepareDenseScene's DeviceUndistortScope an RGBA float image is remapped on the device
++    // (hip/port/cheshireremap), the loop below operation for operation; CHESHIRE_UNDISTORT_DEVICE_CHECK=1 also runs the
++    // loop, compares, and keeps its pixels
++    image::Image<T> cheshireDevice;
++    bool cheshireCompare = false;
++    if constexpr (std::is_same_v<T, image::RGBAfColor>)
++    {
++        if (cheshireLut && image::inDeviceUndistort() && image::cheshireRemapDeviceEnabled())
++        {
++            const auto coords = cheshire_undistort::deviceCoords(cheshireMap, widthRoi, heightRoi, imageIn);
++            const float fill[4] = {fillcolor.r(), fillcolor.g(), fillcolor.b(), fillcolor.a()};
++            if (image::cheshireRemapOnDevice(coords.get(), coords->data(), widthRoi, heightRoi, reinterpret_cast<const float*>(imageIn.data()),
++                                              imageIn.width(), imageIn.height(), fill, reinterpret_cast<float*>(image_ud.data())))
++            {
++                if (!image::cheshireRemapDeviceCheck())
++                    return;
++                cheshireDevice = image_ud;
++                image_ud.fill(fillcolor);
++                cheshireCompare = true;
++            }
++        }
++    }
  #pragma omp parallel for
      for (int y = 0; y < heightRoi; ++y)
      {
-@@ -127,7 +227,8 @@ void UndistortImage(const image::Image<T>& imageIn,
+@@ -127,7 +294,8 @@ void UndistortImage(const image::Image<T>& imageIn,
          {
              const Vec2 undisto_pix(x + xOffset, y + yOffset);
              // compute coordinates with distortion
@@ -264,6 +331,18 @@ index ef0d52f..458d8a2 100644
  
              // pick pixel if it is in the image domain
              if (imageIn.contains(disto_pix(1), disto_pix(0)))
+@@ -136,6 +304,11 @@ void UndistortImage(const image::Image<T>& imageIn,
+             }
+         }
+     }
++    if constexpr (std::is_same_v<T, image::RGBAfColor>)
++    {
++        if (cheshireCompare)  // cheshire (step 8g): the device's pixels against the loop's
++            image::cheshireRemapCheckCount(std::memcmp(cheshireDevice.data(), image_ud.data(), sizeof(T) * std::size_t(widthRoi) * heightRoi) == 0);
++    }
+ }
+ 
+ }  // namespace camera
 diff --git a/src/aliceVision/depthMap/BufPtr.hpp b/src/aliceVision/depthMap/BufPtr.hpp
 index 6ead556..eabd2d9 100644
 --- a/src/aliceVision/depthMap/BufPtr.hpp
@@ -6144,23 +6223,25 @@ index bd5e932..987a60c 100644
  
      std::map<VertexIndex, std::set<CellIndex>> neighboringCellsPerVertexTmp;
 diff --git a/src/aliceVision/image/CMakeLists.txt b/src/aliceVision/image/CMakeLists.txt
-index 1907d8f..80355e0 100644
+index 1907d8f..bebc63f 100644
 --- a/src/aliceVision/image/CMakeLists.txt
 +++ b/src/aliceVision/image/CMakeLists.txt
-@@ -14,6 +14,8 @@ set(image_files_headers
+@@ -14,6 +14,9 @@ set(image_files_headers
      drawing.hpp
      filtering.hpp
      io.hpp
 +    cheshireExr.hpp
++    cheshireUndistort.hpp
 +    cheshireResize.hpp
      jetColorMap.cpp
      resampling.hpp
      pixelTypes.hpp
-@@ -30,12 +32,28 @@ set(image_files_sources
+@@ -30,12 +33,42 @@ set(image_files_sources
      dcp.cpp
      filtering.cpp
      io.cpp
 +    cheshireExr.cpp
++    cheshireUndistort.cpp
      imageAlgo.cpp
      jetColorMap.cpp
      remap.cpp
@@ -6181,18 +6262,35 @@ index 1907d8f..80355e0 100644
 +    add_subdirectory("${CHESHIRE_JPG_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/cheshirejpg")
 +    set(CHESHIRE_JPG_LINK CheshireJPG)
 +endif()
++# cheshire (step 8g): CheshireRemap (hip/port/cheshireremap) for PrepareDenseScene's undistortion on the device,
++# built from the Cheshire checkout with the build's GPU language and architectures
++set(CHESHIRE_REMAP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../hip/port/cheshireremap")
++set(CHESHIRE_REMAP_LINK "")
++if (ALICEVISION_HAVE_CUDA AND EXISTS "${CHESHIRE_REMAP_DIR}/CMakeLists.txt")
++    if (ALICEVISION_HAVE_HIP)
++        set(CHESHIREREMAP_GPU HIP CACHE STRING "HIP or CUDA" FORCE)
++    else()
++        set(CHESHIREREMAP_GPU CUDA CACHE STRING "HIP or CUDA" FORCE)
++    endif()
++    add_subdirectory("${CHESHIRE_REMAP_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/cheshireremap")
++    set(CHESHIRE_REMAP_LINK CheshireRemap)
++endif()
 +
  alicevision_add_library(aliceVision_image
      SOURCES ${image_files_headers} ${image_files_sources}
      PUBLIC_LINKS
-@@ -46,7 +64,22 @@ alicevision_add_library(aliceVision_image
+@@ -46,7 +79,26 @@ alicevision_add_library(aliceVision_image
      PRIVATE_LINKS
          aliceVision_system
          OpenEXR::OpenEXR
 +        ${CHESHIRE_JPG_LINK}
++        ${CHESHIRE_REMAP_LINK}
  )
 +if (CHESHIRE_JPG_LINK)
 +    target_compile_definitions(aliceVision_image PRIVATE CHESHIRE_HAVE_JPG=1)
++endif()
++if (CHESHIRE_REMAP_LINK)
++    target_compile_definitions(aliceVision_image PRIVATE CHESHIRE_HAVE_REMAP=1)  # cheshire: step 8g
 +endif()
 +# cheshire (step 6v): libdeflate for the direct EXR reader's ZIP/ZIPS chunks
 +find_path(CHESHIRE_DEFLATE_INCLUDE_DIR libdeflate.h)
@@ -11938,7 +12036,7 @@ index 4fe193b..0145801 100644
                      fuseCut::Mesher mesher(mp, pc, tetrahedralization, gfiller.getCellsStatus());
                      mesher.graphCutPostProcessing(&hexah[0]);
 diff --git a/src/software/pipeline/main_prepareDenseScene.cpp b/src/software/pipeline/main_prepareDenseScene.cpp
-index a37cb29..c2dc9f8 100644
+index a37cb29..41d44ce 100644
 --- a/src/software/pipeline/main_prepareDenseScene.cpp
 +++ b/src/software/pipeline/main_prepareDenseScene.cpp
 @@ -4,6 +4,9 @@
@@ -11951,11 +12049,12 @@ index a37cb29..c2dc9f8 100644
  #include <aliceVision/sfmData/SfMData.hpp>
  #include <aliceVision/alicevision_omp.hpp>
  #include <aliceVision/sfmDataIO/sfmDataIO.hpp>
-@@ -17,6 +20,29 @@
+@@ -17,6 +20,30 @@
  #include <aliceVision/config.hpp>
  #include <aliceVision/sfmDataIO/viewIO.hpp>
  #include <aliceVision/camera/cameraUndistortImage.hpp>
 +#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 8f
++#include <aliceVision/image/cheshireUndistort.hpp>  // cheshire: step 8g
 +#include <atomic>   // cheshire: CHESHIRE_PDS_PROFILE
 +#include <chrono>
 +#include <cstdio>
@@ -11981,7 +12080,7 @@ index a37cb29..c2dc9f8 100644
  
  #include <boost/program_options.hpp>
  
-@@ -45,6 +71,32 @@ using namespace aliceVision::sfmDataIO;
+@@ -45,6 +72,32 @@ using namespace aliceVision::sfmDataIO;
  namespace po = boost::program_options;
  namespace fs = std::filesystem;
  
@@ -12014,18 +12113,19 @@ index a37cb29..c2dc9f8 100644
  template<class ImageT, class MaskFuncT>
  void process(const std::string& dstColorImage,
               const IntrinsicBase* cam,
-@@ -55,7 +107,10 @@ void process(const std::string& dstColorImage,
+@@ -55,7 +108,11 @@ void process(const std::string& dstColorImage,
               MaskFuncT&& maskFunc)
  {
      ImageT image, image_ud;
 +    image::ExrDeflateWriteScope cheshireDeflateScope;  // cheshire (step 8f): the EXR below, deflated with libdeflate where OpenEXR uses zlib
++    image::DeviceUndistortScope cheshireUndistortScope;  // cheshire (step 8g): the undistortion below on the device, the same bits
 +    auto cheshireT = std::chrono::steady_clock::now();  // cheshire, step 5g
      readImage(srcImage, image, image::EImageColorSpace::LINEAR);
 +    cheshirePdsProfile.readUs += cheshireUsSince(cheshireT); cheshireT = std::chrono::steady_clock::now();
  
      // exposure correction
      if (evCorrection)
-@@ -70,6 +125,7 @@ void process(const std::string& dstColorImage,
+@@ -70,6 +127,7 @@ void process(const std::string& dstColorImage,
  
      // mask
      maskFunc(image);
@@ -12033,7 +12133,7 @@ index a37cb29..c2dc9f8 100644
  
      // undistort
      if (cam->isValid() && cam->hasDistortion())
-@@ -78,11 +134,14 @@ void process(const std::string& dstColorImage,
+@@ -78,11 +136,14 @@ void process(const std::string& dstColorImage,
          using Pix = typename ImageT::Tpixel;
          Pix pixZero(Pix::Zero());
          UndistortImage(image, cam, image_ud, pixZero);
@@ -12050,7 +12150,7 @@ index a37cb29..c2dc9f8 100644
      }
  }
  
-@@ -132,7 +191,10 @@ bool prepareDenseScene(const SfMData& sfmData,
+@@ -132,7 +193,10 @@ bool prepareDenseScene(const SfMData& sfmData,
      const double medianCameraExposure = sfmData.getMedianCameraExposureSetting().getExposure();
      ALICEVISION_LOG_INFO("Median Camera Exposure: " << medianCameraExposure << ", Median EV: " << std::log2(1.0 / medianCameraExposure));
  
@@ -12062,7 +12162,7 @@ index a37cb29..c2dc9f8 100644
      for (int i = 0; i < viewIds.size(); ++i)
      {
          auto itView = viewIds.begin();
-@@ -335,7 +397,7 @@ int aliceVision_main(int argc, char* argv[])
+@@ -335,7 +399,7 @@ int aliceVision_main(int argc, char* argv[])
           "Correct exposure value.");
      // clang-format on
  

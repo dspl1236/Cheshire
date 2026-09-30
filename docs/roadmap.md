@@ -746,8 +746,11 @@ first, then AC-RANSAC's hypothesis loop and PrepareDenseScene on four-thread hos
     is before 3.2 (the Linux bundles). The same pixels, checked against zlib and against the zoo job's
     0.3.7 files. On Windows the files are byte for byte OpenEXR 3.4's. The stage is 28 % faster on
     house-pc: about 930 to 670 s on the zoo.
-  - Next: the undistortion on the device (about a quarter of the stage; double precision without
-    fused operations, so the same bits), while the GPU is idle there.
+  - **Step 8g, done 2026-09-30:** the undistortion on the device (CheshireRemap), the CPU loop's bits;
+    on by default with four hardware threads or fewer. On house-pc it takes 15 % more off the stage,
+    and the zoo chunk goes from 71.2 s (0.3.7) to 43.8 s with 8f. On the twelve-thread RX 9070 box the
+    copies cost more than that CPU's loop, so it is off there. The Windows CUDA build meets it at the
+    0.3.8 gate.
 
 ## Upstream's next pipeline: detect, then pivot
 

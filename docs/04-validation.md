@@ -3427,3 +3427,51 @@ busy with an image.
 What is left on the four-thread host is the undistortion (about a quarter of the stage). It
 samples in double precision without fused operations, so the device could run it to the same bits
 while the GPU sits idle.
+
+## 0.3.8: PrepareDenseScene's undistortion on the device (step 8g, 2026-09-30)
+
+`UndistortImage` samples the photo at each undistorted pixel's distorted position through
+`Sampler2d<SamplerLinear>`. That means four neighbours weighted in double precision, summed per
+channel, divided by the weight where a border cut it short, and rounded back to float. CheshireRemap
+(`hip/port/cheshireremap`, built into the image library like CheshireJPG) runs that arithmetic with
+one device thread per output pixel. Every product, sum and quotient is a separate IEEE operation
+rounded to nearest, as on the host: clang's `fp contract(off)` pragma covers the HIP build, and
+`--fmad=false` the CUDA one. HIP's `__dadd_rn` family is plain operators in HIP's own headers,
+which clang's HIP default fuses across, so it is not used.
+
+The coordinate map is converted on the host once per map and source size, to what the sampler
+actually receives:
+- the two coordinates as floats, since Sampler2d's parameters are floats;
+- NaN where `Image::contains` rejects the pixel. It truncates the double coordinates to int, so
+  -0.5 counts as inside.
+
+Inside PrepareDenseScene (`DeviceUndistortScope`) an RGBA float image with a cached map goes to a
+remapper. A remapper holds the map, a source and a destination image on the device, and pinned
+staging. There are up to min(hardware threads, 4) of them, and no more than fit in 60 % of the device
+memory free at the first image. An image thread that finds none free runs the CPU loop instead of
+waiting.
+
+| check | images identical to the CPU loop | output files |
+|---|---|---|
+| RX 9070 (HIP, gfx12-generic), 41 views, forced on | 41 of 41; 32 of 32 and 31 of 31 with 4 remappers | 41 of 41 identical as bytes |
+| house-pc GTX 1080 Ti (CUDA 12.9, sm_61), the zoo's first 40 views | 40 of 40 | 40 of 40 identical as bytes |
+
+On house-pc (i3-4330, four threads; 0.3.8 development bundle with 8f; the zoo chunk, alternating):
+
+| undistortion | wall | undistort (thread-seconds) |
+|---|---|---|
+| CPU loop (`CHESHIRE_UNDISTORT_DEVICE=0`) | 51.8 s, 50.7 s | 59.1, 62.4 |
+| device (the default there) | 43.5 s, 44.1 s | 26.6, 26.9 |
+
+That takes 15 % off the stage, and with 8f 38 %: the chunk went from 71.2 s (0.3.7) to 43.8 s. On
+the whole zoo, PrepareDenseScene would go from about 930 s to about 570 s.
+
+On the RX 9070 box (twelve threads) the device path does not pay. A remap there costs about 40 ms
+of upload and 70 ms of kernel and download per 12 MP image with four running, and more with twelve
+threads competing for memory bandwidth. That is more than that CPU's loop, about 140 ms of the
+undistort phase, whose other half is the output image's allocation and fill, the same on both
+paths. The 41 views took 9.4-9.8 s on the device against 8.9-9.2 s on the CPU. So the device takes
+the undistortion by default only with four hardware threads or fewer, where the loop is the costly
+side. `CHESHIRE_UNDISTORT_DEVICE=1|0` overrides that, `CHESHIRE_UNDISTORT_DEVICE_REMAPPERS` sets the
+bound, and `CHESHIRE_UNDISTORT_DEVICE_CHECK=1` runs both and compares. The Windows CUDA build has not
+run it yet; its first run is the 0.3.8 gate.

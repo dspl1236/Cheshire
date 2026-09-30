@@ -804,6 +804,122 @@ STEP8F_PDS = [
      "    image::ExrDeflateWriteScope cheshireDeflateScope;  // cheshire (step 8f): the EXR below, deflated with libdeflate where OpenEXR uses zlib\n"),
 ]
 
+# 8g (0.3.8): PrepareDenseScene's undistortion on the device (hip/port/cheshireremap), AliceVision's arithmetic to the bit.
+STEP8G_IMAGE_CMAKE = [
+    ("    cheshireExr.hpp\n", "    cheshireExr.hpp\n    cheshireUndistort.hpp\n"),
+    ("    cheshireExr.cpp\n", "    cheshireExr.cpp\n    cheshireUndistort.cpp\n"),
+    ("    set(CHESHIRE_JPG_LINK CheshireJPG)\nendif()\n",
+     "    set(CHESHIRE_JPG_LINK CheshireJPG)\nendif()\n"
+     "# cheshire (step 8g): CheshireRemap (hip/port/cheshireremap) for PrepareDenseScene's undistortion on the device,\n"
+     "# built from the Cheshire checkout with the build's GPU language and architectures\n"
+     "set(CHESHIRE_REMAP_DIR \"${CMAKE_CURRENT_SOURCE_DIR}/../../../../../hip/port/cheshireremap\")\n"
+     "set(CHESHIRE_REMAP_LINK \"\")\n"
+     "if (ALICEVISION_HAVE_CUDA AND EXISTS \"${CHESHIRE_REMAP_DIR}/CMakeLists.txt\")\n"
+     "    if (ALICEVISION_HAVE_HIP)\n"
+     "        set(CHESHIREREMAP_GPU HIP CACHE STRING \"HIP or CUDA\" FORCE)\n"
+     "    else()\n"
+     "        set(CHESHIREREMAP_GPU CUDA CACHE STRING \"HIP or CUDA\" FORCE)\n"
+     "    endif()\n"
+     "    add_subdirectory(\"${CHESHIRE_REMAP_DIR}\" \"${CMAKE_CURRENT_BINARY_DIR}/cheshireremap\")\n"
+     "    set(CHESHIRE_REMAP_LINK CheshireRemap)\n"
+     "endif()\n"),
+    ("        ${CHESHIRE_JPG_LINK}\n", "        ${CHESHIRE_JPG_LINK}\n        ${CHESHIRE_REMAP_LINK}\n"),
+    ("if (CHESHIRE_JPG_LINK)\n    target_compile_definitions(aliceVision_image PRIVATE CHESHIRE_HAVE_JPG=1)\nendif()\n",
+     "if (CHESHIRE_JPG_LINK)\n    target_compile_definitions(aliceVision_image PRIVATE CHESHIRE_HAVE_JPG=1)\nendif()\n"
+     "if (CHESHIRE_REMAP_LINK)\n    target_compile_definitions(aliceVision_image PRIVATE CHESHIRE_HAVE_REMAP=1)  # cheshire: step 8g\nendif()\n"),
+]
+STEP8G_UNDISTORT = [
+    ("#include <cstdlib>   // cheshire: undistortion map cache (scripts/apply_hip_patch.py, step 5h)\n",
+     "#include <cstdlib>   // cheshire: undistortion map cache (scripts/apply_hip_patch.py, step 5h)\n"
+     "#include <aliceVision/image/cheshireUndistort.hpp>  // cheshire: step 8g\n"
+     "#include <cstring>  // cheshire\n#include <limits>  // cheshire\n#include <type_traits>  // cheshire\n"),
+    ("}  // namespace cheshire_undistort\n",
+     r"""// cheshire (step 8g): the map as the device remap takes it - per output pixel the source position the sampler is
+// called with (Sampler2d's parameters are floats), or NaN in x where Image::contains, which truncates the double
+// coordinates to int, rejects the pixel and UndistortImage leaves the fill colour. Once per map and source size.
+template<typename ImageT>
+inline std::shared_ptr<const std::vector<float>> deviceCoords(const std::shared_ptr<const std::vector<Vec2>>& map, int roiW, int roiH,
+                                                              const ImageT& imageIn)
+{
+    struct Entry
+    {
+        const void* map;
+        int w, h;
+        std::shared_ptr<const std::vector<float>> coords;
+    };
+    static std::mutex m;
+    static std::vector<Entry> entries;  // the maps themselves are never dropped (cache() above), so neither are these
+    std::lock_guard<std::mutex> g(m);
+    for (const Entry& e : entries)
+        if (e.map == map.get() && e.w == imageIn.width() && e.h == imageIn.height())
+            return e.coords;
+    const std::size_t n = std::size_t(roiW) * roiH;
+    auto c = std::make_shared<std::vector<float>>(2 * n);
+    const Vec2* d = map->data();
+    float* out = c->data();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        if (imageIn.contains(d[i](1), d[i](0)))
+        {
+            const float x = d[i](0), y = d[i](1);  // as the sampler's float parameters take them
+            out[2 * i] = x;
+            out[2 * i + 1] = y;
+        }
+        else
+        {
+            out[2 * i] = std::numeric_limits<float>::quiet_NaN();
+            out[2 * i + 1] = 0.0f;
+        }
+    }
+    entries.push_back(Entry{map.get(), imageIn.width(), imageIn.height(), c});
+    return c;
+}
+
+}  // namespace cheshire_undistort
+"""),
+    ("    const Vec2* cheshireLut = cheshireMap ? cheshireMap->data() : nullptr;\n#pragma omp parallel for\n",
+     r"""    const Vec2* cheshireLut = cheshireMap ? cheshireMap->data() : nullptr;
+    // cheshire (step 8g): inside PrepareDenseScene's DeviceUndistortScope an RGBA float image is remapped on the device
+    // (hip/port/cheshireremap), the loop below operation for operation; CHESHIRE_UNDISTORT_DEVICE_CHECK=1 also runs the
+    // loop, compares, and keeps its pixels
+    image::Image<T> cheshireDevice;
+    bool cheshireCompare = false;
+    if constexpr (std::is_same_v<T, image::RGBAfColor>)
+    {
+        if (cheshireLut && image::inDeviceUndistort() && image::cheshireRemapDeviceEnabled())
+        {
+            const auto coords = cheshire_undistort::deviceCoords(cheshireMap, widthRoi, heightRoi, imageIn);
+            const float fill[4] = {fillcolor.r(), fillcolor.g(), fillcolor.b(), fillcolor.a()};
+            if (image::cheshireRemapOnDevice(coords.get(), coords->data(), widthRoi, heightRoi, reinterpret_cast<const float*>(imageIn.data()),
+                                              imageIn.width(), imageIn.height(), fill, reinterpret_cast<float*>(image_ud.data())))
+            {
+                if (!image::cheshireRemapDeviceCheck())
+                    return;
+                cheshireDevice = image_ud;
+                image_ud.fill(fillcolor);
+                cheshireCompare = true;
+            }
+        }
+    }
+#pragma omp parallel for
+"""),
+    ("                image_ud(y, x) = sampler(imageIn, disto_pix(1), disto_pix(0));\n            }\n        }\n    }\n}\n\n}  // namespace camera\n",
+     "                image_ud(y, x) = sampler(imageIn, disto_pix(1), disto_pix(0));\n            }\n        }\n    }\n"
+     "    if constexpr (std::is_same_v<T, image::RGBAfColor>)\n"
+     "    {\n"
+     "        if (cheshireCompare)  // cheshire (step 8g): the device's pixels against the loop's\n"
+     "            image::cheshireRemapCheckCount(std::memcmp(cheshireDevice.data(), image_ud.data(), sizeof(T) * std::size_t(widthRoi) * heightRoi) == 0);\n"
+     "    }\n"
+     "}\n\n}  // namespace camera\n"),
+]
+STEP8G_PDS = [
+    ("#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 8f\n",
+     "#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 8f\n#include <aliceVision/image/cheshireUndistort.hpp>  // cheshire: step 8g\n"),
+    ("    image::ExrDeflateWriteScope cheshireDeflateScope;  // cheshire (step 8f): the EXR below, deflated with libdeflate where OpenEXR uses zlib\n",
+     "    image::ExrDeflateWriteScope cheshireDeflateScope;  // cheshire (step 8f): the EXR below, deflated with libdeflate where OpenEXR uses zlib\n"
+     "    image::DeviceUndistortScope cheshireUndistortScope;  // cheshire (step 8g): the undistortion below on the device, the same bits\n"),
+]
+
 
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
@@ -5927,6 +6043,25 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                     sys.exit(f"an anchor of the deflate writer not found once in {rel} (8f)")
                 t = t.replace(old, new, 1)
         f8f.write_text(t, encoding="utf-8", newline="")
+
+    # 8g (0.3.8). PrepareDenseScene's undistortion on the device: CheshireRemap (hip/port/cheshireremap, built into the
+    #     image library like CheshireJPG) runs Sampler2d<SamplerLinear>'s arithmetic per output pixel without fused
+    #     operations, so the image is the CPU loop's to the bit. cheshireUndistort.{hpp,cpp} (the remapper pool and the
+    #     switches) are copied next to cheshireExr; UndistortImage takes the device inside PrepareDenseScene's
+    #     DeviceUndistortScope for RGBA float images with a cached map; CHESHIRE_UNDISTORT_DEVICE_CHECK=1 compares.
+    shutil.copy2(ROOT / "hip" / "port" / "cheshireremap" / "cheshireUndistort.hpp.txt", AV / "src/aliceVision/image/cheshireUndistort.hpp")
+    shutil.copy2(ROOT / "hip" / "port" / "cheshireremap" / "cheshireUndistort.cpp.txt", AV / "src/aliceVision/image/cheshireUndistort.cpp")
+    for rel, pairs in (("src/aliceVision/image/CMakeLists.txt", STEP8G_IMAGE_CMAKE),
+                       ("src/aliceVision/camera/cameraUndistortImage.hpp", STEP8G_UNDISTORT),
+                       ("src/software/pipeline/main_prepareDenseScene.cpp", STEP8G_PDS)):
+        f8g = AV / rel
+        t = f8g.read_text(encoding="utf-8")
+        if "step 8g" not in t:
+            for old, new in pairs:
+                if t.count(old) != 1:
+                    sys.exit(f"an anchor of the device undistortion not found once in {rel} (8g)")
+                t = t.replace(old, new, 1)
+        f8g.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports

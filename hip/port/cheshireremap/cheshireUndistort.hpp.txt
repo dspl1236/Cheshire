@@ -1,0 +1,43 @@
+// This file is part of the Cheshire project (MPL-2.0), a patch set over AliceVision.
+// Copied into src/aliceVision/image/ by scripts/apply_hip_patch.py (step 8g).
+#pragma once
+
+namespace aliceVision {
+namespace image {
+
+/**
+ * @brief cheshire (step 8g): marks the calling thread as undistorting PrepareDenseScene's images. While a scope is
+ * alive, UndistortImage remaps an RGBA float image on the device (cheshireRemapOnDevice) when it can, with
+ * AliceVision's arithmetic to the bit. Nesting is allowed.
+ */
+struct DeviceUndistortScope
+{
+    DeviceUndistortScope();
+    ~DeviceUndistortScope();
+    DeviceUndistortScope(const DeviceUndistortScope&) = delete;
+    DeviceUndistortScope& operator=(const DeviceUndistortScope&) = delete;
+};
+
+/// cheshire (step 8g): true inside a DeviceUndistortScope on this thread
+bool inDeviceUndistort();
+
+/// cheshire (step 8g): a device is present and CHESHIRE_UNDISTORT_DEVICE is not 0 (checked once per process)
+bool cheshireRemapDeviceEnabled();
+
+/// cheshire (step 8g): CHESHIRE_UNDISTORT_DEVICE_CHECK=1, every device remap compared with the CPU loop
+bool cheshireRemapDeviceCheck();
+
+/**
+ * @brief cheshire (step 8g): src (srcWidth x srcHeight RGBA floats) remapped through coords (2 floats per output
+ * pixel: the source position as Sampler2d takes it, or NaN in x outside the source) into dst (width x height RGBA
+ * floats) on the device; fill for the pixels outside. key names the map (uploaded once per remapper). False when
+ * it did not run; the caller then runs its CPU loop.
+ */
+bool cheshireRemapOnDevice(const void* key, const float* coords, int width, int height, const float* src, int srcWidth, int srcHeight,
+                           const float fill[4], float* dst);
+
+/// cheshire (step 8g): the check mode's count, one image compared with the CPU loop
+void cheshireRemapCheckCount(bool identical);
+
+}  // namespace image
+}  // namespace aliceVision
