@@ -3289,6 +3289,12 @@ inline bool solverOptions(const ceres::Solver::Options& options, int requestedTh
 inline bool solveSource(const Source& src, const ceres::Solver::Options& options, const Options& o, std::function<void()> prepare,
                         ceres::Solver::Summary* summary, Result* out = nullptr)
 {
+    // once per run, from the entry both the direct build and the Problem path take (the release gate's marker;
+    // until 0.3.7's release round it was said only on the Problem path, which the direct build bypasses)
+    static std::once_flag said;
+    std::call_once(said, [] {
+        ALICEVISION_LOG_INFO("cheshire: BA solver: Cheshire's own for the Schur solves (CHESHIRE_BA_SOLVER=ceres for Ceres)");
+    });
     Result r;
     bool done = false;
     if (deviceMode() == 2 && o.device)
@@ -3423,10 +3429,6 @@ inline bool solveInstead(ceres::Problem& problem, const ceres::Solver::Options& 
 {
     if (!solverEnabled())
         return false;
-    static std::once_flag said;
-    std::call_once(said, [] {
-        ALICEVISION_LOG_INFO("cheshire: BA solver: Cheshire's own for the Schur solves (CHESHIRE_BA_SOLVER=ceres for Ceres)");
-    });
     Options o;
     std::string why;
     if (!solverOptions(options, requestedThreads, &o, &why))

@@ -198,6 +198,11 @@ these are *on* unless set to `0`:
 | `CHESHIRE_EXR_DIRECT=0` | read EXR files through OpenImageIO; the default reads RGB/RGBA half or float EXRs straight through OpenEXR (identical pixels, about 6x faster on the 6000x3376 undistorted images) |
 | `CHESHIRE_SFM_LOCAL_PASSES=1` | after every bundle adjustment under the local strategy, restrict upstream's outlier and unstable-pose passes to what the solve can have changed (exact: same digests). Off by default: at 884 views the full passes are about 40 s of the run and the restricted ones no cheaper; the case is thousands of views (docs/04, 0.3.4) |
 | `CHESHIRE_BA_FUSED_PROJECTION=0` | bundle adjustment's inner projection through upstream's four-call chain instead of the fused one-walk version (pinhole with none / radial K1 / K3 / Brown distortion; other models use upstream's anyway); 1.7x on the Jacobian phase at 41 views (docs/04, 0.3.4) |
+| `CHESHIRE_BA_SOLVER=ceres` | bundle adjustment through Ceres, as up to 0.3.6. The default since 0.3.7 is Cheshire's own solver for the Schur solves: Ceres' algorithm, step for step, with the Jacobians and the reduced camera system built straight from the scene. It announces itself once per run (`cheshire: BA solver: Cheshire's own for the Schur solves`) ([docs/notes/ba-own-solver.md](docs/notes/ba-own-solver.md)) |
+| `CHESHIRE_BA_DEVICE=0` | the own solver on the CPU alone. The default gives the solves of 200,000 residual rows or more to the GPU: evaluation, the passes over the Jacobian, the landmark elimination and the minimiser's vectors, with every sum in the CPU's order, so the output is the same bytes either way. On the False Door this halves bundle adjustment |
+| `CHESHIRE_BA_DEVICE_MIN_ROWS=<n>` (tuning, default 200000) | the smallest solve the GPU takes. A slow CPU gains from far smaller ones: a four-core Haswell with a GTX 1080 Ti or an RX 6750 XT runs the engine bay's SfM in 35-38 s from 1000 rows against 45-48 s on the CPU |
+| `CHESHIRE_BA_DIRECT=0` | the own solver reads each problem from the Ceres Problem that AliceVision builds, as 0.3.7's first steps did. The default builds it from the scene directly |
+| `CHESHIRE_OMP_BLOCKTIME=<ms>` (tuning, default 0; Windows) | how long incrementalSfM's OpenMP threads keep spinning after a parallel region before they sleep. LLVM's runtime defaults to 200 ms, and beside the single-threaded passes that cost about 5 % of the False Door's SfM. A `KMP_BLOCKTIME` of your own is left alone |
 | `CHESHIRE_BA_PERSIST=0` | bundle adjustment builds its Ceres problem from scratch every solve, as upstream does; the default keeps one Problem across solves while every landmark is active (up to 100 poses) and rebuilds under the local strategy, where the moving frontier made persistence a wash (0.3.4; sets with rigs, survey points, constraints, rotation priors, temporal smoothness or depth observations use the rebuild anyway) |
 | `CHESHIRE_SIFT_SORT=0` | keep GPU SIFT keypoints in the order the card finished them (v0.3.2 sorts them by position, scale and orientation, so `.feat` files and the matches are a function of the images alone; SfM itself still varies run to run within upstream's own band - same poses and landmark count, parameters differing in the fourth digit) |
 
@@ -236,6 +241,10 @@ together as its `verify` configuration ([docs/04](docs/04-validation.md)):
 | `CHESHIRE_BA_LOG_COST=1` | upstream's two `landmarksBlocks cost` log lines per bundle adjustment, each a full single-threaded residual evaluation; skipped by default since 0.3.4 (docs/04, "what a bundle adjustment costs around Ceres' Solve") |
 | `CHESHIRE_BA_PERSIST_CHECK=1` | in the StructureFromMotion log, after every bundle adjustment: `BA persistent check: N residual blocks in the problem, N recorded, N expected from the scene; missing 0, extra 0, stale 0, landmarks whose Ceres residual ids differ from the record 0 - consistent` (and a `pre-sync check` line before each sync) |
 | `CHESHIRE_BA_CHECK=1` | in the StructureFromMotion log, after every bundle adjustment: `BA check (stride against autodiff): ... residuals 0 of N values differ; Jacobians 0 of M values differ - identical`; with `CHESHIRE_BA_JACOBIANS=analytic` the Jacobians differ by rounding (max rel 4.4e-10 on 41 views) and the line says by how much |
+| `CHESHIRE_BA_DEVICE=check` | every solve the GPU would take is solved on the CPU from a snapshot, then on the GPU, and compared: `BA device check: same, N rows, iterations a / a, final cost c / c, digests in x / x out y / y`. With `CHESHIRE_BA_DEVICE_MIN_ROWS=1000` it covers the small sets too |
+| `CHESHIRE_BA_DIRECT=check` | every solve built both ways, from the scene and from the Ceres Problem, and compared: `BA direct check: same, ...` |
+| `CHESHIRE_SFM_PROFILE=1` | not a check: where incremental SfM's time goes. One `cheshire: SfM profile:` line per phase set when the reconstruction ends (resection, triangulation, the solve, the passes after it, the local-BA graph, ...) and one for the program (reading features and matches, colours, saves) |
+| `CHESHIRE_BA_PROFILE=1` | not a check: one `BA own profile` line per solve, with its phases (setup, evaluations, elimination, factorisation, back-substitution, the vector passes) |
 | `CHESHIRE_OBJ_CHECK=1` | Meshing and Texturing also write Assimp's file beside the direct writer's (`mesh.assimp.obj`, `texturedMesh.assimp.obj`); `scripts/check_textured_obj.py` compares the textured pair by content |
 
 **Memory.** Defaults fit the card you have; the bridge settings exist to give it *less* than it
@@ -263,7 +272,8 @@ default); the rest are tuning values:
 Everything else produces the same output as the unmodified CPU build; that is checked per release
 against reference values ([docs/04](docs/04-validation.md)). The exception is incremental SfM,
 whose default output is not upstream's to the bit: the analytic Jacobians above, the fused
-projection and the persistent Problem's summation order differ by rounding, and a random generator
+projection, the persistent Problem's summation order and, since 0.3.7, the own solver (Ceres' algorithm
+without fused multiply-adds, its sums in an order of its own) differ by rounding, and a random generator
 per task draws different samples than upstream's shared one. `CHESHIRE_SFM_DETERMINISTIC=1` makes
 it reproducible run to run. There are about fifty more
 `CHESHIRE_*` variables in the code for profiling and debugging - they are in the docs for each

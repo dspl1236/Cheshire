@@ -56,7 +56,10 @@ GPU_MARKERS = {
                           r"visibility knn on the GPU",
                           r"visibility votes on the GPU"],
     "Texturing":         [r"texturing: pyramid \+ rasterisation on"],
-    "StructureFromMotion": [r"cheshire: incremental SfM: a resection pass that ends without a bundle adjustment gets one"],
+    # 0.3.7: the own bundle-adjustment solver, announced once per run from its success branch (a run that
+    # fell back to Ceres for every solve would not print it)
+    "StructureFromMotion": [r"cheshire: incremental SfM: a resection pass that ends without a bundle adjustment gets one",
+                            r"cheshire: BA solver: Cheshire's own for the Schur solves"],
     # 0.3.6: PrepareDenseScene has been paired since v0.2.9 and was checked by nothing, so a run
     # whose PrepareDenseScene was Meshroom's own binary passed. CPU only; the marker is the direct
     # 8-bit read (step 6n, hip/port/image_read/direct8.txt) announcing its first image. It is printed
