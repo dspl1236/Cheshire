@@ -15,6 +15,12 @@ Everything else PopSIFT needs is supplied by hip/port/popsift/popsift_hip.h, whi
 in front of every translation unit. Nothing in the pyramid had to be restructured: HIP 7.2 has
 layered arrays, layered surfaces and 2D textures natively, unlike the mipmapped arrays the depth-map
 port had to emulate.
+
+    python scripts/apply_popsift_patch.py --fixes-only
+
+applies only the fixes that are not about HIP and that both backends take (the extremum counter's
+uninitialised read, and the race in the descriptor normalisation, 3c and 3e below). The CUDA builds
+reset the tree to upstream and then run this, since 0.3.8.
 """
 import sys
 from pathlib import Path
@@ -25,9 +31,74 @@ GEN = ROOT / "build" / "popsift-gen" / "popsift"
 NL = chr(10)
 
 
+def fix_extrema_counter() -> None:
+    # 3c. The extremum counter, and the reason GPU SIFT reconstructed badly. extrema_count() does
+    #
+    #         int write_index;
+    #         if( threadIdx.x == 0 ) { write_index = atomicAdd( extrema_counter, ct ); }
+    #         write_index = popsift::shuffle( write_index, 0 );
+    #
+    #     so every lane but 0 reads write_index uninitialised, which is undefined behaviour. nvcc
+    #     leaves the guard alone. The AMDGPU backend takes the licence and every lane performs the
+    #     atomic, so the counter advances by 32 * ct instead of ct and each octave reports exactly
+    #     32x the extrema it wrote. The surplus slots are never written, their i_ext_off stays 0 and
+    #     they alias the octave's extremum 0; once AliceVision's grid filter runs, copy_if promotes
+    #     them to survivors pointing at a zeroed InitialExtremum, whose sigma is 0, and a keypoint
+    #     with no scale gets no descriptor at all. Initialising the variable removes the UB. The
+    #     other lanes take lane 0's value from the shuffle either way, so nothing nvcc produces
+    #     changes, and the CUDA builds take it too.
+    extrema = POPSIFT / "src" / "popsift" / "s_extrema.cu"
+    t = extrema.read_text(encoding="utf-8")
+    if "cheshire" not in t:
+        old_decl = ("    int write_index;" + NL
+                    + "    if( threadIdx.x == 0 ) {" + NL)
+        if t.count(old_decl) != 1:
+            sys.exit("write_index declaration not found once in s_extrema.cu")
+        new_decl = ("    // cheshire: lanes other than 0 read this below without it being assigned." + NL
+                    + "    // That is undefined behaviour, and on AMDGPU it costs the guard: every lane" + NL
+                    + "    // performs the atomic and the octave counts come out 32x too large." + NL
+                    + "    int write_index = 0;" + NL
+                    + "    if( threadIdx.x == 0 ) {" + NL)
+        extrema.write_text(t.replace(old_decl, new_decl, 1), encoding="utf-8", newline=NL)
+
+
+def fix_normalize_race() -> None:
+    # 3e. The descriptor normalisation, and why the CUDA packages did not repeat themselves.
+    #     normalize_histogram runs one warp per descriptor, 32 to a block. In the last block the warps
+    #     past the end are clamped onto the last descriptor so that their shuffles have data, and
+    #     ignoreme was meant to stop them writing it - but it was computed after the clamp, so it was
+    #     never true. Those warps normalised the last descriptor again, in place, racing the warp that
+    #     owns it; now and then one read it half written and it came out normalised twice. At most one
+    #     descriptor per image, and only when the count is not a multiple of 32: in the 0.3.7 gate on
+    #     a GTX 1080 Ti, one of about 970,000 on Windows and one in each of four views on Linux, each
+    #     the other run's descriptor passed through RootSIFT a second time (docs/04). The AMD cards
+    #     never showed it, and the fix leaves what they compute as it was.
+    norm = POPSIFT / "src" / "popsift" / "s_desc_normalize.h"
+    t = norm.read_text(encoding="utf-8")
+    if "cheshire" not in t:
+        old = ("    offset = ( offset < num_orientations ) ? offset" + NL
+               + "                                           : num_orientations-1;" + NL
+               + "    Descriptor* desc = &descs[offset];" + NL
+               + NL
+               + "    bool ignoreme = ( offset >= num_orientations );" + NL)
+        if t.count(old) != 1:
+            sys.exit("normalize_histogram's clamp and ignoreme not found once in s_desc_normalize.h")
+        new = ("    // cheshire: decide before the clamp, or no warp is ever ignored and the warps past the" + NL
+               + "    // end normalise the last descriptor a second time, racing its own warp." + NL
+               + "    const bool ignoreme = ( offset >= num_orientations );" + NL
+               + "    offset = ignoreme ? num_orientations-1 : offset;" + NL
+               + "    Descriptor* desc = &descs[offset];" + NL)
+        norm.write_text(t.replace(old, new, 1), encoding="utf-8", newline=NL)
+
+
 def main() -> None:
     if not POPSIFT.exists():
         sys.exit(f"{POPSIFT} not found; clone alicevision/popsift v0.10.0 there first (see the docstring)")
+    if "--fixes-only" in sys.argv[1:]:
+        fix_extrema_counter()
+        fix_normalize_race()
+        print("popsift: the fixes both backends take are in (the extremum counter, the descriptor normalisation)")
+        return
 
     # 1. the config header upstream's CMake generates. HIP has the *_sync shuffles, and the grid
     #    filter stays on (rocThrust provides the algorithms it uses).
@@ -131,32 +202,8 @@ def main() -> None:
         t = t[:i] + "#include <cstdlib>  // cheshire" + NL + "#include <cstdio>" + NL + t[i:]
         ori.write_text(t, encoding="utf-8", newline=NL)
 
-    # 3c. The extremum counter, and the reason GPU SIFT reconstructed badly. extrema_count() does
-    #
-    #         int write_index;
-    #         if( threadIdx.x == 0 ) { write_index = atomicAdd( extrema_counter, ct ); }
-    #         write_index = popsift::shuffle( write_index, 0 );
-    #
-    #     so every lane but 0 reads write_index uninitialised, which is undefined behaviour. nvcc
-    #     leaves the guard alone. The AMDGPU backend takes the licence and every lane performs the
-    #     atomic, so the counter advances by 32 * ct instead of ct and each octave reports exactly
-    #     32x the extrema it wrote. The surplus slots are never written, their i_ext_off stays 0 and
-    #     they alias the octave's extremum 0; once AliceVision's grid filter runs, copy_if promotes
-    #     them to survivors pointing at a zeroed InitialExtremum, whose sigma is 0, and a keypoint
-    #     with no scale gets no descriptor at all. Initialising the variable removes the UB.
-    extrema = POPSIFT / "src" / "popsift" / "s_extrema.cu"
-    t = extrema.read_text(encoding="utf-8")
-    if "cheshire" not in t:
-        old_decl = ("    int write_index;" + NL
-                    + "    if( threadIdx.x == 0 ) {" + NL)
-        if t.count(old_decl) != 1:
-            sys.exit("write_index declaration not found once in s_extrema.cu")
-        new_decl = ("    // cheshire: lanes other than 0 read this below without it being assigned." + NL
-                    + "    // That is undefined behaviour, and on AMDGPU it costs the guard: every lane" + NL
-                    + "    // performs the atomic and the octave counts come out 32x too large." + NL
-                    + "    int write_index = 0;" + NL
-                    + "    if( threadIdx.x == 0 ) {" + NL)
-        extrema.write_text(t.replace(old_decl, new_decl, 1), encoding="utf-8", newline=NL)
+    # 3c. the extremum counter (the function above; the CUDA builds take it too)
+    fix_extrema_counter()
 
     # 3d. CHESHIRE_POPSIFT_DEBUG=1 also reports what the grid filter did per octave. The filter
     #     compacts the surviving extrema with copy_if and separately sets the count with reduce over
@@ -192,6 +239,9 @@ def main() -> None:
         i = t.index("#include")
         t = t[:i] + "#include <cstdlib>  // cheshire" + NL + "#include <cstdio>" + NL + t[i:]
         filt.write_text(t, encoding="utf-8", newline=NL)
+
+    # 3e. the descriptor normalisation's race (the function above; the CUDA builds take it too)
+    fix_normalize_race()
 
     # 3. one translation unit. HIP cannot produce relocatable device code with COFF objects on
     #    Windows, and PopSIFT shares __constant__ and __device__ globals across its sources, so the

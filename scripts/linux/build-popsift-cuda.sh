@@ -3,7 +3,9 @@
 #
 # Nothing is ported here. PopSIFT is a CUDA project to begin with - third_party/popsift is a
 # clone of alicevision/popsift v0.10.0, and scripts/apply_popsift_patch.py is what adapts it *to*
-# HIP. So the CUDA build wants the pristine upstream source, which is the easy direction.
+# HIP. So the CUDA build wants the upstream source, which is the easy direction - plus, since 0.3.8,
+# the fixes that are not about HIP and that both backends take (apply_popsift_patch.py --fixes-only):
+# the descriptor normalisation's race, which made the CUDA packages' descriptors differ between runs.
 #
 # Why this exists: every libpopsift.so on the development machines was a HIP build (they declare
 # libamdhip64), so the CUDA AliceVision had ALICEVISION_USE_POPSIFT=OFF and died on
@@ -30,6 +32,8 @@ else
   # a HIP build may have left the tree patched; CUDA wants it pristine
   git -C "$SRC" checkout -- . 2>/dev/null || true
 fi
+# ...and then the fixes both backends take
+python3 "$ROOT/scripts/apply_popsift_patch.py" --fixes-only
 echo "[popsift] source $(git -C "$SRC" log --oneline -1)"
 echo "[popsift] $("$CUDA/bin/nvcc" --version | sed -n 4p), sm_$ARCH"
 

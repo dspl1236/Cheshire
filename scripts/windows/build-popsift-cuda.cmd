@@ -4,8 +4,11 @@ rem Usage: scripts\windows\build-popsift-cuda.cmd [configure|build|install]   (d
 rem
 rem Nothing is ported. third_party/popsift is a clone of alicevision/popsift v0.10.0 - the original
 rem CUDA project - and scripts/apply_popsift_patch.py is what adapts it *to* HIP. So this resets the
-rem tree to pristine upstream and builds that, while scripts\build-popsift.cmd builds the HIP port
-rem from hip/port/popsift instead. The two do not share a build or install directory.
+rem tree to upstream and builds that, while scripts\build-popsift.cmd builds the HIP port from
+rem hip/port/popsift instead. The two do not share a build or install directory. Since 0.3.8 the
+rem reset is followed by the fixes that are not about HIP and that both backends take
+rem (apply_popsift_patch.py --fixes-only): the descriptor normalisation's race, which made the CUDA
+rem packages' descriptors differ between runs.
 rem
 rem Same vcvars ordering as build-alicevision-cuda.cmd, for the same reason: env.cmd initialises
 rem VS 2026 when VCToolsInstallDir is unset, vcvars will not re-initialise an already-configured
@@ -50,6 +53,8 @@ set INST=%R%/build/popsift-cuda-install
 
 rem A HIP build leaves the tree patched; CUDA wants it as upstream wrote it.
 git -C "%CHESHIRE_ROOT%\third_party\popsift" checkout -- . 2>nul
+rem ...and then the fixes both backends take
+python "%CHESHIRE_ROOT%\scripts\apply_popsift_patch.py" --fixes-only || exit /b 1
 for /f "delims=" %%I in ('git -C "%CHESHIRE_ROOT%\third_party\popsift" log --oneline -1') do echo [popsift] source %%I
 echo [popsift] archs=%CHESHIRE_CUDA_ARCHS%  install=%INST%
 
