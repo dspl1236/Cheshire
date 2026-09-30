@@ -3209,3 +3209,42 @@ rebuild PopSIFT CUDA on both systems before AliceVision: WSL's `/opt/popsift-cud
 `build/popsift-cuda-install` still hold 0.3.7's library. The test build was
 `build/popsift038/wsl-build.lf.sh` (a scratch prefix), the runs `/data/tests/popsift-race` on
 house-pc and `build/popsift038/hip_check.py` here.
+
+## 0.3.8: SfM around Grin, continued - the features' read and the colours' read (2026-09-30)
+
+**8a, the features' read.** Every node that reads features parses the `.feat` text through an
+`istream_iterator` over `operator>>`, four floats a keypoint. Measured on its own over the 884-view False
+Door's 20,023,190 features (`build/popsift038/featbench.cpp`, files already in the page cache):
+
+| parser | MSVC STL (clang-cl), 1 thread | 12 threads | libstdc++ (GCC 13, WSL), 1 thread | 12 threads |
+|---|---|---|---|---|
+| `istream_iterator` (upstream) | 30.75 s | 42.54 s | 30.15 s | 5.32 s |
+| one read + `std::from_chars` | 5.72 s | 0.79 s | 8.33 s | 2.12 s |
+
+MSVC's stream extraction gets slower with more threads, because it serialises on its locale. Both parsers
+round correctly, and the two agree on every one of the 80 M floats under both libraries. The WSL runs read
+through `/mnt/d`, which is slow; native Linux reads are faster.
+
+The step reads a PointFeature file in one go and parses it with `from_chars`. It stops where the stream
+stops: at the end of the file, or at the first token the stream would not take (`nan` and `inf`
+included). It keeps only whole features, as the stream does. `CHESHIRE_FEAT_READ=0` restores upstream's
+read.
+
+**8b, the colours' read.** `colorizeTracks` reads each view's photo whole as `Image<RGBColor>`. Upstream's
+`readImage` decodes it into a float `ImageBuf` (144 MB for 12 MP), converts no colour (sRGB to sRGB), and
+hands the pixels back as 8 bits. When OpenImageIO's uint8 to float to uint8 round trip gives every value
+back, those are the decoder's bytes. Step 6n's direct read now copies them straight out in that case; it
+checks the round trip once per process, through the same calls, for all 256 values. The check mode
+compares 8-bit images byte for byte.
+
+Development install, RX 9070 box, `scripts/sfmbench.py` (Meshroom 2023.3's SfM options):
+
+| set | digest (sfm.abc, cameras) | features | colours | SfM wall |
+|---|---|---|---|---|
+| 41 views, 0.3.7 | `801d1fb7`, `361ddd5c` | 1.50 s | 1.19 s | 27.2 s |
+| 41 views, 8a + 8b | the same | 0.04 s | 0.52 s | 23.0 s |
+| engine bay, 0.3.7 | `814ae0d5`, `af98cde3` | 4.02 s | 2.03 s | 24.1 s |
+| engine bay, 8a + 8b | the same | 0.09 s | 0.80 s | 17.9 s |
+
+With `CHESHIRE_READ_DIRECT_CHECK=1`, the direct read and upstream's path agreed on 38 of 38 and 98 of 98
+images. The False Door run waits for an idle box.

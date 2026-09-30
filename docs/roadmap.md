@@ -705,8 +705,11 @@ first, then AC-RANSAC's hypothesis loop and PrepareDenseScene on four-thread hos
 **SfM around Grin, continued** (each exact, so the digests stay; the False Door's SfM is 284 s at
 0.3.7):
 
-- the features' read (46 s);
-- the colours' image reads (about 37 s);
+- the features' read (46 s). **Done 2026-09-30** (step 8a, a4ab8d1): `from_chars` on the whole file, the same
+  bits; 42.5 s to 0.8 s for the False Door's features on 12 threads on Windows, measured on its own.
+- the colours' image reads (about 37 s). **Done 2026-09-30** (step 8b, a4ab8d1): an 8-bit read where upstream
+  round-trips through float, the same bytes; 2.3-2.5x on the colours of 41 views and the engine bay. The
+  False Door numbers for both wait for an idle-box run.
 - resection's and triangulation's arithmetic;
 - inside Grin: the sparse factorisation (8.6 s) and the elimination (9.6 s) of the False Door's large
   solves, and the per-solve setup (about 13 s).
