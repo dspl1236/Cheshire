@@ -21,6 +21,7 @@ Layout produced:
     fam/<family>/bin/, lib/    AliceVision's own binaries for that toolchain
     gpu/<family>/              amdhip64_* + amd_comgr_* (what the probe loads)
     gpu/<family>/<target>/     the GPU-bearing DLLs (build_targets.py's GPU_DLLS)
+    gpu/<family>/UNTESTED      the family's targets never run on hardware here, one per line
 
 At run time the launcher sets
     PATH = gpu/<fam>/<target>;gpu/<fam>;fam/<fam>/bin;common/bin
@@ -85,6 +86,14 @@ def carries_target(name: str, target: str, tgts: set) -> bool:
         return False
     fam = target[:-len('-generic')].replace('-', '')      # gfx10-3-generic -> gfx103
     return all(t.startswith(fam) and t[len(fam):].isdigit() for t in tgts)
+
+
+# Run on a real card here, with a point-cloud checksum matching a reference the same machine made
+# (docs/16). Every other target of a family goes into gpu/<family>/UNTESTED.
+VALIDATED = {
+    'hip6.2':  ['gfx1012', 'gfx1031'],
+    'rocm7.2': ['gfx12-generic'],
+}
 
 
 def is_runtime(name: str) -> bool:
@@ -198,6 +207,18 @@ def main(argv):
                 dst = stage / 'fam' / fam / rel
                 dst.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dst)
                 counts[f'fam/{fam}'] += 1
+
+    # What has not been run here: cheshire-run.cmd and the Meshroom launcher announce a listed target on
+    # every run that selects it. Written in this script, which every release passes through - until
+    # 0.3.8 only assemble_bundle.py wrote the lists, the release chains called this script directly,
+    # and v0.3.2 to v0.3.7 shipped without them.
+    for fam in families:
+        untested = sorted({t for f, t, _ in inputs if f == fam} - set(VALIDATED.get(fam, ())))
+        if untested:
+            lst = stage / 'gpu' / fam / 'UNTESTED'
+            lst.parent.mkdir(parents=True, exist_ok=True)
+            lst.write_text('\n'.join(untested) + '\n', encoding='ascii')
+            print(f"  {fam}: {len(untested)} target(s) listed as untested: {', '.join(untested)}")
 
     # The probe, and the runner that uses it.
     here = Path(__file__).parent

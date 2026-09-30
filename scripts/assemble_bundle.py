@@ -7,23 +7,17 @@ The two packages are the family bases, giving the bundle its CPU binaries, vcpkg
 tree and HIP runtime. Every GPU target comes from build/payload/<family>/<target>/, so the bases
 only need to exist for one target each.
 
-Also writes gpu/<family>/UNTESTED. A target listed there has not been run on that hardware here, and
-cheshire-run.cmd says so on every run that selects it - a README nobody opens is not a warning. (The
-Meshroom launcher does not read it yet, and a release that calls bundle_windows.py directly ships
-without it, as v0.3.2 to v0.3.7 did. Both are queued for 0.3.8.) The list is what it is: of eleven targets, three have been run on a real
-card, and pretending otherwise would be the one thing this project cannot afford.
+The UNTESTED lists (gpu/<family>/UNTESTED, the targets never run on hardware here) are written by
+bundle_windows.py itself since 0.3.8, from its VALIDATED table: this script used to write them after
+the fact, the release chains called bundle_windows.py directly, and v0.3.2 to v0.3.7 shipped without
+them. Of eleven targets, three have been run on a real card, and pretending otherwise would be the
+one thing this project cannot afford.
 """
 import subprocess, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PAYLOADS = ROOT / 'build' / 'payload'
-
-# Run on a real card here, with a point-cloud checksum matching a reference the same machine made.
-VALIDATED = {
-    'hip6.2':  ['gfx1012', 'gfx1031'],
-    'rocm7.2': ['gfx12-generic'],
-}
 
 def main(argv):
     if len(argv) != 4:
@@ -47,7 +41,7 @@ def main(argv):
                 return found.pop()
         sys.exit(f"cannot determine the GPU target of {pkg}")
 
-    specs, untested = [], {}
+    specs = []
     for family, base, base_target in (('rocm7.2', pkg_rocm, base_target_of(pkg_rocm)),
                                       ('hip6.2', pkg_hip, base_target_of(pkg_hip))):
         famdir = PAYLOADS / family
@@ -63,27 +57,10 @@ def main(argv):
         print(f"  {family}: base package carries {base_target}")
         specs.append(f"{family}:{base_target}:{base}")
         specs += [f"{family}:{t}:{famdir / t}" for t in targets if t != base_target]
-        untested[family] = [t for t in targets if t not in VALIDATED.get(family, [])]
 
     cmd = [sys.executable, str(ROOT / 'scripts' / 'bundle_windows.py'), str(outzip)] + specs
     print('  ' + ' \\\n  '.join(cmd[2:]))
-    rc = subprocess.run(cmd).returncode
-    if rc != 0:
-        return rc
-
-    stage = outzip.with_suffix('')
-    for family, targets in untested.items():
-        if not targets: continue
-        p = stage / 'gpu' / family / 'UNTESTED'
-        p.write_text('\n'.join(targets) + '\n', encoding='ascii')
-        print(f"  {family}: {len(targets)} target(s) marked untested: {', '.join(targets)}")
-    print("\nre-zipping with the UNTESTED lists")
-    import zipfile
-    with zipfile.ZipFile(outzip, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
-        for p in sorted(stage.rglob('*')):
-            if p.is_file(): z.write(p, p.relative_to(stage.parent))
-    print('zip', outzip, round(outzip.stat().st_size / 2**20), 'MB')
-    return 0
+    return subprocess.run(cmd).returncode
 
 if __name__ == '__main__':
     sys.exit(main(sys.argv))

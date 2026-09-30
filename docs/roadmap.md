@@ -662,7 +662,51 @@ reaches it. The design is in docs/notes/ba-own-solver.md; the steps, each a go/n
     False Door 436-448 s → 284 s, the same output.
   - Next: the features' read (46 s), resection's and triangulation's arithmetic, the colours' reads.
 
-Beside it:
+Beside it, both moved to 0.3.8: AC-RANSAC's hypothesis loop on the device, and PrepareDenseScene on
+four-thread hosts.
+
+## 0.3.8
+
+Started 2026-09-30, in the user's order: the fixes 0.3.7's round turned up and SfM's remaining CPU time
+first, then AC-RANSAC's hypothesis loop and PrepareDenseScene on four-thread hosts.
+
+**The fixes:**
+
+- **The UNTESTED lists, where no release can skip them** (S). **Done 2026-09-30.** `bundle_windows.py`
+  writes `gpu/<family>/UNTESTED` from its own `VALIDATED` table (moved from `assemble_bundle.py`, which
+  no longer writes or re-zips), and the Meshroom launcher announces a listed target the way
+  `cheshire-run.cmd` does. Checked by bundling 0.3.7's own inputs into a scratch folder: the two lists
+  name the eight untested targets, and on the RX 9070 the launcher picks `rocm7.2/gfx12-generic` with
+  no note, and prints the note once that target is listed.
+- **`CHESHIRE_BACKEND=auto` follows the package** (S). **Done 2026-09-30.** auto runs the package when
+  it matches the card: a CUDA package when an NVIDIA card answers `nvidia-smi`, an AMD package when
+  none does. The Windows launcher knows a CUDA package by the `cudart64_*.dll` it bundles, and
+  `meshroom-pair.sh` records the bundle's backend in each wrapper (`lib/libcudart.so*`). Checked:
+  - the launcher, 9 of 9 cases with fake packages and a fake `nvidia-smi` (0.3.7's launcher fails
+    the three CUDA ones);
+  - house-pc's GTX 1080 Ti with the 0.3.7 CUDA and HIP bundles, paired into the gates' scratch
+    Meshroom 2025.1: 6 of 6.
+
+  At release, README and USING change with it: a CUDA package no longer needs
+  `CHESHIRE_BACKEND=cheshire`, and paired runs name an untested target. Until then they describe
+  the released packages.
+- **PopSIFT's CUDA descriptor race** (M). In the 0.3.7 gate on the GTX 1080 Ti, two runs of the same
+  photos gave the same keypoints, but one descriptor of about 970,000 differed on Windows, and one
+  in each of four views on Linux. The one examined has the same bins at different magnitudes. The
+  evidence is kept: bench-pc `C:/cheshire/e2e-037c-25-41/{base,verify}/MeshroomCache/FeatureExtraction`
+  and house-pc `/data/tests/gate-037/lc25-41/{base,verify}/MeshroomCache/FeatureExtraction`. The fix
+  must leave the HIP build's bytes as they are.
+
+**SfM around Grin, continued** (each exact, so the digests stay; the False Door's SfM is 284 s at
+0.3.7):
+
+- the features' read (46 s);
+- the colours' image reads (about 37 s);
+- resection's and triangulation's arithmetic;
+- inside Grin: the sparse factorisation (8.6 s) and the elimination (9.6 s) of the False Door's large
+  solves, and the per-solve setup (about 13 s).
+
+**Then:**
 
 - **AC-RANSAC's hypothesis loop on the device** (M-L). Meshroom 2025.1's defaults spend 21 s to 488 s
   of geometric filtering on the engine bay and 105 s to 2234 s on the False Door, for the same
@@ -779,14 +823,14 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 ## Hardware coverage
 
 - **Eight Windows AMD targets never run** (L). Only gfx1012, gfx1031 and gfx12-generic are
-  validated (`scripts/assemble_bundle.py:22-25`). The Meshroom launcher never reads
-  `gpu/<family>/UNTESTED` (`scripts/windows/meshroom-pair-launcher.cpp:154-172`), so paired runs
-  give no warning.
+  validated (`VALIDATED` in `scripts/bundle_windows.py`). Since 0.3.8 the Meshroom launcher announces
+  a target listed in `gpu/<family>/UNTESTED`, as `cheshire-run.cmd` always did.
 - **Ship the UNTESTED lists again** (S, 0.3.8). Found 2026-09-30: no Windows zip since v0.3.2 has
   the list (v0.2.17 to v0.3.1 did; every published zip checked). Only `scripts/assemble_bundle.py` writes it,
   and every release chain since has called `scripts/bundle_windows.py` directly. Have
   `bundle_windows.py` write it from the validated-target table, so no chain can skip it, and make
   the launcher read it (the item above). The README, docs/16 and `assemble_bundle.py` say so.
+  **Done 2026-09-30** (0.3.8, above).
 - **RDNA2 Windows payloads for 0.3.3** (S). gfx1031 has not run on Windows since v0.2.17
   (`docs/16-bundling.md:215`). Put the RX 6750 XT back in bench-pc and run the 12-config matrix.
 - **RDNA3 discrete** (S, blocked on a tester). No run on any RX 7600-7900 (`README.md:328-329`).
@@ -840,7 +884,8 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 - **`CHESHIRE_BACKEND=auto` on NVIDIA boxes** (S). `auto` returns every node to Meshroom whenever an
   NVIDIA card is present (`scripts/windows/meshroom-pair-launcher.cpp:131-135`). Record the
   package's backend at pair time and follow it. (The Linux launcher's `env.sh` order is fixed: it now
-  reads `CHESHIRE_BACKEND` from the bundle's `env.sh` before deciding, 2026-09-27.)
+  reads `CHESHIRE_BACKEND` from the bundle's `env.sh` before deciding, 2026-09-27.) **Done
+  2026-09-30** (0.3.8, above): auto follows the package, on both systems.
 - **Linux stage gate** (M). The stage gates need `cheshire-run.cmd` or PowerShell
   (`scripts/verify_bundle_stages.py:32-34`), so no Linux artifact gets per-stage checks.
 - **Resume cannot detect a corrupt cached input** (M). SUCCESS chunks are kept without being

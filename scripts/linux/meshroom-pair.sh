@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Cheshire: pair a Meshroom 2023.3 or 2025.1 Linux bundle with the Cheshire HIP AliceVision bundle.
+# Cheshire: pair a Meshroom 2023.3 or 2025.1 Linux bundle with a Cheshire AliceVision bundle (HIP or CUDA).
 #
-# Meshroom runs its nodes as aliceVision_* executables from <Meshroom>/aliceVision/bin. Seven of
+# Meshroom runs its nodes as aliceVision_* executables from <Meshroom>/aliceVision/bin. Nine of
 # them get the Cheshire treatment when the bundle carries them: PrepareDenseScene,
-# FeatureExtraction, FeatureMatching, DepthMap, DepthMapFilter, Meshing and Texturing. Each becomes
-# a wrapper that execs the Cheshire build with the bundle's libraries in front, or Meshroom's own
-# binary (kept as <name>.cuda) when nvidia-smi finds an NVIDIA card: the choice is made per run, so
-# a node that swaps cards needs no re-pairing, and CHESHIRE_BACKEND forces it. The nodes Cheshire
-# does not carry - CameraInit, ImageMatching, StructureFromMotion, MeshFiltering, Publish - keep
-# running from the Meshroom bundle unchanged. `--unpair` restores.
+# FeatureExtraction, ImageMatching, FeatureMatching, StructureFromMotion, DepthMap, DepthMapFilter,
+# Meshing and Texturing. Each becomes a wrapper that execs the Cheshire build with the bundle's
+# libraries in front when the bundle matches the card (a CUDA bundle with an NVIDIA card that
+# answers nvidia-smi, an HIP bundle without one), or Meshroom's own binary (kept as <name>.cuda)
+# otherwise: the choice is made per run, so a node that swaps cards needs no re-pairing, and
+# CHESHIRE_BACKEND forces it. The nodes Cheshire does not carry - CameraInit, MeshFiltering,
+# Publish - keep running from the Meshroom bundle unchanged. `--unpair` restores.
 #
 # (Until v0.3.0 this header said two nodes and named meshing and texturing as staying on Meshroom's
 # side; the body has paired seven since v0.2.9.)
@@ -55,7 +56,14 @@ fi
 BUNDLE="${2:-$HOME/apps/cheshire/bundle}"
 CHECK_ONLY=0
 [ "${3:-}" = "--check" ] && CHECK_ONLY=1
-[ -x "$BUNDLE/bin/aliceVision_depthMapEstimation" ] || { echo "no HIP aliceVision_depthMapEstimation in $BUNDLE/bin"; exit 1; }
+[ -x "$BUNDLE/bin/aliceVision_depthMapEstimation" ] || { echo "no aliceVision_depthMapEstimation in $BUNDLE/bin"; exit 1; }
+# A CUDA bundle carries its CUDA runtime (lib/libcudart.so.*), which an HIP bundle never does. Each
+# wrapper records which this one is, so that auto runs the bundle when it matches the card.
+if compgen -G "$BUNDLE/lib/libcudart.so*" >/dev/null; then
+  BACKEND=cuda; AUTO_MESHROOM='! nvidia-smi >/dev/null 2>&1'
+else
+  BACKEND=hip; AUTO_MESHROOM='nvidia-smi >/dev/null 2>&1'
+fi
 
 # The options Meshroom's own binary takes must all be taken by the bundle's, except the one the
 # wrapper drops (DepthMap's --sgmFilteringAxes): a Meshroom node passes options its node description
@@ -90,14 +98,15 @@ pair() {  # name  drop-option
   cat > "$target" <<EOF
 #!/bin/bash
 # Cheshire pairing (scripts/linux/meshroom-pair.sh): $name on whichever GPU is in the box.
-# NVIDIA present (nvidia-smi answers): Meshroom's own binary, kept beside this file as .cuda.
-# Otherwise the Cheshire build from the bundle. Decided per run, so swapping cards needs no
-# re-pairing. CHESHIRE_BACKEND=auto|cheshire|meshroom forces one, for every paired node.
+# The bundle is a $BACKEND build. auto (the default) runs it when it matches the card - a CUDA
+# bundle when an NVIDIA card answers nvidia-smi, an HIP bundle when none does - and otherwise
+# Meshroom's own binary, kept beside this file as .cuda. Decided per run, so swapping cards needs
+# no re-pairing. CHESHIRE_BACKEND=auto|cheshire|meshroom forces one, for every paired node.
 #
-# auto hands the node back to Meshroom whenever an NVIDIA card is present. That was the right
-# default while Cheshire was AMD-only and is exactly wrong when the paired bundle is itself a CUDA
-# build, so a CUDA bundle has to be asked for. CHESHIRE_DEPTHMAP=cuda|hip is the older spelling,
-# from when "hip" and "the Cheshire bundle" were the same thing, and is still honoured.
+# Until 0.3.8 auto meant "Meshroom whenever an NVIDIA card is present": right while Cheshire was
+# AMD-only, and a paired CUDA bundle then ran nothing unless asked for. CHESHIRE_DEPTHMAP=cuda|hip
+# is the older spelling, from when "hip" and "the Cheshire bundle" were the same thing, and is
+# still honoured.
 #
 # The bundle's env.sh is the persistent place for CHESHIRE_* settings (USING.md), but it was sourced
 # only after this decision, so a CHESHIRE_BACKEND set there never took effect (docs/roadmap.md,
@@ -118,7 +127,7 @@ if [ -z "\$CHESHIRE_MODE" ]; then
     *)    CHESHIRE_MODE="\${CHESHIRE_DEPTHMAP:-auto}" ;;
   esac
 fi
-if [ "\$CHESHIRE_MODE" = meshroom ] || { [ "\$CHESHIRE_MODE" = auto ] && nvidia-smi >/dev/null 2>&1; }; then
+if [ "\$CHESHIRE_MODE" = meshroom ] || { [ "\$CHESHIRE_MODE" = auto ] && $AUTO_MESHROOM; }; then
   echo "[cheshire] $name: Meshroom's own binary ($target.cuda)" >&2
   exec "$target.cuda" "\$@"
 fi

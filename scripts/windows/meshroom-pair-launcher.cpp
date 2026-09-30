@@ -6,11 +6,11 @@
 // <name>.cheshire.txt. Meshroom runs its nodes as `aliceVision_<node> {allParams}` through a shell,
 // so they land here; the launcher takes its role from its own file name.
 //
-// Per run: NVIDIA present (nvidia-smi answers) -> Meshroom's binary (CUDA DepthMap, CPU matcher);
-// otherwise the Cheshire build, with the package's bin first on PATH and ALICEVISION_ROOT pointing
-// at the package so it finds its own DLLs and share/ tree, not Meshroom's.
-// CHESHIRE_BACKEND=auto|cheshire|meshroom forces one for every paired binary; CHESHIRE_DEPTHMAP=cuda|hip
-// is the older spelling and still works. Meshroom 2023.3 still passes --sgmFilteringAxes to DepthMap,
+// Per run, by default: the Cheshire build when the package matches the card (a CUDA package with an
+// NVIDIA card that answers nvidia-smi, an AMD package without one), with the package's bin first on
+// PATH and ALICEVISION_ROOT pointing at the package so it finds its own DLLs and share/ tree, not
+// Meshroom's; otherwise Meshroom's own binary. CHESHIRE_BACKEND=auto|cheshire|meshroom forces one for
+// every paired binary; CHESHIRE_DEPTHMAP=cuda|hip is the older spelling and still works. Meshroom 2023.3 still passes --sgmFilteringAxes to DepthMap,
 // which upstream AliceVision removed (the Cheshire build is based on 2026 upstream and always filters
 // YX): dropped on the Cheshire path, kept on Meshroom's.
 //
@@ -92,6 +92,31 @@ static int run(const std::wstring& exe, const std::vector<std::wstring>& args) {
     return int(code);
 }
 
+// Does any file match this pattern (wildcards in the last component)?
+static bool anyFile(const std::wstring& pattern) {
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    FindClose(h);
+    return true;
+}
+
+// Is this word one of the file's lines? Lines are trimmed of CR, LF and spaces, so a list written on
+// either system reads the same.
+static bool listed(const std::wstring& path, const std::wstring& word) {
+    FILE* f = _wfopen(path.c_str(), L"rt, ccs=UTF-8");
+    if (!f) return false;
+    wchar_t line[256];
+    bool hit = false;
+    while (!hit && fgetws(line, 256, f)) {
+        std::wstring s(line);
+        while (!s.empty() && (s.back() == L'\n' || s.back() == L'\r' || s.back() == L' ')) s.pop_back();
+        hit = s == word;
+    }
+    fclose(f);
+    return hit;
+}
+
 static bool nvidiaPresent() {
     // nvidia-smi lives in System32 once the NVIDIA driver is installed; a clean exit means a card answered.
     STARTUPINFOW si{}; si.cb = sizeof si; si.dwFlags = STARTF_USESTDHANDLES;   // no inherited stdio: keep the node log clean
@@ -114,9 +139,13 @@ int wmain() {
     const std::wstring pkg = readLine(dir + L"\\" + stem + L".cheshire.txt");
     const bool isDepthMap = stem == L"aliceVision_depthMapEstimation";
     // Which binary runs: Meshroom's own, or the paired Cheshire package's. CHESHIRE_BACKEND decides -
-    // cheshire, meshroom, or auto. auto (the default) hands the node back to Meshroom whenever an
-    // NVIDIA card is present, which was the right default while Cheshire was AMD-only and is exactly
-    // wrong when the paired package is itself a CUDA build, so a CUDA package must be asked for.
+    // cheshire, meshroom, or auto. auto (the default) runs the package when it matches the card: a
+    // CUDA package when an NVIDIA card answers nvidia-smi, an AMD package when none does. Until 0.3.8
+    // auto meant "Meshroom whenever an NVIDIA card is present", which was right while Cheshire was
+    // AMD-only and made a paired CUDA package run nothing unless CHESHIRE_BACKEND=cheshire was set.
+    // A CUDA package is known by the CUDA runtime it bundles (bin\cudart64_*.dll), which an AMD
+    // package never carries: what the package holds, like the bundle shape below, so a pairing made
+    // by an older meshroom-pair.cmd needs nothing new.
     //
     // CHESHIRE_DEPTHMAP=cuda|hip is the older spelling and is still honoured. It named the two
     // backends at a time when "hip" and "the Cheshire package" were the same thing; they are not any
@@ -132,7 +161,8 @@ int wmain() {
     if (mode != L"auto" && mode != L"cheshire" && mode != L"meshroom")
         fwprintf(stderr, L"[cheshire] %ls: CHESHIRE_BACKEND=%ls is not one of auto|cheshire|meshroom;"
                          L" using the Cheshire package\n", stem.c_str(), mode.c_str());
-    const bool useOrig = mode == L"meshroom" || (mode == L"auto" && nvidiaPresent());
+    const bool cudaPkg = !pkg.empty() && anyFile(pkg + L"\\bin\\cudart64_*.dll");
+    const bool useOrig = mode == L"meshroom" || (mode == L"auto" && nvidiaPresent() != cudaPkg);
     if (useOrig) {
         fwprintf(stderr, L"[cheshire] %ls: Meshroom's own binary (%ls)\n", stem.c_str(), orig.c_str());
         return run(orig, args);
@@ -170,6 +200,12 @@ int wmain() {
         if (GetFileAttributesW(pkgExe.c_str()) == INVALID_FILE_ATTRIBUTES)
             pkgExe = pkg + L"\\common\\bin\\" + stem + L".exe";
         fwprintf(stderr, L"[cheshire] %ls: bundle payload %ls/%ls\n", stem.c_str(), fam.c_str(), tgt.c_str());
+        // Targets not run on real hardware here are listed in gpu\<family>\UNTESTED (bundle_windows.py
+        // writes it). Say so on every run that selects one, as cheshire-run.cmd does: most runs start
+        // here, and a README nobody opens is not a warning.
+        if (listed(pkg + L"\\gpu\\" + fam + L"\\UNTESTED", tgt))
+            fwprintf(stderr, L"[cheshire] NOTE: %ls has not been validated on hardware here - please report"
+                             L" how it goes\n", tgt.c_str());
     }
     SetEnvironmentVariableW(L"ALICEVISION_ROOT", root.c_str());
     SetEnvironmentVariableW(L"PATH", (path + L";" + envVar(L"PATH")).c_str());

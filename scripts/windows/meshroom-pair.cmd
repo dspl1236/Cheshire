@@ -1,13 +1,15 @@
 @echo off
 rem Cheshire: pair a Meshroom 2023.3 or 2025.1 Windows install with a Cheshire AliceVision package.
 rem
-rem Meshroom runs its nodes as aliceVision_*.exe from <Meshroom>\aliceVision\bin. Seven of them get
+rem Meshroom runs its nodes as aliceVision_*.exe from <Meshroom>\aliceVision\bin. Nine of them get
 rem the Cheshire treatment when the package carries them: PrepareDenseScene, FeatureExtraction,
-rem FeatureMatching, DepthMap, DepthMapFilter, Meshing and Texturing. Each becomes a copy of the
-rem launcher (meshroom-pair-launcher.exe, shipped beside this script) that starts the Cheshire build
-rem from the package, or Meshroom's own binary (kept as <name>.cuda.exe) when nvidia-smi finds an
-rem NVIDIA card. Decided per run, so a box that swaps cards needs no re-pairing; CHESHIRE_DEPTHMAP
-rem forces one or the other. Every node the package does not carry keeps running from Meshroom.
+rem ImageMatching, FeatureMatching, StructureFromMotion, DepthMap, DepthMapFilter, Meshing and
+rem Texturing. Each becomes a copy of the launcher (meshroom-pair-launcher.exe, shipped beside this
+rem script) that starts the Cheshire build from the package when the package matches the card (a
+rem CUDA package with an NVIDIA card that answers nvidia-smi, an AMD package without one), or
+rem Meshroom's own binary (kept as <name>.cuda.exe) otherwise. Decided per run, so a box that swaps
+rem cards needs no re-pairing; CHESHIRE_BACKEND=auto|cheshire|meshroom forces one or the other.
+rem Every node the package does not carry keeps running from Meshroom.
 rem --unpair restores the originals.
 rem
 rem   meshroom-pair.cmd <Meshroom dir> <Cheshire package dir>
