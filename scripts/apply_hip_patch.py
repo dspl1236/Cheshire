@@ -773,6 +773,37 @@ STEP8E_GF = [
      "    multiview::relativePose::cheshireEpipolarReport();  // cheshire (step 8e): CHESHIRE_ACR_RESIDUALS_CHECK's count\n"),
 ]
 
+# 8f (0.3.8): PrepareDenseScene's EXR files deflated with libdeflate where OpenEXR uses zlib (cheshireExr.cpp.txt).
+STEP8F_IO = [
+    ("template<typename T>\nvoid writeImage(const std::string& path,\n                oiio::TypeDesc typeDesc,\n",
+     "// cheshire (step 8f): an EXR's ZIP/ZIPS chunks deflated with libdeflate inside an ExrDeflateWriteScope (cheshireExr.cpp)\n"
+     "bool cheshireWriteExrDeflate(const oiio::ImageBuf& buf, const std::string& path, const std::string& compression);\n"
+     "\n"
+     "template<typename T>\nvoid writeImage(const std::string& path,\n                oiio::TypeDesc typeDesc,\n"),
+    ("            formatBuf.copy(*outBuf, oiio::TypeDesc::HALF);  // override format, use half instead of float\n"
+     "            outBuf = &formatBuf;\n"
+     "        }\n"
+     "    }\n"
+     "\n"
+     "    // write image\n"
+     "    if (!outBuf->write(tmpPath))\n",
+     "            formatBuf.copy(*outBuf, oiio::TypeDesc::HALF);  // override format, use half instead of float\n"
+     "            outBuf = &formatBuf;\n"
+     "        }\n"
+     "    }\n"
+     "\n"
+     "    // write image\n"
+     "    // cheshire (step 8f): PrepareDenseScene's EXR files deflated with libdeflate where OpenEXR uses zlib, else OpenImageIO\n"
+     "    if (!(isEXR && inExrDeflateWrite() && cheshireWriteExrDeflate(*outBuf, tmpPath, compressionMethod)) && !outBuf->write(tmpPath))\n"),
+]
+STEP8F_PDS = [
+    ("#include <aliceVision/camera/cameraUndistortImage.hpp>\n",
+     "#include <aliceVision/camera/cameraUndistortImage.hpp>\n#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 8f\n"),
+    ("    ImageT image, image_ud;\n",
+     "    ImageT image, image_ud;\n"
+     "    image::ExrDeflateWriteScope cheshireDeflateScope;  // cheshire (step 8f): the EXR below, deflated with libdeflate where OpenEXR uses zlib\n"),
+]
+
 
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
@@ -5880,6 +5911,22 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                     sys.exit(f"an anchor of the epipolar residuals not found {want} time(s) in {rel} (8e)")
                 t = t.replace(old, new)
         f8e.write_text(t, encoding="utf-8", newline="")
+
+    # 8f (0.3.8). PrepareDenseScene's EXR files: OpenImageIO writes them uncompressed into memory and their ZIP chunks are
+    #     deflated with libdeflate (hip/port/sgm_fused/cheshireExr.cpp.txt), where OpenEXR before 3.2 (the Linux bundles)
+    #     deflates with zlib at less than half the speed. The pixels are the same; only the deflate streams differ.
+    #     io.cpp takes that path inside PrepareDenseScene's ExrDeflateWriteScope. io.cpp and main_prepareDenseScene.cpp
+    #     are both in TRACKED.
+    for rel, pairs in (("src/aliceVision/image/io.cpp", STEP8F_IO),
+                       ("src/software/pipeline/main_prepareDenseScene.cpp", STEP8F_PDS)):
+        f8f = AV / rel
+        t = f8f.read_text(encoding="utf-8")
+        if "step 8f" not in t:
+            for old, new in pairs:
+                if t.count(old) != 1:
+                    sys.exit(f"an anchor of the deflate writer not found once in {rel} (8f)")
+                t = t.replace(old, new, 1)
+        f8f.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports

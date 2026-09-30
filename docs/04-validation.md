@@ -3343,3 +3343,87 @@ in use: 41 views `801d1fb7`, `361ddd5c` and engine bay `814ae0d5`, `af98cde3`.
 
 With 8d and 8e, geometric filtering on 41 views at 50,000 iterations went from 36.8 s to 16.35 s
 in this round. `kernel.fit` is now 74.8 % of AC-RANSAC's CPU time (docs/15, "What is left").
+
+## 0.3.8: PrepareDenseScene on a four-thread host, and its EXR chunks deflated with libdeflate (step 8f, 2026-09-30)
+
+**Measured first, on the host the roadmap names.** house-pc (i3-4330: two cores, four threads; 14 GB;
+`/data` on a SATA SSD; GTX 1080 Ti) ran the zoo job again with the 0.3.7 CUDA bundle. The job was
+`zoo-pds-038`: 524 photos at 4896x3672, GPS pairing at 200 m, the app's 2023.3 RANSAC counts, and
+mesh only.
+
+| zoo, mesh only | 0.3.6 (RX 6750 XT, HIP bundle) | 0.3.7 (GTX 1080 Ti, CUDA bundle) |
+|---|---|---|
+| FeatureExtraction | 295.9 s | 258.7 s |
+| FeatureMatching | 585.7 s | 483.9 s |
+| StructureFromMotion | 510.6 s (521 of 524 views) | 287.0 s (522 of 524) |
+| PrepareDenseScene | 1245.6 s | 930.3 s |
+| DepthMap | 3660.8 s | 3403.0 s |
+| DepthMapFilter | 620.9 s | 531.2 s |
+| Meshing + MeshFiltering | 384.9 s | 469.0 s |
+| total | 7311.7 s | 6370.2 s |
+
+PrepareDenseScene is all CPU there. A sampler ran every 5 s through the stage: user 91.8 %, system
+6.3 %, iowait 0.3 %, idle 1.6 %. The SSD wrote 34.1 GB at 40.5 MB/s on average and was busy
+16.1 % of the time. The stage costs about 7.1 thread-seconds per image. The job's first chunk (40
+views) was run again with `CHESHIRE_PDS_PROFILE=1`; thread-seconds, 4 threads unless named:
+
+| run | wall | read | undistort | write | output |
+|---|---|---|---|---|---|
+| as released (ZIP level 1) | 72.0, 70.7 s | 49.3, 43.1 | 70.1, 64.7 | 148.4, 162.2 | 2696 MB |
+| `CHESHIRE_PDS_EXR_COMPRESSION=none` | 37.5 s | 39.6 | 61.1 | 40.7 | 5489 MB |
+| `CHESHIRE_PDS_THREADS=2` | 80.7 s | 23.7 | 40.6 | 93.4 | 2696 MB |
+| `CHESHIRE_GPU_JPEG=1` (all 40 decoded on the device) | 70.0 s | 41.0 | 65.7 | 160.4 | 2696 MB |
+
+The compression is 47 % of the stage. The Linux bundle's OpenEXR is 3.1, which deflates with the
+system's zlib (1.3). On the job's own EXR chunks, that zlib compresses at level 1 at 73 MB/s on the
+i3. libdeflate, already in the bundle for the reader (6v), does it at 180 MB/s, with slightly smaller
+output (68.5 against 70.4 MB for one image). The level really is 1: re-compressing 64 chunks at each
+level reproduces the file's bytes at level 1 only. Measured on Windows first, the two looked equal,
+but Windows' Python ships zlib-ng. Two other ideas were rejected:
+- decoding the JPEGs on the device saves nothing; the read is not decode-bound;
+- the colour conversion is not per channel, so a table of the 256 byte values cannot replace it.
+  The config's sRGB to scene-linear path composes two matrices that are not exactly inverse. On all
+  16,777,216 RGB triples, 16.66 M, 16.74 M and 16.77 M outputs (R, G, B) differ from per-channel
+  tables. Besides, it costs 9 ns a pixel.
+
+**8f.** Inside PrepareDenseScene (an `ExrDeflateWriteScope` around its writes), `writeImage` hands a
+ZIP or ZIPS EXR to `cheshireWriteExrDeflate` (`hip/port/sgm_fused/cheshireExr.cpp.txt`):
+1. OpenImageIO writes the image uncompressed into memory, header and lines as it writes them.
+2. The ZIP chunks are built from those lines as OpenEXR's zip compressor builds them: the lines in
+   order, the interleave, the predictor, and a zlib stream from libdeflate at the same level.
+3. A chunk that does not come out smaller is stored as it is. Only the compression byte of the
+   header changes.
+
+It is on by default with OpenEXR before 3.2 (the Linux bundles); OpenEXR 3.2 and later deflate with
+libdeflate themselves. `CHESHIRE_EXR_DEFLATE_WRITE=0|1` overrides that, and
+`CHESHIRE_EXR_DEFLATE_WRITE_CHECK=1` reads every file back through OpenEXR. Every other EXR writer
+keeps OpenEXR's, so depth maps and the rest are the bytes they were.
+
+| check | result |
+|---|---|
+| Windows, forced on, 41 views, against OpenEXR 3.4's own writer | 41 of 41 files identical as bytes |
+| Windows, the check | 41 of 41 read back identical |
+| house-pc (0.3.8 development CUDA bundle), zoo chunk, libdeflate against zlib | 40 of 40: headers identical, every line identical |
+| house-pc, the check | 40 of 40 read back identical through OpenEXR 3.1 |
+| house-pc, the zoo job's 0.3.7 files against 0.3.8 with zlib | 40 of 40 identical as bytes |
+| house-pc, the zoo job's 0.3.7 files against 0.3.8 with libdeflate | 40 of 40: headers identical, every line identical |
+
+On Windows the files are byte for byte what OpenEXR 3.4 writes, so its libdeflate at level 1 is the
+same compressor. On Linux they are now what the Windows packages write from the same pixels.
+
+Timing on house-pc, the same chunk, alternating:
+
+| zoo chunk, 40 views | wall | write (thread-seconds) | output |
+|---|---|---|---|
+| zlib (`CHESHIRE_EXR_DEFLATE_WRITE=0`) | 70.5 s, 71.8 s | 154.4, 155.1 | 2696 MB |
+| libdeflate (8f) | 51.1 s, 51.3 s | 99.0, 98.7 | 2625 MB |
+
+That is 28 % off the stage. On the whole zoo job, PrepareDenseScene would go from about 930 s to
+about 670 s. On Windows (OpenEXR 3.4) the path stays off. Forced on there it was slower (11.2
+against 9.5 s on 41 views): OpenEXR spreads one file's chunks over its pool, while the path
+deflates them in the image's own thread. That is enough on four threads, where every thread is
+busy with an image.
+
+What is left on the four-thread host is the undistortion (about a quarter of the stage). It
+samples in double precision without fused operations, so the device could run it to the same bits
+while the GPU sits idle.

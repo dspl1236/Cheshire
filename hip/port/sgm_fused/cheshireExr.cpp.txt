@@ -36,9 +36,13 @@ inline int omp_in_parallel() { return 0; }
     #include <vector>
 #endif
 
+#include <OpenImageIO/filesystem.h>  // step 8f: the deflate writer
+#include <OpenImageIO/imagebuf.h>
+#include <OpenImageIO/imageio.h>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <mutex>
@@ -298,11 +302,362 @@ bool cheshireReadExrDeflate(Imf::InputFile& file, const Imf::Header& header, int
 }
 #endif
 
+thread_local int tlExrDeflateWrite = 0;
+
+#if defined(CHESHIRE_HAVE_DEFLATE)
+// cheshire (step 8f, 0.3.8): PrepareDenseScene's EXR files, their ZIP (or ZIPS) chunks deflated with libdeflate where
+// OpenEXR deflates with zlib (before 3.2: the Linux bundles' 3.1). On an i3-4330 that zlib compresses the undistorted
+// images at 73 MB/s at level 1, libdeflate at 180, and on that four-thread host PrepareDenseScene spent half its time
+// compressing (docs/04, 0.3.8). The file is OpenImageIO's own: it writes the image uncompressed into memory - header,
+// attributes and lines as it writes them - and the chunks are built from those lines as OpenEXR's zip compressor
+// builds them (the lines of a chunk in order, the interleave putting the even bytes first, the predictor storing each
+// byte minus the one before plus 128, the zlib stream), and a chunk that does not come out smaller is stored as it is.
+// Beside OpenImageIO's ZIP file only the deflate streams differ, so every pixel is the same. Default: on with OpenEXR
+// before 3.2 (3.2 and later deflate with libdeflate themselves); CHESHIRE_EXR_DEFLATE_WRITE=0|1 overrides.
+// CHESHIRE_EXR_DEFLATE_WRITE_CHECK=1 reads every file back through OpenEXR, keeps it only when its pixels are the
+// buffer's (OpenImageIO writes it otherwise), and reports "EXR deflate write check: N of M files" at exit.
+bool cheshireExrDeflateWriteEnabled()
+{
+#if OPENEXR_VERSION_MAJOR < 3 || (OPENEXR_VERSION_MAJOR == 3 && OPENEXR_VERSION_MINOR < 2)
+    constexpr bool byDefault = true;
+#else
+    constexpr bool byDefault = false;
+#endif
+    static const bool on = ::cheshire::env::flag("CHESHIRE_EXR_DEFLATE_WRITE", byDefault);
+    return on;
+}
+
+bool cheshireExrDeflateWriteCheck()
+{
+    static const bool on = ::cheshire::env::flag("CHESHIRE_EXR_DEFLATE_WRITE_CHECK");
+    return on;
+}
+
+struct CheshireDeflateWriteStats
+{
+    std::atomic<long long> written{0}, checked{0}, identical{0};
+    std::atomic<bool> announced{false};
+    ~CheshireDeflateWriteStats()
+    {
+        if (checked.load() > 0)
+            std::fprintf(stderr, "[cheshire] EXR deflate write check: %lld of %lld files read back identical through OpenEXR\n", identical.load(),
+                         checked.load());
+    }
+};
+CheshireDeflateWriteStats g_cheshireDeflateWriteStats;
+
+std::int32_t exrInt32(const std::vector<unsigned char>& f, std::size_t at)
+{
+    std::int32_t v;
+    std::memcpy(&v, f.data() + at, 4);
+    return v;
+}
+
+// the NUL-terminated string at p; p then points past the NUL
+bool exrString(const std::vector<unsigned char>& f, std::size_t& p, std::string& s)
+{
+    if (p >= f.size())
+        return false;
+    const unsigned char* b = f.data() + p;
+    const void* nul = std::memchr(b, 0, f.size() - p);
+    if (nul == nullptr)
+        return false;
+    const std::size_t n = static_cast<const unsigned char*>(nul) - b;
+    s.assign(reinterpret_cast<const char*>(b), n);
+    p += n + 1;
+    return true;
+}
+
+// What the deflate writer needs of the uncompressed single-part scanline EXR OpenImageIO wrote into memory
+struct UncompressedExr
+{
+    std::size_t headerEnd = 0;      // past the header's terminating NUL: where the offset table starts
+    std::size_t compressionAt = 0;  // the compression attribute's one value byte
+    int ymin = 0, ymax = -1;
+    std::size_t bytesPerLine = 0;
+    std::vector<std::size_t> lines;  // where each line's pixel data starts
+};
+
+bool parseUncompressedExr(const std::vector<unsigned char>& f, UncompressedExr& u)
+{
+    if (f.size() < 8 || exrInt32(f, 0) != 20000630)
+        return false;
+    const std::int32_t version = exrInt32(f, 4);
+    if ((version & 0xff) != 2 || (version & (0x200 | 0x800 | 0x1000)) != 0)
+        return false;  // tiled, deep or multi-part
+    std::size_t p = 8;
+    bool haveCompression = false, haveWindow = false;
+    int xmin = 0, xmax = -1;
+    std::size_t bytesPerPixel = 0;
+    for (;;)
+    {
+        if (p >= f.size())
+            return false;
+        if (f[p] == 0)
+        {
+            ++p;
+            break;
+        }
+        std::string name, type;
+        if (!exrString(f, p, name) || !exrString(f, p, type) || p + 4 > f.size())
+            return false;
+        const std::int32_t size = exrInt32(f, p);
+        p += 4;
+        if (size < 0 || p + std::size_t(size) > f.size())
+            return false;
+        if (name == "compression")
+        {
+            if (size != 1 || f[p] != 0)
+                return false;  // not the uncompressed file asked for
+            u.compressionAt = p;
+            haveCompression = true;
+        }
+        else if (name == "dataWindow")
+        {
+            if (size != 16)
+                return false;
+            xmin = exrInt32(f, p);
+            u.ymin = exrInt32(f, p + 4);
+            xmax = exrInt32(f, p + 8);
+            u.ymax = exrInt32(f, p + 12);
+            haveWindow = true;
+        }
+        else if (name == "lineOrder")
+        {
+            if (size != 1 || f[p] != 0)
+                return false;  // increasing y only
+        }
+        else if (name == "type")
+        {
+            if (std::string(reinterpret_cast<const char*>(f.data() + p), std::size_t(size)).rfind("scanlineimage", 0) != 0)
+                return false;
+        }
+        else if (name == "chunkCount" || name == "tiles")
+            return false;  // an attribute the chunk layout would have to follow
+        else if (name == "channels")
+        {
+            std::size_t q = p;
+            const std::size_t end = p + std::size_t(size);
+            while (q < end && f[q] != 0)
+            {
+                std::string channel;
+                if (!exrString(f, q, channel) || q + 16 > end)
+                    return false;
+                const std::int32_t pixelType = exrInt32(f, q);
+                if (exrInt32(f, q + 8) != 1 || exrInt32(f, q + 12) != 1 || pixelType < 0 || pixelType > 2)
+                    return false;
+                bytesPerPixel += pixelType == 1 ? 2 : 4;  // HALF; UINT and FLOAT are 4
+                q += 16;
+            }
+        }
+        p += std::size_t(size);
+    }
+    if (!haveCompression || !haveWindow || bytesPerPixel == 0 || xmax < xmin || u.ymax < u.ymin)
+        return false;
+    u.headerEnd = p;
+    u.bytesPerLine = bytesPerPixel * std::size_t(xmax - xmin + 1);
+    const std::size_t height = std::size_t(u.ymax - u.ymin) + 1;
+    if (p + 8 * height > f.size())
+        return false;
+    u.lines.resize(height);
+    for (std::size_t i = 0; i < height; ++i)
+    {
+        std::uint64_t at;
+        std::memcpy(&at, f.data() + p + 8 * i, 8);
+        if (at > f.size() || f.size() - at < 8 + u.bytesPerLine || exrInt32(f, std::size_t(at)) != u.ymin + std::int32_t(i) ||
+            exrInt32(f, std::size_t(at) + 4) != std::int32_t(u.bytesPerLine))
+            return false;
+        u.lines[i] = std::size_t(at) + 8;
+    }
+    return true;
+}
+
+// buf written to path as OpenImageIO writes it with ZIP (16 lines a chunk) or ZIPS (one line) at level, the chunks
+// deflated by libdeflate; false (the file removed) on anything unexpected
+bool writeExrDeflate(const OIIO::ImageBuf& buf, const std::string& path, bool zips, int level)
+{
+    // OpenImageIO's uncompressed file, in memory
+    std::vector<unsigned char> mem;
+    mem.reserve(std::size_t(buf.spec().image_bytes()) + 16 * std::size_t(std::max(0, buf.spec().height)) + (std::size_t(1) << 16));
+    {
+        const void* pixels = buf.localpixels();
+        auto out = OIIO::ImageOutput::create("openexr");
+        if (pixels == nullptr || !out || !out->supports("ioproxy"))
+            return false;
+        OIIO::Filesystem::IOVecOutput proxy(mem);
+        OIIO::ImageSpec spec = buf.spec();
+        spec.attribute("compression", "none");
+        if (!out->set_ioproxy(&proxy) || !out->open(path, spec))
+            return false;
+        if (!out->write_image(spec.format, pixels, buf.pixel_stride(), buf.scanline_stride(), buf.z_stride()) || !out->close())
+            return false;
+    }
+    UncompressedExr u;
+    if (!parseUncompressedExr(mem, u) || u.bytesPerLine % 2 != 0)
+        return false;
+
+    const std::size_t linesPerChunk = zips ? 1 : 16;
+    const std::size_t height = u.lines.size();
+    const std::size_t nChunks = (height + linesPerChunk - 1) / linesPerChunk;
+    libdeflate_compressor* compressor = libdeflate_alloc_compressor(level);
+    if (compressor == nullptr)
+        return false;
+    FILE* fp = OIIO::Filesystem::fopen(path, "wb");
+    if (fp == nullptr)
+    {
+        libdeflate_free_compressor(compressor);
+        return false;
+    }
+    bool ok = true;
+    std::uint64_t pos = 0;
+    auto put = [&](const void* data, std::size_t n) {
+        if (ok && n > 0 && std::fwrite(data, 1, n, fp) != n)
+            ok = false;
+        pos += n;
+    };
+    // the header with compression ZIP (3) or ZIPS (2), then the offset table, filled in at the end
+    mem[u.compressionAt] = zips ? 2 : 3;
+    put(mem.data(), u.headerEnd);
+    const std::uint64_t tableAt = pos;
+    std::vector<std::uint64_t> table(nChunks, 0);
+    put(table.data(), 8 * nChunks);
+    std::vector<unsigned char> inter, pred, packed;
+    for (std::size_t k = 0; k < nChunks && ok; ++k)
+    {
+        const std::size_t first = k * linesPerChunk;
+        const std::size_t count = std::min(linesPerChunk, height - first);
+        const std::size_t n = count * u.bytesPerLine;
+        // OpenEXR's zip: the interleave (the even bytes of the chunk's lines, then the odd ones), straight from the
+        // lines - their length is even, so each continues the split - then the predictor
+        inter.resize(n);
+        unsigned char* t1 = inter.data();
+        unsigned char* t2 = inter.data() + n / 2;
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            const unsigned char* s = mem.data() + u.lines[first + i];
+            for (std::size_t b = 0; b < u.bytesPerLine; b += 2)
+            {
+                *t1++ = s[b];
+                *t2++ = s[b + 1];
+            }
+        }
+        pred.resize(n);
+        pred[0] = inter[0];
+        for (std::size_t i = 1; i < n; ++i)
+            pred[i] = static_cast<unsigned char>(int(inter[i]) - int(inter[i - 1]) + (128 + 256));
+        // the zlib stream only when it is smaller than the lines, as OpenEXR decides
+        packed.resize(n);
+        const std::size_t z = libdeflate_zlib_compress(compressor, pred.data(), n, packed.data(), n - 1);
+        table[k] = pos;
+        const std::int32_t y = u.ymin + static_cast<std::int32_t>(first);
+        const std::int32_t size = static_cast<std::int32_t>(z > 0 ? z : n);
+        put(&y, 4);
+        put(&size, 4);
+        if (z > 0)
+            put(packed.data(), z);
+        else
+            for (std::size_t i = 0; i < count; ++i)
+                put(mem.data() + u.lines[first + i], u.bytesPerLine);
+    }
+    libdeflate_free_compressor(compressor);
+    if (ok && std::fseek(fp, static_cast<long>(tableAt), SEEK_SET) == 0)
+        put(table.data(), 8 * nChunks);
+    else
+        ok = false;
+    ok = std::fclose(fp) == 0 && ok;
+    if (!ok)
+        OIIO::Filesystem::remove(path);
+    return ok;
+}
+
+// The file at path read through OpenEXR (its zlib inflate): are its pixels buf's, bit for bit?
+bool exrReadsBackAs(const std::string& path, const OIIO::ImageBuf& buf)
+{
+    const OIIO::ImageSpec& spec = buf.spec();
+    if (spec.format != OIIO::TypeDesc::HALF && spec.format != OIIO::TypeDesc::FLOAT)
+        return false;
+    Imf::InputFile file(path.c_str());
+    const Imath::Box2i dw = file.header().dataWindow();
+    const int width = dw.max.x - dw.min.x + 1, height = dw.max.y - dw.min.y + 1;
+    if (width != spec.width || height != spec.height)
+        return false;
+    const std::size_t elem = spec.format.size();
+    const std::size_t xs = elem * std::size_t(spec.nchannels), ys = xs * std::size_t(width);
+    std::vector<char> back(ys * std::size_t(height));
+    Imf::FrameBuffer fb;
+    char* origin = back.data() - (std::ptrdiff_t(dw.min.x) * std::ptrdiff_t(xs) + std::ptrdiff_t(dw.min.y) * std::ptrdiff_t(ys));
+    for (int c = 0; c < spec.nchannels; ++c)
+        fb.insert(spec.channelnames[c].c_str(), Imf::Slice(elem == 2 ? Imf::HALF : Imf::FLOAT, origin + std::size_t(c) * elem, xs, ys));
+    file.setFrameBuffer(fb);
+    file.readPixels(dw.min.y, dw.max.y);
+    const char* src = static_cast<const char*>(buf.localpixels());
+    if (src == nullptr || buf.pixel_stride() != OIIO::stride_t(xs))
+        return false;
+    for (int y = 0; y < height; ++y)
+        if (std::memcmp(back.data() + std::size_t(y) * ys, src + std::ptrdiff_t(y) * buf.scanline_stride(), ys) != 0)
+            return false;
+    return true;
+}
+#endif
+
 }  // namespace
 
 ConcurrentLoadScope::ConcurrentLoadScope() { ++tlConcurrentLoad; }
 ConcurrentLoadScope::~ConcurrentLoadScope() { --tlConcurrentLoad; }
 bool inConcurrentLoad() { return tlConcurrentLoad > 0; }
+
+ExrDeflateWriteScope::ExrDeflateWriteScope() { ++tlExrDeflateWrite; }
+ExrDeflateWriteScope::~ExrDeflateWriteScope() { --tlExrDeflateWrite; }
+bool inExrDeflateWrite() { return tlExrDeflateWrite > 0; }
+
+bool cheshireWriteExrDeflate(const OIIO::ImageBuf& buf, const std::string& path, const std::string& compression)
+{
+#if defined(CHESHIRE_HAVE_DEFLATE)
+    if (!cheshireExrDeflateWriteEnabled())
+        return false;
+    // "zip:<level>" or "zips:<level>", the level given (without one OpenEXR picks its own)
+    const std::size_t colon = compression.find(':');
+    const std::string method = compression.substr(0, colon);
+    if ((method != "zip" && method != "zips") || colon == std::string::npos)
+        return false;
+    const int level = std::atoi(compression.c_str() + colon + 1);
+    if (level < 1 || level > 9)
+        return false;
+    try
+    {
+        if (!writeExrDeflate(buf, path, method == "zips", level))
+            return false;
+        ++g_cheshireDeflateWriteStats.written;
+        if (!g_cheshireDeflateWriteStats.announced.exchange(true))
+            ALICEVISION_LOG_INFO("cheshire: EXR ZIP/ZIPS chunks deflated with libdeflate on write (OpenEXR "
+                                 << OPENEXR_VERSION_MAJOR << "." << OPENEXR_VERSION_MINOR
+                                 << "; CHESHIRE_EXR_DEFLATE_WRITE=0 for OpenEXR's own, CHESHIRE_EXR_DEFLATE_WRITE_CHECK=1 to read every file back)");
+        if (cheshireExrDeflateWriteCheck())
+        {
+            ++g_cheshireDeflateWriteStats.checked;
+            if (!exrReadsBackAs(path, buf))
+            {
+                ALICEVISION_LOG_WARNING("cheshire: EXR deflate write check: '" << path << "' does not read back as written; OpenImageIO writes it");
+                OIIO::Filesystem::remove(path);
+                return false;
+            }
+            ++g_cheshireDeflateWriteStats.identical;
+        }
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        ALICEVISION_LOG_DEBUG("[IO] cheshire: deflate write of '" << path << "' not taken (" << e.what() << "), OpenImageIO path");
+        OIIO::Filesystem::remove(path);
+        return false;
+    }
+#else
+    (void)buf;
+    (void)path;
+    (void)compression;
+    return false;
+#endif
+}
 
 bool cheshireReadExr(const std::string& path, int nchannels, bool requireLinearMetadata, const std::function<float*(int, int)>& allocate)
 {

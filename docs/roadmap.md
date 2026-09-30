@@ -734,9 +734,20 @@ first, then AC-RANSAC's hypothesis loop and PrepareDenseScene on four-thread hos
   - Left: `kernel.fit` 74.8 % of AC-RANSAC's CPU time, the bound 11.9 %, `kernel.errors` 6.1 %,
     sampling 4.4 %. What exact work can still reach is about a quarter. The solver's nullspace is
     several times faster through QR (`CHESHIRE_QR_NULLSPACE=1`, docs/17), but not bit-identical.
-    The user's decision is next: the nullspace, the iteration default, the device port.
-- **PrepareDenseScene on four-thread hosts** (M, measure first). About 21 minutes of each 524-photo
-  zoo job on house-pc.
+  - **Decided 2026-09-30:** the exact path stays the default and QR stays opt-in. The paired nodes keep
+    Meshroom's RANSAC defaults: changing a default would make a paired 2025.1 run differ from a stock
+    one for a reason that is not Cheshire's code. The faster 2023.3 counts (2048 / 4096; the house-pc
+    app's default) should be a visible choice instead - a pipeline template with the two values in the
+    graph, and the README's numbers. Not started. The device port is not pursued.
+- **PrepareDenseScene on four-thread hosts** (M, measure first). **Measured 2026-09-30** on house-pc
+  (docs/04, 0.3.8): all CPU, 930 s of the zoo job on the 0.3.7 CUDA bundle, and half of it the EXR
+  compression. OpenEXR 3.1's zlib runs at 73 MB/s on that i3, libdeflate at 180.
+  - **Step 8f, done 2026-09-30:** PrepareDenseScene's ZIP chunks deflated with libdeflate where OpenEXR
+    is before 3.2 (the Linux bundles). The same pixels, checked against zlib and against the zoo job's
+    0.3.7 files. On Windows the files are byte for byte OpenEXR 3.4's. The stage is 28 % faster on
+    house-pc: about 930 to 670 s on the zoo.
+  - Next: the undistortion on the device (about a quarter of the stage; double precision without
+    fused operations, so the same bits), while the GPU is idle there.
 
 ## Upstream's next pipeline: detect, then pivot
 

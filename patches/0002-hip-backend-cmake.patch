@@ -6326,7 +6326,7 @@ index 1f29fe2..7055c2a 100644
                     image::Image<float>& outBuffer,
                     const std::string& kernel = "gaussian",
 diff --git a/src/aliceVision/image/io.cpp b/src/aliceVision/image/io.cpp
-index 8c5e1d3..0e1ea3a 100644
+index 8c5e1d3..186de35 100644
 --- a/src/aliceVision/image/io.cpp
 +++ b/src/aliceVision/image/io.cpp
 @@ -6,7 +6,9 @@
@@ -6848,6 +6848,26 @@ index 8c5e1d3..0e1ea3a 100644
      oiio::ImageSpec configSpec;
  
      const bool isRawImage = isRawFormat(path);
+@@ -1049,6 +1539,9 @@ bool containsHalfFloatOverflow(const oiio::ImageBuf& image)
+     return false;
+ }
+ 
++// cheshire (step 8f): an EXR's ZIP/ZIPS chunks deflated with libdeflate inside an ExrDeflateWriteScope (cheshireExr.cpp)
++bool cheshireWriteExrDeflate(const oiio::ImageBuf& buf, const std::string& path, const std::string& compression);
++
+ template<typename T>
+ void writeImage(const std::string& path,
+                 oiio::TypeDesc typeDesc,
+@@ -1227,7 +1720,8 @@ void writeImage(const std::string& path,
+     }
+ 
+     // write image
+-    if (!outBuf->write(tmpPath))
++    // cheshire (step 8f): PrepareDenseScene's EXR files deflated with libdeflate where OpenEXR uses zlib, else OpenImageIO
++    if (!(isEXR && inExrDeflateWrite() && cheshireWriteExrDeflate(*outBuf, tmpPath, compressionMethod)) && !outBuf->write(tmpPath))
+     {
+         const std::string error = outBuf->geterror();
+         ALICEVISION_THROW_ERROR("Can't write output image file '" << path << "': "
 diff --git a/src/aliceVision/matching/CMakeLists.txt b/src/aliceVision/matching/CMakeLists.txt
 index a7544f6..381f19b 100644
 --- a/src/aliceVision/matching/CMakeLists.txt
@@ -11918,7 +11938,7 @@ index 4fe193b..0145801 100644
                      fuseCut::Mesher mesher(mp, pc, tetrahedralization, gfiller.getCellsStatus());
                      mesher.graphCutPostProcessing(&hexah[0]);
 diff --git a/src/software/pipeline/main_prepareDenseScene.cpp b/src/software/pipeline/main_prepareDenseScene.cpp
-index a37cb29..056a4f2 100644
+index a37cb29..c2dc9f8 100644
 --- a/src/software/pipeline/main_prepareDenseScene.cpp
 +++ b/src/software/pipeline/main_prepareDenseScene.cpp
 @@ -4,6 +4,9 @@
@@ -11931,10 +11951,11 @@ index a37cb29..056a4f2 100644
  #include <aliceVision/sfmData/SfMData.hpp>
  #include <aliceVision/alicevision_omp.hpp>
  #include <aliceVision/sfmDataIO/sfmDataIO.hpp>
-@@ -17,6 +20,28 @@
+@@ -17,6 +20,29 @@
  #include <aliceVision/config.hpp>
  #include <aliceVision/sfmDataIO/viewIO.hpp>
  #include <aliceVision/camera/cameraUndistortImage.hpp>
++#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 8f
 +#include <atomic>   // cheshire: CHESHIRE_PDS_PROFILE
 +#include <chrono>
 +#include <cstdio>
@@ -11960,7 +11981,7 @@ index a37cb29..056a4f2 100644
  
  #include <boost/program_options.hpp>
  
-@@ -45,6 +70,32 @@ using namespace aliceVision::sfmDataIO;
+@@ -45,6 +71,32 @@ using namespace aliceVision::sfmDataIO;
  namespace po = boost::program_options;
  namespace fs = std::filesystem;
  
@@ -11993,17 +12014,18 @@ index a37cb29..056a4f2 100644
  template<class ImageT, class MaskFuncT>
  void process(const std::string& dstColorImage,
               const IntrinsicBase* cam,
-@@ -55,7 +106,9 @@ void process(const std::string& dstColorImage,
+@@ -55,7 +107,10 @@ void process(const std::string& dstColorImage,
               MaskFuncT&& maskFunc)
  {
      ImageT image, image_ud;
++    image::ExrDeflateWriteScope cheshireDeflateScope;  // cheshire (step 8f): the EXR below, deflated with libdeflate where OpenEXR uses zlib
 +    auto cheshireT = std::chrono::steady_clock::now();  // cheshire, step 5g
      readImage(srcImage, image, image::EImageColorSpace::LINEAR);
 +    cheshirePdsProfile.readUs += cheshireUsSince(cheshireT); cheshireT = std::chrono::steady_clock::now();
  
      // exposure correction
      if (evCorrection)
-@@ -70,6 +123,7 @@ void process(const std::string& dstColorImage,
+@@ -70,6 +125,7 @@ void process(const std::string& dstColorImage,
  
      // mask
      maskFunc(image);
@@ -12011,7 +12033,7 @@ index a37cb29..056a4f2 100644
  
      // undistort
      if (cam->isValid() && cam->hasDistortion())
-@@ -78,11 +132,14 @@ void process(const std::string& dstColorImage,
+@@ -78,11 +134,14 @@ void process(const std::string& dstColorImage,
          using Pix = typename ImageT::Tpixel;
          Pix pixZero(Pix::Zero());
          UndistortImage(image, cam, image_ud, pixZero);
@@ -12028,7 +12050,7 @@ index a37cb29..056a4f2 100644
      }
  }
  
-@@ -132,7 +189,10 @@ bool prepareDenseScene(const SfMData& sfmData,
+@@ -132,7 +191,10 @@ bool prepareDenseScene(const SfMData& sfmData,
      const double medianCameraExposure = sfmData.getMedianCameraExposureSetting().getExposure();
      ALICEVISION_LOG_INFO("Median Camera Exposure: " << medianCameraExposure << ", Median EV: " << std::log2(1.0 / medianCameraExposure));
  
@@ -12040,7 +12062,7 @@ index a37cb29..056a4f2 100644
      for (int i = 0; i < viewIds.size(); ++i)
      {
          auto itView = viewIds.begin();
-@@ -335,7 +395,7 @@ int aliceVision_main(int argc, char* argv[])
+@@ -335,7 +397,7 @@ int aliceVision_main(int argc, char* argv[])
           "Correct exposure value.");
      // clang-format on
  
