@@ -5378,5 +5378,33 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
     print(f"applied; {len(diff.splitlines())} diff lines -> {out.relative_to(ROOT)}")
 
 
+def keep_unchanged_times(run) -> None:
+    """Run the generator, then give every file under the submodule's src/ (and its CMake files) whose content it left
+    as it was its old modification time back. Step 0 checks out every TRACKED file and the steps write them again, so
+    without this ninja saw the whole patched tree as new on every build - a six-minute rebuild for a one-line change.
+    Now only what a step really changed is rebuilt. A step that stops the run (sys.exit) restores just as well."""
+    import hashlib
+    roots = [AV / "src", AV / "CMakeLists.txt"]
+    before = {}
+    for root in roots:
+        files = [root] if root.is_file() else (p for p in root.rglob("*") if p.is_file())
+        for p in files:
+            st = p.stat()
+            before[p] = (st.st_mtime_ns, hashlib.sha1(p.read_bytes()).digest())
+    try:
+        run()
+    finally:
+        kept = 0
+        for p, (mtime, digest) in before.items():
+            try:
+                st = p.stat()
+                if st.st_mtime_ns != mtime and hashlib.sha1(p.read_bytes()).digest() == digest:
+                    os.utime(p, ns=(st.st_atime_ns, mtime))
+                    kept += 1
+            except OSError:
+                pass
+        print(f"{kept} files the steps rewrote unchanged keep their old modification time")
+
+
 if __name__ == "__main__":
-    main()
+    keep_unchanged_times(main)
