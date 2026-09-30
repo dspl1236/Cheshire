@@ -782,6 +782,11 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   validated (`scripts/assemble_bundle.py:22-25`). The Meshroom launcher never reads
   `gpu/<family>/UNTESTED` (`scripts/windows/meshroom-pair-launcher.cpp:154-172`), so paired runs
   give no warning.
+- **Ship the UNTESTED lists again** (S, 0.3.8). Found 2026-09-30: no Windows zip since v0.3.2 has
+  the list (v0.2.17 to v0.3.1 did; every published zip checked). Only `scripts/assemble_bundle.py` writes it,
+  and every release chain since has called `scripts/bundle_windows.py` directly. Have
+  `bundle_windows.py` write it from the validated-target table, so no chain can skip it, and make
+  the launcher read it (the item above). The README, docs/16 and `assemble_bundle.py` say so.
 - **RDNA2 Windows payloads for 0.3.3** (S). gfx1031 has not run on Windows since v0.2.17
   (`docs/16-bundling.md:215`). Put the RX 6750 XT back in bench-pc and run the 12-config matrix.
 - **RDNA3 discrete** (S, blocked on a tester). No run on any RX 7600-7900 (`README.md:328-329`).
@@ -1024,27 +1029,14 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 
 ### README.md
 
-- `:36`, `:373`: "What is left is the tetrahedralisation" and "every CPU change verified
-  identical" are no longer accurate (4u changes faces on purpose).
-- `:37`, `:382-384`: padding, save and downscale have all shipped, and the downscale is exact.
-- `:38`: the 0.3.3 undistortion map is missing.
-- `:42-43`, `:300-302`, `:474`: says seven paired nodes, and lists SfM as not carried.
-- `:44-47`: the 39 → 30 min figure was measured at v0.2.5 (`docs/07-gpu-matcher.md:77`).
-- `:189`: RDNA2 on Linux also lacks `hipMallocMipmappedArray`.
-- `:238`, `:417`: future chips get no GPU SIFT.
-- `:240`: the Vega/APU "fallback" claim is unverified.
-- `:260`: the launcher warning claim is wrong - the launcher never reads `gpu/<family>/UNTESTED`.
-  The same claim is in `scripts/assemble_bundle.py:10-11` and docs/16. Either fix the text or make
-  the launcher read the marker, which makes every claim true.
-- `:326-339`: points to the retired RDNA3+RDNA4 zip, uses a broken command, and "every package"
-  does not hold for CUDA.
-- `:357-358`: the cache shipped in v0.2.9.
-- `:403-412`: QR has been opt-in since v0.2.18.
-- `:421-423`: the collapse is to six targets, not four.
-- `:425-429`: the CUDA work has shipped; only the older-glibc bundle remains.
-- `:434-436`: SfM also blocks reproducibility, not only geogram.
-- `:452-453`: Building covers RDNA3/4 only.
-- `:474-494`: Status still reports the v0.3.0 gates, and cb2e496 is not mentioned.
+Fixed on 2026-09-30, with 0.3.7's own changes (Grin and SfM, nine paired nodes, the 0.3.7 gate in
+Status): the Meshing, Texturing and PrepareDenseScene rows, the whole-job figure's version, RDNA2's
+missing mipmapped arrays, GPU SIFT on generic targets and on Vega and the APUs, the RDNA3 call for
+testers (one Windows zip, both AMD packages, `scripts\run-depthmap.cmd` now runs a bundle through
+its `cheshire-run.cmd`, Python requirements stated), the history list (the DepthMapFilter cache, the
+texturing downscale, QR opt-in since v0.2.18, six generic targets, the CUDA build), SfM's place in
+Not planned, Building, and Status. The UNTESTED claim is now stated as it is: no zip since v0.3.2
+carries the list and the launcher never read it (Hardware coverage, 0.3.8).
 
 ### USING.md
 

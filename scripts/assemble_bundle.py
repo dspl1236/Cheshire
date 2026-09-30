@@ -8,8 +8,9 @@ tree and HIP runtime. Every GPU target comes from build/payload/<family>/<target
 only need to exist for one target each.
 
 Also writes gpu/<family>/UNTESTED. A target listed there has not been run on that hardware here, and
-cheshire-run.cmd and the Meshroom launcher say so on every run that selects it - a README nobody
-opens is not a warning. The list is what it is: of eleven targets, three have been run on a real
+cheshire-run.cmd says so on every run that selects it - a README nobody opens is not a warning. (The
+Meshroom launcher does not read it yet, and a release that calls bundle_windows.py directly ships
+without it, as v0.3.2 to v0.3.7 did. Both are queued for 0.3.8.) The list is what it is: of eleven targets, three have been run on a real
 card, and pretending otherwise would be the one thing this project cannot afford.
 """
 import subprocess, sys

@@ -158,7 +158,10 @@ They ship anyway, for two reasons. The probe matches on the exact `gcnArchName`,
 can only ever be handed to an APU - there is no path by which an unvalidated target reaches
 hardware that is tested. And those users have no Windows package at all today, so the alternative
 is not safety, it is nothing. Every target outside the first row is listed in
-`gpu/<family>/UNTESTED` and announced on every run that selects it.
+`gpu/<family>/UNTESTED` and announced on every run of `cheshire-run.cmd` that selects it. (Two gaps,
+found on 2026-09-30 and queued for 0.3.8: the Meshroom launcher does not read the list, and only
+`scripts/assemble_bundle.py` writes it, so the zips of v0.3.2 to v0.3.7, composed with
+`bundle_windows.py` directly, carry none.)
 
 Two of these were already shipping unflagged: v0.2.16 released gfx1030 and gfx1032 packages that
 have never run on an RX 6800 or an RX 6600. Marking them is more honest than the status quo.
