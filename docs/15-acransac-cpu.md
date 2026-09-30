@@ -277,6 +277,45 @@ Over the whole run, `CHESHIRE_ACR_BOUND_CHECK=1` sorts and scans every skipped m
 23,526,805 of 23,607,436 skipped, none below `minNFA`. Geometric filtering goes from 36.8 s to
 18.8 s, and the match file is byte for byte the same ([docs/04](04-validation.md), 0.3.8).
 
+## The residual loop, vectorised (0.3.8, step 8e)
+
+With the sort and the scan gone, `kernel.errors` was the second phase at 44.9 CPU-seconds. Step 4x
+had already let the compiler inline `FundamentalEpipolarDistanceError::error`, but the loop still
+did not vectorise. Each call builds two `Vec3` from the columns, multiplies by `F` through Eigen,
+and takes a dot product and a norm: 5.7 ns a residual in the run.
+
+Vectorising it must not change a bit, so the new loop repeats Eigen's arithmetic operation for
+operation. Here is how Eigen 3.4 evaluates it for AliceVision's aligned fixed sizes, read off
+clang-cl's code and checked below:
+
+```
+F x, rows 0-1 (one packet): F(.,0)*a0, then + F(.,1)*a1 as a pmadd (an FMA where Eigen uses FMA),
+                            then + F(.,2)*1
+F x, row 2 (not vectorised): F(2,0)*a0 + (F(2,1)*a1 + F(2,2)*1)
+dot with (b0, b1, 1):        (fx0*b0 + fx1*b1) + fx2
+squared norm of the head:    fx0*fx0 + fx1*fx1
+```
+
+The loop reads the points straight from the 2 x n matrices and gives every rounding its own
+statement (clang contracts only within one), so the compiler fuses nothing that Eigen does not. Where
+Eigen does fuse, the loop uses `std::fma` itself. `hip/tests/epipolar` compares the two bit for bit
+on random, tiny and huge, zero and degenerate inputs:
+
+| build | residuals | differ | per residual |
+|---|---|---|---|
+| clang-cl `/arch:AVX2` (the Windows packages; Eigen's FMA path) | 6,150,602 | 0 | 2.63 -> 0.70 ns |
+| clang-cl `/arch:AVX` (the path without FMA) | 6,163,449 | 0 | 2.63 -> 1.19 ns |
+| GCC 15 `-march=core2` (the Linux packages' `TARGET_ARCHITECTURE=core`) | 6,142,901 | 0 | 2.83 -> 1.50 ns |
+
+Other flags, another Eigen, or another alignment choice could change Eigen's side. So on first use a
+self-test runs the same comparison on fixed pseudo-random inputs. If one bit differs, the kernels
+keep the per-point loop and the log says so. The loop covers every kernel that computes this
+distance: the F and E geometric filters and SfM's initial pair. `CHESHIRE_ACR_RESIDUALS=0` turns it
+off. `CHESHIRE_ACR_RESIDUALS_CHECK=1` computes both, keeps `error()`'s, and counts the residuals that
+differ: on 41 views at 50,000 iterations, 7,861,787,651 of 7,861,787,651 are identical. Geometric
+filtering goes from 18.9 s to 16.35 s, with the same match file and the same SfM digests
+([docs/04](04-validation.md), 0.3.8).
+
 ## Why this did not go to the GPU
 
 The work is per image pair and already parallel across pairs, so the shape would be one workgroup
@@ -298,18 +337,21 @@ algorithm's reputation.
 
 ## What is left
 
-After step 8d, on 41 views at Meshroom 2025.1's 50,000 iterations (CPU time summed over 12 threads,
-from a temporary instrumentation pass; 23,607,436 models, 333 residuals each):
+After steps 8d and 8e, on 41 views at Meshroom 2025.1's 50,000 iterations (CPU time summed over 12
+threads, from a temporary instrumentation pass; 23,607,436 models, 333 residuals each):
 
-| phase | CPU time | share |
-|---|---|---|
-| `kernel.fit` (7-point solver) | 143.7 s | 63.5 % |
-| `kernel.errors` | 44.9 s | 19.8 % |
-| the bound (8d) | 23.2 s | 10.2 % |
-| sampling | 8.8 s | 3.9 % |
-| sort + `bestNFA`, 80,631 models | 0.6 s | 0.25 % |
-| the better-model branch | 0.5 s | 0.2 % |
-| each iteration, all told | 226.3 s | |
+| phase | after 8d | after 8e | share |
+|---|---|---|---|
+| `kernel.fit` (7-point solver) | 143.7 s | 146.5 s | 74.8 % |
+| the bound (8d) | 23.2 s | 23.2 s | 11.9 % |
+| `kernel.errors` | 44.9 s | 11.9 s | 6.1 % |
+| sampling | 8.8 s | 8.5 s | 4.4 % |
+| sort + `bestNFA`, 80,631 models | 0.6 s | 0.6 s | 0.3 % |
+| the better-model branch | 0.5 s | 0.5 s | 0.2 % |
+| each iteration, all told | 226.3 s | 196.0 s | |
+
+What exact work can still reach is a quarter of the stage: the bound, the residuals and the
+sampling.
 
 On the engine bay before 0.3.8, `kernel.fit` was already the largest phase at 1589.4 s, 39 % of the
 stage. It is

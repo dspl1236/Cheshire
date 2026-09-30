@@ -728,9 +728,13 @@ first, then AC-RANSAC's hypothesis loop and PrepareDenseScene on four-thread hos
   - **Step 8d, done 2026-09-30:** a model whose NFA bound cannot beat the best so far skips the residual
     sort and the NFA scan (99.7 % of the models). Geometric filtering 36.8 to 18.8 s on 41 views at
     50,000 iterations, the same bytes (docs/15, docs/04).
-  - Left after it: `kernel.fit` 63.5 % of AC-RANSAC's CPU time, `kernel.errors` 19.8 %, the bound
-    10.2 %. The residual loop is next, exact. The solver's nullspace would be several times faster
-    through another factorisation, but not bit-identical (docs/15, "What is left").
+  - **Step 8e, done 2026-09-30:** the epipolar residuals in one vectorised loop with Eigen's
+    arithmetic, the same bits (7.86 G residuals checked); self-tested on first use. Geometric filtering
+    18.9 to 16.35 s (docs/15, docs/04).
+  - Left: `kernel.fit` 74.8 % of AC-RANSAC's CPU time, the bound 11.9 %, `kernel.errors` 6.1 %,
+    sampling 4.4 %. What exact work can still reach is about a quarter. The solver's nullspace is
+    several times faster through QR (`CHESHIRE_QR_NULLSPACE=1`, docs/17), but not bit-identical.
+    The user's decision is next: the nullspace, the iteration default, the device port.
 - **PrepareDenseScene on four-thread hosts** (M, measure first). About 21 minutes of each 524-photo
   zoo job on house-pc.
 

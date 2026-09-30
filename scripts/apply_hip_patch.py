@@ -560,6 +560,219 @@ STEP8D_GF = [
     ("        ++progressDisplay;\n    }\n}\n", "        ++progressDisplay;\n    }\n    robustEstimation::cheshireAcrBoundReport();  // cheshire (step 8d): CHESHIRE_ACR_BOUND_CHECK's count\n}\n"),
 ]
 
+# 8e (0.3.8): the epipolar residuals of a model in one vectorised loop, with Eigen's arithmetic.
+STEP8E_FE = [
+    ("#include <aliceVision/multiview/relativePose/ISolverErrorRelativePose.hpp>\n",
+     "#include <aliceVision/multiview/relativePose/ISolverErrorRelativePose.hpp>\n"
+     "#include <aliceVision/system/Logger.hpp>  // cheshire: step 8e\n"
+     "#include <atomic>  // cheshire\n#include <bit>  // cheshire\n#include <cmath>  // cheshire\n"
+     "#include <cstdint>  // cheshire\n#include <vector>  // cheshire\n"),
+    ("        return Square(F_x.dot(y)) / F_x.head<2>().squaredNorm();\n    }\n};\n\nstruct EpipolarSphericalDistanceError\n",
+     r"""        return Square(F_x.dot(y)) / F_x.head<2>().squaredNorm();
+    }
+};
+
+/**
+ * cheshire (step 8e, 0.3.8): FundamentalEpipolarDistanceError::error for every correspondence of one model, in a loop
+ * the compiler vectorises, with Eigen's arithmetic operation for operation. The kernels' errors() called error() once
+ * per correspondence - two Vec3 from the columns, F x, the dot product and the norm - at 5.7 ns a residual inside
+ * geometric filtering. Eigen evaluates F x for aligned fixed sizes as rows 0 and 1 in one packet (F(.,0) a0, then
+ * F(.,1) a1 added - a fused multiply-add where Eigen vectorises with FMA - then F(.,2) times 1) and row 2 unvectorised
+ * as c0 + (c1 + c2); the dot product with y adds its first two products as a packet, then the third term; the squared
+ * norm is F x's first two squares added. Below, each rounding is its own statement, so the compiler fuses nothing
+ * Eigen does not. Checked bit for bit against error() on 12 M residuals with clang-cl /arch:AVX2 and /arch:AVX and
+ * GCC 15 -march=core2 (this build's Windows and Linux flags); cheshireEpipolarFast() checks it again on first use.
+ */
+inline void cheshireEpipolarDistanceErrors(const Mat3& F, const Mat& x1, const Mat& x2, std::vector<double>& out)
+{
+#ifdef __clang__
+#pragma clang fp contract(off)
+#endif
+    const double f00 = F(0, 0), f10 = F(1, 0), f20 = F(2, 0), f01 = F(0, 1), f11 = F(1, 1), f21 = F(2, 1), f02 = F(0, 2),
+                 f12 = F(1, 2), f22 = F(2, 2);
+    const std::size_t n = x1.cols();
+    out.resize(n);
+    const double* __restrict a = x1.data();
+    const double* __restrict b = x2.data();
+    double* __restrict e = out.data();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const double a0 = a[2 * i], a1 = a[2 * i + 1], b0 = b[2 * i], b1 = b[2 * i + 1];
+#ifdef EIGEN_VECTORIZE_FMA
+        const double u0 = std::fma(a1, f01, f00 * a0);
+        const double u1 = std::fma(a1, f11, f10 * a0);
+#else
+        const double m00 = f00 * a0, m10 = f10 * a0;
+        const double m01 = f01 * a1, m11 = f11 * a1;
+        const double u0 = m00 + m01;
+        const double u1 = m10 + m11;
+#endif
+        const double fx0 = u0 + f02;
+        const double fx1 = u1 + f12;
+        const double m21 = f21 * a1;
+        const double m20 = f20 * a0;
+        const double s2 = m21 + f22;
+        const double fx2 = m20 + s2;
+        const double p0 = fx0 * b0;
+        const double p1 = fx1 * b1;
+        const double s = p0 + p1;
+        const double d = s + fx2;
+        const double q0 = fx0 * fx0;
+        const double q1 = fx1 * fx1;
+        const double nn = q0 + q1;
+        const double dd = d * d;
+        e[i] = dd / nn;
+    }
+}
+
+/// cheshire (step 8e): cheshireEpipolarDistanceErrors against error(), bit for bit, on fixed pseudo-random inputs
+inline bool cheshireEpipolarSelfTest()
+{
+    std::uint64_t state = 0x9E3779B97F4A7C15ull;
+    auto next = [&state] {  // in [-1, 1)
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        return double(std::int64_t(state >> 11) - (std::int64_t(1) << 52)) * 0x1p-52;
+    };
+    constexpr int n = 61;  // odd, so a vector loop's remainder runs too
+    Mat x1(2, n), x2(2, n);
+    for (int i = 0; i < n; ++i)
+    {
+        x1(0, i) = next();
+        x1(1, i) = next();
+        x2(0, i) = next();
+        x2(1, i) = next();
+    }
+    FundamentalEpipolarDistanceError est;
+    std::vector<double> fast;
+    for (int m = 0; m < 32; ++m)
+    {
+        Mat3 F;
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                F(r, c) = next() * (m % 4 == 3 ? 1e-7 : m % 4 == 2 ? 1e5 : 1.0);
+        const robustEstimation::Mat3Model model(F);
+        cheshireEpipolarDistanceErrors(F, x1, x2, fast);
+        for (int i = 0; i < n; ++i)
+            if (std::bit_cast<std::uint64_t>(fast[i]) != std::bit_cast<std::uint64_t>(est.error(model, x1.col(i), x2.col(i))))
+                return false;
+    }
+    return true;
+}
+
+/// cheshire (step 8e): whether the kernels use cheshireEpipolarDistanceErrors. CHESHIRE_ACR_RESIDUALS=0 turns it off,
+/// and so does a failed self-test (another Eigen, other flags).
+inline bool cheshireEpipolarFast()
+{
+    static const bool on = [] {
+        if (!::cheshire::env::flag("CHESHIRE_ACR_RESIDUALS", true))
+            return false;
+        if (cheshireEpipolarSelfTest())
+            return true;
+        ALICEVISION_LOG_WARNING("cheshire: the vectorised epipolar distance does not reproduce FundamentalEpipolarDistanceError "
+                                "with this build's Eigen and flags, so the per-point loop is used");
+        return false;
+    }();
+    return on;
+}
+
+inline bool cheshireEpipolarCheck()
+{
+    static const bool on = ::cheshire::env::flag("CHESHIRE_ACR_RESIDUALS_CHECK");
+    return on;
+}
+
+struct CheshireEpipolarStats
+{
+    std::atomic<long long> residuals{0}, differ{0};
+};
+
+inline CheshireEpipolarStats& cheshireEpipolarStats()
+{
+    static CheshireEpipolarStats s;
+    return s;
+}
+
+/// cheshire (step 8e): what CHESHIRE_ACR_RESIDUALS_CHECK=1 found, once the caller's estimations are done
+inline void cheshireEpipolarReport()
+{
+    const CheshireEpipolarStats& s = cheshireEpipolarStats();
+    if (s.residuals.load())
+        ALICEVISION_LOG_INFO("cheshire: epipolar residual check: " << s.residuals.load() - s.differ.load() << " of " << s.residuals.load()
+                                                                   << " residuals identical to FundamentalEpipolarDistanceError::error");
+}
+
+struct EpipolarSphericalDistanceError
+"""),
+]
+STEP8E_RPK = [
+    ("#include <aliceVision/robustEstimation/PointFittingRansacKernel.hpp>\n",
+     "#include <aliceVision/robustEstimation/PointFittingRansacKernel.hpp>\n"
+     "#include <aliceVision/multiview/relativePose/FundamentalError.hpp>  // cheshire: step 8e\n"
+     "#include <bit>  // cheshire\n#include <cstdint>  // cheshire\n#include <type_traits>  // cheshire\n"),
+    ("namespace aliceVision {\nnamespace multiview {\n\n",
+     r"""namespace aliceVision {
+namespace multiview {
+
+/// cheshire (step 8e): the kernels' errors() - error() for every correspondence. FundamentalEpipolarDistanceError on a
+/// Mat3Model goes through relativePose::cheshireEpipolarDistanceErrors, the same bits in a vectorised loop, when its
+/// self-test passed. CHESHIRE_ACR_RESIDUALS_CHECK=1 computes both, counts the residuals that differ and keeps error()'s.
+template<typename ErrorT_, typename ModelT_>
+inline void cheshireKernelErrors(const ErrorT_& estimator, const ModelT_& model, const Mat& x1, const Mat& x2, std::vector<double>& errors)
+{
+    const std::size_t n = x1.cols();
+    if constexpr (std::is_same_v<ErrorT_, relativePose::FundamentalEpipolarDistanceError> &&
+                  std::is_same_v<ModelT_, robustEstimation::Mat3Model>)
+    {
+        if (x1.rows() == 2 && x2.rows() == 2 && std::size_t(x2.cols()) == n && relativePose::cheshireEpipolarFast())
+        {
+            relativePose::cheshireEpipolarDistanceErrors(model.getMatrix(), x1, x2, errors);
+            if (!relativePose::cheshireEpipolarCheck())
+                return;
+            long long differ = 0;
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                const double e = estimator.ErrorT_::error(model, x1.col(i), x2.col(i));
+                differ += std::bit_cast<std::uint64_t>(e) != std::bit_cast<std::uint64_t>(errors[i]);
+                errors[i] = e;
+            }
+            relativePose::cheshireEpipolarStats().residuals += (long long)n;
+            relativePose::cheshireEpipolarStats().differ += differ;
+            return;
+        }
+    }
+    errors.resize(n);
+    for (std::size_t i = 0; i < n; ++i)
+        errors[i] = estimator.ErrorT_::error(model, x1.col(i), x2.col(i));
+}
+
+"""),
+    ("        const std::size_t n = PFRansacKernel::PFKernel::_x1.cols();\n"
+     "        errors.resize(n);\n"
+     "        for (std::size_t i = 0; i < n; ++i)\n"
+     "            errors[i] = PFRansacKernel::PFKernel::_errorEstimator.error(\n"
+     "              model, PFRansacKernel::PFKernel::_x1.col(i), PFRansacKernel::PFKernel::_x2.col(i));\n",
+     "        // cheshire (step 8e): through cheshireKernelErrors, vectorised for the epipolar distance\n"
+     "        cheshireKernelErrors(PFRansacKernel::PFKernel::_errorEstimator, model, PFRansacKernel::PFKernel::_x1,\n"
+     "                             PFRansacKernel::PFKernel::_x2, errors);\n"),
+    ("        const ModelT_ modelF(F);\n"
+     "        const std::size_t n = PFRansacKernel::PFKernel::_x1.cols();\n"
+     "        errors.resize(n);\n"
+     "        for (std::size_t i = 0; i < n; ++i)\n"
+     "            errors[i] = _errorEstimator.error(modelF, PFRansacKernel::PFKernel::_x1.col(i), PFRansacKernel::PFKernel::_x2.col(i));\n",
+     "        const ModelT_ modelF(F);\n"
+     "        // cheshire (step 8e): through cheshireKernelErrors, vectorised for the epipolar distance\n"
+     "        cheshireKernelErrors(PFRansacKernel::PFKernel::_errorEstimator, modelF, PFRansacKernel::PFKernel::_x1,\n"
+     "                             PFRansacKernel::PFKernel::_x2, errors);\n"),
+]
+STEP8E_GF = [
+    ("#include <aliceVision/robustEstimation/ACRansac.hpp>  // cheshire: step 8d\n",
+     "#include <aliceVision/robustEstimation/ACRansac.hpp>  // cheshire: step 8d\n"
+     "#include <aliceVision/multiview/relativePose/FundamentalError.hpp>  // cheshire: step 8e\n"),
+    ("    robustEstimation::cheshireAcrBoundReport();  // cheshire (step 8d): CHESHIRE_ACR_BOUND_CHECK's count\n",
+     "    robustEstimation::cheshireAcrBoundReport();  // cheshire (step 8d): CHESHIRE_ACR_BOUND_CHECK's count\n"
+     "    multiview::relativePose::cheshireEpipolarReport();  // cheshire (step 8e): CHESHIRE_ACR_RESIDUALS_CHECK's count\n"),
+]
+
 
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
@@ -626,12 +839,14 @@ TRACKED = [
     "src/aliceVision/mesh/UVAtlas.cpp",
     "src/aliceVision/robustEstimation/ACRansac.hpp",
     "src/aliceVision/multiview/RelativePoseKernel.hpp",
+    "src/aliceVision/multiview/relativePose/FundamentalError.hpp",
     "src/aliceVision/image/imageAlgo.hpp",
     "src/aliceVision/image/imageAlgo.cpp",
     "src/aliceVision/numeric/algebra.hpp",
     "src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp",
     "src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp",
     "src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp",
+    "src/aliceVision/sfm/CMakeLists.txt",  # step 7f
     "src/aliceVision/sfm/pipeline/ReconstructionEngine.hpp",
     "src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp",
     "src/aliceVision/sfm/bundle/costfunctions/intrinsicsProject.hpp",
@@ -5648,6 +5863,23 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                     sys.exit(f"an anchor of the AC-RANSAC bound not found {want} time(s) in {rel} (8d)")
                 t = t.replace(old, new)
         f8d.write_text(t, encoding="utf-8", newline="")
+
+    # 8e (0.3.8). The epipolar residuals of a model (FundamentalEpipolarDistanceError, the F and E geometric filters and
+    #     SfM's initial pair) in one vectorised loop with Eigen's arithmetic, operation for operation; a self-test on first
+    #     use falls back to the per-point loop where the bits differ. GeometricFilter reports CHESHIRE_ACR_RESIDUALS_CHECK's
+    #     count (both overloads). After 8d, whose report line it follows.
+    for rel, pairs, count in (("src/aliceVision/multiview/relativePose/FundamentalError.hpp", STEP8E_FE, None),
+                              ("src/aliceVision/multiview/RelativePoseKernel.hpp", STEP8E_RPK, None),
+                              ("src/aliceVision/matchingImageCollection/GeometricFilter.hpp", STEP8E_GF, {1: 2})):
+        f8e = AV / rel
+        t = f8e.read_text(encoding="utf-8")
+        if "step 8e" not in t:
+            for i, (old, new) in enumerate(pairs):
+                want = (count or {}).get(i, 1)
+                if t.count(old) != want:
+                    sys.exit(f"an anchor of the epipolar residuals not found {want} time(s) in {rel} (8e)")
+                t = t.replace(old, new)
+        f8e.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports

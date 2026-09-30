@@ -3315,3 +3315,31 @@ most models, not just get cheaper.
 
 After 8d, `kernel.fit` (the 7-point solver) is 63.5 % of AC-RANSAC's CPU time and `kernel.errors`
 19.8 % (docs/15, "What is left").
+
+## 0.3.8: the epipolar residuals in one vectorised loop (step 8e, 2026-09-30)
+
+The loop computes `FundamentalEpipolarDistanceError` for every correspondence of a model. It repeats
+Eigen's arithmetic operation for operation, and a self-test on first use falls back to the
+per-point loop wherever a bit differs ([docs/15](15-acransac-cpu.md), "The residual loop,
+vectorised"). With `CHESHIRE_ACR_RESIDUALS_CHECK=1`, every residual is computed both ways and
+`error()`'s value is kept:
+
+| run | residuals identical | digest |
+|---|---|---|
+| 41 views, 50,000 iterations | 7,861,787,651 of 7,861,787,651 | `2b4452a79d79b819`, `base50k`'s |
+| engine bay, 2048 iterations | 2,264,668,180 of 2,264,668,180 | `f063ea6d15c0aa2e`, as before |
+
+41 views at 50,000 iterations, alternating runs with the 8d bound on:
+
+| run | geometric filtering | wall | digest |
+|---|---|---|---|
+| `CHESHIRE_ACR_RESIDUALS=0` | 18.9 s | 25.5 s | `2b4452a79d79b819` |
+| 8e | 16.3 s | 22.8 s | the same |
+| `CHESHIRE_ACR_RESIDUALS=0` | 18.9 s | 25.4 s | the same |
+| 8e | 16.4 s | 23.0 s | the same |
+
+SfM's initial pair uses the same kernel. `scripts/sfmbench.py` gives the same digests with the loop
+in use: 41 views `801d1fb7`, `361ddd5c` and engine bay `814ae0d5`, `af98cde3`.
+
+With 8d and 8e, geometric filtering on 41 views at 50,000 iterations went from 36.8 s to 16.35 s
+in this round. `kernel.fit` is now 74.8 % of AC-RANSAC's CPU time (docs/15, "What is left").
