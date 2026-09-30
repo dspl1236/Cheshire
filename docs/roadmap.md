@@ -537,6 +537,8 @@ passing the SfM gate); GPS pairing is validated on a public survey, OpenDroneMap
 
 ## 0.3.7
 
+**Released 2026-09-30 as v0.3.7** (built at 3104a30; all five card gates passed, docs/04).
+
 Started 2026-09-28. **Headline: Grin, a bundle-adjustment solver of Cheshire's own** (XL), decided in 0.3.6
 after the step-0/A1/B1 measurements (docs/notes/ba-device-plan.md). Bundle adjustment is 82 % of a
 large set's SfM, and nearly all of it sits in Ceres' generic machinery rather than in the arithmetic.
@@ -891,6 +893,14 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   search found. The drafted PR is not opened (`docs/upstream/alicevision-bundle-libs-paths.md`).
 - **OpenMesh `/bigobj`** (S). Exported without a language guard
   (`docs/upstream/openmesh-bigobj-language-guard.md`).
+
+### Promised upstream
+
+- **A functional-test pipeline for AliceVision** (after 0.3.7). In discussion #2116 AliceVision asked for our SfM
+  evaluation as functional tests, "some pipeline for meshroom but located inside alicevision repository". Promised
+  (2026-09-30): the SfM quality comparison as a `.mg` pipeline next to `photogrammetry.mg` in AliceVision's `meshroom/`,
+  with a comparison node, on `dataset_monstree` and the new SfM nodes (TracksBuilding, SfmBootstrapping, SfmExpanding).
+  The deliverable is a draft PR.
 
 ### Waiting on maintainers
 

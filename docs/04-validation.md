@@ -3133,3 +3133,42 @@ The largest pieces left outside the solver are:
 - resection's arithmetic;
 - the colours' image reads;
 - triangulation's LO-RANSAC.
+
+
+## The 0.3.7 release gate (2026-09-30)
+
+All four packages were built at 3104a30 (`build/chain-037.cmd`). The first launch, at bad0dfa, stopped at
+22:51 with ninja's "User interrupt" partway through the hip6.2 payloads, most likely from a closed console
+window. It was relaunched from WMI with the window hidden, after the solver was named Grin.
+
+The packers' checks pass, and three more were made by hand:
+- all 11 GPU targets of the Windows AMD bundle carry their own `aliceVision_sfm_bundle.dll`, each
+  with its target's code object and Grin's announce line;
+- both Linux bundles carry Grin, the HIP one for 19 targets and the CUDA one for sm_61;
+- every package copied to a test box matched its SHA-256.
+
+The gate is 0.3.6's, and the StructureFromMotion node now also has to print
+`cheshire: BA solver: Grin, Cheshire's own, for the Schur solves`. Every run is scored at eight nodes.
+
+| package | hardware | 2025.1: mini6 | 2025.1: 41 views | 2023.3: mini6 |
+|---|---|---|---|---|
+| Windows AMD | RX 9070 (rocm7.2 gfx12-generic payload) | 15/15 at 8/8 | base 433 s, verify 781 s | 4/4 at 8/8 |
+| Windows AMD | RX 5500 XT (hip6.2 gfx1012 payload, bench-pc) | 15/15 at 8/8 | base 1398 s, verify 2312 s | 4/4 at 8/8 |
+| Linux AMD | RX 6750 XT (house-pc) | 15/15 at 8/8 | base 881 s, verify 1632 s | 4/4 at 8/8 |
+| Windows CUDA | GTX 1080 Ti (bench-pc) | 15/15 at 8/8 | base 1277 s, verify 2216 s | 4/4 at 8/8 |
+| Linux CUDA | GTX 1080 Ti (house-pc) | 15/15 at 8/8 | base 931 s, verify 1662 s | 4/4 at 8/8 |
+
+105 runs, none failed. Every 41-view time is below 0.3.6's on the same card (478/832, 1469/2377,
+916/1672, 1343/2273 and 966/1707 s).
+
+**What repeatable SfM showed.** On all three AMD cards, the 41-view `base` and `verify` runs now give
+the same depth maps. In 0.3.6 every pair differed, because SfM did. On both CUDA packages they still
+differ, and a stage-by-stage hash of the two Windows runs puts the first difference in
+FeatureExtraction:
+- the 41 `.feat` files are identical;
+- one descriptor of about 970,000 differs (view 1827716366, index 6213, 88 of 128 bytes, the same bins
+  at different magnitudes);
+- on Linux, one descriptor each in four views.
+
+That points at a race in PopSIFT's CUDA descriptor kernel. The HIP build repeats exactly. It is filed
+for a separate investigation.
