@@ -708,8 +708,10 @@ first, then AC-RANSAC's hypothesis loop and PrepareDenseScene on four-thread hos
 - the features' read (46 s). **Done 2026-09-30** (step 8a, a4ab8d1): `from_chars` on the whole file, the same
   bits; 42.5 s to 0.8 s for the False Door's features on 12 threads on Windows, measured on its own.
 - the colours' image reads (about 37 s). **Done 2026-09-30** (step 8b, a4ab8d1): an 8-bit read where upstream
-  round-trips through float, the same bytes; 2.3-2.5x on the colours of 41 views and the engine bay. The
-  False Door numbers for both wait for an idle-box run.
+  round-trips through float, the same bytes; 2.3-2.5x on the colours of 41 views and the engine bay.
+  False Door, back to back: SfM 307.8 s (0.3.7 bundle) to 240.9 s, features 44.1 to 0.84 s, colours 38.0 to
+  14.4 s (the rest is the disk), the same digests. Next by the new profile: adjust 60.7 s, resection 42.1 s,
+  triangulation 40.3 s, post-adjust 16.7 s, initial pairs 12.8 s, tracks 12.5 s (docs/04).
 - resection's and triangulation's arithmetic;
 - inside Grin: the sparse factorisation (8.6 s) and the elimination (9.6 s) of the False Door's large
   solves, and the per-solve setup (about 13 s).

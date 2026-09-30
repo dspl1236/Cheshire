@@ -3247,4 +3247,32 @@ Development install, RX 9070 box, `scripts/sfmbench.py` (Meshroom 2023.3's SfM o
 | engine bay, 8a + 8b | the same | 0.09 s | 0.80 s | 17.9 s |
 
 With `CHESHIRE_READ_DIRECT_CHECK=1`, the direct read and upstream's path agreed on 38 of 38 and 98 of 98
-images. The False Door run waits for an idle box.
+images.
+
+The 884-view False Door, back to back in one session on an idle box: the published 0.3.7 bundle
+(`build/run-037.cmd`, through its `cheshire-run.cmd`) against the development install with 8a and 8b.
+
+| False Door | SfM wall | features | colours | reconstruction | digests (sfm.abc, cameras) |
+|---|---|---|---|---|---|
+| 0.3.7 bundle | 307.8 s | 44.1 s | 38.0 s | 216.2 s | `a5cc8437`, `e05e2fa4` |
+| 8a + 8b | 240.9 s | 0.84 s | 14.4 s | 216.7 s | the same |
+
+The node is 22 % faster with the same bytes. The 0.3.7 run is 24 s slower than the release notes'
+284 s; that is the same box on another day, the drift those notes describe. What is left of the colours
+is about the disk: the 884 photos are 4.4 GB on a SATA SSD.
+
+The reconstruction's own profile now reads:
+
+| phase | time |
+|---|---|
+| adjust (Grin) | 60.7 s |
+| resection | 42.1 s |
+| triangulation | 40.3 s |
+| post-adjust | 16.7 s |
+| initial pairs | 12.8 s |
+| tracks | 12.5 s |
+| register | 8.9 s |
+| graph states | 7.4 s |
+| next views | 5.1 s |
+| statistics | 4.4 s |
+| graph update | 2.9 s |
