@@ -3214,7 +3214,7 @@ house-pc and `build/popsift038/hip_check.py` here.
 
 **8a, the features' read.** Every node that reads features parses the `.feat` text through an
 `istream_iterator` over `operator>>`, four floats a keypoint. Measured on its own over the 884-view False
-Door's 20,023,190 features (`build/popsift038/featbench.cpp`, files already in the page cache):
+Door's 20,023,190 features (`hip/tests/featread/featbench.cpp`, files already in the page cache):
 
 | parser | MSVC STL (clang-cl), 1 thread | 12 threads | libstdc++ (GCC 13, WSL), 1 thread | 12 threads |
 |---|---|---|---|---|
