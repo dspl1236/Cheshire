@@ -3172,3 +3172,40 @@ FeatureExtraction:
 
 That points at a race in PopSIFT's CUDA descriptor kernel. The HIP build repeats exactly. It is filed
 for a separate investigation.
+
+## 0.3.8: PopSIFT's CUDA descriptor race, found and fixed (2026-09-30)
+
+The 0.3.7 gate's CUDA runs repeated everything but one descriptor in about 970,000 (above). The cause
+is upstream PopSIFT's `normalize_histogram` (`s_desc_normalize.h`), on both backends:
+- It runs one warp per descriptor, 32 to a block. In the last block the warps past the end are
+  clamped onto the last descriptor so that their shuffles have data, and `ignoreme` was meant to keep
+  them from writing it. It was computed after the clamp, so it was never true: those warps normalised
+  the last descriptor again, in place, racing the warp that owns it.
+- So at most one descriptor per image can come out wrong, and only when the image's descriptor count
+  is not a multiple of 32. Which descriptor is last in the device buffer changes between runs (the
+  extrema are appended with atomics), which is why the affected row moves.
+- The Linux evidence fits all of it. Four views, one descriptor each, with counts 23692, 23362, 23628
+  and 23861 (12, 2, 12 and 21 past a multiple of 32). In each pair one copy is the other passed through
+  RootSIFT a second time: RootSIFT applied to the stored bytes reproduces it to within 1 in most bins,
+  the rest being the rounding of the stored intermediate, which the square root magnifies in small
+  bins.
+
+The fix decides `ignoreme` before the clamp (`scripts/apply_popsift_patch.py`, step 3e). It is not
+about HIP, so the CUDA builds take it too: they reset PopSIFT to upstream and now apply
+`--fixes-only`, this step and the extremum counter's (3c).
+
+| build | runs (41 views, 968,726 descriptors) | result |
+|---|---|---|
+| the shipped 0.3.7 Linux CUDA library, GTX 1080 Ti (house-pc) | 3 | run 1 against 2: 2 descriptors differ, in 2 views; run 1 against 3: 1 |
+| the same bundle with the fixed library | 4 | identical, every `.desc` and `.feat` |
+| the fixed library against the 0.3.7 gate's two runs | | identical but for the gate's four racy descriptors, where the fixed build gives the copy normalised once, in each case |
+| the published 0.3.7 Windows AMD bundle, RX 9070 | 2 | identical |
+| the same bundle with the fixed `popsift.dll` (gfx1201) | 1 | identical to the published bundle's: the HIP bytes are as they were |
+
+The AMD cards never showed the race: every AMD base and verify pair in the 0.3.7 gate was identical.
+The Windows CUDA library takes the same fix through `build-popsift-cuda.cmd` and gets its hardware
+check at the 0.3.8 gate, since no Windows box has an NVIDIA card today. The release chains must
+rebuild PopSIFT CUDA on both systems before AliceVision: WSL's `/opt/popsift-cuda` and
+`build/popsift-cuda-install` still hold 0.3.7's library. The test build was
+`build/popsift038/wsl-build.lf.sh` (a scratch prefix), the runs `/data/tests/popsift-race` on
+house-pc and `build/popsift038/hip_check.py` here.

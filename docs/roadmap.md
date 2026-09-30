@@ -695,7 +695,12 @@ first, then AC-RANSAC's hypothesis loop and PrepareDenseScene on four-thread hos
   in each of four views on Linux. The one examined has the same bins at different magnitudes. The
   evidence is kept: bench-pc `C:/cheshire/e2e-037c-25-41/{base,verify}/MeshroomCache/FeatureExtraction`
   and house-pc `/data/tests/gate-037/lc25-41/{base,verify}/MeshroomCache/FeatureExtraction`. The fix
-  must leave the HIP build's bytes as they are.
+  must leave the HIP build's bytes as they are. **Done 2026-09-30** (docs/04, "0.3.8: PopSIFT's CUDA
+  descriptor race"): `normalize_histogram` let the last block's spare warps normalise the last
+  descriptor a second time; step 3e of `apply_popsift_patch.py`, which the CUDA builds now apply
+  with `--fixes-only`. Four runs with the fixed library identical on the GTX 1080 Ti (the shipped
+  one differed within three), and the HIP bytes unchanged on the RX 9070. At release: rebuild
+  PopSIFT CUDA on both systems before AliceVision.
 
 **SfM around Grin, continued** (each exact, so the digests stay; the False Door's SfM is 284 s at
 0.3.7):

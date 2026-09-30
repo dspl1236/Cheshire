@@ -458,6 +458,15 @@ print(len(best),'pairs,',sum(best.values()),'matches,',sum(best.values())//len(b
 
 538 of a possible 820 pairs on the 41-view set, 4,367 of a possible 5,671 on the engine bay.
 
+## The CUDA build's one racy descriptor (fixed in 0.3.8)
+
+Found once SfM itself repeated (0.3.7): on a GTX 1080 Ti, two runs of the same photos gave the same
+keypoints but differed in one descriptor in about 970,000. Upstream's `normalize_histogram` let the
+spare warps of the last block normalise the last descriptor a second time, in place, racing the warp
+that owns it. At most one descriptor per image, and only when the count is not a multiple of 32.
+Step 3e of `scripts/apply_popsift_patch.py` fixes it on both backends; the HIP build never showed it
+and its bytes are unchanged. Evidence and runs: docs/04, "0.3.8: PopSIFT's CUDA descriptor race".
+
 ## What is not done
 
 The descriptors have not been judged, only counted. PopSIFT and CPU SIFT do not agree exactly by
