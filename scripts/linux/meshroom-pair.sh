@@ -43,6 +43,101 @@ MESHROOM="${1:?Meshroom directory (e.g. ~/apps/Meshroom-2023.3.0)}"
 # If you restructure the wrapper or the bundle layout, say so in the same commit.
 BIN="$MESHROOM/aliceVision/bin"
 [ -d "$BIN" ] || { echo "$BIN not found: is $MESHROOM a Meshroom 2023.3 or 2025.1 Linux bundle?"; exit 1; }
+
+# Meshroom 2025.1 only (0.3.9): the "Photogrammetry Fast Ransac" and "Photogrammetry Draft Fast Ransac"
+# pipeline templates. 2025.1 raised FeatureMatching's maxIteration (2048 in 2023.3) and StructureFromMotion's
+# localizerEstimatorMaxIterations (4096) to 50000; on the sets measured (docs/04, 0.3.6 and 0.3.9) that
+# verifies more weak pairs and places no more views, for minutes of matching. The paired nodes keep
+# Meshroom's defaults, so Meshroom's own templates give what a stock run gives; these are the opt-in: the
+# installed Photogrammetry and Draft templates, each written as the stock file plus two lines - the
+# 2023.3 value as the first input of the FeatureMatching and of the StructureFromMotion node, indented like
+# their neighbours, with the stock line endings - and checked to parse as the stock graph plus those two
+# values. Meshroom labels a template by splitting its file name at capitals. The Windows pairing writes the
+# same files (scripts/windows/meshroom-templates.ps1). 2023.3 keeps its templates in lib/meshroom/pipelines
+# and already runs these counts; a template whose graph is not the expected shape is skipped, not guessed
+# at; a file of the same name that does not carry both values is the user's and is left alone.
+fast_ransac_templates() {  # install|remove
+  if ! command -v python3 >/dev/null 2>&1; then echo "python3 not found: Fast Ransac templates not handled"; return 0; fi
+  python3 - "$MESHROOM/aliceVision/share/meshroom" "$1" <<'PY'
+import json, os, re, sys
+d, mode = sys.argv[1], sys.argv[2]
+variants = [("photogrammetry", "photogrammetryFastRansac"), ("photogrammetryDraft", "photogrammetryDraftFastRansac")]
+sets = [("FeatureMatching", "maxIteration", 2048), ("StructureFromMotion", "localizerEstimatorMaxIterations", 4096)]
+
+def ours(path):
+    if not os.path.isfile(path):
+        return False
+    with open(path, encoding="utf-8") as f:
+        t = f.read()
+    return '"maxIteration": 2048' in t and '"localizerEstimatorMaxIterations": 4096' in t
+
+def label(name):
+    return " ".join(re.findall("[A-Z][^A-Z]*", name[0].upper() + name[1:]))
+
+def add_input(text, eol, node_type, name, value):
+    """`"<name>": <value>,` as the first entry of the inputs of the one node of that type; None otherwise"""
+    tag = f'"nodeType": "{node_type}",'
+    i = text.find(tag)
+    if i < 0 or text.find(tag, i + 1) >= 0:
+        return None
+    opening = '"inputs": {' + eol
+    j = text.find(opening, i)
+    nxt = text.find('"nodeType":', i + len(tag))
+    if j < 0 or 0 <= nxt < j:
+        return None
+    line_start = text.rfind(eol, 0, j) + len(eol)
+    indent = text[line_start:j] + "    "
+    k = j + len(opening)
+    return text[:k] + f'{indent}"{name}": {value},' + eol + text[k:]
+
+if mode == "remove":
+    for _, name in variants:
+        p = os.path.join(d, name + ".mg")
+        if ours(p):
+            os.remove(p)
+            print(f"removed the pipeline template {name}.mg")
+    sys.exit(0)
+if not os.path.isfile(os.path.join(d, "photogrammetry.mg")):
+    print("no aliceVision/share/meshroom/photogrammetry.mg: not Meshroom 2025.1 (2023.3 already runs 2048/4096), no Fast Ransac template written")
+    sys.exit(0)
+for stock_name, name in variants:
+    src, dst = os.path.join(d, stock_name + ".mg"), os.path.join(d, name + ".mg")
+    if not os.path.isfile(src):
+        print(f"no {stock_name}.mg in {d}: {name}.mg not written")
+        continue
+    if os.path.exists(dst) and not ours(dst):
+        print(f"{name}.mg exists and is not Cheshire's: left alone")
+        continue
+    with open(src, "rb") as f:
+        text = f.read().decode("utf-8")      # bytes, so the line endings are the stock file's
+    eol = "\r\n" if "\r\n" in text else "\n"
+    stock = json.loads(text)
+    new = text
+    for node_type, inp, value in sets:
+        nodes = [n for n in stock["graph"].values() if n.get("nodeType") == node_type]
+        if len(nodes) != 1 or inp in nodes[0].get("inputs", {}):
+            new = None
+            break
+        new = add_input(new, eol, node_type, inp, value)
+        if new is None:
+            break
+    if new is None:
+        print(f"{stock_name}.mg is not the graph this expects (one FeatureMatching and one StructureFromMotion, neither value set): {name}.mg not written")
+        continue
+    graph, ok = json.loads(new), True
+    for node_type, inp, value in sets:
+        node = [n for n in graph["graph"].values() if n.get("nodeType") == node_type][0]
+        ok = ok and node["inputs"].pop(inp, None) == value
+    if not ok or graph != stock:
+        print(f"{name}.mg: the edit did not come out as the stock graph plus the two values: not written")
+        continue
+    with open(dst, "wb") as f:
+        f.write(new.encode("utf-8"))
+    print(f'installed the pipeline template "{label(name)}" ({name}.mg): {stock_name}.mg with FeatureMatching maxIteration 2048 '
+          "and StructureFromMotion localizerEstimatorMaxIterations 4096, Meshroom 2023.3's RANSAC counts")
+PY
+}
+
 if [ "${2:-}" = "--unpair" ]; then
   for name in aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_featureExtraction aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene aliceVision_incrementalSfM aliceVision_imageMatching; do
     if [ -x "$BIN/$name.cuda" ]; then mv -f "$BIN/$name.cuda" "$BIN/$name"; echo "restored $name"; else echo "$name: not paired"; fi
@@ -51,6 +146,7 @@ if [ "${2:-}" = "--unpair" ]; then
   if [ -f "$NODE" ] && grep -q "Cheshire" "$NODE"; then rm -f "$NODE"; echo "removed the DepthMap node override (block of 48)"; fi
   NODE="$MESHROOM/aliceVision/share/meshroom/aliceVision/DepthMap.py"
   if [ -f "$NODE.meshroom" ] && grep -q "Cheshire" "$NODE"; then mv -f "$NODE.meshroom" "$NODE"; echo "restored Meshroom's DepthMap node"; fi
+  fast_ransac_templates remove || echo "Fast Ransac templates: removal failed, see above"
   exit 0
 fi
 BUNDLE="${2:-$HOME/apps/cheshire/bundle}"
@@ -241,6 +337,8 @@ fi
 NODES="$MESHROOM/lib/meshroom/nodes/aliceVision"
 NODES25="$MESHROOM/aliceVision/share/meshroom/aliceVision"
 OVR="$BUNDLE/share/cheshire/meshroom-overrides"
+# the Fast Ransac templates (see fast_ransac_templates above)
+[ "$CHECK_ONLY" = 1 ] || fast_ransac_templates install || echo "Fast Ransac templates: not written, see above"
 if [ "$CHECK_ONLY" = 1 ]; then
   echo "--check: nothing changed"
 elif [ ! -f "$OVR/DepthMap.py" ]; then

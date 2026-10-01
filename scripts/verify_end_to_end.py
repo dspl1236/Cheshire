@@ -224,9 +224,23 @@ BINARY = {
 # missing, so a config that fails instantly with ports=0/6 is a naming problem, not a GPU one; the
 # failure prints the Overrides lines for that reason. The authority is the node definition in
 # <Meshroom>/lib/meshroom/nodes/aliceVision/<Node>.pyc, not the AliceVision --help text.
+# Meshroom 2025.1's RANSAC defaults, as each node logs its options. checks25 apply on 2025.1 only: 2023.3's
+# defaults are the counts the Fast Ransac template sets.
+RANSAC_2025 = {"FeatureMatching": [r"\* maxIteration = 50000\b"],
+               "StructureFromMotion": [r"\* localizerEstimatorMaxIterations = 50000\b"]}
+
 CONFIGS = {
-    # Stock settings, to establish that the paired pipeline works at all.
-    "base": dict(overrides=SIFT, env={}),
+    # Stock settings, to establish that the paired pipeline works at all. On 2025.1 also that pairing left
+    # Meshroom's own template and its RANSAC defaults alone (0.3.9: the faster counts are a template of
+    # their own, below).
+    "base": dict(overrides=SIFT, env={}, checks25=RANSAC_2025),
+    # 0.3.9: the "Photogrammetry Fast Ransac" template the pairing writes on Meshroom 2025.1 (stock
+    # Photogrammetry with 2023.3's FeatureMatching maxIteration 2048 and StructureFromMotion
+    # localizerEstimatorMaxIterations 4096), by name, so the run also proves Meshroom lists it. Meshroom
+    # 2023.3 gets no such template: its defaults are those counts, and the config is skipped there.
+    "fastransac": dict(overrides=SIFT, env={}, pipeline="photogrammetryFastRansac", meshroom2025=True, checks={
+        "FeatureMatching": [r"\* maxIteration = 2048\b"],
+        "StructureFromMotion": [r"\* localizerEstimatorMaxIterations = 4096\b"]}),
     # Meshroom's defaults with nothing overridden: what a user who only pairs the package runs.
     # DSP-SIFT on the CPU, then the GPU matcher on its descriptors and every later port. Also the
     # parameter set of the upstream reference meshes the mesh quality gate compares against.
@@ -437,7 +451,7 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
                                              os.path.join(d, "aliceVision", "lib", "python3.11", "site-packages")])
 
     batch = meshroom / ("meshroom_batch.exe" if os.name == "nt" else "meshroom_batch")
-    cmd = [str(batch), "--input", str(photos), "--output", str(out / "out"), "--pipeline", "photogrammetry"]
+    cmd = [str(batch), "--input", str(photos), "--output", str(out / "out"), "--pipeline", cfg.get("pipeline", "photogrammetry")]
     cmd += ["--save", str(out / "project.mg")] if new else ["--cache", str(cache)]
     # CHESHIRE_E2E_OVERRIDES adds Meshroom parameter overrides to any config without editing the table
     # (space-separated, e.g. "StructureFromMotion:useLocalBA=False"), for one-off runs such as the
@@ -502,8 +516,13 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     missing = [n for n, pats in markers.items()
                if paired[n] and not all(re.search(p, logs[n]) for p in pats)]
     unpaired = [n for n in markers if not paired[n] and n not in never_ran]
-    # Config-specific assertions on top of the port lines: self-check verdicts, bridge announcements.
-    unmet = [f"{n}: /{p}/" for n, pats in cfg.get("checks", {}).items()
+    # Config-specific assertions on top of the port lines: self-check verdicts, bridge announcements, and
+    # on Meshroom 2025.1 the checks25 ones.
+    checks = {n: list(p) for n, p in cfg.get("checks", {}).items()}
+    if new:
+        for n, pats in cfg.get("checks25", {}).items():
+            checks[n] = checks.get(n, []) + list(pats)
+    unmet = [f"{n}: /{p}/" for n, pats in checks.items()
              for p in pats if not re.search(p, node_logs(cache, n))]
     for n, pats in FORBIDDEN.items():
         for p in pats:
@@ -632,6 +651,11 @@ def main(argv):
     bad = [n for n in names if n not in CONFIGS]
     if bad:
         sys.exit(f"unknown config(s): {', '.join(bad)} - have {', '.join(CONFIGS)}")
+    if not meshroom_2025(meshroom):
+        skipped = [n for n in names if CONFIGS[n].get("meshroom2025")]
+        if skipped:
+            print(f"=== skipped on Meshroom 2023.3, which has no Fast Ransac template (its defaults are those counts): {', '.join(skipped)}")
+            names = [n for n in names if n not in skipped]
 
     # Both platforms pair the same way and take the same two arguments; only the script's name,
     # its directory here, and whether it needs a shell differ.

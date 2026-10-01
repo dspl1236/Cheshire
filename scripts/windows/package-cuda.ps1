@@ -99,6 +99,8 @@ Copy-Item "D:\MMI\cheshire\scripts\windows\meshroom-pair.cmd" (Join-Path $stage 
 # meshroom-pair.cmd checks each node's options with this before pairing it, and pairs unchecked when it
 # is missing: the 0.3.5 CUDA zip first went out of the build without it
 Copy-Item "D:\MMI\cheshire\scripts\windows\meshroom-pair-check.ps1" (Join-Path $stage "meshroom-pair-check.ps1") -Force
+# and the Fast Ransac pipeline templates it writes on Meshroom 2025.1 (0.3.9)
+Copy-Item "D:\MMI\cheshire\scripts\windows\meshroom-templates.ps1" (Join-Path $stage "meshroom-templates.ps1") -Force
 Write-Output ("=== pairing: meshroom-pair.cmd + launcher ({0:N0} bytes, knows CHESHIRE_BACKEND)" -f $bytes.Length)
 
 # GPU SIFT by substance: if a popsift.dll is staged, the feature library must import it. The v0.3.2

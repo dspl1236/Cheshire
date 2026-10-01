@@ -40,6 +40,7 @@ if /i "%PKG%"=="--unpair" (
   if exist "%MR%\lib\meshroom\nodes\aliceVision\DepthMap.py" ( findstr /c:"Cheshire" "%MR%\lib\meshroom\nodes\aliceVision\DepthMap.py" >nul && del /q "%MR%\lib\meshroom\nodes\aliceVision\DepthMap.py" && echo removed the DepthMap node override )
   if exist "%MR%\aliceVision\share\meshroom\aliceVision\DepthMap.py.meshroom" ( findstr /c:"Cheshire" "%MR%\aliceVision\share\meshroom\aliceVision\DepthMap.py" >nul && move /y "%MR%\aliceVision\share\meshroom\aliceVision\DepthMap.py.meshroom" "%MR%\aliceVision\share\meshroom\aliceVision\DepthMap.py" >nul && echo restored Meshroom's DepthMap node )
   for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_featureExtraction aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene aliceVision_incrementalSfM aliceVision_imageMatching) do call :unpair %%N
+  if exist "%HERE%meshroom-templates.ps1" powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%meshroom-templates.ps1" "%MR%" remove
   exit /b 0
 )
 
@@ -102,6 +103,12 @@ if defined HAVE (
   for /d %%F in ("%PKG%\gpu\*") do for /d %%T in ("%%~fF\*") do if exist "%%~fT\popsift.dll" set FEOK=1
 )
 if defined FEOK ( call :pairif aliceVision_featureExtraction ) else ( echo package has no GPU SIFT ^(no popsift.dll^): featureExtraction not paired )
+rem Meshroom 2025.1 only (0.3.9): the "Photogrammetry Fast Ransac" and "Photogrammetry Draft Fast Ransac"
+rem pipeline templates, the installed Photogrammetry and Draft templates with Meshroom 2023.3's two RANSAC
+rem counts set in the graph (FeatureMatching maxIteration 2048, StructureFromMotion
+rem localizerEstimatorMaxIterations 4096; 2025.1's defaults are 50000). Meshroom's own templates are not
+rem touched, so the paired nodes keep its defaults. Removed by --unpair. See meshroom-templates.ps1.
+if exist "%HERE%meshroom-templates.ps1" ( powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%meshroom-templates.ps1" "%MR%" install ) else ( echo meshroom-templates.ps1 not beside this script: no Fast Ransac templates )
 rem The DepthMap node in blocks of 48 views instead of 12 (docs/04, 0.3.4 "the depth-map node was loading
 rem images"): each chunk is a process that loads the SfM data, probes the device and starts cold. Removed
 rem by --unpair. Meshroom 2023.3 compiled its nodes into lib\meshroom\nodes: the package's
