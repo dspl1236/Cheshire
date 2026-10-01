@@ -3598,3 +3598,22 @@ Notes on the runs:
 `sfmbench.py` now replaces an option it already passes when the same option is given after `--` (the SfM
 binary refuses an option given twice), and `fmbench.py` takes sfmbench's sets, the kept False Door cache
 (`fd`) included.
+
+## The 0.3.9 release gate (2026-10-01)
+
+0.3.9 is 0.3.8's binaries with the Fast Ransac pairing. The two Windows zips were repacked from 0.3.8's
+(`scratchpad repack039.py`): `meshroom-pair.cmd` replaced, `meshroom-templates.ps1` added beside each copy,
+and every other entry checked to carry 0.3.8's CRC. The Linux tarballs are the 0.3.8 files, since Linux
+pairing comes from the repository's script. The binaries passed 0.3.8's full gate; the changed packages
+ran as built, mini6:
+
+| package | hardware | 2025.1: `base`, `fastransac` | 2023.3: `base` |
+|---|---|---|---|
+| Windows AMD | RX 9070 | both ok at 8/8 | ok at 8/8 |
+| Windows CUDA | GTX 1080 Ti (bench-pc) | both ok at 8/8 | ok at 8/8 |
+| Linux, the repository's `meshroom-pair.sh` with the HIP tarball | RX 6750 XT (house-pc) | both ok at 8/8 | |
+
+On 2023.3 the pairing printed that there is nothing to write and the harness skipped `fastransac`; every
+`--unpair` removed both templates. On each card the Fast Ransac run's depth maps were byte for byte the
+same card's Meshroom 2023.3 run: `352f0abe56eede6d` on the RX 9070, `e9de6475cc3c0662` on the GTX 1080 Ti
+(in this gate and in 0.3.8's), `c4e51fa59e526c8c` on the RX 6750 XT (against 0.3.8's gate).

@@ -43,6 +43,7 @@ cheshire-alicevision-windows-x64\
     cheshire-detect.exe           the card probe, on its own
     meshroom-pair.cmd             pair it with Meshroom
     meshroom-pair-check.ps1       used by the pairing: can this package stand in for your Meshroom's nodes?
+    meshroom-templates.ps1        used by the pairing: the Fast Ransac templates on Meshroom 2025.1 (below)
     meshroom-pair-launcher.exe    installed by the pairing; not run directly
     common\  fam\  gpu\           the payloads - nothing to do in here
 ```
@@ -85,6 +86,17 @@ own binary takes (from both `--help` texts; no GPU needed). This package is buil
 `aliceVision_meshing: Meshroom's binary takes options this package's does not: --newOption`, and
 that node stays Meshroom's own instead of failing halfway through a job.
 
+**Meshroom 2025.1: the Fast Ransac templates (from v0.3.9).** 2025.1 raised two RANSAC limits to
+50,000: FeatureMatching's *Max Iterations* (2048 in 2023.3) and StructureFromMotion's *Localizer Max
+Ransac Iterations* (4096). The paired nodes keep those defaults, so Meshroom's own templates give what
+a stock Meshroom gives. Pairing adds two templates beside them, in *File > New Pipeline* and on the
+home page: **Photogrammetry Fast Ransac** and **Photogrammetry Draft Fast Ransac**, Meshroom's own
+Photogrammetry and Draft with 2023.3's two values set in the graph, where they show and can be
+changed like any other. On the RX 9070 box they took a 41-photo job from 378 s to 307 s, and
+FeatureMatching from 374 s to 117 s on 107 photos and from 30 minutes to 7.4 on 884, with the same
+views placed. `--unpair` removes them. On Meshroom 2023.3 there is
+nothing to add: its defaults are those counts.
+
 **Driver:** an RX 7000/9000 card needs **Adrenalin 26.2.2 or newer**, because that half of the
 package carries the HIP 7.2 runtime and older drivers refuse it. RX 5000/6000 cards use the runtime
 your driver already ships and have no such floor.
@@ -101,8 +113,9 @@ ls -l /dev/kfd                    # should exist
 ```
 
 `scripts/linux/meshroom-pair.sh` does the same pairing as the Windows script, with the same
-compatibility check. `meshroom-pair.sh <Meshroom dir> <bundle dir> --check` only reports which nodes
-would pair, and changes nothing.
+compatibility check and, on Meshroom 2025.1, the same Fast Ransac templates (it needs `python3` for
+those). `meshroom-pair.sh <Meshroom dir> <bundle dir> --check` only reports which nodes would pair,
+and changes nothing.
 
 ## 3. Check it is actually using the GPU
 

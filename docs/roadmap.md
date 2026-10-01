@@ -766,6 +766,9 @@ values in the graph, and the README's numbers for both.
 
 ## 0.3.9
 
+**Released 2026-10-01 as v0.3.9**: 0.3.8's binaries, repacked with the Fast Ransac pairing (docs/04,
+"The 0.3.9 release gate").
+
 Started 2026-10-01.
 
 - **The Fast Ransac templates** (S). **Done 2026-10-01** (95e5863, docs/04 "0.3.9: the Fast Ransac pipeline
@@ -779,8 +782,8 @@ Started 2026-10-01.
   depth maps are byte for byte the same card's Meshroom 2023.3 run. Measured with 0.3.8's binaries: 41
   views 378 s to 307 s, FeatureMatching 374 s to 117 s on the engine bay and 1779 s to 443 s on the False
   Door, the same views placed.
-  - At release: README and USING describe it (the edits are drafted, uncommitted); the Windows zips need
-    rebuilding or repacking, since `meshroom-templates.ps1` ships beside `meshroom-pair.cmd`.
+  - Released in v0.3.9: README and USING describe it, and the Windows zips were repacked with
+    `meshroom-templates.ps1` beside `meshroom-pair.cmd`.
 
 ## Upstream's next pipeline: detect, then pivot
 
