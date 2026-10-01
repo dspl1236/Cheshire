@@ -891,9 +891,9 @@ Plan, loosely, since the release date is not known:
      (`main_exportImages.cpp`), one view at a time.
 3. **Port** (M-L). The nodes already build in our tree and the replay harness exists
    (`build/nightly-cmp/run_ours.py`, `cmp_poses.py`, `replay.py`), so this need not wait for the
-   release. **State on 2026-10-01, after steps 9a-9e:** the new chain (TracksBuilding to
-   ExportImages) takes about 54 s on 41 views, where it took 285.0 s with our build before and our
-   legacy chain takes 77.5 s. On the engine bay it takes about 83 s against 201.7 s and 55.4 s. What
+   release. **State on 2026-10-01, after steps 9a-9h:** the new chain (TracksBuilding to
+   ExportImages) takes about 48 s on 41 views, where it took 285.0 s with our build before and our
+   legacy chain takes 77.5 s. On the engine bay it takes about 70 s against 201.7 s and 55.4 s. What
    is left there is RelativePoseEstimating's 5-point solver, SfMExpanding's four comparable parts,
    and ExportImages' warp. In order of what it buys:
    - **NACRANSAC: the key sort and 8d's bound** (M). The bound ports with one change: NACRANSAC
@@ -939,6 +939,10 @@ Plan, loosely, since the release date is not known:
      `dataio/json.hpp`'s map conversions copied the parsed arrays. RelativePoseEstimating goes from
      31.2 s to 23.0 s on the engine bay, and SfMBootStrapping from 4.0 s to 2.5 s, with the same
      outputs.
+   - **The tracks file parsed straight into structs** (S, exact). **Done 2026-10-01** (step 9h,
+     docs/04). Boost.JSON's `parse_into`, the same parser's numbers, and no DOM. Each tracks load
+     goes from 1.44 s to 0.89 s on the engine bay; RelativePoseEstimating goes to 18.8 s, every
+     field checked the same.
    - **The 5-point solver's nullspace by QR** (S-M): docs/17's lever, for RelativePoseEstimating.
    - **Fast Ransac for the new templates** (S): SfMExpanding has StructureFromMotion's
      `localizerEstimatorMaxIterations`, also 50,000 by default. The generator would add it there

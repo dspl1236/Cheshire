@@ -3812,3 +3812,28 @@ The resection's residuals were tried the same day and dropped. Building their `P
 instead of once per point (exact, the same 4x4 matrix) changed nothing measurable: SfMExpanding took
 27.4-28.4 s on 41 views and 28.7-29.3 s on the engine bay either way. The cost is the out-of-line
 projection in the camera library, which no hoist reaches.
+
+## After 0.3.9: the tracks file parsed straight into structs (step 9h, 2026-10-01)
+
+After 9e the tracks file still went through Boost.JSON's DOM, an object with its key strings for
+every track and every observation, converted afterwards. Step 9h parses it with Boost.JSON's
+`parse_into` straight into plain described structs. It then converts them as `tag_invoke` does:
+TrackItem's scale 1 and depth -1 when absent, and the first of two equal keys kept. The numbers come
+from the same parser, `basic_parser` in its default imprecise mode, which the DOM uses too. A file
+the structs cannot hold takes the DOM's way. `CHESHIRE_TRACKS_PARSE_INTO=0` always takes the DOM.
+
+`CHESHIRE_TRACKS_PARSE_INTO_CHECK=1` takes both and compares every field bit for bit. In all 11
+loads, 0 of 87,729 tracks (371,011 observations) on 41 views and 0 of 202,290 (624,793) on the
+engine bay differ.
+
+Loading the tracks takes 0.50 s instead of 0.79 s per process on 41 views, and 0.89 s instead of
+1.44 s on the engine bay (2.7 s before 9e):
+
+| run | RelativePoseEstimating, 41 views | engine bay | SfMBootStrapping, 41 views | engine bay |
+|---|---|---|---|---|
+| 9h | 7.3 s | 18.8 s | 1.5 s | 1.7 s |
+| `CHESHIRE_TRACKS_PARSE_INTO=0` | 8.0 s | 21.7 s | 1.9 s | 2.3 s |
+| 9h | 7.2 s | 18.8 s | 1.6 s | 1.8 s |
+| `CHESHIRE_TRACKS_PARSE_INTO=0` | 7.9 s | 21.6 s | 1.8 s | 2.3 s |
+
+The outputs are 9e's: the same pairs, and SfMBootStrapping's and SfMExpanding's files byte for byte.

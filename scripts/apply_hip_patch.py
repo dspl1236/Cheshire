@@ -1696,6 +1696,138 @@ static void cheshirePrebuildMaps(const sfmData::SfMData& input, const sfmData::S
      "    // cheshire (step 9d): one image per thread on every core"),
 ]
 
+# 9h (after 0.3.9): the tracks file parsed straight into plain structs by Boost.JSON's parse_into, without the DOM. The
+# numbers come from the same parser (basic_parser, imprecise mode, as the DOM's), so the tracks are the same.
+STEP9H_TRACKIO = [
+    ("#include <aliceVision/dataio/json.hpp>\n#include <fstream>\n",
+     "#include <aliceVision/dataio/json.hpp>\n#include <fstream>\n"
+     "#include <aliceVision/system/Logger.hpp>  // cheshire: step 9h\n"
+     "#include <boost/describe.hpp>  // cheshire\n#include <boost/json/parse_into.hpp>  // cheshire\n"
+     "#include <cstring>  // cheshire\n#include <optional>  // cheshire\n#include <vector>  // cheshire\n"),
+    ("bool loadTracks(TracksMap& mapTracks, const std::string& filename)\n{\n",
+     r"""// cheshire (step 9h): the tracks file straight into plain structs. Upstream parsed it into Boost.JSON's DOM - an object
+// with its key strings for every track and every observation - and converted that. parse_into fills these with the
+// numbers the same parser reads (basic_parser in its default, imprecise mode, which the DOM uses too), and the
+// conversion below repeats tag_invoke's: TrackItem's scale 1 and depth -1 when absent, the first of two equal keys.
+namespace cheshireTracks {
+struct Item
+{
+    std::size_t featureId = 0;
+    std::vector<double> coords;
+    std::optional<double> scale;
+    std::optional<double> depth;
+};
+BOOST_DESCRIBE_STRUCT(Item, (), (featureId, coords, scale, depth))
+struct Entry
+{
+    std::string descType;
+    std::vector<std::pair<std::size_t, Item>> featPerView;
+};
+BOOST_DESCRIBE_STRUCT(Entry, (), (descType, featPerView))
+
+inline bool on()
+{
+    static const bool v = ::cheshire::env::flag("CHESHIRE_TRACKS_PARSE_INTO", true);
+    return v;
+}
+
+inline bool check()
+{
+    static const bool v = ::cheshire::env::flag("CHESHIRE_TRACKS_PARSE_INTO_CHECK");
+    return v;
+}
+
+/// False when the file does not fit the structs (then the DOM's way decides, as upstream)
+inline bool load(TracksMap& out, const std::string& text)
+{
+    std::vector<std::pair<std::size_t, Entry>> entries;
+    boost::system::error_code ec;
+    boost::json::parse_into(entries, text, ec);
+    if (ec)
+        return false;
+    TracksMap tracks;
+    for (auto& [trackId, entry] : entries)
+    {
+        Track track;
+        track.descType = feature::EImageDescriberType_stringToEnum(entry.descType);
+        for (auto& [viewId, it] : entry.featPerView)
+        {
+            if (it.coords.size() < 2)
+                return false;
+            TrackItem item;
+            item.featureId = it.featureId;
+            item.coords = Vec2(it.coords[0], it.coords[1]);
+            item.scale = it.scale ? *it.scale : 1.0;
+            item.depth = it.depth ? *it.depth : -1.0;
+            track.featPerView.insert({viewId, item});
+        }
+        tracks.insert({trackId, std::move(track)});
+    }
+    out = std::move(tracks);
+    return true;
+}
+
+inline bool same(double a, double b) { return std::memcmp(&a, &b, sizeof(double)) == 0; }
+
+/// CHESHIRE_TRACKS_PARSE_INTO_CHECK=1: every field of both maps, bit for bit; the count of tracks that differ
+inline std::size_t differences(const TracksMap& a, const TracksMap& b)
+{
+    std::size_t n = a.size() > b.size() ? a.size() - b.size() : b.size() - a.size();
+    auto ib = b.begin();
+    for (auto ia = a.begin(); ia != a.end() && ib != b.end(); ++ia, ++ib)
+    {
+        bool d = ia->first != ib->first || ia->second.descType != ib->second.descType ||
+                 ia->second.featPerView.size() != ib->second.featPerView.size();
+        if (!d)
+        {
+            auto jb = ib->second.featPerView.begin();
+            for (auto ja = ia->second.featPerView.begin(); ja != ia->second.featPerView.end(); ++ja, ++jb)
+            {
+                const TrackItem& x = ja->second;
+                const TrackItem& y = jb->second;
+                d |= ja->first != jb->first || x.featureId != y.featureId || !same(x.coords(0), y.coords(0)) ||
+                     !same(x.coords(1), y.coords(1)) || !same(x.scale, y.scale) || !same(x.depth, y.depth);
+            }
+        }
+        n += d;
+    }
+    return n;
+}
+}  // namespace cheshireTracks
+
+bool loadTracks(TracksMap& mapTracks, const std::string& filename)
+{
+"""),
+    ("    // Parse json\n    boost::json::value jv = boost::json::parse(buffer.str());\n",
+     r"""    // cheshire (step 9h): straight into plain structs; anything they cannot hold takes the DOM's way below.
+    // CHESHIRE_TRACKS_PARSE_INTO=0 always takes the DOM; CHESHIRE_TRACKS_PARSE_INTO_CHECK=1 takes both and compares.
+    const std::string cheshireText = buffer.str();
+    if (cheshireTracks::on())
+    {
+        TracksMap cheshireMap;
+        if (cheshireTracks::load(cheshireMap, cheshireText))
+        {
+            if (cheshireTracks::check())
+            {
+                const boost::json::value cheshireDom = boost::json::parse(cheshireText);
+                const TracksMap cheshireReference(map_value_to<std::size_t, track::Track>(cheshireDom));
+                std::size_t observations = 0;
+                for (const auto& t : cheshireReference)
+                    observations += t.second.featPerView.size();
+                ALICEVISION_LOG_INFO("cheshire: tracks file check: " << cheshireTracks::differences(cheshireMap, cheshireReference)
+                                     << " of " << cheshireReference.size() << " tracks (" << observations
+                                     << " observations) differ between parse_into and the DOM");
+            }
+            mapTracks = std::move(cheshireMap);
+            return true;
+        }
+    }
+
+    // Parse json
+    boost::json::value jv = boost::json::parse(cheshireText);
+"""),
+]
+
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
     if new in text:
@@ -1790,6 +1922,7 @@ TRACKED = [
     "src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.hpp",  # 9c
     "src/software/utils/main_exportImages.cpp",  # 9d
     "src/aliceVision/dataio/json.hpp",  # 9e
+    "src/aliceVision/track/trackIO.cpp",  # 9h
 ]
 
 
@@ -6933,6 +7066,18 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                 sys.exit("an anchor of ExportImages' shared maps not found once in main_exportImages.cpp (9g)")
             t = t.replace(old, new, 1)
     f9g.write_text(t, encoding="utf-8", newline="")
+
+    # 9h (after 0.3.9). The tracks file is parsed straight into plain structs with Boost.JSON's parse_into, the numbers
+    #     from the same parser as the DOM's; a file the structs cannot hold takes the DOM's way.
+    #     CHESHIRE_TRACKS_PARSE_INTO=0 always takes the DOM; CHESHIRE_TRACKS_PARSE_INTO_CHECK=1 takes both and compares.
+    f9h = AV / "src/aliceVision/track/trackIO.cpp"
+    t = f9h.read_text(encoding="utf-8")
+    if "step 9h" not in t:
+        for old, new in STEP9H_TRACKIO:
+            if t.count(old) != 1:
+                sys.exit("an anchor of the tracks file's parse not found once in trackIO.cpp (9h)")
+            t = t.replace(old, new, 1)
+    f9h.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports
