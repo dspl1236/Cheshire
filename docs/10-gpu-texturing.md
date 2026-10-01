@@ -142,7 +142,9 @@ two temporary `pair<int, int>` and **truncates the area to an integer**: project
 10.1 compare equal, and cameras are ordered by whatever the sort does with a tie.
 
 That is a defect, not a performance question, and correcting it would change which cameras each
-chart keeps and therefore the packing. It is reported rather than patched.
+chart keeps and therefore the packing. It is reported rather than patched. Upstream took the fix
+(AliceVision #2181, merged 2026-10-01 for 3.4.0); Cheshire's tree predates it, so its textures
+change when the submodule moves past that merge.
 
 What is left in `createCharts` is 2.44 s in `computeTrisCamsFromPtsCams` and about 2.96 s in a
 12-thread projection loop. Making the per-triangle camera list a reference rather than a copy is in

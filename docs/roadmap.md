@@ -1004,7 +1004,12 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 
 ### Waiting on maintainers
 
-- AliceVision PR #2179 and PR #2181 have no reviews yet. Keep the fork until both close.
+- **PR #2181 merged 2026-10-01** into `develop` for 3.4.0 (the UVAtlas comparator; issue #2180 closed). PR #2179
+  (the inversion count read as an int, issue #2178) was rebased by the same maintainer that day and put on the
+  3.4.0 milestone; not merged yet. Keep the fork until #2179 closes. When the AliceVision submodule moves past
+  them: #2181 changes Texturing's output (Cheshire left that bug alone, docs/10, so texture digests will move),
+  and #2179 replaces step 4u (drop it and `CHESHIRE_INVERT_OLD`, or its anchor stops the generator). Issue
+  #2182 and popsift#193 have no maintainer reply yet.
 - The #2344 SfM fix was posted with a PR offer (`docs/drafts/meshroom-2344-comment.md:93`), and
   nobody has replied.
 - Discussion #2116 (2026-09-26): asked where functional tests should live (see "Functional tests
