@@ -43,8 +43,11 @@ from pathlib import Path
 GPU_MARKERS = {
     "FeatureExtraction": [r"Choosing device \d+:",
                           r"GPU SIFT keypoints in stable order"],
+    # 0.3.8: AC-RANSAC's bound (step 8d) announces itself at the first estimation it serves; CPU code, so it
+    # is required in the fallback run too
     "FeatureMatching":   [r"GPU brute-force L2 2-NN on",
-                          r"7-point nullspace: (SVD \(default|Householder QR \(CHESHIRE_QR_NULLSPACE=1\))"],
+                          r"7-point nullspace: (SVD \(default|Householder QR \(CHESHIRE_QR_NULLSPACE=1\))",
+                          r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far"],
     "DepthMap":          [r"Number of GPU devices"],
     "DepthMapFilter":    [r"depth map filter: group votes on",
                           r"depth map filter cache: cap \d+ MB"],
@@ -77,7 +80,8 @@ CPU_MARKERS = {
     "FeatureExtraction": [],
     "DepthMap":          GPU_MARKERS["DepthMap"],
     "PrepareDenseScene": GPU_MARKERS["PrepareDenseScene"],
-    "FeatureMatching":   [r"GPU brute-force disabled by CHESHIRE_GPU_MATCHER=0"],
+    "FeatureMatching":   [r"GPU brute-force disabled by CHESHIRE_GPU_MATCHER=0",
+                          r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far"],
     "DepthMapFilter":    [r"depth map filter: disabled by CHESHIRE_GPU_FILTER=0"],
     "Meshing":           [r"meshing votes: disabled by CHESHIRE_GPU_VOTE=0",
                           r"sim blur: disabled by CHESHIRE_GPU_BLUR=0",
@@ -100,8 +104,21 @@ HOSTVOTES_MARKERS = dict(GPU_MARKERS, Meshing=[m for m in GPU_MARKERS["Meshing"]
 # local-BA graph skip an edge to a posed view it was never handed, where upstream throws "invalid
 # map<K, T> key" (Meshroom #2344), and warns when it does. The run then completes, so nothing else
 # here would notice; a gate run that needed the workaround should say so.
+# 0.3.8: the steps that keep a fallback say so when they take it, and their self-checks (under `verify`)
+# print a count that must be N of N - the verdicts below find a passing line, these find a failing one in
+# any chunk's log. The epipolar loop (8e) falls back when its self-test finds this build's Eigen and flags
+# do not reproduce upstream's error(); the run is right, but slower, and the release should know.
+EPIPOLAR_FALLBACK = r"vectorised epipolar distance does not reproduce FundamentalEpipolarDistanceError"
 FORBIDDEN = {
-    "StructureFromMotion": [r"local BA graph: \d+ edges to posed views the graph was never handed were skipped"],
+    "StructureFromMotion": [r"local BA graph: \d+ edges to posed views the graph was never handed were skipped",
+                            EPIPOLAR_FALLBACK],
+    "FeatureMatching": [EPIPOLAR_FALLBACK,
+                        r"AC-RANSAC bound check: \d+ of \d+ models skipped the sort and the NFA scan, [1-9]\d* of them below minNFA",
+                        r"epipolar residual check: \b(\d+) of (?!\1 )\d+ residuals"],
+    "PrepareDenseScene": [r"EXR deflate write check: '.*' does not read back as written",
+                          r"EXR deflate write check: \b(\d+) of (?!\1 )\d+ files",
+                          r"undistort on the device failed",
+                          r"undistort device check: \b(\d+) of (?!\1 )\d+ images"],
 }
 
 # In-process self-checks: the port runs the CPU reference alongside itself and compares. These are
@@ -112,12 +129,29 @@ SELF_CHECK_ENV = {
     "CHESHIRE_FILTER_CHECK": "1", "CHESHIRE_MAXFLOW_CHECK": "1", "CHESHIRE_GPU_VIS_CHECK": "1", "CHESHIRE_DENSE_SFM_CHECK": "1", "CHESHIRE_GPU_MATCHER_CHECK": "1", "CHESHIRE_GPU_FILTER_CHECK": "1",
     "CHESHIRE_SEGMENT_CHECK": "1", "CHESHIRE_GPU_TEDGE_CHECK": "1", "CHESHIRE_GPU_VOTE_LOG": "1",
     "CHESHIRE_MESHCLEAN_CHECK": "1", "CHESHIRE_READ_DIRECT_CHECK": "1",
+    # 0.3.8: AC-RANSAC's bound (8d) and epipolar loop (8e), checked on every model and every residual;
+    # PrepareDenseScene's libdeflate writer (8f) and device undistortion (8g), switched on here whatever
+    # their platform defaults (8f is on only with OpenEXR before 3.2, 8g only with four hardware threads
+    # or fewer), so every package checks them on its own card.
+    "CHESHIRE_ACR_BOUND_CHECK": "1", "CHESHIRE_ACR_RESIDUALS_CHECK": "1",
+    "CHESHIRE_EXR_DEFLATE_WRITE": "1", "CHESHIRE_EXR_DEFLATE_WRITE_CHECK": "1",
+    "CHESHIRE_UNDISTORT_DEVICE": "1", "CHESHIRE_UNDISTORT_DEVICE_CHECK": "1",
 }
 SELF_CHECK_VERDICTS = {
-    # The direct 8-bit read (6n) against OpenImageIO's path, every image, printed at process exit.
-    "PrepareDenseScene": [r"direct 8-bit read check: (\d+) of \1 images identical to OpenImageIO's path"],
+    # The direct 8-bit read (6n) against OpenImageIO's path, every image, printed at process exit. Since
+    # 0.3.8 also the device undistortion (8g) against the CPU loop, and the libdeflate writer's files (8f)
+    # read back through OpenEXR.
+    "PrepareDenseScene": [r"direct 8-bit read check: (\d+) of \1 images identical to OpenImageIO's path",
+                          r"undistort device check: \b([1-9]\d*) of \1 images identical to the CPU loop",
+                          r"EXR deflate write check: \b([1-9]\d*) of \1 files read back identical through OpenEXR"],
+    # The colours' 8-bit read (8b) against OpenImageIO's path, every reconstructed view.
+    "StructureFromMotion": [r"direct 8-bit read check: \b([1-9]\d*) of \1 images identical to OpenImageIO's path"],
     # The GPU matcher against upstream's brute force on a sample of every search (uint8 descriptors).
-    "FeatureMatching": [r"GPU matcher check: ([1-9]\d*) of \1 sampled queries identical to upstream's brute force"],
+    # Since 0.3.8 also AC-RANSAC: every model the bound (8d) skipped sorted and scanned anyway, none below
+    # minNFA, and every residual of the epipolar loop (8e) against upstream's error().
+    "FeatureMatching": [r"GPU matcher check: ([1-9]\d*) of \1 sampled queries identical to upstream's brute force",
+                        r"AC-RANSAC bound check: \d+ of [1-9]\d* models skipped the sort and the NFA scan, 0 of them below minNFA",
+                        r"epipolar residual check: \b([1-9]\d*) of \1 residuals identical to FundamentalEpipolarDistanceError::error"],
     # The depth-map filter's vote pass against the CPU pass, every camera, printed at exit.
     "DepthMapFilter": [r"depth map filter check: ([1-9]\d*) of \1 cameras identical to the CPU vote pass"],
     "Meshing": [
@@ -211,10 +245,11 @@ CONFIGS = {
         "Texturing:textureSide=8192", "Texturing:downscale=1"], env={}),
     # Every GPU port switched off. Must still produce a mesh, and must say it went to the CPU.
     # Until 2026-09-20 this set four of the seven switches and was described as "every port off".
+    # 0.3.8: also PrepareDenseScene's device undistortion (8g), on by default on four-thread hosts.
     "cpufallback": dict(overrides=CPUFALLBACK, markers="cpu", note=SILENT_PORTS, env={
         "CHESHIRE_GPU_MATCHER": "0", "CHESHIRE_GPU_FILTER": "0", "CHESHIRE_GPU_VOTE": "0",
         "CHESHIRE_GPU_TEX": "0", "CHESHIRE_GPU_BLUR": "0", "CHESHIRE_GPU_MAXFLOW": "0",
-        "CHESHIRE_GPU_VIS": "0"}),
+        "CHESHIRE_GPU_VIS": "0", "CHESHIRE_UNDISTORT_DEVICE": "0"}),
     # Every in-process self-check on: each port must agree with its CPU reference, in its own words.
     "verify": dict(overrides=SIFT, env=dict(SELF_CHECK_ENV), checks=SELF_CHECK_VERDICTS),
     # The host votes (bucketed), which the device votes replaced as the default in step 10: still the
