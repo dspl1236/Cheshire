@@ -166,7 +166,7 @@ def parse_log(log: Path) -> dict:
 
 def sfm_cmd(ci: Path, fe: Path, fm: Path, describer: str, out: Path, as_json: bool = False, extra: list[str] | None = None) -> list[str]:
     """incrementalSfM with Meshroom 2023.3's default node options (shared with scripts/gpsbench.py)."""
-    return ["aliceVision_incrementalSfM", "--input", str(ci), "--featuresFolders", str(fe), "--matchesFolders", str(fm),
+    cmd = ["aliceVision_incrementalSfM", "--input", str(ci), "--featuresFolders", str(fe), "--matchesFolders", str(fm),
             "--describerTypes", describer, "--localizerEstimator", "acransac", "--observationConstraint", "Scale",
             "--localizerEstimatorMaxIterations", "4096", "--localizerEstimatorError", "0.0", "--lockScenePreviouslyReconstructed", "False",
             "--useLocalBA", "True", "--localBAGraphDistance", "1", "--nbFirstUnstableCameras", "30", "--maxImagesPerGroup", "30",
@@ -178,7 +178,20 @@ def sfm_cmd(ci: Path, fe: Path, fm: Path, describer: str, out: Path, as_json: bo
             "--computeStructureColor", "True", "--useAutoTransform", "True", "--initialPairA", "", "--initialPairB", "",
             "--interFileExtension", ".abc", "--logIntermediateSteps", "False", "--verboseLevel", "info",
             "--output", str(out / ("sfm.sfm" if as_json else "sfm.abc")), "--outputViewsAndPoses", str(out / "cameras.sfm"),
-            "--extraInfoFolder", str(out)] + (extra or [])
+            "--extraInfoFolder", str(out)]
+    # An extra option the command already has replaces its value (incrementalSfM refuses an option given twice, so
+    # appending `--localizerEstimatorMaxIterations 50000` after the 4096 above would stop it); others are appended.
+    extra = list(extra or [])
+    i = 0
+    while i < len(extra):
+        opt = extra[i]
+        val = extra[i + 1] if i + 1 < len(extra) and not extra[i + 1].startswith("--") else None
+        if val is not None and opt in cmd:
+            cmd[cmd.index(opt) + 1] = val
+        else:
+            cmd += [opt] + ([val] if val is not None else [])
+        i += 1 if val is None else 2
+    return cmd
 
 
 def run(s: str, tag: str, envs: dict[str, str], repeat: int, extra: list[str], as_json: bool = False) -> None:

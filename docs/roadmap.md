@@ -764,6 +764,24 @@ first, then AC-RANSAC's hypothesis loop and PrepareDenseScene on four-thread hos
 **Next (0.3.9):** Meshroom 2023.3's RANSAC counts as a visible choice - a pipeline template with the two
 values in the graph, and the README's numbers for both.
 
+## 0.3.9
+
+Started 2026-10-01.
+
+- **The Fast Ransac templates** (S). **Done 2026-10-01** (95e5863, docs/04 "0.3.9: the Fast Ransac pipeline
+  templates"). On Meshroom 2025.1 the pairing writes "Photogrammetry Fast Ransac" and "Photogrammetry Draft
+  Fast Ransac": the installed stock templates plus two lines each, 2023.3's FeatureMatching `maxIteration`
+  2048 and StructureFromMotion `localizerEstimatorMaxIterations` 4096 in the graph. `--unpair` removes them.
+  The user's choices: Photogrammetry and Draft only (Object Two-Sides and the camera-tracking pipelines have
+  several FeatureMatching nodes; "Experimental" has no StructureFromMotion node), names Meshroom can label
+  cleanly. The gate runs the template by name (`fastransac`) and checks both values reach the nodes; `base`
+  checks 50000 on 2025.1. Checked on the RX 9070 (Windows) and the RX 6750 XT (Linux): on both the template's
+  depth maps are byte for byte the same card's Meshroom 2023.3 run. Measured with 0.3.8's binaries: 41
+  views 378 s to 307 s, FeatureMatching 374 s to 117 s on the engine bay and 1779 s to 443 s on the False
+  Door, the same views placed.
+  - At release: README and USING describe it (the edits are drafted, uncommitted); the Windows zips need
+    rebuilding or repacking, since `meshroom-templates.ps1` ships beside `meshroom-pair.cmd`.
+
 ## Upstream's next pipeline: detect, then pivot
 
 Added 2026-09-26. On discussion #2116 an AliceVision maintainer pointed out that StructureFromMotion,

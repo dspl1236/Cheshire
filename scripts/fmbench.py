@@ -40,10 +40,13 @@ def main(argv: list[str]) -> None:
     iters = argv[argv.index("--maxIteration") + 1] if "--maxIteration" in argv else "2048"
     ref = argv[argv.index("--ref") + 1] if "--ref" in argv else None
     envs = {a.split("=", 1)[0]: a.split("=", 1)[1] for a in argv[2:] if "=" in a and not a.startswith("--")}
-    cache = B / "sfmbench" / s / "cache"
-    ci = cache / "CameraInit" / "cameraInit.sfm"
-    fe, pairs = cache / "FeatureExtraction", cache / "ImageMatching" / "imageMatches.txt"
-    describer = (B / "sfmbench" / s / "describer.txt").read_text(encoding="utf-8").strip()
+    # sfmbench's own lookup: build/sfmbench/<set>/cache, or a kept Meshroom cache (fd: the 884-view False Door)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from sfmbench import KEPT, cache_dirs
+    d = cache_dirs(s)
+    ci = d["ci"] / "cameraInit.sfm"
+    fe, pairs = d["fe"], d["im"] / "imageMatches.txt"
+    describer = KEPT[s][1] if s in KEPT else (B / "sfmbench" / s / "describer.txt").read_text(encoding="utf-8").strip()
     out = B / "fmbench" / s / tag
     if out.exists():
         for f in out.iterdir():

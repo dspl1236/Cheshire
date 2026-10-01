@@ -3531,3 +3531,70 @@ ran on RDNA1, RDNA2, RDNA4 and Pascal, its first runs on all but the RX 9070 and
 On the GTX 1080 Ti they also gave the same features (all 82 `.desc` and `.feat` files) and the same
 `sfm.abc` on both systems, where 0.3.7's pairs differed in four descriptors (Linux) and one (Windows). This
 gate was the Windows CUDA library's first run on hardware.
+
+## 0.3.9: the Fast Ransac pipeline templates (2026-10-01)
+
+Meshroom 2025.1 raised two RANSAC limits to 50000 (0.3.6, above): FeatureMatching's `maxIteration` (2048
+in 2023.3) and StructureFromMotion's `localizerEstimatorMaxIterations` (4096). The paired nodes keep
+Meshroom's defaults, so a paired run of Meshroom's own templates gives what a stock run gives (decided
+2026-09-30). The faster counts are an opt-in instead. On Meshroom 2025.1 the pairing writes two templates
+beside Meshroom's own: **Photogrammetry Fast Ransac** and **Photogrammetry Draft Fast Ransac**
+(`photogrammetryFastRansac.mg`, `photogrammetryDraftFastRansac.mg`; Meshroom labels a template by
+splitting its file name at capitals, so a name with parentheses or "RANSAC" in capitals reads badly).
+
+How they are made:
+- Each is the installed stock template plus two lines: the 2023.3 value as the first input of the
+  FeatureMatching node and of the StructureFromMotion node, indented like their neighbours, with the
+  stock file's line endings. It is checked to parse as the stock graph plus those two values before it
+  is written.
+- It is built from the Meshroom being paired, so its node versions are that Meshroom's.
+- `--unpair` removes both. A file of the same name that does not carry both values is the user's and is
+  left alone. Meshroom 2023.3 keeps its templates in `lib/meshroom/pipelines` and already runs these
+  counts, so it gets nothing.
+- Windows writes them with `meshroom-templates.ps1`, shipped beside `meshroom-pair.cmd`; Linux with
+  python3 inside `meshroom-pair.sh`. On the stock files the two give the same bytes apart from line
+  endings.
+
+The gate's `fastransac` configuration runs the template by name, so Meshroom must list it, and requires
+`* maxIteration = 2048` and `* localizerEstimatorMaxIterations = 4096` among the two nodes' logged
+options. On 2025.1, `base` now requires 50000 in both, so the pairing provably leaves Meshroom's own
+template alone.
+
+| check, mini6, Meshroom 2025.1 | RX 9070, Windows (0.3.8 bundle) | RX 6750 XT, Linux (house-pc, 0.3.8 bundle) |
+|---|---|---|
+| `base` and `fastransac` | both ok at 8/8 | both ok at 8/8 |
+| `fastransac` depth maps | `352f0abe56eede6d` | `c4e51fa59e526c8c` |
+| the same card's 0.3.8 gate run on Meshroom 2023.3 (`base`) | `352f0abe56eede6d` | `c4e51fa59e526c8c` |
+| `base` depth maps, and the 0.3.8 gate's 2025.1 `base` | `7c5369fc24ee7540`, the same | `26fc558e3d75361f`, the same |
+| `--unpair` | both templates removed | both templates removed |
+
+On both systems the template reproduces Meshroom 2023.3's run on the same card, byte for byte as far as
+the depth maps show.
+
+**What the counts cost with 0.3.8's AC-RANSAC.** RX 9070 box, 0.3.8 binaries; the 0.3.6 numbers above
+predate steps 8d and 8e.
+
+| | Meshroom 2025.1's defaults (50000 / 50000) | Fast Ransac (2048 / 4096) |
+|---|---|---|
+| 41 views, whole graph | 378 s | 307 s |
+| 41 views, FeatureMatching / StructureFromMotion | 38.0 s / 65.7 s | 15.2 s / 18.5 s |
+| 41 views, views placed | 41 of 41 | 41 of 41 |
+| engine bay, FeatureMatching (geometric filtering) | 373.8 s (333.5 s) | 116.8 s (18.6 s) |
+| engine bay, SfM on the same matches (localizer only) | 35.3 s: 107 poses, 140,284 landmarks | 15.1 s: 107 poses, 140,394 landmarks |
+| False Door, FeatureMatching (geometric filtering) | 1778.9 s (1410.8 s) | 443.0 s (66.8 s) |
+
+Notes on the runs:
+- The 41-view numbers are a second pair, run on an idle box with the template first. In the first pair
+  the Fast Ransac run lost 53 s in FeatureMatching's GPU matching phase (63 s against 10 s, the same
+  work in both runs) to other load on the box. Both pairs gave the same outputs, byte for byte.
+- The engine bay and the False Door are `fmbench.py` and `sfmbench.py` runs (Meshroom 2023.3's other
+  options). The matches at 2048 are `f063ea6d15c0aa2e` on the engine bay, as recorded for 8d, and
+  `ebffcb37a3bd2b0b` on the False Door; at 50000 `5d5f6af548e43556` and `66a6c11497ce0c5d`. The SfM at
+  4096 gives the engine bay's reference digest, `814ae0d5`.
+- 0.3.8 took the False Door's geometric filtering at 50000 from 2234 s to 1411 s, but at 884 views the
+  larger budget still costs 22 minutes of FeatureMatching. 0.3.6 found that its extra pairs placed no
+  more views.
+
+`sfmbench.py` now replaces an option it already passes when the same option is given after `--` (the SfM
+binary refuses an option given twice), and `fmbench.py` takes sfmbench's sets, the kept False Door cache
+(`fd`) included.
