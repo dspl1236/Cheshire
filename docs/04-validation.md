@@ -3640,3 +3640,45 @@ host. Every config both ran gives byte-identical depth maps on the two cards exc
 and a finished pipeline, not for identity, and its digest differs between the two cards. `fastransac` on
 2025.1 gave `bfd6150b4ced08b5`, the same as this card's Meshroom 2023.3 `base`, so the Fast Ransac
 templates reproduce 2023.3 on this card too.
+
+## After 0.3.9: NACRANSAC takes 8d's bound and the key sort (step 9a, 2026-10-01)
+
+The new SfM nodes' AC-RANSAC, `NACRANSAC`, gets 8d's bound and the key sort
+([docs/15](15-acransac-cpu.md), "The new SfM nodes' AC-RANSAC"). `build/nightly-cmp/replay.py`
+replays the nightly comparison's command lines (roadmap, "Upstream's next pipeline", step 2) with
+the development install. RelativePoseEstimating and SfMExpanding read the 0.3.8 build's
+TracksBuilding and SfMBootStrapping outputs, so every run has the same inputs. One binary,
+alternating runs, RX 9070 box, idle; `CHESHIRE_ACR_PAIRSORT=1` is upstream's path:
+
+| run | RelativePoseEstimating, 41 views | SfMExpanding, 41 views | RelativePoseEstimating, engine bay | SfMExpanding, engine bay |
+|---|---|---|---|---|
+| 9a | 10.4 s | 60.0 s | 31.2 s | 43.3 s |
+| upstream's path | 17.8 s | 236.5 s | 37.5 s | 108.0 s |
+| 9a | 10.1 s | 57.4 s | | |
+| upstream's path | 18.2 s | 242.7 s | | |
+
+The 0.3.8 build took 17.2 s, 235.1 s, 34.6 s and 103.9 s. In SfMExpanding the resection goes from
+214.9 s to 38.2 s on 41 views and from 80.8 s to 18.9 s on the engine bay. Triangulation (about
+8 s), bundle adjustment (about 5.5 s) and the rest stay. RelativePoseEstimating gains less on the
+engine bay: each of its five chunks first spends about 3 s parsing the 87 MB tracks file.
+
+The output is the upstream path's:
+- **RelativePoseEstimating**: every run gives the 0.3.8 build's pairs, as a set (1,469 on 41 views,
+  2,093 on the engine bay). Its files list them in the order the threads finish, since they are
+  written from a critical section.
+- **SfMExpanding**: two threaded runs cannot be compared, upstream or not.
+  `SfmTriangulation::process` triangulates the tracks on every core, and every track's LO-RANSAC
+  draws from one shared `std::mt19937`, so the draws follow thread timing. On one thread
+  (`--maxCoresAvailable 1`), 9a's `cameras.sfm`, `sfmExpanded.usda` and `sfmExpanded_landmarks.usdc`
+  are byte for byte the upstream path's on both sets: 81.5 s against 299.2 s on 41 views, 89.2 s
+  against 225.9 s on the engine bay.
+- **`CHESHIRE_ACR_BOUND_CHECK=1`**, which also sorts and scans every skipped model:
+  - SfMExpanding skips 762,734 of 780,156 models on 41 views and 2,936,259 of 2,977,540 on the
+    engine bay.
+  - RelativePoseEstimating skips 97.6-98.1 % per chunk.
+  - None of the skipped models is below `minNFA`.
+- **`CHESHIRE_ACR_NANLOG=1`**: 44 (41 views) and 773 (engine bay) of the resection's residual arrays
+  hold a NaN and sort upstream's pairs. RelativePoseEstimating has none.
+- **`ACRANSAC`'s callers**: unchanged. Its bucket table gained the switch with the same values.
+  FeatureMatching on 41 views at 50,000 iterations gives `base50k`'s `2b4452a79d79b819`, and
+  incrementalSfM gives `801d1fb7b32bdd32` / `361ddd5cf663cfe6`, as in 0.3.8.

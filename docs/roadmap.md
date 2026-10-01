@@ -895,11 +895,27 @@ Plan, loosely, since the release date is not known:
    - **NACRANSAC: the key sort and 8d's bound** (M). The bound ports with one change: NACRANSAC
      takes the residuals as they are where ACRANSAC takes square roots, so the bucket table drops
      the root. The port is exact (same models, same draws), with `CHESHIRE_ACR_BOUND_CHECK`
-     extended to it. It reaches SfMExpanding's resection and RelativePoseEstimating.
-   - **One resection on every core** (M). Split each model's residuals across threads.
-     `ResectionSphericalKernel::errors` also builds a `Pose3` and makes a virtual `residual()` call
-     per point; hoist and devirtualise, 8e-style, checked bit for bit. The outputs are per point and
-     the bound's histogram is integer counts, so the result does not change.
+     extended to it. It reaches SfMExpanding's resection and RelativePoseEstimating. **Done
+     2026-10-01** (step 9a, docs/04 and docs/15). SfMExpanding goes from 236.5 s to 60.0 s on 41
+     views and from 108.0 s to 43.3 s on the engine bay. RelativePoseEstimating goes from 17.8 s to
+     10.4 s and from 37.5 s to 31.2 s. Single-threaded, the output is byte for byte upstream's path's.
+   - **One resection on every core** (M). Most rounds resect one view, so one thread runs
+     NACRANSAC's 50,000 iterations. Run them in speculative batches:
+     - Draw the samples in order, saving the generator after each draw.
+     - Fit and score a batch's models on every core, then take the results in order.
+     - The pool changes only when a model with a negative NFA beats the best, which is rare. When it
+       does, drop the batch's later iterations and restore the generator from that iteration.
+     - A skip decided against an older `minNFA` stays right, since `minNFA` only falls.
+     - A single-view round must stop opening a parallel region (`ExpansionChunk.cpp`).
+     - `CHESHIRE_ACR_BATCH_CHECK=1` runs the loop as well and compares everything.
+     - Later, `ResectionSphericalKernel::errors` builds a `Pose3` and makes a virtual `residual()`
+       call per point; hoist and devirtualise, 8e-style, checked bit for bit.
+   - **5n's task seeds for the new triangulation** (S-M). `SfmTriangulation::process` triangulates
+     the tracks on every core, drawing every track's LO-RANSAC samples from one shared
+     `std::mt19937`. So SfMExpanding differs from run to run, upstream too. The legacy engine got a
+     generator per task in 5n. The same for SfmTriangulation would make SfMExpanding reproducible:
+     different draws from upstream's, as in the legacy engine. Then threaded runs could be compared
+     byte for byte.
    - **ExportImages as PrepareDenseScene** (M): 4k's one image per thread, 5y/6f's ZIP level 1, 8f's
      libdeflate on Linux, and 8g's device remap widened to the full transform (its map is
      `source.project(target.backProjectUnit(p))`).
@@ -1063,6 +1079,8 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   - the kd-tree reads vertices that other threads are moving (4l)
   - about 50 M discarded slots are left in the kd-tree
   - NaN residuals break `std::sort` in AC-RANSAC (4w)
+  - SfmTriangulation shares one `std::mt19937` across the OpenMP loop over tracks, so SfMExpanding
+    differs from run to run (found in step 9a)
 - **AliceVision: silent CPU SIFT fallback** (S). No warning is printed when the GPU is denied
   (`feature/sift/ImageDescriber_SIFT.hpp:35`). Add a local warning step and file the same change
   upstream.

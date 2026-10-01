@@ -920,6 +920,159 @@ STEP8G_PDS = [
      "    image::DeviceUndistortScope cheshireUndistortScope;  // cheshire (step 8g): the undistortion below on the device, the same bits\n"),
 ]
 
+# 9a (after 0.3.9): NACRANSAC, the AC-RANSAC of the new SfM nodes, takes 8d's bound and the key sort. NACRANSAC uses its
+# residuals as they are where ACRANSAC takes their square roots, so 8d's buckets get a table without the root.
+STEP9A_ACR = [
+    ("    /// below log10(sqrt(e) + FLT_EPSILON) for every e in the bucket: its value at the lower edge, less 1e-12\n"
+     "    double g[count];\n"
+     "    CheshireAcrBuckets()\n"
+     "    {\n"
+     "        for (int b = 0; b < count; ++b)\n"
+     "        {\n"
+     "            const double edge = b == 0 ? 0.0 : std::bit_cast<double>(std::uint64_t(u0 + b - 1) << shift);\n"
+     "            g[b] = std::log10(std::sqrt(edge) + double(std::numeric_limits<float>::epsilon())) - 1e-12;\n",
+     "    /// below log10(sqrt(e) + FLT_EPSILON) for every e in the bucket - ACRANSAC's squared residuals - or, with root\n"
+     "    /// false, below log10(e + FLT_EPSILON) - NACRANSAC's, which bestNFA2 takes as they are (step 9a): the value at the\n"
+     "    /// lower edge, less 1e-12\n"
+     "    double g[count];\n"
+     "    explicit CheshireAcrBuckets(bool root = true)\n"
+     "    {\n"
+     "        for (int b = 0; b < count; ++b)\n"
+     "        {\n"
+     "            const double edge = b == 0 ? 0.0 : std::bit_cast<double>(std::uint64_t(u0 + b - 1) << shift);\n"
+     "            g[b] = std::log10((root ? std::sqrt(edge) : edge) + double(std::numeric_limits<float>::epsilon())) - 1e-12;\n"),
+    ("                                  double minNFA)\n"
+     "{\n"
+     "    using B = CheshireAcrBuckets;\n"
+     "    static const B buckets;\n",
+     "                                  double minNFA,\n"
+     "                                  bool root = true)  // cheshire (step 9a): false for NACRANSAC's residuals, used as they are\n"
+     "{\n"
+     "    using B = CheshireAcrBuckets;\n"
+     "    static const B rooted(true), plain(false);  // cheshire (step 9a)\n"
+     "    const B& buckets = root ? rooted : plain;\n"),
+]
+STEP9A_NACR = [
+    ("inline ErrorIndex bestNFA2(int startIndex, //number of point required for estimation\n"
+     "                          double logalpha0,\n"
+     "                          const std::vector<ErrorIndex>& e,\n",
+     "template<typename ResidualT>  // cheshire (step 9a): ErrorIndex, or a bare residual key\n"
+     "inline ErrorIndex bestNFA2(int startIndex, //number of point required for estimation\n"
+     "                          double logalpha0,\n"
+     "                          const std::vector<ResidualT>& e,\n"),
+    ("  for(size_t k = startIndex + 1; k <= n && e[k - 1].first <= maxThreshold; ++k)\n"
+     "  {\n"
+     "    double residual = e[k - 1].first + std::numeric_limits<float>::epsilon();\n",
+     "  for(size_t k = startIndex + 1; k <= n && acrResidual(e[k - 1]) <= maxThreshold; ++k)  // cheshire (step 9a): acrResidual\n"
+     "  {\n"
+     "    double residual = acrResidual(e[k - 1]) + std::numeric_limits<float>::epsilon();\n"),
+    ("    std::vector<double> vec_residuals_(nData);\n",
+     "    std::vector<double> vec_residuals_(nData);\n"
+     "    // cheshire (step 9a): residual bits, sorted for a model the bound does not skip; see cheshireRadixSortResiduals\n"
+     "    std::vector<std::uint64_t> vec_keys(nData), vec_keysScratch;\n"
+     "    const bool cheshirePairSort = ::cheshire::env::flag(\"CHESHIRE_ACR_PAIRSORT\");\n"),
+    ("    makelogcombi(sizeSample, nData, vec_logc_k, vec_logc_n);\n",
+     "    makelogcombi(sizeSample, nData, vec_logc_k, vec_logc_n);\n"
+     "    // cheshire (step 9a): what 8d's bound on each model's NFA needs of this call\n"
+     "    const CheshireAcrBoundSetup cheshireBound =\n"
+     "      cheshireAcrBoundSetup(sizeSample, kernel.logalpha0(), loge0, kernel.errorVectorDimension(), vec_logc_n, vec_logc_k);\n"),
+    (r"""            if(bACRansacMode)
+            {
+                for(size_t i = 0; i < nData; ++i)
+                {
+                    const double error = vec_residuals_[i];
+                    vec_residuals[i] = ErrorIndex(error, i);
+                }
+                std::sort(vec_residuals.begin(), vec_residuals.end());
+
+                // Most meaningful discrimination inliers/outliers
+                const ErrorIndex best = bestNFA2(sizeSample, kernel.logalpha0(), vec_residuals, loge0, maxThreshold,
+                                                vec_logc_n, vec_logc_k, kernel.errorVectorDimension());
+
+                if(best.first < minNFA /*&& vec_residuals[best.second-1].first < errorMax*/)
+                {
+                    // A better model was found
+                    better = true;
+""", r"""            if(bACRansacMode)
+            {
+                // cheshire (step 9a): 8d for NACRANSAC. The bound on the unsorted residuals skips the sort and the scan
+                // of a model that cannot beat minNFA. bestNFA2 reads residuals only, so a model the bound does not skip
+                // sorts its 8-byte residual bits instead of the (residual, index) pairs. A negative, -0.0 or NaN
+                // residual, whose order the bits do not give, sorts the pairs as upstream does, and so does every model
+                // under CHESHIRE_ACR_PAIRSORT=1. A better model sorts the pairs too, for its inliers' order.
+                ErrorIndex best;
+                bool cheshirePairsSorted = false;
+                const bool cheshireSkip = !cheshirePairSort &&
+                                          cheshireAcrCannotBeat(cheshireBound, vec_residuals_, sizeSample, kernel.logalpha0(), loge0,
+                                                                maxThreshold, kernel.errorVectorDimension(), minNFA, false);
+                if (!cheshirePairSort && cheshireAcrBoundCheck())
+                    ++cheshireAcrBoundStats().models;
+                if (!cheshireSkip || cheshireAcrBoundCheck())
+                {
+                    bool cheshireOdd = cheshirePairSort;
+                    for (size_t i = 0; i < nData && !cheshireOdd; ++i)
+                    {
+                        vec_keys[i] = std::bit_cast<std::uint64_t>(vec_residuals_[i]);
+                        cheshireOdd = vec_keys[i] > 0x7FF0000000000000ull;  // negative, -0.0 or NaN
+                    }
+                    if (cheshireOdd)
+                    {
+                        if (!cheshirePairSort)  // CHESHIRE_ACR_NANLOG=1 reports how many arrays took the pairs
+                            cheshireAcrDeferred().fetch_add(1, std::memory_order_relaxed);
+                        for(size_t i = 0; i < nData; ++i)
+                        {
+                            const double error = vec_residuals_[i];
+                            vec_residuals[i] = ErrorIndex(error, i);
+                        }
+                        std::sort(vec_residuals.begin(), vec_residuals.end());
+                        cheshirePairsSorted = true;
+
+                        // Most meaningful discrimination inliers/outliers
+                        best = bestNFA2(sizeSample, kernel.logalpha0(), vec_residuals, loge0, maxThreshold,
+                                        vec_logc_n, vec_logc_k, kernel.errorVectorDimension());
+                    }
+                    else
+                    {
+                        cheshireRadixSortResiduals(vec_keys, vec_keysScratch);
+                        best = bestNFA2(sizeSample, kernel.logalpha0(), vec_keys, loge0, maxThreshold,
+                                        vec_logc_n, vec_logc_k, kernel.errorVectorDimension());
+                    }
+                    if (cheshireSkip)
+                        cheshireAcrBoundCompare(best, minNFA);
+                }
+                if (cheshireSkip)
+                    best = ErrorIndex(std::numeric_limits<double>::infinity(), sizeSample);  // not below minNFA
+
+                if(best.first < minNFA /*&& vec_residuals[best.second-1].first < errorMax*/)
+                {
+                    // A better model was found
+                    // cheshire (step 9a): the inliers below come out in (residual, index) order, which the key sort
+                    // does not carry; the pairs are sorted here, for the few models that reach this branch
+                    if (!cheshirePairsSorted)
+                    {
+                        for(size_t i = 0; i < nData; ++i)
+                            vec_residuals[i] = ErrorIndex(vec_residuals_[i], i);
+                        std::sort(vec_residuals.begin(), vec_residuals.end());
+                    }
+                    better = true;
+"""),
+]
+# SfMExpanding's resections run in the sfm library, and on Windows every module has its own copy of an inline function's
+# statics, so the count is reported from there, not from the program's main.
+STEP9A_EXPPROC = [
+    ("#include <aliceVision/system/Logger.hpp>\n",
+     "#include <aliceVision/system/Logger.hpp>\n#include <aliceVision/robustEstimation/ACRansac.hpp>  // cheshire: step 9a\n"),
+    ("    ALICEVISION_LOG_INFO(\"ExpansionProcess end\");\n",
+     "    ALICEVISION_LOG_INFO(\"ExpansionProcess end\");\n"
+     "    robustEstimation::cheshireAcrBoundReport();  // cheshire (step 9a): CHESHIRE_ACR_BOUND_CHECK's count, from the library that resects\n"),
+]
+STEP9A_RPE = [
+    ("    of.close();\n\n    return EXIT_SUCCESS;\n}\n",
+     "    of.close();\n\n"
+     "    robustEstimation::cheshireAcrBoundReport();  // cheshire (step 9a): CHESHIRE_ACR_BOUND_CHECK's count\n\n"
+     "    return EXIT_SUCCESS;\n}\n"),
+]
+
 
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
@@ -1007,6 +1160,9 @@ TRACKED = [
     "src/aliceVision/sfm/LocalBundleAdjustmentGraph.cpp",  # 5k, same gap
     "src/aliceVision/fuseCut/MaxFlow_AdjList.hpp",  # 6p, same gap
     "src/aliceVision/sfmData/colorize.cpp",  # 7i
+    "src/aliceVision/robustEstimation/NACRansac.hpp",  # 9a
+    "src/aliceVision/sfm/pipeline/expanding/ExpansionProcess.cpp",  # 9a
+    "src/software/pipeline/main_relativePoseEstimating.cpp",  # 9a
 ]
 
 
@@ -6062,6 +6218,25 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                     sys.exit(f"an anchor of the device undistortion not found once in {rel} (8g)")
                 t = t.replace(old, new, 1)
         f8g.write_text(t, encoding="utf-8", newline="")
+
+    # 9a (after 0.3.9). NACRANSAC, the AC-RANSAC of the new SfM nodes (SfMExpanding's resection, RelativePoseEstimating),
+    #     takes 8d's bound and the key sort: a model the bound shows cannot beat minNFA skips the sort and bestNFA2's
+    #     scan, and the rest sort their residual bits; a negative, -0.0 or NaN residual sorts the pairs as upstream does.
+    #     8d's buckets get the table for residuals used as they are (NACRANSAC takes no root). Both programs report
+    #     CHESHIRE_ACR_BOUND_CHECK's count (SfMExpanding's from the sfm library, where its resections run). After 8d,
+    #     whose text the ACRansac.hpp anchors are.
+    for rel, pairs in (("src/aliceVision/robustEstimation/ACRansac.hpp", STEP9A_ACR),
+                       ("src/aliceVision/robustEstimation/NACRansac.hpp", STEP9A_NACR),
+                       ("src/aliceVision/sfm/pipeline/expanding/ExpansionProcess.cpp", STEP9A_EXPPROC),
+                       ("src/software/pipeline/main_relativePoseEstimating.cpp", STEP9A_RPE)):
+        f9a = AV / rel
+        t = f9a.read_text(encoding="utf-8")
+        if "step 9a" not in t:
+            for old, new in pairs:
+                if t.count(old) != 1:
+                    sys.exit(f"an anchor of NACRANSAC's bound not found once in {rel} (9a)")
+                t = t.replace(old, new, 1)
+        f9a.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports

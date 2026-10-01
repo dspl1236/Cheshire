@@ -364,3 +364,40 @@ Every change above is bit-identical to upstream. That one cannot be: a different
 gives a different basis for the same nullspace, the cubic `det(F1 + a*F2) = 0` is then solved in a
 different parametrisation, and the fundamental matrices differ in their last bits. It belongs in a
 different bucket from the rest and is not done here.
+
+## The new SfM nodes' AC-RANSAC (after 0.3.9, step 9a)
+
+AliceVision's new SfM chain, which `develop`'s `photogrammetry.mg` runs in place of
+StructureFromMotion (roadmap, "Upstream's next pipeline"), does not call `ACRANSAC`. SfMExpanding's
+resection and RelativePoseEstimating call `NACRANSAC` (`robustEstimation/NACRansac.hpp`), upstream's
+copy of the loop for spherical kernels. It differs in two ways that matter here:
+- its kernels return the residual itself, not its square, so `bestNFA2` takes
+  `log10(e + FLT_EPSILON)` where `bestNFA` takes `log10(sqrt(e) + FLT_EPSILON)`;
+- it still builds and sorts (residual, index) pairs for every model, so neither the key sort nor 8d
+  reached it.
+
+On the nightly comparison's inputs that was most of SfMExpanding: 214.9 of its 234.8 s on 41 views
+went to resection, and 28 of its 30 rounds resect a single view, on one thread.
+
+Step 9a gives `NACRANSAC` both, with one change and one stricter fallback:
+- **The bound** uses 8d's buckets with a table without the root:
+  `G[b] = log10(lower edge of b + FLT_EPSILON) - 1e-12`. The rest of the argument above holds as
+  written: `nfa(k)` rises with `e(k)` (`dim` is 2 for the resection kernel and 1 for the two
+  relative-pose kernels), and `NACRANSAC` builds the same `makelogcombi` tables.
+- **The key sort** for a model the bound does not settle, read by `bestNFA2` through the same
+  `acrResidual` as `bestNFA`. A better model sorts the pairs as well, for its inliers' order.
+- **A negative, `-0.0` or NaN residual** sends the array down upstream's path: the pairs, sorted by
+  `std::sort` as upstream sorts them, so even an order the standard leaves unspecified is
+  upstream's. `ACRANSAC`'s key path hands such an array to `std::sort` over the keys instead
+  (above). `CHESHIRE_ACR_NANLOG=1` counts the arrays.
+
+`CHESHIRE_ACR_BOUND=0`, `CHESHIRE_ACR_BOUND_CHECK=1` and `CHESHIRE_ACR_PAIRSORT=1` act as they do
+for `ACRANSAC`, and both programs print the check's count.
+
+On the nightly comparison's inputs ([docs/04](04-validation.md)), SfMExpanding goes from 236.5 s to
+60.0 s on 41 views and from 108.0 s to 43.3 s on the engine bay, and its resection from 214.9 s to
+38.2 s and from 80.8 s to 18.9 s. The bound settles 97.8 % and 98.6 % of the resection's models, and
+`bestNFA2` puts none of the skipped ones below `minNFA`. The NaN path is not hypothetical here
+either: 44 and 773 of the resection's arrays take it. Single-threaded, the output is byte for byte
+upstream's path. What is left in the resection is its threading: most rounds resect one view, on one
+thread.
