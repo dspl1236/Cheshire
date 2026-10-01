@@ -1,5 +1,5 @@
-# Cheshire: the "Fast Ransac" pipeline templates for Meshroom 2025.1 (0.3.9), written by meshroom-pair.cmd
-# and removed by its --unpair.
+# Cheshire: the "Fast Ransac" pipeline templates for Meshroom 2025.1 and later (0.3.9), written by
+# meshroom-pair.cmd and removed by its --unpair.
 #
 #   meshroom-templates.ps1 <Meshroom dir> install|remove
 #
@@ -10,16 +10,22 @@
 # run gives. These templates are the opt-in instead: the installed Photogrammetry and Photogrammetry Draft
 # templates, copied with the two 2023.3 values set in the graph, where they show and can be edited.
 #
+# Upstream's new SfM pipeline replaces StructureFromMotion with SfMExpanding, whose resection takes the
+# same localizerEstimatorMaxIterations, also 50000 by default. Meshroom 2025.1 ships it as Photogrammetry
+# Experimental; upstream's nightly makes it Photogrammetry itself. A graph with SfMExpanding instead of
+# StructureFromMotion gets the 4096 there (after 0.3.9, docs/04).
+#
 # Each is the stock file plus two lines, so a diff shows exactly what changed: "maxIteration": 2048 as
 # the first input of the FeatureMatching node and "localizerEstimatorMaxIterations": 4096 as the first of
-# the StructureFromMotion node, indented like their neighbours, with the stock file's line endings. They
-# are built from the Meshroom being paired, so their node versions are that Meshroom's. Meshroom labels a
-# template by splitting its file name at capitals: photogrammetryFastRansac.mg is "Photogrammetry Fast
-# Ransac". scripts/linux/meshroom-pair.sh writes the same files, byte for byte apart from line endings.
+# the StructureFromMotion (or SfMExpanding) node, indented like their neighbours, with the stock file's
+# line endings. They are built from the Meshroom being paired, so their node versions are that
+# Meshroom's. Meshroom labels a template by splitting its file name at capitals:
+# photogrammetryFastRansac.mg is "Photogrammetry Fast Ransac". scripts/linux/meshroom-pair.sh writes the
+# same files, byte for byte apart from line endings.
 #
 # Meshroom 2023.3 keeps its templates in lib\meshroom\pipelines and already runs these counts: nothing to
-# write there. A template whose graph is not the expected one (one node of each type, neither value set)
-# is skipped with a message rather than guessed at.
+# write there. A template whose graph is not the expected one (one FeatureMatching, one StructureFromMotion
+# or SfMExpanding, neither value set) is skipped with a message rather than guessed at.
 param([Parameter(Mandatory)][string]$Meshroom, [ValidateSet('install', 'remove')][string]$Mode = 'install')
 $ErrorActionPreference = 'Stop'
 
@@ -28,9 +34,10 @@ $variants = @(
     @{ Stock = 'photogrammetry'; Name = 'photogrammetryFastRansac' },
     @{ Stock = 'photogrammetryDraft'; Name = 'photogrammetryDraftFastRansac' }
 )
+# each value goes to the one node of its types (the SfM node is one or the other)
 $sets = @(
-    @{ NodeType = 'FeatureMatching'; Input = 'maxIteration'; Value = 2048 },
-    @{ NodeType = 'StructureFromMotion'; Input = 'localizerEstimatorMaxIterations'; Value = 4096 }
+    @{ NodeTypes = @('FeatureMatching'); Input = 'maxIteration'; Value = 2048 },
+    @{ NodeTypes = @('StructureFromMotion', 'SfMExpanding'); Input = 'localizerEstimatorMaxIterations'; Value = 4096 }
 )
 $utf8 = New-Object System.Text.UTF8Encoding $false
 
@@ -50,7 +57,7 @@ if ($Mode -eq 'remove') {
 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $dir 'photogrammetry.mg'))) {
-    "no aliceVision\share\meshroom\photogrammetry.mg: not Meshroom 2025.1 (2023.3 already runs 2048/4096), no Fast Ransac template written"
+    "no aliceVision\share\meshroom\photogrammetry.mg: not Meshroom 2025.1 or later (2023.3 already runs 2048/4096), no Fast Ransac template written"
     exit 0
 }
 
@@ -80,18 +87,20 @@ foreach ($v in $variants) {
     $eol = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
     $stock = $text | ConvertFrom-Json
     $new = $text
+    $types = @{}  # the node type each value went to
     foreach ($s in $sets) {
-        $nodes = @($stock.graph.PSObject.Properties | Where-Object { $_.Value.nodeType -eq $s.NodeType })
+        $nodes = @($stock.graph.PSObject.Properties | Where-Object { $s.NodeTypes -ccontains $_.Value.nodeType })
         if ($nodes.Count -ne 1 -or $null -ne $nodes[0].Value.inputs.($s.Input)) { $new = $null; break }
-        $new = Add-Input $new $eol $s.NodeType $s.Input $s.Value
+        $types[$s.Input] = $nodes[0].Value.nodeType
+        $new = Add-Input $new $eol $types[$s.Input] $s.Input $s.Value
         if ($null -eq $new) { break }
     }
-    if ($null -eq $new) { "$($v.Stock).mg is not the graph this expects (one FeatureMatching and one StructureFromMotion, neither value set): $($v.Name).mg not written"; continue }
+    if ($null -eq $new) { "$($v.Stock).mg is not the graph this expects (one FeatureMatching, one StructureFromMotion or SfMExpanding, neither value set): $($v.Name).mg not written"; continue }
     # the result must parse, carry both values, and be the stock graph otherwise
     $g = $new | ConvertFrom-Json
     $ok = $true
     foreach ($s in $sets) {
-        $n = @($g.graph.PSObject.Properties | Where-Object { $_.Value.nodeType -eq $s.NodeType })[0].Value
+        $n = @($g.graph.PSObject.Properties | Where-Object { $_.Value.nodeType -ceq $types[$s.Input] })[0].Value
         if ($n.inputs.($s.Input) -ne $s.Value) { $ok = $false }
         $n.inputs.PSObject.Properties.Remove($s.Input)
     }
@@ -99,6 +108,6 @@ foreach ($v in $variants) {
         "$($v.Name).mg: the edit did not come out as the stock graph plus the two values: not written"; continue
     }
     [System.IO.File]::WriteAllText($dst, $new, $utf8)
-    "installed the pipeline template `"$((Get-Culture).TextInfo.ToTitleCase(($v.Name -creplace '([A-Z])', ' $1')))`" ($($v.Name).mg): $($v.Stock).mg with FeatureMatching maxIteration 2048 and StructureFromMotion localizerEstimatorMaxIterations 4096, Meshroom 2023.3's RANSAC counts"
+    "installed the pipeline template `"$((Get-Culture).TextInfo.ToTitleCase(($v.Name -creplace '([A-Z])', ' $1')))`" ($($v.Name).mg): $($v.Stock).mg with $($types['maxIteration']) maxIteration 2048 and $($types['localizerEstimatorMaxIterations']) localizerEstimatorMaxIterations 4096, Meshroom 2023.3's RANSAC counts"
 }
 exit 0

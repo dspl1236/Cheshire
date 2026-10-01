@@ -103,11 +103,12 @@ if defined HAVE (
   for /d %%F in ("%PKG%\gpu\*") do for /d %%T in ("%%~fF\*") do if exist "%%~fT\popsift.dll" set FEOK=1
 )
 if defined FEOK ( call :pairif aliceVision_featureExtraction ) else ( echo package has no GPU SIFT ^(no popsift.dll^): featureExtraction not paired )
-rem Meshroom 2025.1 only (0.3.9): the "Photogrammetry Fast Ransac" and "Photogrammetry Draft Fast Ransac"
+rem Meshroom 2025.1 and later (0.3.9): the "Photogrammetry Fast Ransac" and "Photogrammetry Draft Fast Ransac"
 rem pipeline templates, the installed Photogrammetry and Draft templates with Meshroom 2023.3's two RANSAC
-rem counts set in the graph (FeatureMatching maxIteration 2048, StructureFromMotion
-rem localizerEstimatorMaxIterations 4096; 2025.1's defaults are 50000). Meshroom's own templates are not
-rem touched, so the paired nodes keep its defaults. Removed by --unpair. See meshroom-templates.ps1.
+rem counts set in the graph (FeatureMatching maxIteration 2048, and localizerEstimatorMaxIterations 4096 on
+rem StructureFromMotion, or on SfMExpanding in the new pipeline; 2025.1's defaults are 50000). Meshroom's own
+rem templates are not touched, so the paired nodes keep its defaults. Removed by --unpair. See
+rem meshroom-templates.ps1.
 if exist "%HERE%meshroom-templates.ps1" ( powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%meshroom-templates.ps1" "%MR%" install ) else ( echo meshroom-templates.ps1 not beside this script: no Fast Ransac templates )
 rem The DepthMap node in blocks of 48 views instead of 12 (docs/04, 0.3.4 "the depth-map node was loading
 rem images"): each chunk is a process that loads the SfM data, probes the device and starts cold. Removed

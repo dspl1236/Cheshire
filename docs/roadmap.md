@@ -957,13 +957,22 @@ Plan, loosely, since the release date is not known:
    - **Fast Ransac for the new templates** (S): SfMExpanding has StructureFromMotion's
      `localizerEstimatorMaxIterations`, also 50,000 by default. The generator would add it there
      when a graph has SfMExpanding instead. Today it skips such a graph with a message, so pairing a
-     release with the new templates does not fail.
+     release with the new templates does not fail. **Done 2026-10-01** (docs/04). Both generators
+     take the graph's one StructureFromMotion or SfMExpanding. On 2025.1 they write 0.3.9's bytes; on
+     the nightly, Photogrammetry Fast Ransac is now written, and Meshroom loads it with 2048 and
+     4096. On the new chain, the template takes our FeatureMatching-to-SfMExpanding from 68.4 s to
+     39.9 s on 41 views and from 411.5 s to 85.6 s on the engine bay. Every view is placed, and
+     the cameras move less than other RANSAC draws move them. 2025.1's Photogrammetry Experimental,
+     the same pipeline, gets no Fast Ransac copy: 0.3.9 wrote only Photogrammetry and Draft, the
+     user's choice.
 4. **Pivot** (M-L, smaller than first thought) when a Meshroom release ships the new pipeline:
    update the submodule to that release's AliceVision (anchors hold today), ship and pair the new
    binaries, build with USD, and port 5r, 5s and the ranking ties to SfmBundle and
    ExpansionPolicyLegacy. Keep a 2023.3 package line for as long as people use that release.
    Versioning then follows the Meshroom release: one package per supported release, chosen by the
-   detection in step 1.
+   detection in step 1. `verify_end_to_end.py` needs the new chain too: its markers and its
+   `fastransac` check name StructureFromMotion and PrepareDenseScene, which a new Photogrammetry
+   does not run.
 
 Effect on the open items: in the new chain too, Grin leaves bundle adjustment at about 5 s of
 SfMExpanding on these sets, so the new pipeline adds nothing to the case for BA on the device

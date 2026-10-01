@@ -44,7 +44,7 @@ MESHROOM="${1:?Meshroom directory (e.g. ~/apps/Meshroom-2023.3.0)}"
 BIN="$MESHROOM/aliceVision/bin"
 [ -d "$BIN" ] || { echo "$BIN not found: is $MESHROOM a Meshroom 2023.3 or 2025.1 Linux bundle?"; exit 1; }
 
-# Meshroom 2025.1 only (0.3.9): the "Photogrammetry Fast Ransac" and "Photogrammetry Draft Fast Ransac"
+# Meshroom 2025.1 and later (0.3.9): the "Photogrammetry Fast Ransac" and "Photogrammetry Draft Fast Ransac"
 # pipeline templates. 2025.1 raised FeatureMatching's maxIteration (2048 in 2023.3) and StructureFromMotion's
 # localizerEstimatorMaxIterations (4096) to 50000; on the sets measured (docs/04, 0.3.6 and 0.3.9) that
 # verifies more weak pairs and places no more views, for minutes of matching. The paired nodes keep
@@ -52,17 +52,21 @@ BIN="$MESHROOM/aliceVision/bin"
 # installed Photogrammetry and Draft templates, each written as the stock file plus two lines - the
 # 2023.3 value as the first input of the FeatureMatching and of the StructureFromMotion node, indented like
 # their neighbours, with the stock line endings - and checked to parse as the stock graph plus those two
-# values. Meshroom labels a template by splitting its file name at capitals. The Windows pairing writes the
-# same files (scripts/windows/meshroom-templates.ps1). 2023.3 keeps its templates in lib/meshroom/pipelines
-# and already runs these counts; a template whose graph is not the expected shape is skipped, not guessed
-# at; a file of the same name that does not carry both values is the user's and is left alone.
+# values. Upstream's new SfM pipeline (2025.1's Photogrammetry Experimental, the nightly's Photogrammetry)
+# has SfMExpanding instead of StructureFromMotion, with the same localizerEstimatorMaxIterations for its
+# resection: such a graph gets the 4096 there (after 0.3.9). Meshroom labels a template by splitting its
+# file name at capitals. The Windows pairing writes the same files (scripts/windows/meshroom-templates.ps1).
+# 2023.3 keeps its templates in lib/meshroom/pipelines and already runs these counts; a template whose
+# graph is not the expected shape is skipped, not guessed at; a file of the same name that does not carry
+# both values is the user's and is left alone.
 fast_ransac_templates() {  # install|remove
   if ! command -v python3 >/dev/null 2>&1; then echo "python3 not found: Fast Ransac templates not handled"; return 0; fi
   python3 - "$MESHROOM/aliceVision/share/meshroom" "$1" <<'PY'
 import json, os, re, sys
 d, mode = sys.argv[1], sys.argv[2]
 variants = [("photogrammetry", "photogrammetryFastRansac"), ("photogrammetryDraft", "photogrammetryDraftFastRansac")]
-sets = [("FeatureMatching", "maxIteration", 2048), ("StructureFromMotion", "localizerEstimatorMaxIterations", 4096)]
+# each value goes to the one node of its types (the SfM node is one or the other)
+sets = [(("FeatureMatching",), "maxIteration", 2048), (("StructureFromMotion", "SfMExpanding"), "localizerEstimatorMaxIterations", 4096)]
 
 def ours(path):
     if not os.path.isfile(path):
@@ -98,7 +102,7 @@ if mode == "remove":
             print(f"removed the pipeline template {name}.mg")
     sys.exit(0)
 if not os.path.isfile(os.path.join(d, "photogrammetry.mg")):
-    print("no aliceVision/share/meshroom/photogrammetry.mg: not Meshroom 2025.1 (2023.3 already runs 2048/4096), no Fast Ransac template written")
+    print("no aliceVision/share/meshroom/photogrammetry.mg: not Meshroom 2025.1 or later (2023.3 already runs 2048/4096), no Fast Ransac template written")
     sys.exit(0)
 for stock_name, name in variants:
     src, dst = os.path.join(d, stock_name + ".mg"), os.path.join(d, name + ".mg")
@@ -112,29 +116,30 @@ for stock_name, name in variants:
         text = f.read().decode("utf-8")      # bytes, so the line endings are the stock file's
     eol = "\r\n" if "\r\n" in text else "\n"
     stock = json.loads(text)
-    new = text
-    for node_type, inp, value in sets:
-        nodes = [n for n in stock["graph"].values() if n.get("nodeType") == node_type]
+    new, types = text, {}  # types: the node type each value went to
+    for node_types, inp, value in sets:
+        nodes = [n for n in stock["graph"].values() if n.get("nodeType") in node_types]
         if len(nodes) != 1 or inp in nodes[0].get("inputs", {}):
             new = None
             break
-        new = add_input(new, eol, node_type, inp, value)
+        types[inp] = nodes[0]["nodeType"]
+        new = add_input(new, eol, types[inp], inp, value)
         if new is None:
             break
     if new is None:
-        print(f"{stock_name}.mg is not the graph this expects (one FeatureMatching and one StructureFromMotion, neither value set): {name}.mg not written")
+        print(f"{stock_name}.mg is not the graph this expects (one FeatureMatching, one StructureFromMotion or SfMExpanding, neither value set): {name}.mg not written")
         continue
     graph, ok = json.loads(new), True
-    for node_type, inp, value in sets:
-        node = [n for n in graph["graph"].values() if n.get("nodeType") == node_type][0]
+    for _, inp, value in sets:
+        node = [n for n in graph["graph"].values() if n.get("nodeType") == types[inp]][0]
         ok = ok and node["inputs"].pop(inp, None) == value
     if not ok or graph != stock:
         print(f"{name}.mg: the edit did not come out as the stock graph plus the two values: not written")
         continue
     with open(dst, "wb") as f:
         f.write(new.encode("utf-8"))
-    print(f'installed the pipeline template "{label(name)}" ({name}.mg): {stock_name}.mg with FeatureMatching maxIteration 2048 '
-          "and StructureFromMotion localizerEstimatorMaxIterations 4096, Meshroom 2023.3's RANSAC counts")
+    print(f'installed the pipeline template "{label(name)}" ({name}.mg): {stock_name}.mg with {types["maxIteration"]} maxIteration 2048 '
+          f"and {types['localizerEstimatorMaxIterations']} localizerEstimatorMaxIterations 4096, Meshroom 2023.3's RANSAC counts")
 PY
 }
 

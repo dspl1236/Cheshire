@@ -3958,3 +3958,58 @@ landmarks are fewer at both (-81, -20). Both differences are inside what the see
 
 So 9j stays opt-in, as docs/17's QR does. It saves about a second of RelativePoseEstimating on these
 sets, for results that agree only to rounding and RANSAC's spread.
+
+## After 0.3.9: Fast Ransac for the new pipeline's templates (2026-10-01)
+
+Upstream's new SfM pipeline puts SfMExpanding where StructureFromMotion was. Its resection takes the
+same `localizerEstimatorMaxIterations`, also 50000 by default. Meshroom 2025.1 ships that pipeline as
+Photogrammetry Experimental. Upstream's nightly makes it Photogrammetry itself, and there the
+pairing's Fast Ransac generator skipped the template with a message. Both generators
+(`scripts/windows/meshroom-templates.ps1` and the one in `scripts/linux/meshroom-pair.sh`) now take
+the graph's one StructureFromMotion or one SfMExpanding, and set the 4096 there. FeatureMatching's
+2048 is as before.
+
+The generators, on scratch copies of each Meshroom's templates:
+- **Meshroom 2025.1:** both write what 0.3.9 wrote, byte for byte (`9f27c64e`, `6fa5930d`).
+- **The nightly (2026.1.0+develop 67deb3b):** Photogrammetry Fast Ransac is now written. It is the
+  stock file plus the two lines, with SfMExpanding taking the 4096; Draft is unchanged. Windows and
+  Linux write the same bytes.
+- **Edge cases, on both:** a re-install writes the same bytes. A graph with both SfM nodes is skipped
+  with the message. A user's file of the same name stays through install and remove, and remove
+  deletes only ours.
+- **Meshroom itself:** with the files in place, the nightly's `meshroom_info pipelines` lists both.
+  `meshroom_batch --compute no --save` gives FeatureMatching 2048 and SfMExpanding 4096 in the saved
+  graph; stock Photogrammetry gives 50000 and 50000.
+
+What the counts do to the new chain, with our build in the replay harness (`build/nightly-cmp`,
+`plan-fr.json`, `cmp_fr.py`). The nightly's cache supplies the features and image pairs. Our
+FeatureMatching matches exact nearest neighbours on the device where stock's FLANN is approximate,
+so both legs run ours:
+
+| seconds | 41 views, defaults | Fast Ransac | engine bay, defaults | Fast Ransac |
+|---|---|---|---|---|
+| FeatureMatching | 25.7 | 8.2 | 372.9 | 54.6 |
+| TracksBuilding | 1.5 | 1.4 | 1.9 | 1.8 |
+| RelativePoseEstimating | 9.2 | 7.8 | 14.3 | 12.5 |
+| SfMBootStrapping | 1.9 | 1.7 | 1.6 | 1.6 |
+| SfMExpanding | 30.1 | 20.8 | 20.8 | 15.1 |
+| total | 68.4 | 39.9 | 411.5 | 85.6 |
+
+| | 41 views, defaults | Fast Ransac | engine bay, defaults | Fast Ransac |
+|---|---|---|---|---|
+| verified pairs, matches | 529, 613,927 | 529, 613,734 | 1028, 512,691 | 904, 502,437 |
+| tracks | 88,284 | 87,997 | 174,681 | 169,684 |
+| relative poses | 1467 | 1462 | 2053 | 2040 |
+| views placed, landmarks | 41, 81,073 | 41, 80,864 | 107, 136,787 | 107, 138,495 |
+
+Camera centres after a similarity fit move 0.013 % and 0.13 % of the scene's radius. That is less
+than other RANSAC draws move them (0.0015 % and 0.38 %, step 9j's control), and less than the
+matcher does: ours against stock's moves them 0.011 % and 0.28 %. As 0.3.9 found for the legacy
+chain, 50000 iterations verify more weak pairs (124 of 1028 on the engine bay) and place no more
+views.
+
+SfMExpanding's 4096 alone, on the same tracks, pairs and bootstrap as 9j's default run: 27.9 s to
+21.0 s on 41 views and 29.1 s to 23.8 s on the engine bay. The resection goes from 8.3 s to 1.7 s
+and from 8.8 s to 1.5 s; after 9a and 9b it was already a small part. All views are placed. The
+landmarks are 80,672 against 80,677 and 134,804 against 134,427, and the centres move 0.0024 % and
+0.12 %.
