@@ -3728,3 +3728,29 @@ The draws differ from upstream's, so the reconstruction is a different sample of
 - camera centres within 0.0060 % (41 views) and 0.12 % (engine bay) of the scene's radius from the
   stock nightly's, where the shared generator's run lands at 0.0094 % and 0.21 %;
 - 80,672 and 134,804 landmarks, against stock's 80,680 and 134,482.
+
+## After 0.3.9: ExportImages as PrepareDenseScene (step 9d, 2026-10-01)
+
+ExportImages, which the new chain runs in place of PrepareDenseScene, exported one image at a time,
+with only the warp's rows on the cores, and wrote its EXR files with upstream's default compression.
+Step 9d gives it PrepareDenseScene's treatment:
+- one image per thread on every core, as 4k does (`CHESHIRE_EXPORT_THREADS`);
+- the EXR at ZIP level 1, as 5y and 6f chose (`CHESHIRE_EXPORT_EXR_COMPRESSION`, `default` for
+  upstream's files);
+- the chunks deflated with libdeflate inside 8f's scope.
+
+Same harness, the 0.3.8 build's SfMColorizing and IntrinsicsTransforming outputs as inputs:
+
+| run | ExportImages, 41 views | engine bay |
+|---|---|---|
+| one image at a time, upstream's compression (upstream's behaviour) | 28.3 s | 57.0 s |
+| one image per thread, upstream's compression | 13.9 s | 26.6 s |
+| 9d: one image per thread, ZIP level 1 | 12.6 s | 23.6 s |
+
+The stock nightly took 35.0 s and 69.3 s, and the legacy chain's PrepareDenseScene in our build
+takes 9.6 s and 17.6 s.
+- **One image per thread is exact**: 41 of 41 and 107 of 107 EXR files are byte for byte the
+  one-at-a-time run's, and `sfm.usda` is the same but for the output folder.
+- **ZIP level 1 keeps the pixels**: `build/nightly-cmp/exr_pixels.py` decodes every scanline from
+  either compression. It finds 41 of 41 and 107 of 107 files with upstream's pixels and header but
+  the compression attribute, at the same size (1.8 GB and 3.6 GB).

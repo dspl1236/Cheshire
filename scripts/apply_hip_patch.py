@@ -1502,6 +1502,53 @@ STEP9C_TRI_CPP = [
      "processTrack(sfmData, track, cheshireGenerator, trackViewsFiltered, result)"),
 ]
 
+# 9d (after 0.3.9): ExportImages, the new chain's PrepareDenseScene, takes PrepareDenseScene's treatment: one image per
+# thread (4k), the EXR written with ZIP at level 1 (5y/6f) and deflated with libdeflate where OpenEXR uses zlib (8f).
+STEP9D_EXPORT = [
+    ("#include <aliceVision/camera/IntrinsicScaleOffsetDisto.hpp>\n",
+     "#include <aliceVision/camera/IntrinsicScaleOffsetDisto.hpp>\n#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 9d\n"),
+    ("/**\n * @Brief process an image such that they appear captured by a new virtual intrinsic\n",
+     r"""// cheshire (step 9d): the EXR compression of the exported images, as 5y and 6f chose it for PrepareDenseScene's: ZIP at
+// level 1, sixteen lines per zlib stream where upstream's default (Auto, which OpenImageIO writes as ZIPS) has one, for
+// a cheaper write and read and the same pixels. CHESHIRE_EXPORT_EXR_COMPRESSION=method[:level] names another;
+// "default" leaves upstream's options, and so upstream's files.
+static void cheshireExportCompression(image::ImageWriteOptions& o)
+{
+    static const std::string method = [] {
+        const std::string m = ::cheshire::env::text("CHESHIRE_EXPORT_EXR_COMPRESSION", "zip:1");
+        ALICEVISION_LOG_INFO("cheshire: exported images written with EXR compression '" << m
+                             << "' (CHESHIRE_EXPORT_EXR_COMPRESSION=method[:level] to change, default for upstream's)");
+        return m;
+    }();
+    if (method == "default")
+        return;
+    const std::size_t colon = method.find(':');
+    o.exrCompressionMethod(image::EImageExrCompression_stringToEnum(method.substr(0, colon)));
+    if (colon != std::string::npos)
+        o.exrCompressionLevel(std::atoi(method.c_str() + colon + 1));
+}
+
+/**
+ * @Brief process an image such that they appear captured by a new virtual intrinsic
+"""),
+    ("    image::Image<image::RGBAfColor> image;\n    image::Image<image::RGBAfColor> image_ud;\n",
+     "    image::Image<image::RGBAfColor> image;\n    image::Image<image::RGBAfColor> image_ud;\n"
+     "    image::ExrDeflateWriteScope cheshireDeflateScope;  // cheshire (step 9d): the EXR below, deflated with libdeflate (8f)\n"),
+    ("        writeOptions.storageDataType(storageDataType);\n",
+     "        writeOptions.storageDataType(storageDataType);\n"
+     "        cheshireExportCompression(writeOptions);  // cheshire (step 9d)\n"),
+    ("    for (int posImage = 0; posImage < countElements; posImage++)\n",
+     r"""    // cheshire (step 9d): one image per thread on every core, as 4k has PrepareDenseScene do (upstream: one image at a
+    // time, the warp's rows on the cores). Every iteration reads and writes only its own view and files.
+    // CHESHIRE_EXPORT_THREADS sets the thread count.
+    int cheshireThreads = omp_get_max_threads();
+    cheshireThreads = std::max(1, int(::cheshire::env::integer("CHESHIRE_EXPORT_THREADS", cheshireThreads)));
+    ALICEVISION_LOG_INFO("cheshire: images exported " << cheshireThreads << " at a time, one per thread (CHESHIRE_EXPORT_THREADS to change)");
+#pragma omp parallel for num_threads(cheshireThreads) schedule(dynamic)
+    for (int posImage = 0; posImage < int(countElements); posImage++)
+"""),
+]
+
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
     if new in text:
@@ -1594,6 +1641,7 @@ TRACKED = [
     "src/aliceVision/sfm/pipeline/expanding/ExpansionChunk.cpp",  # 9b
     "src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.cpp",  # 9c
     "src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.hpp",  # 9c
+    "src/software/utils/main_exportImages.cpp",  # 9d
 ]
 
 
@@ -6701,6 +6749,18 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                     sys.exit(f"an anchor of the triangulation's generators not found once in {rel} (9c)")
                 t = t.replace(old, new, 1)
         f9c.write_text(t, encoding="utf-8", newline="")
+
+    # 9d (after 0.3.9). ExportImages as PrepareDenseScene: one image per thread on every core (CHESHIRE_EXPORT_THREADS),
+    #     its EXR files at ZIP level 1 (CHESHIRE_EXPORT_EXR_COMPRESSION, "default" for upstream's) and deflated with
+    #     libdeflate inside 8f's scope. The same pixels.
+    f9d = AV / "src/software/utils/main_exportImages.cpp"
+    t = f9d.read_text(encoding="utf-8")
+    if "step 9d" not in t:
+        for old, new in STEP9D_EXPORT:
+            if t.count(old) != 1:
+                sys.exit("an anchor of ExportImages' threads not found once in main_exportImages.cpp (9d)")
+            t = t.replace(old, new, 1)
+    f9d.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports

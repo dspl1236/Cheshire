@@ -12820,3 +12820,82 @@ index a8714f8..1cf26df 100644
  
      cmdline.add(requiredParams);
      cmdline.add(optionalParams);
+diff --git a/src/software/utils/main_exportImages.cpp b/src/software/utils/main_exportImages.cpp
+index 8eeebe4..cc5e9f7 100644
+--- a/src/software/utils/main_exportImages.cpp
++++ b/src/software/utils/main_exportImages.cpp
+@@ -4,6 +4,7 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include <aliceVision/sfmData/SfMData.hpp>
+ #include <aliceVision/alicevision_omp.hpp>
+ #include <aliceVision/sfmDataIO/sfmDataIO.hpp>
+@@ -15,6 +16,7 @@
+ #include <aliceVision/image/Sampler.hpp>
+ #include <aliceVision/image/remap.hpp>
+ #include <aliceVision/camera/IntrinsicScaleOffsetDisto.hpp>
++#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 9d
+ #include <boost/program_options.hpp>
+ 
+ // These constants define the current software version.
+@@ -190,6 +192,26 @@ void ImageRemoveDistortion(const image::Image<T>& imageIn,
+     }
+ }
+ 
++// cheshire (step 9d): the EXR compression of the exported images, as 5y and 6f chose it for PrepareDenseScene's: ZIP at
++// level 1, sixteen lines per zlib stream where upstream's default (Auto, which OpenImageIO writes as ZIPS) has one, for
++// a cheaper write and read and the same pixels. CHESHIRE_EXPORT_EXR_COMPRESSION=method[:level] names another;
++// "default" leaves upstream's options, and so upstream's files.
++static void cheshireExportCompression(image::ImageWriteOptions& o)
++{
++    static const std::string method = [] {
++        const std::string m = ::cheshire::env::text("CHESHIRE_EXPORT_EXR_COMPRESSION", "zip:1");
++        ALICEVISION_LOG_INFO("cheshire: exported images written with EXR compression '" << m
++                             << "' (CHESHIRE_EXPORT_EXR_COMPRESSION=method[:level] to change, default for upstream's)");
++        return m;
++    }();
++    if (method == "default")
++        return;
++    const std::size_t colon = method.find(':');
++    o.exrCompressionMethod(image::EImageExrCompression_stringToEnum(method.substr(0, colon)));
++    if (colon != std::string::npos)
++        o.exrCompressionLevel(std::atoi(method.c_str() + colon + 1));
++}
++
+ /**
+  * @Brief process an image such that they appear captured by a new virtual intrinsic
+  * @param dstFileName the image output file name
+@@ -221,6 +243,7 @@ bool processImage(const std::string& dstFileName,
+ {
+     image::Image<image::RGBAfColor> image;
+     image::Image<image::RGBAfColor> image_ud;
++    image::ExrDeflateWriteScope cheshireDeflateScope;  // cheshire (step 9d): the EXR below, deflated with libdeflate (8f)
+ 
+     oiio::ParamValueList metadata;
+     try 
+@@ -309,6 +332,7 @@ bool processImage(const std::string& dstFileName,
+     {
+         image::ImageWriteOptions writeOptions;
+         writeOptions.storageDataType(storageDataType);
++        cheshireExportCompression(writeOptions);  // cheshire (step 9d)
+         writeImage(dstFileName, image_ud, writeOptions, metadata, roi);
+     }
+     catch (...)
+@@ -350,7 +374,14 @@ bool process(const sfmData::SfMData & input,
+     // for exposure correction
+     const double medianCameraExposure = input.getMedianCameraExposureSetting().getExposure(); 
+ 
+-    for (int posImage = 0; posImage < countElements; posImage++)
++    // cheshire (step 9d): one image per thread on every core, as 4k has PrepareDenseScene do (upstream: one image at a
++    // time, the warp's rows on the cores). Every iteration reads and writes only its own view and files.
++    // CHESHIRE_EXPORT_THREADS sets the thread count.
++    int cheshireThreads = omp_get_max_threads();
++    cheshireThreads = std::max(1, int(::cheshire::env::integer("CHESHIRE_EXPORT_THREADS", cheshireThreads)));
++    ALICEVISION_LOG_INFO("cheshire: images exported " << cheshireThreads << " at a time, one per thread (CHESHIRE_EXPORT_THREADS to change)");
++#pragma omp parallel for num_threads(cheshireThreads) schedule(dynamic)
++    for (int posImage = 0; posImage < int(countElements); posImage++)
+     {
+         auto viewsIt = input.getViews().begin();
+         std::advance(viewsIt, posImage);

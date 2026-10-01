@@ -924,7 +924,11 @@ Plan, loosely, since the release date is not known:
      0.0060 % and 0.12 % of the stock nightly's, at the same speed.
    - **ExportImages as PrepareDenseScene** (M): 4k's one image per thread, 5y/6f's ZIP level 1, 8f's
      libdeflate on Linux, and 8g's device remap widened to the full transform (its map is
-     `source.project(target.backProjectUnit(p))`).
+     `source.project(target.backProjectUnit(p))`). **The first three done 2026-10-01** (step 9d,
+     docs/04). ExportImages goes from 28.3 s to 12.6 s on 41 views and from 57.0 s to 23.6 s on the
+     engine bay, with the same pixels; our PrepareDenseScene takes 9.6 s and 17.6 s. Still open: the
+     warp map once per intrinsic pair (5h's cache; upstream builds it for every image) and the
+     device warp.
    - **The 5-point solver's nullspace by QR** (S-M): docs/17's lever, for RelativePoseEstimating.
    - **Fast Ransac for the new templates** (S): SfMExpanding has StructureFromMotion's
      `localizerEstimatorMaxIterations`, also 50,000 by default. The generator would add it there
