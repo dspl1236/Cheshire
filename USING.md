@@ -7,9 +7,10 @@ any of it is in [`docs/`](docs/).
 `cheshire-alicevision-cuda-windows-x64-cuda12.9.zip` or
 `cheshire-alicevision-cuda-linux-x64-cuda12.9.tar.gz`. It is worth having because Meshroom puts
 only DepthMap on the GPU; the matcher, depth map filter, meshing votes, texturing and SIFT are on
-the CPU upstream for everyone. Follow this guide with two changes: there is only one package, with
-no payload to select, and the pairing needs `CHESHIRE_BACKEND=cheshire` - otherwise the launcher
-sees an NVIDIA card and hands every node back to Meshroom.
+the CPU upstream for everyone. Follow this guide with one change: there is only one package, with
+no payload to select. From v0.3.8 the launcher knows a paired CUDA package and runs it on the NVIDIA
+card; v0.3.0 to v0.3.7 need `CHESHIRE_BACKEND=cheshire` set, or the launcher sees the NVIDIA card and
+hands every node back to Meshroom.
 
 ## 1. Will it work on my card?
 
@@ -116,10 +117,11 @@ cheshire: 18907488 rays, 11676791 cells to the GPU (votes + weakly supported sur
 No `[cheshire]` lines at all means the pairing did not take, and Meshroom is running its own
 binaries. Re-run `meshroom-pair.cmd`.
 
-A line saying `Meshroom's own binary` means an NVIDIA card was detected and Meshroom's own CUDA
-build was chosen deliberately. `CHESHIRE_BACKEND=cheshire` forces the Cheshire package instead -
-which is what you want if the package you paired is itself a **Cheshire CUDA** one, since there the
-automatic choice hands every node back to Meshroom and the package never runs.
+A line saying `Meshroom's own binary` means the launcher chose Meshroom's own build on purpose: the
+package you paired is an AMD one and an NVIDIA card answered `nvidia-smi`. `CHESHIRE_BACKEND=cheshire`
+forces the Cheshire package instead. A paired **Cheshire CUDA** package runs on an NVIDIA card by
+itself from v0.3.8; with v0.3.0 to v0.3.7 it needs `CHESHIRE_BACKEND=cheshire`, or the automatic
+choice hands every node back to Meshroom and the package never runs.
 
 ## 4. When it goes wrong
 

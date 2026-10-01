@@ -3473,5 +3473,61 @@ undistort phase, whose other half is the output image's allocation and fill, the
 paths. The 41 views took 9.4-9.8 s on the device against 8.9-9.2 s on the CPU. So the device takes
 the undistortion by default only with four hardware threads or fewer, where the loop is the costly
 side. `CHESHIRE_UNDISTORT_DEVICE=1|0` overrides that, `CHESHIRE_UNDISTORT_DEVICE_REMAPPERS` sets the
-bound, and `CHESHIRE_UNDISTORT_DEVICE_CHECK=1` runs both and compares. The Windows CUDA build has not
-run it yet; its first run is the 0.3.8 gate.
+bound, and `CHESHIRE_UNDISTORT_DEVICE_CHECK=1` runs both and compares. The Windows CUDA build first ran
+it at the 0.3.8 gate, on the GTX 1080 Ti: 4 of 4 images identical on mini6 and 40 of 40 on 41 views.
+
+## The 0.3.8 release gate (2026-09-30)
+
+All four packages were built at e8cd509 (`build/chain-038.cmd`), in 56 minutes: the Windows side took 36, nine
+hip6.2 targets of it 19 now that the generator keeps unchanged files' times, and the Linux HIP bundle 16. The
+Linux CUDA build had nothing left to compile after the development bundle of the same sources and only relinked
+against the rebuilt PopSIFT. Both PopSIFT CUDA libraries were rebuilt first, and both build logs show the race
+fix in.
+
+The packers' checks pass, and four more were made by hand:
+- each of the Windows AMD bundle's 11 targets carries an `aliceVision_image.dll` with its own code object and
+  CheshireRemap's kernel, and the zip lists the eight untested targets in `gpu/<family>/UNTESTED` again
+  (hip6.2: seven, rocm7.2: `gfx11-generic`);
+- the Windows CUDA image library carries CheshireRemap's sm_61 code, and the Linux HIP build compiled it for
+  its 19 targets;
+- the Linux bundles do not ship `meshroom-pair.sh`, so the Linux gates take the repository's (0.3.8's, which
+  records each wrapper's backend) from beside the harness;
+- every package copied to a test box matched its SHA-256.
+
+The gate is 0.3.7's with the 0.3.8 steps in it (660f19f):
+- FeatureMatching must announce AC-RANSAC's bound (8d) in every configuration;
+- `verify` also checks the colours' read (8b), the bound and the epipolar loop (8d, 8e), and PrepareDenseScene's
+  libdeflate writer and device undistortion (8f, 8g), both switched on whatever the platform's default;
+- a failing count in any chunk's log fails the run, as does any of the steps' fallback warnings;
+- `cpufallback` also turns the device undistortion off.
+
+| package | hardware | 2025.1: mini6 | 2025.1: 41 views | 2023.3: mini6 |
+|---|---|---|---|---|
+| Windows AMD | RX 9070 (rocm7.2 gfx12-generic payload) | 15/15 at 8/8 | base 383 s, verify 806 s | 4/4 at 8/8 |
+| Windows AMD | RX 5500 XT (hip6.2 gfx1012 payload, bench-pc) | 15/15 at 8/8 | base 1056 s, verify 2316 s | 4/4 at 8/8 |
+| Linux AMD | RX 6750 XT (house-pc) | 15/15 at 8/8 | base 616 s, verify 1707 s | 4/4 at 8/8 |
+| Windows CUDA | GTX 1080 Ti (bench-pc) | 15/15 at 8/8 | base 909 s, verify 2211 s | 4/4 at 8/8 |
+| Linux CUDA | GTX 1080 Ti (house-pc) | 15/15 at 8/8 | base 671 s, verify 1727 s | 4/4 at 8/8 |
+
+105 runs, none failed. `base` is faster than 0.3.7's on every card (433, 1398, 881, 1277 and 931 s at
+0.3.7), most on house-pc's four-thread i3. `verify` takes about as long as before: it now also sorts and
+scans every model the bound skipped and computes every residual both ways.
+
+The 41-view `verify` runs' new self-checks:
+
+| card | 8d: models skipped (none below `minNFA`) | 8e: residuals identical | 8g: images identical | 8f: files | 8b: SfM, PrepareDenseScene |
+|---|---|---|---|---|---|
+| RX 9070 | 31,876,553 of 31,905,517 | 9,709,341,894 of 9,709,341,894 | 33 of 33 (8 took the CPU loop while every remapper was busy) | 41 of 41 | 39 of 39, 41 of 41 |
+| RX 5500 XT | 31,809,482 of 31,837,595 | 9,697,870,823 of 9,697,870,823 | 37 of 37 (4) | 41 of 41 | 39 of 39, 41 of 41 |
+| RX 6750 XT | 31,996,079 of 32,029,909 | 9,710,963,964 of 9,710,963,964 | 41 of 41 | 41 of 41 | 38 of 38, 41 of 41 |
+| GTX 1080 Ti, Windows | 31,712,219 of 31,742,467 | 9,687,690,236 of 9,687,690,236 | 40 of 40 (1) | 41 of 41 | 39 of 39, 41 of 41 |
+| GTX 1080 Ti, Linux | 31,996,349 of 32,030,204 | 9,709,966,459 of 9,709,966,459 | 41 of 41 | 41 of 41 | 38 of 38, 41 of 41 |
+
+The epipolar loop held on every arithmetic path the packages have: AVX2 with fused multiply-adds (rocm7.2),
+AVX without them (hip6.2), GCC for core2 (both Linux packages) and MSVC (Windows CUDA). The device undistortion
+ran on RDNA1, RDNA2, RDNA4 and Pascal, its first runs on all but the RX 9070 and the Linux GTX.
+
+**PopSIFT's race, on hardware.** On every card the 41-view `base` and `verify` runs gave the same depth maps.
+On the GTX 1080 Ti they also gave the same features (all 82 `.desc` and `.feat` files) and the same
+`sfm.abc` on both systems, where 0.3.7's pairs differed in four descriptors (Linux) and one (Windows). This
+gate was the Windows CUDA library's first run on hardware.

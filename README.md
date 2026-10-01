@@ -30,13 +30,13 @@ number is why the design is what it is.
 | Meshroom node | upstream | Cheshire | status |
 |---|---|---|---|
 | DepthMap | CUDA only | HIP port + VRAM-to-RAM memory bridge | validated RDNA1/2/4, Windows + Linux; bit-identical to native across caps |
-| FeatureMatching | CPU (kd-tree) on every vendor | exact GPU brute-force 2-NN (HIP; the source also builds as CUDA), plus exact CPU work in AC-RANSAC ([docs/15](docs/15-acransac-cpu.md)) | validated end to end (v0.2.5): 592 s -> 75 s on 107 photos, same reconstruction. Geometric verification followed in v0.2.15: 566 s -> 351 s, byte-identical match file, and the profile is why it stayed on the CPU |
+| FeatureMatching | CPU (kd-tree) on every vendor | exact GPU brute-force 2-NN (HIP; the source also builds as CUDA), plus exact CPU work in AC-RANSAC ([docs/15](docs/15-acransac-cpu.md)) | validated end to end (v0.2.5): 592 s -> 75 s on 107 photos, same reconstruction. Geometric verification followed in v0.2.15: 566 s -> 351 s, byte-identical match file, and the profile is why it stayed on the CPU. v0.3.8: AC-RANSAC skips the models that cannot win and computes the epipolar residuals in one vectorised loop, both exact: geometric filtering 36.8 s -> 16.4 s on 41 views at Meshroom 2025.1's 50,000 iterations ([notes](docs/releases/0.3.8.md)) |
 | FeatureExtraction | CUDA (PopSift) or CPU | HIP PopSift port ([docs/14](docs/14-gpu-sift.md)) | done (v0.2.13): 2021 s -> 26 s on 41 views (RX 9070), and better than the CPU path rather than merely faster — 88,463 landmarks against 78,372 and RMSE 1.0377 against 1.03997 px. Validated on RDNA4, RDNA1 and RDNA2 across two runtimes and both systems, landmarks within 0.11 %; found and reported an upstream PopSift bug ([popsift#193](https://github.com/alicevision/popsift/issues/193)) |
 | DepthMapFilter | CPU | GPU vote pass (HIP / CUDA source) + a shared decoded-map cache | validated (v0.2.6): 123.5 s -> 26.5 s on 107 photos (RX 9070), 317 s -> 26.9 s on 41 views on an i3 + RX 5500 XT, bit-identical; found and replicated an upstream vote-buffer quirk; v0.2.9 cache: 17.8 s -> 12.7 s, byte-identical |
 | Meshing | CPU | GPU graph-weight votes + weakly-supported-surfaces pass, GPU min-cut (push-relabel, [docs/12](docs/12-gpu-maxflow.md)), GPU nearest-neighbour search and votes for the visibility passes ([docs/13](docs/13-gpu-visibilities.md)), exact CPU fixes around them ([docs/11](docs/11-meshing-cpu.md)) | done (v0.2.7 through v0.2.12, v0.2.16, v0.3.5): 510 s -> 101 s on 107 photos (RX 9070), 491 s -> 111 s on 41 views on an i3 + RX 5500 XT; the cut labelling identical to Boykov-Kolmogorov's and the nearest neighbours identical to nanoflann's on every query. Every CPU change is verified identical in-process but one, on purpose: upstream runs one inversion round whatever it is asked for, and Cheshire runs the rounds asked for ([docs/11](docs/11-meshing-cpu.md); `CHESHIRE_INVERT_OLD=1` restores upstream's). v0.3.5 put the visibility votes on the device (the 884-view Meshing on an i3 + RX 6750 XT: 490 s -> 451 s); the tetrahedralisation stays on the CPU |
 | Texturing | CPU | GPU Laplacian pyramid + rasterisation, parallel camera selection (HIP / CUDA source), exact CPU fixes in the UV unwrap ([docs/10](docs/10-gpu-texturing.md)), edge padding and the atlas downscale on the GPU, a direct textured-OBJ writer | done (v0.2.8, v0.2.16): 165.8 s -> 79.3 s on 107 photos (RX 9070), 271.5 s -> 102.5 s on 41 views on an i3 + RX 5500 XT, textures inside the CPU's own run-to-run band; v0.2.16 took the UV unwrap 14.4 s -> 8.6 s with a byte-identical `texturedMesh.obj`, and gains most on the slowest hardware (51.9 s -> 16.8 s on a 2011 Bulldozer). v0.3.2 moved the edge padding to the GPU (0 of 67,108,864 texels differ) and writes the textured OBJ directly (0 faces differ); v0.3.3 moved OpenImageIO's lanczos3 downscale there too (0 of 50,331,648 channels differ; Texturing on the engine bay 176 s -> 124 s) ([docs/04](docs/04-validation.md)) |
-| PrepareDenseScene | CPU | every core instead of three threads, the undistortion map once per intrinsic, a direct 8-bit JPEG read, cheaper EXR compression | done (v0.2.9, v0.3.3, v0.3.4): 36 s -> 30 s on 107 photos at v0.2.9; the undistortion map and the direct read are exact, and the EXRs are ZIP at level 1 instead of ZIPS at 4 (the same pixels). The node is codec and disk work, so the gains are small; CheshireJPG's GPU decode is there opt-in (v0.3.5, `CHESHIRE_GPU_JPEG=1`) and no faster |
-| StructureFromMotion | CPU (Ceres) | **Grin**, Cheshire's own bundle-adjustment solver: Ceres' algorithm step for step, the large solves on the GPU ([docs/notes/ba-own-solver.md](docs/notes/ba-own-solver.md)); exact rewrites of the host code around it; the fix for Meshroom #2344 (a resection pass that ends without its bundle adjustment gets one, and the local-BA graph cannot throw) | v0.3.7 ([notes](docs/releases/0.3.7.md)): 1140 s -> 284 s on the 884-photo False Door (RX 9070 box), bundle adjustment 675 s -> 47 s. On every build and card tested the GPU's solves give the CPU's bytes, and SfM repeats itself byte for byte. v0.3.3: the `invalid map<K, T> key` crash of Meshroom #2344, reproduced three times on an 884-photo set, found and fixed ([docs/04](docs/04-validation.md)); the eighth paired node |
+| PrepareDenseScene | CPU | every core instead of three threads, the undistortion map once per intrinsic, a direct 8-bit JPEG read, cheaper EXR compression; on four-thread hosts the undistortion on the GPU | done (v0.2.9, v0.3.3, v0.3.4, v0.3.8): 36 s -> 30 s on 107 photos at v0.2.9; the undistortion map and the direct read are exact, and the EXRs are ZIP at level 1 instead of ZIPS at 4 (the same pixels). On a twelve-thread desktop the node is codec and disk work and the gains are small. On a four-thread i3 it was all CPU, and v0.3.8 took 40 photos of a 524-photo job from 71.2 s to 43.8 s, with libdeflate for the EXRs (Linux) and the undistortion on the GPU, both exact. CheshireJPG's GPU decode is there opt-in (v0.3.5, `CHESHIRE_GPU_JPEG=1`) and no faster |
+| StructureFromMotion | CPU (Ceres) | **Grin**, Cheshire's own bundle-adjustment solver: Ceres' algorithm step for step, the large solves on the GPU ([docs/notes/ba-own-solver.md](docs/notes/ba-own-solver.md)); exact rewrites of the host code around it; the fix for Meshroom #2344 (a resection pass that ends without its bundle adjustment gets one, and the local-BA graph cannot throw) | v0.3.8: the features' and colours' reads, exact: 307.8 s -> 240.9 s on the False Door. v0.3.7 ([notes](docs/releases/0.3.7.md)): 1140 s -> 284 s on the 884-photo False Door (RX 9070 box), bundle adjustment 675 s -> 47 s. On every build and card tested the GPU's solves give the CPU's bytes, and SfM repeats itself byte for byte. v0.3.3: the `invalid map<K, T> key` crash of Meshroom #2344, reproduced three times on an 884-photo set, found and fixed ([docs/04](docs/04-validation.md)); the eighth paired node |
 | ImageMatching | CPU (vocabulary tree above 200 photos) | opt-in pairing by GPS radius (`CHESHIRE_GPS_PAIRING_RADIUS=<metres>`), for surveys the vocabulary tree pairs badly; GPS read from cameras that omit the altitude reference | v0.3.5, the ninth paired node; v0.3.6 the altitude fix. On a 524-photo drone survey the vocabulary tree placed 90 views; a 200 m radius placed 521, as exhaustive matching does, from 11 % of its pairs in a tenth of the matching time ([docs/04](docs/04-validation.md)) |
 | MeshFiltering | CPU | | stays on the CPU (small) |
 
@@ -230,33 +230,36 @@ upstream refuses. Details in `docs/02-memory-bridge.md`.
 the GPU, what the error codes mean, and the dozen settings worth knowing. The rest of this file is
 what was built and why.
 
-Binaries are on the [v0.3.7 release](https://github.com/dspl1236/Cheshire/releases/tag/v0.3.7);
+Binaries are on the [v0.3.8 release](https://github.com/dspl1236/Cheshire/releases/tag/v0.3.8);
 the data sets and references are on
 [v0.1.0](https://github.com/dspl1236/Cheshire/releases/tag/v0.1.0) and unchanged, the depth
 maps being bit-identical between the two:
 
 | asset | size | contents |
 |---|---|---|
-| `cheshire-alicevision-windows-x64.zip` (v0.3.7) | 195 MB | **one Windows package for every AMD card.** Eleven GPU payloads across both HIP runtimes - gfx1010/1012 (RX 5500-5700), gfx1030/1031/1032/1034 (RX 6000), gfx1033/1035/1036 (RDNA2 APUs), and `gfx11-generic` + `gfx12-generic` for RDNA3/RDNA4 and future chips in those families (GPU SIFT only for the chips named today: PopSIFT will not run from a generic code object, [docs/16](docs/16-bundling.md)). `cheshire-detect.exe` asks the card which it needs, so there is nothing to choose; `cheshire-run.cmd` runs a node straight from it, `meshroom-pair.cmd` + launcher pair it into Meshroom |
-| `cheshire-alicevision-cuda-windows-x64-cuda12.9.zip` (v0.3.7) | 108 MB | **the same stages for NVIDIA, Windows.** GPU SIFT, matcher, depth map filter, meshing votes and texturing, plus the memory bridge; `cudart` is bundled, so no CUDA toolkit is needed - only the driver. Pair it with `CHESHIRE_BACKEND=cheshire`, or the launcher sees an NVIDIA card and hands every node back to Meshroom |
-| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.3.7) | 126 MB | relocatable Linux bundle with the GPU matcher, depth map filter, meshing votes, texturing and the packed-slot mipmap sampler, depth-map code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested) - 19 in all; GPU SIFT covers 15 of those, not the RDNA2 APUs or Vega (neither has run here: the APUs should fall back to CPU SIFT; on Vega, PopSIFT's start-up may throw instead of falling back); needs only `amdgpu` + `/dev/kfd`; validated on the RX 6750 XT (and the RX 5500 XT in earlier releases) |
-| `cheshire-alicevision-cuda-linux-x64-cuda12.9.tar.gz` (v0.3.7) | 49 MB | **the same stages for NVIDIA, Linux.** `libcudart` bundled and no `libcuda` (the driver's, not ours); the 41-view depth and similarity maps from a clean extraction of the tarball (82 files) were byte-identical to the Meshroom CUDA 11.3 reference in v0.3.3 (GTX 1080 Ti) and v0.3.4 (GTX 1050 Ti) |
+| `cheshire-alicevision-windows-x64.zip` (v0.3.8) | 195 MB | **one Windows package for every AMD card.** Eleven GPU payloads across both HIP runtimes - gfx1010/1012 (RX 5500-5700), gfx1030/1031/1032/1034 (RX 6000), gfx1033/1035/1036 (RDNA2 APUs), and `gfx11-generic` + `gfx12-generic` for RDNA3/RDNA4 and future chips in those families (GPU SIFT only for the chips named today: PopSIFT will not run from a generic code object, [docs/16](docs/16-bundling.md)). `cheshire-detect.exe` asks the card which it needs, so there is nothing to choose; `cheshire-run.cmd` runs a node straight from it, `meshroom-pair.cmd` + launcher pair it into Meshroom |
+| `cheshire-alicevision-cuda-windows-x64-cuda12.9.zip` (v0.3.8) | 108 MB | **the same stages for NVIDIA, Windows.** GPU SIFT, matcher, depth map filter, meshing votes and texturing, plus the memory bridge; `cudart` is bundled, so no CUDA toolkit is needed - only the driver. Paired, it runs on the NVIDIA card by itself (from v0.3.8; with v0.3.0 to v0.3.7 set `CHESHIRE_BACKEND=cheshire`) |
+| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.3.8) | 126 MB | relocatable Linux bundle with the GPU matcher, depth map filter, meshing votes, texturing and the packed-slot mipmap sampler, depth-map code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested) - 19 in all; GPU SIFT covers 15 of those, not the RDNA2 APUs or Vega (neither has run here: the APUs should fall back to CPU SIFT; on Vega, PopSIFT's start-up may throw instead of falling back); needs only `amdgpu` + `/dev/kfd`; validated on the RX 6750 XT (and the RX 5500 XT in earlier releases) |
+| `cheshire-alicevision-cuda-linux-x64-cuda12.9.tar.gz` (v0.3.8) | 49 MB | **the same stages for NVIDIA, Linux.** `libcudart` bundled and no `libcuda` (the driver's, not ours); the 41-view depth and similarity maps from a clean extraction of the tarball (82 files) were byte-identical to the Meshroom CUDA 11.3 reference in v0.3.3 (GTX 1080 Ti) and v0.3.4 (GTX 1050 Ti) |
 | `monstree-mini6-meshroom-cache.tar.gz` (v0.1.0) | 383 MB | 6-view Meshroom 2023.3 cache: CameraInit, SfM, PrepareDenseScene and the CUDA DepthMap reference |
 | `monstree-full-cuda-reference.tar.gz` (v0.1.0) | 680 MB | 41-view SfM + CUDA DepthMap reference (GTX 1080 Ti) |
 | `cheshire-hip-depthmap-outputs.tar.gz` (v0.1.0) | 966 MB | the HIP depth maps behind the table above (RX 9070 6 + 41 views, RX 5500 XT, RX 6750 XT) |
 
-All four packages in v0.3.7 passed on their own hardware (docs/04):
+All four packages in v0.3.8 passed on their own hardware (docs/04):
 - the full gate through Meshroom 2025.1: the 15-configuration mini6 matrix and the 41-view set;
 - a mini6 check through Meshroom 2023.3.
 
 The cards were the RX 9070 and RX 5500 XT (the Windows AMD package's two halves), the RX 6750 XT
 (Linux AMD), and a GTX 1080 Ti for both NVIDIA packages.
 
-v0.3.7 replaces Ceres in incremental SfM's bundle adjustment with **Grin**, Cheshire's own solver: Ceres'
-algorithm, step for step, with the large solves on the GPU and the CPU's bytes on every build and card
-tested. With exact rewrites of the host code around it, StructureFromMotion on the 884-photo False
-Door went from 1140 s to 284 s on the RX 9070 box, and SfM now repeats itself byte for byte. What
-changed, in full: [docs/releases/0.3.7.md](docs/releases/0.3.7.md).
+v0.3.8 gives the same output sooner. At Meshroom 2025.1's RANSAC defaults, FeatureMatching's
+geometric filtering on 41 views takes 16.4 s instead of 36.8 s. StructureFromMotion reads features and
+colours faster, 307.8 s to 240.9 s on the 884-photo False Door. On a four-thread host,
+PrepareDenseScene compresses its EXRs with libdeflate and undistorts on the GPU, 38 % faster on an i3.
+Every one of these gives the output it gave before, to the bit. A race in PopSIFT's CUDA descriptor
+kernel is fixed, so NVIDIA runs now repeat exactly, as AMD runs already did. What changed, in full:
+[docs/releases/0.3.8.md](docs/releases/0.3.8.md). v0.3.7 replaced Ceres in incremental SfM's bundle
+adjustment with **Grin**, Cheshire's own solver ([notes](docs/releases/0.3.7.md)).
 
 **There is nothing to pick any more.** Until v0.2.17 there were six Windows downloads and choosing
 the wrong one did not fail: a package built for one chip enumerates another, runs every kernel and
@@ -269,10 +272,10 @@ table of PCI IDs, because a table needs an entry for hardware that does not exis
 `gfx12-generic`. Four more are the same architecture as a tested sibling (gfx1010, gfx1030, gfx1032,
 gfx1034) and four are hardware nobody here owns (the three APUs and `gfx11-generic`). The APUs are
 the row to watch: they are unified-memory parts, and the memory bridge was designed and measured
-against a discrete card behind PCIe. If you run one, please say how it went. The eight are meant to
-be listed in `gpu/<family>/UNTESTED`, which `cheshire-run.cmd` announces on every run that selects
-one; but the zips since v0.3.2 have shipped without the list, and the Meshroom launcher never read
-it. Both are queued for 0.3.8.
+against a discrete card behind PCIe. If you run one, please say how it went. The eight are listed in
+`gpu/<family>/UNTESTED`, and both `cheshire-run.cmd` and the Meshroom launcher announce it on every
+run that selects one. The zips from v0.3.2 to v0.3.7 shipped without the list, and until v0.3.8 the
+Meshroom launcher never read it.
 
 The package carries every DLL it needs, the MSVC and OpenMP runtimes included (until 2026-09-15 it
 did not, and a machine without Visual Studio died with exit code 0xC0000135 and no message). The
@@ -304,7 +307,7 @@ meshroom-pair.cmd C:\Meshroom-2023.3.0 C:\cheshire-alicevision-windows-x64
 meshroom-pair.cmd C:\Meshroom-2023.3.0 --unpair
 ```
 
-**Meshroom 2025.1** pairs the same way, from v0.3.6, on Windows and Linux (the 0.3.6 and 0.3.7
+**Meshroom 2025.1** pairs the same way, from v0.3.6, on Windows and Linux (the 0.3.6 to 0.3.8
 gates ran through it on every card and package). What to know:
 - **The DepthMap override:** 2025.1 keeps its node descriptions as source in
   `aliceVision\share\meshroom\aliceVision`. Pairing installs the 48-view DepthMap override there,
@@ -320,16 +323,16 @@ gates ran through it on every card and package). What to know:
   884-photo False Door that cost minutes of CPU matching for no more views placed. Override them
   back if you want 2023.3's speed.
 
-The launcher decides per run: an NVIDIA card present (`nvidia-smi` answers) runs Meshroom's own
-binary, otherwise the build from the Cheshire package, with the package's DLLs and `share/` in front
-so nothing of Meshroom's older AliceVision leaks in. `CHESHIRE_BACKEND=auto|cheshire|meshroom`
-forces one, and `CHESHIRE_DEPTHMAP=cuda|hip` is the older spelling of the same switch, still
-honoured. The choice is printed as the first line of the node's log. The nodes Cheshire does not
-carry - CameraInit, MeshFiltering, Publish - keep running from Meshroom.
+The launcher decides per run. When the package matches the card - a CUDA package and an NVIDIA card
+that answers `nvidia-smi`, or an AMD package and no such card - it runs the build from the package,
+with the package's DLLs and `share/` in front so nothing of Meshroom's older AliceVision leaks in;
+otherwise it runs Meshroom's own binary. `CHESHIRE_BACKEND=auto|cheshire|meshroom` forces one, and
+`CHESHIRE_DEPTHMAP=cuda|hip` is the older spelling of the same switch, still honoured. The choice is
+printed as the first line of the node's log. The nodes Cheshire does not carry - CameraInit,
+MeshFiltering, Publish - keep running from Meshroom.
 
-Pairing a Cheshire **CUDA** package is the one case where the automatic choice is wrong: the card is
-NVIDIA, so `auto` hands every node back to Meshroom and the package never runs. Set
-`CHESHIRE_BACKEND=cheshire` for that.
+Until v0.3.7 `auto` meant Meshroom's own binary whenever an NVIDIA card answered, so a Cheshire
+**CUDA** package from those releases never ran unless `CHESHIRE_BACKEND=cheshire` was set.
 
 Given a bundle it also picks the payload for the card and prints that too
 (`bundle payload hip6.2/gfx1031`), composing the layered `PATH` per run. A flat single-chip package
@@ -516,11 +519,12 @@ A whole Meshroom graph, 2023.3 or 2025.1, runs on every package with all nine Ch
 paired. `scripts/verify_end_to_end.py` checks it: eight of the nodes have to prove which binary ran
 and print their own port's line, rather than merely produce a mesh, since a pipeline that fell back
 to Meshroom's own binaries would produce a perfectly good one (ImageMatching's change is opt-in, so
-the gate does not score it). The 0.3.7 release gate (2026-09-30, docs/04) ran each package as
+the gate does not score it). The 0.3.8 release gate (2026-09-30, docs/04) ran each package as
 downloaded on its own cards - the RX 9070 and RX 5500 XT for the two halves of the Windows AMD
 package, the RX 6750 XT for the Linux one, and a GTX 1080 Ti for both NVIDIA packages - through
 the 15-configuration mini6 matrix and the 41-view set on Meshroom 2025.1 and a mini6 check on
-2023.3: 105 whole pipelines, none failed, eight of eight nodes in each.
+2023.3: 105 whole pipelines, none failed, eight of eight nodes in each. Its `verify` runs switch on
+every in-process self-check, the 0.3.8 steps' included, and each came out identical on every card.
 
 The gate's first runs, on 2026-09-20 (docs/04):
 

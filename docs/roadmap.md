@@ -667,6 +667,8 @@ four-thread hosts.
 
 ## 0.3.8
 
+**Released 2026-10-01 as v0.3.8** (built at e8cd509; all five card gates passed, docs/04).
+
 Started 2026-09-30, in the user's order: the fixes 0.3.7's round turned up and SfM's remaining CPU time
 first, then AC-RANSAC's hypothesis loop and PrepareDenseScene on four-thread hosts.
 
@@ -749,8 +751,18 @@ first, then AC-RANSAC's hypothesis loop and PrepareDenseScene on four-thread hos
   - **Step 8g, done 2026-09-30:** the undistortion on the device (CheshireRemap), the CPU loop's bits;
     on by default with four hardware threads or fewer. On house-pc it takes 15 % more off the stage,
     and the zoo chunk goes from 71.2 s (0.3.7) to 43.8 s with 8f. On the twelve-thread RX 9070 box the
-    copies cost more than that CPU's loop, so it is off there. The Windows CUDA build meets it at the
-    0.3.8 gate.
+    copies cost more than that CPU's loop, so it is off there. The Windows CUDA build met it at the
+    0.3.8 gate: 4 of 4 images identical on the GTX 1080 Ti.
+- **CheshireJPG: keep or revert** (decided 2026-09-30, the user: keep it). The GPU decode stays opt-in
+  (`CHESHIRE_GPU_JPEG=1`, step 6r). It has never been faster: decoding is about 11 % of PrepareDenseScene's
+  read, and neither the RX 9070 box nor house-pc's i3 gained from it. But off it costs nothing, the
+  per-target `aliceVision_image.dll` it brought now also carries 8g, and the gate proves it exact on every
+  card. Where it could matter later: PrepareDenseScene's chain on the device (decode, colour, undistort),
+  so that 8g pays on many-thread CPUs too. That needs OpenColorIO's sRGB-to-linear conversion bit for bit
+  on the device, and the upside is modest.
+
+**Next (0.3.9):** Meshroom 2023.3's RANSAC counts as a visible choice - a pipeline template with the two
+values in the graph, and the README's numbers for both.
 
 ## Upstream's next pipeline: detect, then pivot
 
