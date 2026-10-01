@@ -929,6 +929,10 @@ Plan, loosely, since the release date is not known:
      engine bay, with the same pixels; our PrepareDenseScene takes 9.6 s and 17.6 s. Still open: the
      warp map once per intrinsic pair (5h's cache; upstream builds it for every image) and the
      device warp.
+   - **The tracks file without the DOM copies** (S, exact). **Done 2026-10-01** (step 9e, docs/04).
+     `dataio/json.hpp`'s map conversions copied the parsed arrays. RelativePoseEstimating goes from
+     31.2 s to 23.0 s on the engine bay, and SfMBootStrapping from 4.0 s to 2.5 s, with the same
+     outputs.
    - **The 5-point solver's nullspace by QR** (S-M): docs/17's lever, for RelativePoseEstimating.
    - **Fast Ransac for the new templates** (S): SfMExpanding has StructureFromMotion's
      `localizerEstimatorMaxIterations`, also 50,000 by default. The generator would add it there
@@ -987,7 +991,9 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   (`docs/16-bundling.md:215`). Put the RX 6750 XT back in bench-pc and run the 12-config matrix.
   **Done 2026-10-01** on 0.3.9: 22 of 22 runs (16 configs on 2025.1 mini6, the 41-view pair, four on
   2023.3). Every config but `cpufallback` gives the RX 5500 XT's depth maps byte for byte on the same
-  host (docs/04).
+  host (docs/04). RDNA1 under Linux too, the same day: the RX 5500 XT in house-pc ran 2025.1
+  mini6, 16 of 16. Every config but `cpufallback` gave the RX 6750 XT's Linux depth maps byte for
+  byte.
 - **RDNA3 discrete** (S, blocked on a tester). No run on any RX 7600-7900 (`README.md:328-329`).
 - **APUs and the bridge on unified memory** (M). No APU has run, and what the bridge does when host
   RAM is the VRAM is unknown (`docs/16-bundling.md:153-155`).

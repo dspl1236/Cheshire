@@ -3754,3 +3754,34 @@ takes 9.6 s and 17.6 s.
 - **ZIP level 1 keeps the pixels**: `build/nightly-cmp/exr_pixels.py` decodes every scanline from
   either compression. It finds 41 of 41 and 107 of 107 files with upstream's pixels and header but
   the compression attribute, at the same size (1.8 GB and 3.6 GB).
+
+## After 0.3.9: the tracks file read without copying its DOM (step 9e, 2026-10-01)
+
+`dataio/json.hpp`'s map conversions took their JSON arrays by value. So loading a tracks file
+copied its whole parsed tree, then every [key, value] pair again. RelativePoseEstimating pays for
+that once per chunk, and SfMBootStrapping and SfMExpanding once each. Step 9e takes the arrays by
+reference: the same values in the same order, read by Boost.JSON's own parser as before.
+- RelativePoseEstimating goes from 10.1-10.4 s to 9.0 s on 41 views and from 31.2 s to 23.0 s on
+  the engine bay (each of its five chunks about 6.2 s to 4.6 s).
+- SfMBootStrapping goes from 2.9 s to 2.0 s and from 4.0 s to 2.5 s.
+- SfMExpanding's tracks load goes from 1.53 s to 0.85 s and from 2.69 s to 1.45 s.
+
+The outputs are the same:
+- RelativePoseEstimating gives the same 1,469 and 2,093 pairs.
+- SfMBootStrapping's three files are byte for byte the 0.3.8 build's.
+- SfMExpanding's are byte for byte 9c's run.
+
+## 0.3.9 on RDNA1 under Linux: the RX 5500 XT in house-pc (2026-10-01)
+
+With the RX 6750 XT moved to bench-pc, house-pc (i3-4330) runs the RX 5500 XT (gfx1012). RDNA1 had
+not run the Linux bundle since v0.2.16. The node app's HIP bundle (the 0.3.9 tarball's bytes) was
+copied and paired into the scratch Meshroom 2025.1 under `/data/tests`, leaving the app's own
+installs alone. mini6 ran all 16 configs: 16 of 16 ok at 8/8 ports.
+
+Every config but `cpufallback` gives the RX 6750 XT's Linux depth maps (0.3.8's gate on the same
+host, and 0.3.9's `fastransac` check) byte for byte:
+- `base` `26fc558e3d75361f` and the eight configs that share it;
+- `fastransac` `c4e51fa59e526c8c`, `defaults` `9a59849b87d90c9e`, `tiles` `f7e813fc49a10749`,
+  `coarse` `014df5da061351f8`, `ds1` `4c2a6957b746adf6`, `blast` `c9fa653c7ff1ee87`.
+
+As under Windows, RDNA1 and RDNA2 agree.

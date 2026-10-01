@@ -343,6 +343,52 @@ index ef0d52f..6960f60 100644
  }
  
  }  // namespace camera
+diff --git a/src/aliceVision/dataio/json.hpp b/src/aliceVision/dataio/json.hpp
+index a0d0486..77ad72e 100644
+--- a/src/aliceVision/dataio/json.hpp
++++ b/src/aliceVision/dataio/json.hpp
+@@ -61,11 +61,11 @@ stl::flat_map<K, T> flat_map_value_to(const boost::json::value& jv)
+ {
+     stl::flat_map<K, T> ret;
+ 
+-    const boost::json::array obj = jv.as_array();
++    const boost::json::array& obj = jv.as_array();  // cheshire (step 9e): by reference, not a copy of the array
+ 
+     for (const auto& item : obj)
+     {
+-        const boost::json::array inner = item.as_array();
++        const boost::json::array& inner = item.as_array();  // cheshire (step 9e)
+         ret.insert({boost::json::value_to<K>(inner[0]), boost::json::value_to<T>(inner[1])});
+     }
+ 
+@@ -77,11 +77,11 @@ std::unordered_map<K, T> unordered_map_value_to(const boost::json::value& jv)
+ {
+     std::unordered_map<K, T> ret;
+ 
+-    const boost::json::array obj = jv.as_array();
++    const boost::json::array& obj = jv.as_array();  // cheshire (step 9e): by reference, not a copy of the array
+ 
+     for (const auto& item : obj)
+     {
+-        const boost::json::array inner = item.as_array();
++        const boost::json::array& inner = item.as_array();  // cheshire (step 9e)
+         ret.insert({boost::json::value_to<K>(inner[0]), boost::json::value_to<T>(inner[1])});
+     }
+ 
+@@ -94,11 +94,11 @@ std::map<K, T> map_value_to(const boost::json::value& jv)
+ {
+     std::map<K, T> ret;
+ 
+-    const boost::json::array obj = jv.as_array();
++    const boost::json::array& obj = jv.as_array();  // cheshire (step 9e): by reference, not a copy of the array
+ 
+     for (const auto& item : obj)
+     {
+-        const boost::json::array inner = item.as_array();
++        const boost::json::array& inner = item.as_array();  // cheshire (step 9e)
+         ret.insert({boost::json::value_to<K>(inner[0]), boost::json::value_to<T>(inner[1])});
+     }
+ 
 diff --git a/src/aliceVision/depthMap/BufPtr.hpp b/src/aliceVision/depthMap/BufPtr.hpp
 index 6ead556..eabd2d9 100644
 --- a/src/aliceVision/depthMap/BufPtr.hpp

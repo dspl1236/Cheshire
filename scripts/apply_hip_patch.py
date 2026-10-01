@@ -1549,6 +1549,16 @@ static void cheshireExportCompression(image::ImageWriteOptions& o)
 """),
 ]
 
+# 9e (after 0.3.9): dataio/json.hpp's map conversions took the JSON arrays by value, so loading a tracks file copied its
+# whole DOM, then every [key, value] pair again. Each new SfM node that reads the tracks (RelativePoseEstimating once per
+# chunk, SfMBootStrapping, SfMExpanding) paid for that. By reference, the same values in the same order.
+STEP9E_JSON = [
+    ("    const boost::json::array obj = jv.as_array();\n",
+     "    const boost::json::array& obj = jv.as_array();  // cheshire (step 9e): by reference, not a copy of the array\n"),
+    ("        const boost::json::array inner = item.as_array();\n",
+     "        const boost::json::array& inner = item.as_array();  // cheshire (step 9e)\n"),
+]
+
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
     if new in text:
@@ -1642,6 +1652,7 @@ TRACKED = [
     "src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.cpp",  # 9c
     "src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.hpp",  # 9c
     "src/software/utils/main_exportImages.cpp",  # 9d
+    "src/aliceVision/dataio/json.hpp",  # 9e
 ]
 
 
@@ -6761,6 +6772,18 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                 sys.exit("an anchor of ExportImages' threads not found once in main_exportImages.cpp (9d)")
             t = t.replace(old, new, 1)
     f9d.write_text(t, encoding="utf-8", newline="")
+
+    # 9e (after 0.3.9). dataio/json.hpp's map conversions (flat_map, unordered_map and map from [key, value] arrays) read
+    #     the arrays by reference instead of copying them: the tracks file's whole DOM was copied once per load, then
+    #     every pair. All three occurrences of each line; the same values in the same order.
+    f9e = AV / "src/aliceVision/dataio/json.hpp"
+    t = f9e.read_text(encoding="utf-8")
+    if "step 9e" not in t:
+        for old, new in STEP9E_JSON:
+            if t.count(old) != 3:
+                sys.exit("the JSON map conversions not found three times in dataio/json.hpp (9e)")
+            t = t.replace(old, new)
+    f9e.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports
