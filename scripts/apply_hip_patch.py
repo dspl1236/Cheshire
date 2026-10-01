@@ -1559,6 +1559,143 @@ STEP9E_JSON = [
      "        const boost::json::array& inner = item.as_array();  // cheshire (step 9e)\n"),
 ]
 
+
+# 9g (after 0.3.9): ExportImages built the warp's map, one source pixel per output pixel, for every image. Every image of
+# a camera has the same map, so it is built once before the images, by the function that builds the per-image one.
+STEP9G_EXPORT = [
+    ("#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 9d\n",
+     "#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 9d\n"
+     "#include <map>  // cheshire: step 9g\n#include <memory>  // cheshire\n#include <tuple>  // cheshire\n"),
+    ("template<typename T>\nvoid ImageIntrinsicsTransform(const image::Image<T>& imageIn,\n",
+     r"""// cheshire (step 9g): the warp's map - for each output pixel, the source pixel it samples - for a pair of intrinsics and
+// a region. Upstream's loop, moved here so that the per-image map and the shared ones come from the same code.
+static void cheshireBuildMap(const camera::IntrinsicBase& intrinsicSource,
+                             const camera::IntrinsicBase& intrinsicOutput,
+                             int widthRoi,
+                             int heightRoi,
+                             int xOffset,
+                             int yOffset,
+                             image::Image<Vec2>& map)
+{
+#pragma omp parallel for
+    for (int y = 0; y < heightRoi; ++y)
+    {
+        for (int x = 0; x < widthRoi; ++x)
+        {
+            const Vec2 undisto_pix(x + xOffset, y + yOffset);
+
+            // compute coordinates with distortion
+            const Vec3 intermediate = intrinsicOutput.backProjectUnit(undisto_pix);
+            map(y, x) = intrinsicSource.project(intermediate.homogeneous(), true);
+        }
+    }
+}
+
+// cheshire (step 9g): the maps two views or more share, built before the images and only read while they are exported
+struct CheshireMapKey
+{
+    const camera::IntrinsicBase* source;
+    const camera::IntrinsicBase* output;
+    int width, height, x, y;
+    bool operator<(const CheshireMapKey& o) const
+    {
+        return std::tie(source, output, width, height, x, y) < std::tie(o.source, o.output, o.width, o.height, o.x, o.y);
+    }
+};
+static std::map<CheshireMapKey, std::shared_ptr<const image::Image<Vec2>>> cheshireMaps;
+
+template<typename T>
+void ImageIntrinsicsTransform(const image::Image<T>& imageIn,
+"""),
+    ("    image::Image<Vec2> map(widthRoi, heightRoi);\n\n#pragma omp parallel for\n    for (int y = 0; y < heightRoi; ++y)\n    {\n"
+     "        for (int x = 0; x < widthRoi; ++x)\n        {\n            const Vec2 undisto_pix(x + xOffset, y + yOffset);\n\n"
+     "            // compute coordinates with distortion\n"
+     "            const Vec3 intermediate = intrinsicOutput.backProjectUnit(undisto_pix);\n"
+     "            map(y, x) = intrinsicSource.project(intermediate.homogeneous(), true);\n        }\n    }\n\n"
+     "    remapInter(imageIn, map, fillcolor, image_ud);\n}\n",
+     r"""    // cheshire (step 9g): the map built before the images when other views share it, else here, by the same function
+    const auto cheshireIt = cheshireMaps.find(CheshireMapKey{&intrinsicSource, &intrinsicOutput, widthRoi, heightRoi, xOffset, yOffset});
+    if (cheshireIt != cheshireMaps.end())
+    {
+        remapInter(imageIn, *cheshireIt->second, fillcolor, image_ud);
+        return;
+    }
+    image::Image<Vec2> map(widthRoi, heightRoi);
+    cheshireBuildMap(intrinsicSource, intrinsicOutput, widthRoi, heightRoi, xOffset, yOffset, map);
+
+    remapInter(imageIn, map, fillcolor, image_ud);
+}
+"""),
+    ("/**\n * @Brief process a set of images such that they appear captured by a new virtual intrinsic\n",
+     r"""/**
+ * cheshire (step 9g): the warp maps of the camera pairs two views or more of the range share, most shared first, while
+ * CHESHIRE_EXPORT_MAP_CACHE_MB (2048) lasts; 0 builds one per image as upstream does. Each with the region the image's
+ * ImageIntrinsicsTransform will ask for, and only for pairs that take the full transform.
+ */
+static void cheshirePrebuildMaps(const sfmData::SfMData& input, const sfmData::SfMData& target, size_t rangeStart,
+                                 size_t rangeEnd, bool exportFullRod)
+{
+    const long long budgetMb = ::cheshire::env::integer("CHESHIRE_EXPORT_MAP_CACHE_MB", 2048);
+    if (budgetMb <= 0)
+        return;
+    std::map<std::pair<const camera::IntrinsicBase*, const camera::IntrinsicBase*>, int> uses;
+    size_t pos = 0;
+    for (const auto& item : input.getViews())
+    {
+        const size_t posImage = pos++;
+        if (posImage < rangeStart || posImage >= rangeEnd)
+            continue;
+        const IndexT intrinsicId = item.second->getIntrinsicId();
+        if (input.getIntrinsics().count(intrinsicId) == 0 || target.getIntrinsics().count(intrinsicId) == 0)
+            continue;
+        ++uses[{&input.getIntrinsic(intrinsicId), &target.getIntrinsic(intrinsicId)}];
+    }
+    std::vector<std::pair<int, std::pair<const camera::IntrinsicBase*, const camera::IntrinsicBase*>>> order;
+    for (const auto& u : uses)
+        if (u.second >= 2)
+            order.emplace_back(u.second, u.first);
+    std::stable_sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    long long usedMb = 0;
+    for (const auto& o : order)
+    {
+        const camera::IntrinsicBase& source = *o.second.first;
+        const camera::IntrinsicBase& output = *o.second.second;
+        if (!isFullComputeNeeded(source, output))
+            continue;  // the simplified undistortion builds no map
+        // the region processImage hands ImageIntrinsicsTransform: the output's size, or the full region of definition
+        int w = output.w(), h = output.h(), x = 0, y = 0;
+        if (exportFullRod)
+        {
+            const oiio::ROI rod = computeRod(source, output);
+            if (rod.defined())
+            {
+                w = rod.width();
+                h = rod.height();
+                x = rod.xbegin;
+                y = rod.ybegin;
+            }
+        }
+        const long long mb = (static_cast<long long>(w) * h * static_cast<long long>(sizeof(Vec2))) >> 20;
+        if (usedMb + mb > budgetMb)
+            continue;
+        auto map = std::make_shared<image::Image<Vec2>>(w, h);
+        cheshireBuildMap(source, output, w, h, x, y, *map);
+        cheshireMaps[CheshireMapKey{&source, &output, w, h, x, y}] = map;
+        usedMb += mb;
+    }
+    if (!cheshireMaps.empty())
+        ALICEVISION_LOG_INFO("cheshire: " << cheshireMaps.size() << " warp map(s) built once for the images that share them, " << usedMb
+                             << " MB (CHESHIRE_EXPORT_MAP_CACHE_MB=0 for one per image, as upstream)");
+}
+
+/**
+ * @Brief process a set of images such that they appear captured by a new virtual intrinsic
+"""),
+    ("    // cheshire (step 9d): one image per thread on every core",
+     "    cheshirePrebuildMaps(input, target, rangeStart, rangeEnd, exportFullRod);  // cheshire (step 9g)\n\n"
+     "    // cheshire (step 9d): one image per thread on every core"),
+]
+
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
     if new in text:
@@ -6784,6 +6921,18 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                 sys.exit("the JSON map conversions not found three times in dataio/json.hpp (9e)")
             t = t.replace(old, new)
     f9e.write_text(t, encoding="utf-8", newline="")
+
+    # 9g (after 0.3.9). ExportImages builds the warp map of each camera pair two views or more share once, before the
+    #     images, by the function its per-image map now also comes from (CHESHIRE_EXPORT_MAP_CACHE_MB caps their memory,
+    #     0 for upstream's map per image). After 9d, whose text two of the anchors are.
+    f9g = AV / "src/software/utils/main_exportImages.cpp"
+    t = f9g.read_text(encoding="utf-8")
+    if "step 9g" not in t:
+        for old, new in STEP9G_EXPORT:
+            if t.count(old) != 1:
+                sys.exit("an anchor of ExportImages' shared maps not found once in main_exportImages.cpp (9g)")
+            t = t.replace(old, new, 1)
+    f9g.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports

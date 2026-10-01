@@ -913,11 +913,13 @@ Plan, loosely, since the release date is not known:
      - A single-view round must stop opening a parallel region (`ExpansionChunk.cpp`).
      - `CHESHIRE_ACR_BATCH_CHECK=1` runs the loop as well and compares everything.
      - Later, `ResectionSphericalKernel::errors` builds a `Pose3` and makes a virtual `residual()`
-       call per point; hoist and devirtualise, 8e-style, checked bit for bit.
+       call per point; hoist and devirtualise, 8e-style, checked bit for bit. **Tried 2026-10-01
+       and dropped** (docs/04, 9g): the hoist is exact but changes nothing measurable, and the
+       projection it calls is out of line in the camera library, which no devirtualising inlines.
 
      **Batches done 2026-10-01** (step 9b, docs/04 and docs/15). SfMExpanding goes from 55.6 s to
      28.3-29.5 s on 41 views and from 41.1 s to 31.9-33.0 s on the engine bay. The batch check finds
-     28 of 28 calls the loop's on each set. The `errors()` hoist is still open.
+     28 of 28 calls the loop's on each set. The `errors()` hoist was dropped (below).
    - **5n's task seeds for the new triangulation** (S-M). `SfmTriangulation::process` triangulates
      the tracks on every core, drawing every track's LO-RANSAC samples from one shared
      `std::mt19937`. So SfMExpanding differs from run to run, upstream too. The legacy engine got a
@@ -930,9 +932,9 @@ Plan, loosely, since the release date is not known:
      libdeflate on Linux, and 8g's device remap widened to the full transform (its map is
      `source.project(target.backProjectUnit(p))`). **The first three done 2026-10-01** (step 9d,
      docs/04). ExportImages goes from 28.3 s to 12.6 s on 41 views and from 57.0 s to 23.6 s on the
-     engine bay, with the same pixels; our PrepareDenseScene takes 9.6 s and 17.6 s. Still open: the
-     warp map once per intrinsic pair (5h's cache; upstream builds it for every image) and the
-     device warp.
+     engine bay, with the same pixels; our PrepareDenseScene takes 9.6 s and 17.6 s. **The warp map
+     once per camera done the same day** (step 9g, docs/04): 9.6 s and 18.1 s, the same files.
+     Still open: the device warp.
    - **The tracks file without the DOM copies** (S, exact). **Done 2026-10-01** (step 9e, docs/04).
      `dataio/json.hpp`'s map conversions copied the parsed arrays. RelativePoseEstimating goes from
      31.2 s to 23.0 s on the engine bay, and SfMBootStrapping from 4.0 s to 2.5 s, with the same

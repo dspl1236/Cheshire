@@ -12867,7 +12867,7 @@ index a8714f8..1cf26df 100644
      cmdline.add(requiredParams);
      cmdline.add(optionalParams);
 diff --git a/src/software/utils/main_exportImages.cpp b/src/software/utils/main_exportImages.cpp
-index 8eeebe4..cc5e9f7 100644
+index 8eeebe4..9d5d0ef 100644
 --- a/src/software/utils/main_exportImages.cpp
 +++ b/src/software/utils/main_exportImages.cpp
 @@ -4,6 +4,7 @@
@@ -12878,15 +12878,90 @@ index 8eeebe4..cc5e9f7 100644
  #include <aliceVision/sfmData/SfMData.hpp>
  #include <aliceVision/alicevision_omp.hpp>
  #include <aliceVision/sfmDataIO/sfmDataIO.hpp>
-@@ -15,6 +16,7 @@
+@@ -15,6 +16,10 @@
  #include <aliceVision/image/Sampler.hpp>
  #include <aliceVision/image/remap.hpp>
  #include <aliceVision/camera/IntrinsicScaleOffsetDisto.hpp>
 +#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 9d
++#include <map>  // cheshire: step 9g
++#include <memory>  // cheshire
++#include <tuple>  // cheshire
  #include <boost/program_options.hpp>
  
  // These constants define the current software version.
-@@ -190,6 +192,26 @@ void ImageRemoveDistortion(const image::Image<T>& imageIn,
+@@ -79,6 +84,43 @@ oiio::ROI convertRodToRoi(const camera::IntrinsicBase & intrinsic, const oiio::R
+     return roi;
+ }
+ 
++// cheshire (step 9g): the warp's map - for each output pixel, the source pixel it samples - for a pair of intrinsics and
++// a region. Upstream's loop, moved here so that the per-image map and the shared ones come from the same code.
++static void cheshireBuildMap(const camera::IntrinsicBase& intrinsicSource,
++                             const camera::IntrinsicBase& intrinsicOutput,
++                             int widthRoi,
++                             int heightRoi,
++                             int xOffset,
++                             int yOffset,
++                             image::Image<Vec2>& map)
++{
++#pragma omp parallel for
++    for (int y = 0; y < heightRoi; ++y)
++    {
++        for (int x = 0; x < widthRoi; ++x)
++        {
++            const Vec2 undisto_pix(x + xOffset, y + yOffset);
++
++            // compute coordinates with distortion
++            const Vec3 intermediate = intrinsicOutput.backProjectUnit(undisto_pix);
++            map(y, x) = intrinsicSource.project(intermediate.homogeneous(), true);
++        }
++    }
++}
++
++// cheshire (step 9g): the maps two views or more share, built before the images and only read while they are exported
++struct CheshireMapKey
++{
++    const camera::IntrinsicBase* source;
++    const camera::IntrinsicBase* output;
++    int width, height, x, y;
++    bool operator<(const CheshireMapKey& o) const
++    {
++        return std::tie(source, output, width, height, x, y) < std::tie(o.source, o.output, o.width, o.height, o.x, o.y);
++    }
++};
++static std::map<CheshireMapKey, std::shared_ptr<const image::Image<Vec2>>> cheshireMaps;
++
+ template<typename T>
+ void ImageIntrinsicsTransform(const image::Image<T>& imageIn,
+                     const camera::IntrinsicBase & intrinsicSource,
+@@ -99,20 +141,15 @@ void ImageIntrinsicsTransform(const image::Image<T>& imageIn,
+         yOffset = roi.ybegin;
+     }
+ 
+-    image::Image<Vec2> map(widthRoi, heightRoi);
+-
+-#pragma omp parallel for
+-    for (int y = 0; y < heightRoi; ++y)
++    // cheshire (step 9g): the map built before the images when other views share it, else here, by the same function
++    const auto cheshireIt = cheshireMaps.find(CheshireMapKey{&intrinsicSource, &intrinsicOutput, widthRoi, heightRoi, xOffset, yOffset});
++    if (cheshireIt != cheshireMaps.end())
+     {
+-        for (int x = 0; x < widthRoi; ++x)
+-        {
+-            const Vec2 undisto_pix(x + xOffset, y + yOffset);
+-
+-            // compute coordinates with distortion
+-            const Vec3 intermediate = intrinsicOutput.backProjectUnit(undisto_pix);
+-            map(y, x) = intrinsicSource.project(intermediate.homogeneous(), true);
+-        }
++        remapInter(imageIn, *cheshireIt->second, fillcolor, image_ud);
++        return;
+     }
++    image::Image<Vec2> map(widthRoi, heightRoi);
++    cheshireBuildMap(intrinsicSource, intrinsicOutput, widthRoi, heightRoi, xOffset, yOffset, map);
+ 
+     remapInter(imageIn, map, fillcolor, image_ud);
+ }
+@@ -190,6 +227,26 @@ void ImageRemoveDistortion(const image::Image<T>& imageIn,
      }
  }
  
@@ -12913,7 +12988,7 @@ index 8eeebe4..cc5e9f7 100644
  /**
   * @Brief process an image such that they appear captured by a new virtual intrinsic
   * @param dstFileName the image output file name
-@@ -221,6 +243,7 @@ bool processImage(const std::string& dstFileName,
+@@ -221,6 +278,7 @@ bool processImage(const std::string& dstFileName,
  {
      image::Image<image::RGBAfColor> image;
      image::Image<image::RGBAfColor> image_ud;
@@ -12921,7 +12996,7 @@ index 8eeebe4..cc5e9f7 100644
  
      oiio::ParamValueList metadata;
      try 
-@@ -309,6 +332,7 @@ bool processImage(const std::string& dstFileName,
+@@ -309,6 +367,7 @@ bool processImage(const std::string& dstFileName,
      {
          image::ImageWriteOptions writeOptions;
          writeOptions.storageDataType(storageDataType);
@@ -12929,11 +13004,81 @@ index 8eeebe4..cc5e9f7 100644
          writeImage(dstFileName, image_ud, writeOptions, metadata, roi);
      }
      catch (...)
-@@ -350,7 +374,14 @@ bool process(const sfmData::SfMData & input,
+@@ -320,6 +379,67 @@ bool processImage(const std::string& dstFileName,
+     return true;
+ }
+ 
++/**
++ * cheshire (step 9g): the warp maps of the camera pairs two views or more of the range share, most shared first, while
++ * CHESHIRE_EXPORT_MAP_CACHE_MB (2048) lasts; 0 builds one per image as upstream does. Each with the region the image's
++ * ImageIntrinsicsTransform will ask for, and only for pairs that take the full transform.
++ */
++static void cheshirePrebuildMaps(const sfmData::SfMData& input, const sfmData::SfMData& target, size_t rangeStart,
++                                 size_t rangeEnd, bool exportFullRod)
++{
++    const long long budgetMb = ::cheshire::env::integer("CHESHIRE_EXPORT_MAP_CACHE_MB", 2048);
++    if (budgetMb <= 0)
++        return;
++    std::map<std::pair<const camera::IntrinsicBase*, const camera::IntrinsicBase*>, int> uses;
++    size_t pos = 0;
++    for (const auto& item : input.getViews())
++    {
++        const size_t posImage = pos++;
++        if (posImage < rangeStart || posImage >= rangeEnd)
++            continue;
++        const IndexT intrinsicId = item.second->getIntrinsicId();
++        if (input.getIntrinsics().count(intrinsicId) == 0 || target.getIntrinsics().count(intrinsicId) == 0)
++            continue;
++        ++uses[{&input.getIntrinsic(intrinsicId), &target.getIntrinsic(intrinsicId)}];
++    }
++    std::vector<std::pair<int, std::pair<const camera::IntrinsicBase*, const camera::IntrinsicBase*>>> order;
++    for (const auto& u : uses)
++        if (u.second >= 2)
++            order.emplace_back(u.second, u.first);
++    std::stable_sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
++    long long usedMb = 0;
++    for (const auto& o : order)
++    {
++        const camera::IntrinsicBase& source = *o.second.first;
++        const camera::IntrinsicBase& output = *o.second.second;
++        if (!isFullComputeNeeded(source, output))
++            continue;  // the simplified undistortion builds no map
++        // the region processImage hands ImageIntrinsicsTransform: the output's size, or the full region of definition
++        int w = output.w(), h = output.h(), x = 0, y = 0;
++        if (exportFullRod)
++        {
++            const oiio::ROI rod = computeRod(source, output);
++            if (rod.defined())
++            {
++                w = rod.width();
++                h = rod.height();
++                x = rod.xbegin;
++                y = rod.ybegin;
++            }
++        }
++        const long long mb = (static_cast<long long>(w) * h * static_cast<long long>(sizeof(Vec2))) >> 20;
++        if (usedMb + mb > budgetMb)
++            continue;
++        auto map = std::make_shared<image::Image<Vec2>>(w, h);
++        cheshireBuildMap(source, output, w, h, x, y, *map);
++        cheshireMaps[CheshireMapKey{&source, &output, w, h, x, y}] = map;
++        usedMb += mb;
++    }
++    if (!cheshireMaps.empty())
++        ALICEVISION_LOG_INFO("cheshire: " << cheshireMaps.size() << " warp map(s) built once for the images that share them, " << usedMb
++                             << " MB (CHESHIRE_EXPORT_MAP_CACHE_MB=0 for one per image, as upstream)");
++}
++
+ /**
+  * @Brief process a set of images such that they appear captured by a new virtual intrinsic
+  * @param input the original sfmData to parse
+@@ -350,7 +470,16 @@ bool process(const sfmData::SfMData & input,
      // for exposure correction
      const double medianCameraExposure = input.getMedianCameraExposureSetting().getExposure(); 
  
 -    for (int posImage = 0; posImage < countElements; posImage++)
++    cheshirePrebuildMaps(input, target, rangeStart, rangeEnd, exportFullRod);  // cheshire (step 9g)
++
 +    // cheshire (step 9d): one image per thread on every core, as 4k has PrepareDenseScene do (upstream: one image at a
 +    // time, the warp's rows on the cores). Every iteration reads and writes only its own view and files.
 +    // CHESHIRE_EXPORT_THREADS sets the thread count.

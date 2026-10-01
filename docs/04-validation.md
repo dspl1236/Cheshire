@@ -3785,3 +3785,30 @@ host, and 0.3.9's `fastransac` check) byte for byte:
   `coarse` `014df5da061351f8`, `ds1` `4c2a6957b746adf6`, `blast` `c9fa653c7ff1ee87`.
 
 As under Windows, RDNA1 and RDNA2 agree.
+
+## After 0.3.9: ExportImages' warp map once per camera (step 9g, 2026-10-01)
+
+ExportImages built the warp's map, the source pixel each output pixel samples, for every image.
+Every image of a camera has the same map. Step 9g builds the map of each camera pair that two views
+or more share once, before the images, while `CHESHIRE_EXPORT_MAP_CACHE_MB` (2048) lasts; 0 builds
+one per image as upstream does. Upstream's loop moved into one function that both paths call, so the
+shared map and the per-image one come from the same code. Each set here needs one map, 186 MB for
+41 views and 139 MB for the engine bay. Same harness:
+
+| run | ExportImages, 41 views | engine bay |
+|---|---|---|
+| 9g | 9.6 s | 18.1 s |
+| `CHESHIRE_EXPORT_MAP_CACHE_MB=0` | 11.8 s | 22.4 s |
+| 9g | 9.9 s | 18.4 s |
+| 9g, test images cleared first | 9.3 s | 19.3 s |
+| `CHESHIRE_EXPORT_MAP_CACHE_MB=0`, test images cleared first | 11.7 s | 23.6 s |
+
+A second `CHESHIRE_EXPORT_MAP_CACHE_MB=0` round took 19.2 s and 32.9 s. It came after about 20 GB of
+EXR writes, and with the images cleared it ran as above. The SATA SSD slows under sustained writes.
+With the shared map, 41 of 41 and 107 of 107 EXR files are byte for byte the per-image map's.
+ExportImages now takes our PrepareDenseScene's time on 41 views (9.6 s).
+
+The resection's residuals were tried the same day and dropped. Building their `Pose3` once per model
+instead of once per point (exact, the same 4x4 matrix) changed nothing measurable: SfMExpanding took
+27.4-28.4 s on 41 views and 28.7-29.3 s on the engine bay either way. The cost is the out-of-line
+projection in the camera library, which no hoist reaches.
