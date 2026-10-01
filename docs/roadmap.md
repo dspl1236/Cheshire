@@ -959,6 +959,9 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   **Done 2026-09-30** (0.3.8, above).
 - **RDNA2 Windows payloads for 0.3.3** (S). gfx1031 has not run on Windows since v0.2.17
   (`docs/16-bundling.md:215`). Put the RX 6750 XT back in bench-pc and run the 12-config matrix.
+  **Done 2026-10-01** on 0.3.9: 22 of 22 runs (16 configs on 2025.1 mini6, the 41-view pair, four on
+  2023.3). Every config but `cpufallback` gives the RX 5500 XT's depth maps byte for byte on the same
+  host (docs/04).
 - **RDNA3 discrete** (S, blocked on a tester). No run on any RX 7600-7900 (`README.md:328-329`).
 - **APUs and the bridge on unified memory** (M). No APU has run, and what the bridge does when host
   RAM is the VRAM is unknown (`docs/16-bundling.md:153-155`).

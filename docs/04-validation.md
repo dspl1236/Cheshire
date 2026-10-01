@@ -3617,3 +3617,26 @@ On 2023.3 the pairing printed that there is nothing to write and the harness ski
 `--unpair` removed both templates. On each card the Fast Ransac run's depth maps were byte for byte the
 same card's Meshroom 2023.3 run: `352f0abe56eede6d` on the RX 9070, `e9de6475cc3c0662` on the GTX 1080 Ti
 (in this gate and in 0.3.8's), `c4e51fa59e526c8c` on the RX 6750 XT (against 0.3.8's gate).
+
+## 0.3.9 on RDNA2 under Windows: the RX 6750 XT back in bench-pc (2026-10-01)
+
+gfx1031 had not run on Windows since v0.2.17 (roadmap, "Hardware coverage"). With the RX 6750 XT back in
+bench-pc (FX-8120, Windows, the `hip6.2/gfx1031` payload), the 0.3.9 Windows AMD zip ran:
+
+| Meshroom | set | configs | result |
+|---|---|---|---|
+| 2025.1 | mini6 | all 16, `fastransac` included | 16 of 16 ok at 8/8 ports |
+| 2025.1 | 41 views | `base`, `verify` | both ok at 8/8 (779 s, 2080 s) |
+| 2023.3 | mini6 | `base`, `defaults`, `cpufallback`, `verify` | 4 of 4 ok at 8/8 |
+
+The RX 5500 XT (RDNA1, gfx1012) ran the same binaries (0.3.9 repacks 0.3.8's) in 0.3.8's gate on the same
+host. Every config both ran gives byte-identical depth maps on the two cards except `cpufallback`:
+- 2025.1 mini6: `base` and the eight configs that share its digest give `a4bcbe2f74c26e27`, and `defaults`,
+  `tiles`, `coarse`, `ds1` and `blast` match the RX 5500 XT's too.
+- 41 views: `824f24ba9b01de86`.
+- 2023.3 `base` and `verify`: `bfd6150b4ced08b5`.
+
+`cpufallback` runs CPU SIFT and every port's CPU fallback. The gate checks it for the ports' DISABLED lines
+and a finished pipeline, not for identity, and its digest differs between the two cards. `fastransac` on
+2025.1 gave `bfd6150b4ced08b5`, the same as this card's Meshroom 2023.3 `base`, so the Fast Ransac
+templates reproduce 2023.3 on this card too.
