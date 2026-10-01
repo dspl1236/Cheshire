@@ -60,9 +60,12 @@ GPU_MARKERS = {
                           r"visibility votes on the GPU"],
     "Texturing":         [r"texturing: pyramid \+ rasterisation on"],
     # 0.3.7: Grin, the own bundle-adjustment solver, announced once per run from its success branch (a run
-    # that fell back to Ceres for every solve would not print it)
+    # that fell back to Ceres for every solve would not print it). After 0.3.9: the 5-point solver's
+    # nullspace (step 9j), which the initial pair's estimation runs, names its path once per process; CPU
+    # code, so it is required in the fallback run too
     "StructureFromMotion": [r"cheshire: incremental SfM: a resection pass that ends without a bundle adjustment gets one",
-                            r"cheshire: BA solver: Grin, Cheshire's own, for the Schur solves"],
+                            r"cheshire: BA solver: Grin, Cheshire's own, for the Schur solves",
+                            r"5-point nullspace: (SVD \(default|Householder QR \(CHESHIRE_QR_NULLSPACE5=1\))"],
     # 0.3.6: PrepareDenseScene has been paired since v0.2.9 and was checked by nothing, so a run
     # whose PrepareDenseScene was Meshroom's own binary passed. CPU only; the marker is the direct
     # 8-bit read (step 6n, hip/port/image_read/direct8.txt) announcing its first image. It is printed
@@ -306,17 +309,19 @@ CONFIGS = {
     "ds1": dict(overrides=SIFT + ["DepthMap:downscale=1"], env={"CHESHIRE_BRIDGE_LOG": "1"}),
     # ds1 plus every opt-in speed path and the profile logs, so the run reports where time went.
     # Most acceleration is already default-on; what this adds is the 7-point QR nullspace (held
-    # opt-in, docs/15) and a larger filter cache.
+    # opt-in, docs/15), the 5-point one (step 9j, docs/17) and a larger filter cache.
     "blast": dict(overrides=SIFT + ["DepthMap:downscale=1"], checks={
         "FeatureMatching": [r"7-point nullspace: Householder QR \(CHESHIRE_QR_NULLSPACE=1\)",
                             r"other +vram: [1-9]\d* allocs"],
+        "StructureFromMotion": [r"5-point nullspace: Householder QR \(CHESHIRE_QR_NULLSPACE5=1\)"],
         # 0.3.2 items 4 and 5: the bridge summary (CHESHIRE_BRIDGE_LOG=1) must show the camera
         # mipmaps as "image" and the ports' buffers as "other" - on both backends.
         "DepthMap": [r"image +vram: [1-9]\d* allocs, peak [1-9]\d* MB"],
         "DepthMapFilter": [r"depth map filter cache: cap 8192 MB", r"other +vram: [1-9]\d* allocs"],
         "Meshing": [r"other +vram: [1-9]\d* allocs"],
         "Texturing": [r"other +vram: [1-9]\d* allocs"]}, env={
-        "CHESHIRE_BRIDGE_LOG": "1", "CHESHIRE_QR_NULLSPACE": "1", "CHESHIRE_FILTER_CACHE_MB": "8192",
+        "CHESHIRE_BRIDGE_LOG": "1", "CHESHIRE_QR_NULLSPACE": "1", "CHESHIRE_QR_NULLSPACE5": "1",
+        "CHESHIRE_FILTER_CACHE_MB": "8192",
         "CHESHIRE_GPU_VOTE_LOG": "1", "CHESHIRE_GPU_VIS_LOG": "1", "CHESHIRE_GPU_TEX_LOG": "1",
         "CHESHIRE_GPU_MATCHER_LOG": "1", "CHESHIRE_FILTER_LOG": "1"}),
 }

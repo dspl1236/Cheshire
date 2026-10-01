@@ -1907,6 +1907,57 @@ static void cheshireExportCompression(image::ImageWriteOptions& o)
 """),
 ]
 
+# 9j (after 0.3.9): the 5-point solver's nullspace by Householder QR, opt-in (CHESHIRE_QR_NULLSPACE5=1), as docs/17's QR
+# for the 7-point solver is (CHESHIRE_QR_NULLSPACE=1): a different basis of the same nullspace, so the same essential
+# matrices to rounding, not to the bit.
+STEP9J_E5 = [
+    ("#include <aliceVision/multiview/epipolarEquation.hpp>\n",
+     "#include <aliceVision/multiview/epipolarEquation.hpp>\n#include <Eigen/QR>  // cheshire: step 9j\n#include <cstdio>  // cheshire\n"),
+    ("/**\n * @brief Compute the nullspace of the linear constraints given by the matches.\n */\n"
+     "Mat fivePointsNullspaceBasis(const Mat2X& x1, const Mat2X& x2)\n",
+     r"""// cheshire (step 9j): the nullspace of exactly five correspondences - five independent rows in nine columns - by a
+// Householder QR of the transpose: Q's last four columns are orthonormal and orthogonal to every row, a basis of the
+// same four-dimensional nullspace as the SVD's, without the iterative SVD of the zero-padded 9x9. The polynomial system
+// that follows takes any basis of it, so the essential matrices are the same to rounding but not to the bit: opt-in
+// with CHESHIRE_QR_NULLSPACE5=1, as the 7-point solver's QR is with CHESHIRE_QR_NULLSPACE=1 (docs/17). With more than
+// five correspondences the SVD fits them in the least-squares sense, which this does not reproduce, so those keep it.
+static bool cheshireQrNullspace5()
+{
+    static const bool on = ::cheshire::env::flag("CHESHIRE_QR_NULLSPACE5");
+    static const bool announced = []() {  // once per process, both paths (docs/04 marker rule)
+        std::fprintf(stderr, on ? "[cheshire] 5-point nullspace: Householder QR (CHESHIRE_QR_NULLSPACE5=1)\n"
+                                : "[cheshire] 5-point nullspace: SVD (default; CHESHIRE_QR_NULLSPACE5=1 for QR)\n");
+        return true;
+    }();
+    (void)announced;
+    return on;
+}
+
+static Mat cheshireFivePointsNullspaceQr(const Eigen::Matrix<double, 9, 9>& A)
+{
+    const Eigen::Matrix<double, 9, 5> At = A.topRows<5>().transpose();
+    const Eigen::HouseholderQR<Eigen::Matrix<double, 9, 5>> qr(At);
+    const Eigen::Matrix<double, 9, 9> Q = qr.householderQ();
+    return Q.rightCols<4>();
+}
+
+/**
+ * @brief Compute the nullspace of the linear constraints given by the matches.
+ */
+Mat fivePointsNullspaceBasis(const Mat2X& x1, const Mat2X& x2)
+"""),
+    ("    encodeEpipolarEquation(x1, x2, &A);\n    Eigen::JacobiSVD<Eigen::Matrix<double, 9, 9>> svd(A, Eigen::ComputeFullV);\n",
+     "    encodeEpipolarEquation(x1, x2, &A);\n"
+     "    if (x1.cols() == 5 && cheshireQrNullspace5())  // cheshire (step 9j)\n"
+     "        return cheshireFivePointsNullspaceQr(A);\n"
+     "    Eigen::JacobiSVD<Eigen::Matrix<double, 9, 9>> svd(A, Eigen::ComputeFullV);\n"),
+    ("    encodeEpipolarSphericalEquation(x1, x2, &A);\n    Eigen::JacobiSVD<Eigen::Matrix<double, 9, 9>> svd(A, Eigen::ComputeFullV);\n",
+     "    encodeEpipolarSphericalEquation(x1, x2, &A);\n"
+     "    if (x1.cols() == 5 && cheshireQrNullspace5())  // cheshire (step 9j)\n"
+     "        return cheshireFivePointsNullspaceQr(A);\n"
+     "    Eigen::JacobiSVD<Eigen::Matrix<double, 9, 9>> svd(A, Eigen::ComputeFullV);\n"),
+]
+
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
     if new in text:
@@ -2002,6 +2053,7 @@ TRACKED = [
     "src/software/utils/main_exportImages.cpp",  # 9d
     "src/aliceVision/dataio/json.hpp",  # 9e
     "src/aliceVision/track/trackIO.cpp",  # 9h
+    "src/aliceVision/multiview/relativePose/Essential5PSolver.cpp",  # 9j
 ]
 
 
@@ -7168,6 +7220,18 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                 sys.exit("an anchor of ExportImages' profile not found once in main_exportImages.cpp (9i)")
             t = t.replace(old, new, 1)
     f9i.write_text(t, encoding="utf-8", newline="")
+
+    # 9j (after 0.3.9). The 5-point solver's nullspace of exactly five correspondences by Householder QR, opt-in with
+    #     CHESHIRE_QR_NULLSPACE5=1 (docs/17's lever, as CHESHIRE_QR_NULLSPACE is the 7-point solver's): the same essential
+    #     matrices to rounding, not to the bit, so not the default. RelativePoseEstimating runs it most.
+    f9j = AV / "src/aliceVision/multiview/relativePose/Essential5PSolver.cpp"
+    t = f9j.read_text(encoding="utf-8")
+    if "step 9j" not in t:
+        for old, new in STEP9J_E5:
+            if t.count(old) != 1:
+                sys.exit("an anchor of the 5-point solver's nullspace not found once in Essential5PSolver.cpp (9j)")
+            t = t.replace(old, new, 1)
+    f9j.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports

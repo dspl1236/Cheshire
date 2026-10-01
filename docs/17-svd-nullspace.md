@@ -159,3 +159,20 @@ left alone because there is no hardware here to validate it against.
 `CHESHIRE_SVD_NULLSPACE=1` restores upstream's `JacobiSVD`. The flag is read through a
 function-local static: `solve()` runs 111.7 M times and a `getenv` per call would cost more than
 the change saves.
+
+## The 5-point solver (step 9j, after 0.3.9)
+
+The 5-point solver has the same shape: five rows of a zero-padded 9x9, a four-dimensional nullspace,
+and a polynomial system that takes any basis of it. Step 9j gives it the same QR,
+`CHESHIRE_QR_NULLSPACE5=1`, opt-in too, with the SVD kept for more than five correspondences.
+
+It reaches more than the 7-point's would. RelativePoseEstimating, the new pipeline's pair estimation,
+lifts every observation to a bearing vector, so its spherical branch is the one that runs, for
+pinhole cameras too. The legacy StructureFromMotion's initial pair runs the planar one. Both sets
+here exercise both.
+
+The measurements are in docs/04 (step 9j). RelativePoseEstimating is about 5 % faster. Against
+controls that only change RANSAC's draws, QR moves the relative poses and the reconstructions less
+than the draws do. Two runs per leg cannot settle whether the legacy SfM's higher RMSE on the engine
+bay (+0.10 %, +0.12 %) is real. Three runs misled this document once (above); the ten-run gate would
+settle it.

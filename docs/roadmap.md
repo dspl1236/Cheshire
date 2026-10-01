@@ -379,6 +379,8 @@ the earlier proposal.
   call. Needed either way:
   - ~~fix `CHESHIRE_QR_NULLSPACE=0` turning QR on~~ (done by 6q: `::cheshire::env::flag`)
   - give the base e2e config a QR check if the default flips
+  - decide the 5-point solver's QR with it (step 9j, `CHESHIRE_QR_NULLSPACE5`). So far it has two
+    runs per leg against controls (docs/04); the ten-run gate has not run on it
   - ~~record the drone-set A/B~~ (in docs/04, "A 444-photo drone survey": 29 of 1051 pairs either
     way)
 - **"Nullspace SVD" is the same item, not separate work.** README roadmap item 6 holds the SVD
@@ -891,11 +893,12 @@ Plan, loosely, since the release date is not known:
      (`main_exportImages.cpp`), one view at a time.
 3. **Port** (M-L). The nodes already build in our tree and the replay harness exists
    (`build/nightly-cmp/run_ours.py`, `cmp_poses.py`, `replay.py`), so this need not wait for the
-   release. **State on 2026-10-01, after steps 9a-9h:** the new chain (TracksBuilding to
+   release. **State on 2026-10-01, after steps 9a-9j:** the new chain (TracksBuilding to
    ExportImages) takes about 48 s on 41 views, where it took 285.0 s with our build before and our
    legacy chain takes 77.5 s. On the engine bay it takes about 70 s against 201.7 s and 55.4 s. What
-   is left there is RelativePoseEstimating's 5-point solver, SfMExpanding's four comparable parts,
-   and ExportImages' warp. In order of what it buys:
+   is left there is SfMExpanding's four comparable parts. RelativePoseEstimating's 5-point solver
+   has an opt-in QR (9j), and ExportImages' warp runs on the device on hosts of four threads or fewer
+   (9i). In order of what it buys:
    - **NACRANSAC: the key sort and 8d's bound** (M). The bound ports with one change: NACRANSAC
      takes the residuals as they are where ACRANSAC takes square roots, so the bucket table drops
      the root. The port is exact (same models, same draws), with `CHESHIRE_ACR_BOUND_CHECK`
@@ -946,6 +949,11 @@ Plan, loosely, since the release date is not known:
      goes from 1.44 s to 0.89 s on the engine bay; RelativePoseEstimating goes to 18.8 s, every
      field checked the same.
    - **The 5-point solver's nullspace by QR** (S-M): docs/17's lever, for RelativePoseEstimating.
+     **Done 2026-10-01, opt-in** (step 9j, docs/04 and docs/17): `CHESHIRE_QR_NULLSPACE5=1`.
+     RelativePoseEstimating runs the solver's spherical branch for every camera, and the legacy
+     StructureFromMotion's initial pair runs the planar one; both take it. It saves about 5 % of
+     RelativePoseEstimating (0.45 s and 1.15 s). The results move less than other RANSAC draws move
+     them, but not to the bit, so it stays opt-in like the 7-point solver's QR.
    - **Fast Ransac for the new templates** (S): SfMExpanding has StructureFromMotion's
      `localizerEstimatorMaxIterations`, also 50,000 by default. The generator would add it there
      when a graph has SfMExpanding instead. Today it skips such a graph with a message, so pairing a

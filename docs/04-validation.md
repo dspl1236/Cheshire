@@ -3883,3 +3883,78 @@ traffic that bounds the other threads, and cancel what they save. With four imag
 gains 5 % and 21 %. So, as in 8g, the device takes the warp by default only on a host of four
 hardware threads or fewer; `CHESHIRE_EXPORT_DEVICE=1` or `0` overrides. A 12-thread device run on
 41 views straight after a CPU run's writes took 12.0 s; that was the disk, as in 9g.
+
+## After 0.3.9: the 5-point solver's nullspace by QR, opt-in (step 9j, 2026-10-01)
+
+The 5-point solver (`Essential5PSolver.cpp`) finds the four-dimensional nullspace of five
+correspondences with a JacobiSVD of a 9x9 that holds five rows and four rows of zeros: the 7-point
+solver's shape in docs/17. Step 9j gives it docs/17's lever. A Householder QR of the 9x5 transpose
+gives a Q whose last four columns span the same nullspace. The polynomial system that follows takes
+any basis of it, so the essential matrices are the same to rounding, not to the bit. It is opt-in,
+as the 7-point solver's QR is: `CHESHIRE_QR_NULLSPACE5=1`. More than five correspondences keep the
+SVD, which fits them in the least-squares sense. Each process logs which nullspace it uses.
+
+Both branches of the solver take it:
+- RelativePoseEstimating lifts every observation to a bearing vector (`RelativeSphericalKernel`),
+  pinhole cameras included, so the new chain runs the spherical branch. Unlike the 7-point solver's
+  spherical branch (no data for it here, docs/17), this one is what both sets run.
+- The legacy StructureFromMotion runs the planar branch, for its initial pair (`robustRelativePose`).
+
+With the switch off nothing changes. RelativePoseEstimating gives 9h's pairs, and SfMBootStrapping and
+SfMExpanding 9h's files byte for byte, on both sets. `sfmbench.py` gives the legacy digests,
+`801d1fb7`/`361ddd5c` and `814ae0d5`/`af98cde3`.
+
+RelativePoseEstimating, runs interleaved:
+
+| run | 41 views | engine bay |
+|---|---|---|
+| SVD, 12 threads | 8.0 s, 8.2 s | 20.3 s, 20.1 s |
+| QR, 12 threads | 7.7 s, 7.6 s | 19.4 s, 18.7 s |
+| SVD, 11 threads | 8.1 s | 20.0 s |
+| QR, 11 threads | 7.9 s | 18.6 s |
+
+That is about 5 %: 0.45 s and 1.15 s. The nullspace is a small part of each solve; the elimination
+and the 10x10 eigenproblem after it stay. The legacy SfM's wall time does not move (18.7 s against
+18.4 s on 41 views, 15.0 s against 15.1 s on the engine bay).
+
+What it changes needs a control. RelativePoseEstimating gives every thread its own generator, all
+with the same seed, and deals the pairs out statically. So 11 threads instead of 12 hand each pair
+other draws, and SVD at 11 against SVD at 12 is RANSAC's own spread. A second control is free: most
+pairs are estimated both ways, A to B and B to A, from different draws.
+
+| relative rotation, degrees: median, 99th percentile, pairs over 1 | 41 views | engine bay |
+|---|---|---|
+| QR against SVD, same draws, 12 threads | 0, 1.26, 26 of 1465 | 0.21, 3.03, 225 of 2072 |
+| QR against SVD, same draws, 11 threads | 0, 1.43, 43 of 1465 | 0.24, 3.46, 255 of 2076 |
+| control: SVD, 11 threads against 12 | 0.24, 1.60, 55 of 1465 | 0.36, 2.99, 278 of 2079 |
+| control: SVD, A to B against B to A | 0.25, 1.49, 30 of 730 | 0.39, 3.44, 152 of 1012 |
+
+The same draws do not keep the same answer. Once rounding changes which model is best, AC-RANSAC
+narrows its pool differently and the rest of the draws differ. About two thirds of the 41-view
+pairs agree to 0.01 degrees, and a third of the engine bay's. The QR differences are no larger than
+the controls'.
+
+Pairs come and go between any two runs; the two SVD runs on the engine bay swap 14 for 14. QR keeps
+2083 and 2087 of them against SVD's 2093 and 2093, and 1467 and 1466 on 41 views against 1469 and
+1467.
+
+The reconstructions, with camera centres after a similarity fit in % of the scene's radius:
+
+| | 41 views: centres; landmarks | engine bay |
+|---|---|---|
+| new chain, QR against SVD, 12 threads | 0.0005 %; 80,676 against 80,672 | 0.18 %; 134,453 against 134,804 |
+| new chain, QR against SVD, 11 threads | 0.0006 %; 80,674 against 80,678 | 0.047 %; 134,179 against 133,980 |
+| new chain, control: SVD, 11 threads against 12 | 0.0015 %; 80,678 against 80,672 | 0.38 %; 133,980 against 134,804 |
+| legacy SfM, QR against SVD, default seed | 0.0045 %; 80,796 against 80,799 | 0.036 %; 140,313 against 140,394 |
+| legacy SfM, QR against SVD, `--randomSeed 1` | 0.0016 %; 80,803 against 80,804 | 0.041 %; 140,503 against 140,523 |
+| legacy SfM, control: seed 1 against the default | 0.0046 %; 80,804 against 80,799 | 0.070 %; 140,523 against 140,394 |
+
+Every view is placed in every run; SVD at 11 threads even bootstraps the engine bay from another
+pair. QR moves the results less than other draws do. With QR, the legacy SfM's engine-bay RMSE is
+higher at both seeds: 1.6847 against 1.6830 and 1.6886 against 1.6867 (+0.10 %, +0.12 %). Its
+landmarks are fewer at both (-81, -20). Both differences are inside what the seed moves (+0.22 %,
++129). Two runs per leg cannot tell such a difference from noise; docs/17 needed ten, and
+`scripts/quality_gate.py` would run them.
+
+So 9j stays opt-in, as docs/17's QR does. It saves about a second of RelativePoseEstimating on these
+sets, for results that agree only to rounding and RANSAC's spread.

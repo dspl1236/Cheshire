@@ -8580,6 +8580,73 @@ index c0a3ab3..b540338 100644
      void unnormalize(ModelT_& model) const override
      {
          // do nothing, no normalization in this case
+diff --git a/src/aliceVision/multiview/relativePose/Essential5PSolver.cpp b/src/aliceVision/multiview/relativePose/Essential5PSolver.cpp
+index f94703f..c17e007 100644
+--- a/src/aliceVision/multiview/relativePose/Essential5PSolver.cpp
++++ b/src/aliceVision/multiview/relativePose/Essential5PSolver.cpp
+@@ -6,8 +6,11 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include "Essential5PSolver.hpp"
+ #include <aliceVision/multiview/epipolarEquation.hpp>
++#include <Eigen/QR>  // cheshire: step 9j
++#include <cstdio>  // cheshire
+ 
+ namespace aliceVision {
+ namespace multiview {
+@@ -59,6 +62,32 @@ Vec o2(const Vec& a, const Vec& b)
+     return res;
+ }
+ 
++// cheshire (step 9j): the nullspace of exactly five correspondences - five independent rows in nine columns - by a
++// Householder QR of the transpose: Q's last four columns are orthonormal and orthogonal to every row, a basis of the
++// same four-dimensional nullspace as the SVD's, without the iterative SVD of the zero-padded 9x9. The polynomial system
++// that follows takes any basis of it, so the essential matrices are the same to rounding but not to the bit: opt-in
++// with CHESHIRE_QR_NULLSPACE5=1, as the 7-point solver's QR is with CHESHIRE_QR_NULLSPACE=1 (docs/17). With more than
++// five correspondences the SVD fits them in the least-squares sense, which this does not reproduce, so those keep it.
++static bool cheshireQrNullspace5()
++{
++    static const bool on = ::cheshire::env::flag("CHESHIRE_QR_NULLSPACE5");
++    static const bool announced = []() {  // once per process, both paths (docs/04 marker rule)
++        std::fprintf(stderr, on ? "[cheshire] 5-point nullspace: Householder QR (CHESHIRE_QR_NULLSPACE5=1)\n"
++                                : "[cheshire] 5-point nullspace: SVD (default; CHESHIRE_QR_NULLSPACE5=1 for QR)\n");
++        return true;
++    }();
++    (void)announced;
++    return on;
++}
++
++static Mat cheshireFivePointsNullspaceQr(const Eigen::Matrix<double, 9, 9>& A)
++{
++    const Eigen::Matrix<double, 9, 5> At = A.topRows<5>().transpose();
++    const Eigen::HouseholderQR<Eigen::Matrix<double, 9, 5>> qr(At);
++    const Eigen::Matrix<double, 9, 9> Q = qr.householderQ();
++    return Q.rightCols<4>();
++}
++
+ /**
+  * @brief Compute the nullspace of the linear constraints given by the matches.
+  */
+@@ -67,6 +96,8 @@ Mat fivePointsNullspaceBasis(const Mat2X& x1, const Mat2X& x2)
+     Eigen::Matrix<double, 9, 9> A;
+     A.setZero();  // make A square until Eigen supports rectangular SVD.
+     encodeEpipolarEquation(x1, x2, &A);
++    if (x1.cols() == 5 && cheshireQrNullspace5())  // cheshire (step 9j)
++        return cheshireFivePointsNullspaceQr(A);
+     Eigen::JacobiSVD<Eigen::Matrix<double, 9, 9>> svd(A, Eigen::ComputeFullV);
+     return svd.matrixV().topRightCorner<9, 4>();
+ }
+@@ -79,6 +110,8 @@ Mat fivePointsNullspaceBasisSpherical(const Mat& x1, const Mat& x2)
+     Eigen::Matrix<double, 9, 9> A;
+     A.setZero();  // make A square until Eigen supports rectangular SVD.
+     encodeEpipolarSphericalEquation(x1, x2, &A);
++    if (x1.cols() == 5 && cheshireQrNullspace5())  // cheshire (step 9j)
++        return cheshireFivePointsNullspaceQr(A);
+     Eigen::JacobiSVD<Eigen::Matrix<double, 9, 9>> svd(A, Eigen::ComputeFullV);
+     return svd.matrixV().topRightCorner<9, 4>();
+ }
 diff --git a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
 index 298c9d2..9b31e8f 100644
 --- a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
