@@ -3682,3 +3682,22 @@ The output is the upstream path's:
 - **`ACRANSAC`'s callers**: unchanged. Its bucket table gained the switch with the same values.
   FeatureMatching on 41 views at 50,000 iterations gives `base50k`'s `2b4452a79d79b819`, and
   incrementalSfM gives `801d1fb7b32bdd32` / `361ddd5cf663cfe6`, as in 0.3.8.
+
+## After 0.3.9: NACRANSAC in batches on every core (step 9b, 2026-10-01)
+
+SfMExpanding's single-view rounds run `NACRANSAC`'s iterations in speculative batches on every core
+([docs/15](15-acransac-cpu.md), "One resection on every core"). Same harness and inputs as 9a, one
+binary, alternating runs, `CHESHIRE_ACR_BATCH=0` being 9a:
+
+| run | SfMExpanding, 41 views | engine bay |
+|---|---|---|
+| 9b | 29.5 s | 31.9 s |
+| `CHESHIRE_ACR_BATCH=0` | 55.6 s | 41.1 s |
+| 9b | 28.3 s | 33.0 s |
+| `CHESHIRE_ACR_BATCH=0` | 55.7 s | 41.3 s |
+
+The resection goes from 35.7 s to 8.2 s on 41 views and from 18.2 s to 8.9-10.0 s on the engine
+bay. `CHESHIRE_ACR_BATCH_CHECK=1` runs the loop as well for every batched call. It found 28 of 28
+calls on 41 views and 28 of 28 on the engine bay returning the loop's model, inliers, error and NFA,
+and leaving the generator where the loop leaves it. The other parts of SfMExpanding cannot be
+compared between threaded runs until its triangulation draws reproducibly (9a, above).

@@ -910,6 +910,10 @@ Plan, loosely, since the release date is not known:
      - `CHESHIRE_ACR_BATCH_CHECK=1` runs the loop as well and compares everything.
      - Later, `ResectionSphericalKernel::errors` builds a `Pose3` and makes a virtual `residual()`
        call per point; hoist and devirtualise, 8e-style, checked bit for bit.
+
+     **Batches done 2026-10-01** (step 9b, docs/04 and docs/15). SfMExpanding goes from 55.6 s to
+     28.3-29.5 s on 41 views and from 41.1 s to 31.9-33.0 s on the engine bay. The batch check finds
+     28 of 28 calls the loop's on each set. The `errors()` hoist is still open.
    - **5n's task seeds for the new triangulation** (S-M). `SfmTriangulation::process` triangulates
      the tracks on every core, drawing every track's LO-RANSAC samples from one shared
      `std::mt19937`. So SfMExpanding differs from run to run, upstream too. The legacy engine got a

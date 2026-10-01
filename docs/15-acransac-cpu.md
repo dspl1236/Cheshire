@@ -401,3 +401,48 @@ On the nightly comparison's inputs ([docs/04](04-validation.md)), SfMExpanding g
 either: 44 and 773 of the resection's arrays take it. Single-threaded, the output is byte for byte
 upstream's path. What is left in the resection is its threading: most rounds resect one view, on one
 thread.
+
+## One resection on every core (after 0.3.9, step 9b)
+
+After 9a the resection was still most of SfMExpanding on 41 views (35.7 of 55.3 s), for a reason
+outside AC-RANSAC: 28 of the 30 rounds resect a single view, and `ExpansionChunk` resects a round's
+views one per thread, so one thread ran `NACRANSAC`'s 50,000 iterations while eleven waited.
+
+`NACRANSAC`'s iterations are not independent, but what links them is small and rarely changes:
+- An iteration reads the generator (its draw), the sampling pool, the a-contrario mode, the
+  iteration count and `minNFA`.
+- It always advances the generator, and lowers `minNFA` when a model beats it.
+- It changes the pool, the mode or the count only when a better model has a negative NFA, when the
+  mode switches on, or when the reserve starts.
+
+So step 9b runs them in speculative batches:
+- The batch's draws are made in order on one thread, from the generator as the loop would leave it,
+  keeping its state after each draw.
+- The models are fitted and scored on every core: the residuals, then 8d's bound against `minNFA`
+  as the batch began, or the key sort and `bestNFA2` (9a's path).
+- The results are taken one iteration after another, as the loop takes them. A model that beats the
+  running `minNFA` gets its residuals again for the pairs. A skip stays right, since `minNFA` only
+  falls between the batch's start and the model's turn.
+- When an iteration changes the pool, the mode or the count, the batch's later iterations are
+  dropped. The generator goes back to its state after that iteration's draw, so every later draw is
+  the one the loop would make.
+
+Batches start at one iteration per thread and double, up to eight per thread, while nothing changes.
+The changes cluster at the start of a call, when `minNFA` falls fast.
+
+Where the batches run:
+- `ExpansionChunk` no longer opens a parallel region for a round with one view. That round's
+  `NACRANSAC` is then the only thread of its caller and may use them all.
+- RelativePoseEstimating runs one pair per thread inside its own parallel loop, so its calls keep
+  the loop.
+- `CHESHIRE_ACR_BATCH=0` keeps the loop everywhere.
+
+`CHESHIRE_ACR_BATCH_CHECK=1` runs the loop as well, from the generator's state at the call, and
+compares the model, the inliers, the error, the NFA and the generator's state afterwards. It found
+28 of 28 calls the same on 41 views, and 28 of 28 on the engine bay.
+
+SfMExpanding goes from 55.6 s to 28.3-29.5 s on 41 views, and from 41.1-41.3 s to 31.9-33.0 s on the
+engine bay. The resection goes from 35.7 s to 8.2 s and from 18.2 s to 8.9-10.0 s. The engine bay
+gains less because its large rounds (8 to 30 views) already resected one view per thread. On 41
+views SfMExpanding is now four comparable parts: resection 8.2 s, triangulation 7.7 s, bundle
+adjustment 4.8 s, the rest 7.3 s.

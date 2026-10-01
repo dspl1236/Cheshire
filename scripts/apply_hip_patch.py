@@ -1073,6 +1073,392 @@ STEP9A_RPE = [
      "    return EXIT_SUCCESS;\n}\n"),
 ]
 
+# 9b (after 0.3.9): NACRANSAC's iterations in speculative batches on every core when its caller runs on one thread, with
+# the loop's answer, generator state included. SfMExpanding's single-view rounds stop opening a parallel region, so the
+# resection is that caller. Anchors are 9a's text.
+STEP9B_NACR = [
+    ("#include \"ACRansac.hpp\"\n",
+     "#include \"ACRansac.hpp\"\n"
+     "#include <aliceVision/alicevision_omp.hpp>  // cheshire: step 9b\n"
+     "#include <cstring>  // cheshire\n#include <optional>  // cheshire\n"),
+    ("template <typename Kernel>\nstd::pair<double, double> NACRANSAC(const Kernel& kernel, std::mt19937& randomNumberGenerator,\n",
+     r"""// cheshire (step 9b, after 0.3.9): NACRANSAC's iterations on every core, with the loop's answer. SfMExpanding resects one
+// view per round most of the time (28 of 30 rounds on 41 views), so one thread ran the 50,000 iterations while the others
+// waited. The iterations depend on each other only through what taking a model changes: the sampling pool (a better model
+// with a negative NFA, or the reserve's start), the a-contrario mode (switched on once), the iteration count and minNFA.
+// So a batch of iterations draws its samples in order from the generator, saving its state after each draw; fits and
+// scores the models on every core - the residuals, then 8d's bound against minNFA as the batch began, or the key sort
+// and bestNFA2; and then takes the results one iteration after another as the loop does. A model that beats minNFA has
+// its residuals computed again for the pairs, and a skip stays right, since minNFA only falls. When an iteration changes
+// the pool, the mode or the count, the batch's later iterations are dropped and the generator goes back to its state
+// after that iteration's draw, so every draw is the loop's. Batches start one iteration per thread and double, up to
+// eight, while nothing changes. Only outside an active parallel region and with more than one thread: SfMExpanding's
+// single-view rounds; RelativePoseEstimating's pairs already run one per thread. CHESHIRE_ACR_BATCH=0 keeps the loop;
+// CHESHIRE_ACR_BATCH_CHECK=1 runs the loop as well, from the generator's state at the call, and compares everything
+// both return, the generator's state after included.
+inline bool& cheshireNacrInCheck()
+{
+    static thread_local bool on = false;
+    return on;
+}
+
+inline bool cheshireNacrBatchCheck()
+{
+    static const bool on = ::cheshire::env::flag("CHESHIRE_ACR_BATCH_CHECK");
+    return on;
+}
+
+struct CheshireNacrBatchStats
+{
+    std::atomic<long long> calls{0}, same{0};
+    std::atomic<bool> announced{false};
+};
+
+inline CheshireNacrBatchStats& cheshireNacrBatchStats()
+{
+    static CheshireNacrBatchStats s;
+    return s;
+}
+
+/// Whether this call can batch: on, not the check's own run of the loop, and the only thread of its caller
+inline bool cheshireNacrBatchUsable()
+{
+#if ALICEVISION_IS_DEFINED(ALICEVISION_HAVE_OPENMP)
+    static const bool on = ::cheshire::env::flag("CHESHIRE_ACR_BATCH", true);
+    if (!on || cheshireNacrInCheck() || omp_in_parallel() || omp_get_max_threads() < 2)
+        return false;
+    CheshireNacrBatchStats& st = cheshireNacrBatchStats();
+    if (!st.announced.load(std::memory_order_relaxed) && !st.announced.exchange(true))
+        ALICEVISION_LOG_INFO("cheshire: NACRANSAC runs its iterations in batches on every core when its caller runs on one thread, "
+                             "with the loop's answer (CHESHIRE_ACR_BATCH=0 for the loop, CHESHIRE_ACR_BATCH_CHECK=1 to compare)");
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// cheshire (step 9b): what CHESHIRE_ACR_BATCH_CHECK=1 found, once the caller's estimations are done (called from the
+/// module that ran them: on Windows each module has its own copy of these statics)
+inline void cheshireNacrBatchReport()
+{
+    const CheshireNacrBatchStats& s = cheshireNacrBatchStats();
+    if (s.calls.load())
+        ALICEVISION_LOG_INFO("cheshire: NACRANSAC batch check: " << s.same.load() << " of " << s.calls.load()
+                             << " calls returned the loop's model, inliers, error and NFA, and left the generator where the loop leaves it");
+}
+
+/// Bit for bit: a robustEstimation::MatrixModel, an Eigen matrix, or nothing to compare
+template <typename M>
+inline bool cheshireNacrSameModel(const M& a, const M& b)
+{
+    if constexpr (requires { a.getMatrix().data(); })
+        return a.getMatrix().size() == b.getMatrix().size() &&
+               std::memcmp(a.getMatrix().data(), b.getMatrix().data(), sizeof(*a.getMatrix().data()) * a.getMatrix().size()) == 0;
+    else if constexpr (requires { a.data(); a.size(); })
+        return a.size() == b.size() && std::memcmp(a.data(), b.data(), sizeof(*a.data()) * a.size()) == 0;
+    else
+        return true;
+}
+
+inline bool cheshireNacrSameBits(double a, double b) { return std::bit_cast<std::uint64_t>(a) == std::bit_cast<std::uint64_t>(b); }
+
+/// One thread's buffers: a model's residuals, their keys for the sort, and the pairs for an odd array
+struct CheshireNacrScratch
+{
+    std::vector<double> residuals;
+    std::vector<std::uint64_t> keys, keysScratch;
+    std::vector<ErrorIndex> pairs;
+};
+
+/// NACRANSAC's loop state, which the batches read and change as the loop does
+template <typename Kernel>
+struct CheshireNacrState
+{
+    const Kernel& kernel;
+    std::mt19937& rng;
+    std::vector<size_t>& vec_inliers;
+    typename Kernel::ModelT* model;
+    std::size_t& nIter;
+    std::size_t& nIterReserve;
+    bool& bACRansacMode;
+    std::vector<size_t>& vec_index;
+    double& minNFA;
+    double& errorMax;
+    std::vector<ErrorIndex>& vec_residuals;
+    std::vector<double>& vec_residuals_;
+    std::size_t sizeSample;
+    std::size_t nData;
+    double maxThreshold;
+    double loge0;
+    const std::vector<float>& vec_logc_n;
+    const std::vector<float>& vec_logc_k;
+    const CheshireAcrBoundSetup& bound;
+    bool pairSort;
+};
+
+/// The a-contrario score of sc.residuals against minNFA, by step 9a's path: the bound, then the key sort and bestNFA2, or
+/// the pairs for a negative, -0.0 or NaN residual. A skipped model scores (inf, sizeSample), as in the loop.
+template <typename Kernel>
+ErrorIndex cheshireNacrScore(const CheshireNacrState<Kernel>& st, CheshireNacrScratch& sc, double minNFA)
+{
+    const Kernel& kernel = st.kernel;
+    const bool skip = !st.pairSort && cheshireAcrCannotBeat(st.bound, sc.residuals, st.sizeSample, kernel.logalpha0(), st.loge0,
+                                                            st.maxThreshold, kernel.errorVectorDimension(), minNFA, false);
+    if (!st.pairSort && cheshireAcrBoundCheck())
+        ++cheshireAcrBoundStats().models;
+    ErrorIndex best(std::numeric_limits<double>::infinity(), st.sizeSample);
+    if (!skip || cheshireAcrBoundCheck())
+    {
+        bool odd = st.pairSort;
+        for (std::size_t i = 0; i < st.nData && !odd; ++i)
+        {
+            sc.keys[i] = std::bit_cast<std::uint64_t>(sc.residuals[i]);
+            odd = sc.keys[i] > 0x7FF0000000000000ull;  // negative, -0.0 or NaN
+        }
+        if (odd)
+        {
+            if (!st.pairSort)
+                cheshireAcrDeferred().fetch_add(1, std::memory_order_relaxed);
+            for (std::size_t i = 0; i < st.nData; ++i)
+                sc.pairs[i] = ErrorIndex(sc.residuals[i], i);
+            std::sort(sc.pairs.begin(), sc.pairs.end());
+            best = bestNFA2(st.sizeSample, kernel.logalpha0(), sc.pairs, st.loge0, st.maxThreshold, st.vec_logc_n, st.vec_logc_k,
+                            kernel.errorVectorDimension());
+        }
+        else
+        {
+            cheshireRadixSortResiduals(sc.keys, sc.keysScratch);
+            best = bestNFA2(st.sizeSample, kernel.logalpha0(), sc.keys, st.loge0, st.maxThreshold, st.vec_logc_n, st.vec_logc_k,
+                            kernel.errorVectorDimension());
+        }
+        if (skip)
+            cheshireAcrBoundCompare(best, minNFA);
+    }
+    if (skip)
+        best = ErrorIndex(std::numeric_limits<double>::infinity(), st.sizeSample);  // not below minNFA
+    return best;
+}
+
+/// One model of a batch: its inliers below maxThreshold out of a-contrario mode, and its score if it was scored
+struct CheshireNacrModelScore
+{
+    std::size_t nInlier = 0;
+    bool scored = false;
+    ErrorIndex best{std::numeric_limits<double>::infinity(), 0};
+};
+
+/// NACRANSAC's main loop in speculative batches; leaves st as the loop leaves it
+template <typename Kernel>
+void cheshireNacrBatches(CheshireNacrState<Kernel>& st)
+{
+    using ModelT = typename Kernel::ModelT;
+    struct Iteration
+    {
+        std::vector<std::size_t> sample;
+        std::vector<ModelT> models;
+        std::vector<CheshireNacrModelScore> scores;
+        std::mt19937 rngAfter;  // the generator after this iteration's draw
+    };
+    const int threads = omp_get_max_threads();
+    std::vector<CheshireNacrScratch> scratch(threads);
+    for (CheshireNacrScratch& sc : scratch)
+    {
+        sc.residuals.resize(st.nData);
+        sc.keys.resize(st.nData);
+        sc.pairs.resize(st.nData);
+    }
+    const std::size_t widest = std::size_t(threads) * 8;
+    std::vector<Iteration> batch(widest);
+    std::size_t width = std::size_t(threads);
+    std::size_t iter = 0;
+    while (iter < st.nIter)
+    {
+        const std::size_t n = std::min(width, st.nIter - iter);
+        const bool acMode = st.bACRansacMode;
+        const double minNFA0 = st.minNFA;
+        // the draws, in order, as the loop makes them
+        for (std::size_t b = 0; b < n; ++b)
+        {
+            Iteration& it = batch[b];
+            if (acMode)
+                uniformSample(st.rng, st.sizeSample, st.vec_index, it.sample);
+            else
+                uniformSample(st.rng, st.sizeSample, st.nData, it.sample);
+            it.rngAfter = st.rng;
+        }
+        // the models and their scores, on every core
+#pragma omp parallel for schedule(dynamic, 1)
+        for (int b = 0; b < int(n); ++b)
+        {
+            Iteration& it = batch[b];
+            CheshireNacrScratch& sc = scratch[omp_get_thread_num()];
+            it.models.clear();
+            st.kernel.fit(it.sample, it.models);
+            it.scores.assign(it.models.size(), CheshireNacrModelScore());
+            for (std::size_t k = 0; k < it.models.size(); ++k)
+            {
+                CheshireNacrModelScore& s = it.scores[k];
+                st.kernel.errors(it.models[k], sc.residuals);
+                if (!acMode)
+                {
+                    for (std::size_t i = 0; i < st.nData; ++i)
+                        s.nInlier += sc.residuals[i] <= st.maxThreshold;
+                    if (!(s.nInlier > 2.5 * st.sizeSample))
+                        continue;  // the loop scores it only once the mode is on
+                }
+                s.scored = true;
+                s.best = cheshireNacrScore(st, sc, minNFA0);
+            }
+        }
+        // the iterations in order, as the loop takes them
+        std::size_t next = iter + n;
+        for (std::size_t b = 0; b < n; ++b)
+        {
+            const std::size_t j = iter + b;
+            Iteration& it = batch[b];
+            bool better = false, changed = false;
+            for (std::size_t k = 0; k < it.models.size(); ++k)
+            {
+                const CheshireNacrModelScore& s = it.scores[k];
+                if (!st.bACRansacMode && s.nInlier > 2.5 * st.sizeSample)  // does the model is meaningful
+                {
+                    st.bACRansacMode = true;
+                    changed = true;  // the batch's later iterations were scored out of the mode
+                }
+                if (!st.bACRansacMode)
+                    continue;
+                ErrorIndex best = s.best;
+                if (!s.scored)  // a model after the one that switched the mode on: the loop scores it now
+                {
+                    st.kernel.errors(it.models[k], scratch[0].residuals);
+                    best = cheshireNacrScore(st, scratch[0], st.minNFA);
+                }
+                if (best.first < st.minNFA)
+                {
+                    // A better model was found: its residuals again, and the pairs for its inliers' order
+                    st.kernel.errors(it.models[k], st.vec_residuals_);
+                    for (std::size_t i = 0; i < st.nData; ++i)
+                        st.vec_residuals[i] = ErrorIndex(st.vec_residuals_[i], i);
+                    std::sort(st.vec_residuals.begin(), st.vec_residuals.end());
+                    better = true;
+                    st.minNFA = best.first;
+                    st.vec_inliers.resize(best.second);
+                    for (std::size_t i = 0; i < best.second; ++i)
+                        st.vec_inliers[i] = st.vec_residuals[i].second;
+                    st.errorMax = st.vec_residuals[best.second - 1].first;  // Error threshold
+                    if (st.model)
+                        *st.model = it.models[k];
+                }
+            }
+            // Early exit test -> no meaningful model found after nIterReserve*2 iterations
+            if (!st.bACRansacMode && j > st.nIterReserve * 2)
+            {
+                st.rng = it.rngAfter;
+                return;
+            }
+            // ACRANSAC optimization: draw samples among best set of inliers so far
+            if (st.bACRansacMode && ((better && st.minNFA < 0) || (j + 1 == st.nIter && st.nIterReserve)))
+            {
+                if (st.vec_inliers.empty())
+                {
+                    // No model found at all so far
+                    ++st.nIter;  // Continue to look for any model, even not meaningful
+                    --st.nIterReserve;
+                }
+                else
+                {
+                    st.vec_index = st.vec_inliers;
+                    if (st.nIterReserve)
+                    {
+                        st.nIter = j + 1 + st.nIterReserve;
+                        st.nIterReserve = 0;
+                    }
+                }
+                changed = true;
+            }
+            if (changed)
+            {
+                // the batch's later iterations drew from a pool, or were scored in a mode, the loop has left
+                st.rng = it.rngAfter;
+                next = j + 1;
+                break;
+            }
+        }
+        width = next == iter + n ? std::min(width * 2, widest) : std::size_t(threads);
+        iter = next;
+    }
+}
+
+""" + "template <typename Kernel>\nstd::pair<double, double> NACRANSAC(const Kernel& kernel, std::mt19937& randomNumberGenerator,\n"),
+    ("    vec_inliers.clear();\n\n    const std::size_t sizeSample = kernel.getMinimumNbRequiredSamples();\n",
+     "    vec_inliers.clear();\n"
+     "    // cheshire (step 9b): batches when the caller runs on one thread; CHESHIRE_ACR_BATCH_CHECK=1 keeps the generator's\n"
+     "    // state at the call, for the loop's run\n"
+     "    const bool cheshireBatch = cheshireNacrBatchUsable();\n"
+     "    std::optional<std::mt19937> cheshireRngIn;\n"
+     "    if (cheshireBatch && cheshireNacrBatchCheck())\n"
+     "        cheshireRngIn = randomNumberGenerator;\n"
+     "    const std::size_t cheshireNIterIn = nIter;\n"
+     "\n    const std::size_t sizeSample = kernel.getMinimumNbRequiredSamples();\n"),
+    ("    // Main estimation loop.\n    for(std::size_t iter = 0; iter < nIter; ++iter)\n",
+     "    if (cheshireBatch)  // cheshire (step 9b): the loop below, in batches on every core\n"
+     "    {\n"
+     "        CheshireNacrState<Kernel> cheshireState{kernel, randomNumberGenerator, vec_inliers, model, nIter, nIterReserve,\n"
+     "                                                bACRansacMode, vec_index, minNFA, errorMax, vec_residuals, vec_residuals_,\n"
+     "                                                sizeSample, nData, maxThreshold, loge0, vec_logc_n, vec_logc_k,\n"
+     "                                                cheshireBound, cheshirePairSort};\n"
+     "        cheshireNacrBatches(cheshireState);\n"
+     "    }\n"
+     "    else\n"
+     "    // Main estimation loop.\n    for(std::size_t iter = 0; iter < nIter; ++iter)\n"),
+    ("    if(minNFA >= 0)\n    {\n        vec_inliers.clear();\n    }\n\n    return std::make_pair(errorMax, minNFA);\n}\n",
+     r"""    if(minNFA >= 0)
+    {
+        vec_inliers.clear();
+    }
+
+    // cheshire (step 9b): CHESHIRE_ACR_BATCH_CHECK=1: the loop's answer from the generator's state at the call, and the
+    // state it leaves, against the batches'
+    if (cheshireRngIn)
+    {
+        std::mt19937 rngLoop = *cheshireRngIn;
+        std::vector<size_t> inliersLoop;
+        typename Kernel::ModelT modelLoop{};
+        cheshireNacrInCheck() = true;
+        const std::pair<double, double> loop = NACRANSAC(kernel, rngLoop, inliersLoop, cheshireNIterIn, model ? &modelLoop : nullptr, precision);
+        cheshireNacrInCheck() = false;
+        const bool same = cheshireNacrSameBits(loop.first, errorMax) && cheshireNacrSameBits(loop.second, minNFA) &&
+                          inliersLoop == vec_inliers && rngLoop == randomNumberGenerator &&
+                          (!model || cheshireNacrSameModel(modelLoop, *model));
+        CheshireNacrBatchStats& cheshireStats = cheshireNacrBatchStats();
+        ++cheshireStats.calls;
+        if (same)
+            ++cheshireStats.same;
+        else
+            ALICEVISION_LOG_WARNING("cheshire: NACRANSAC batch check: the batches' answer differs from the loop's (" << vec_inliers.size()
+                                    << " against " << inliersLoop.size() << " inliers, NFA " << minNFA << " against " << loop.second << ")");
+    }
+
+    return std::make_pair(errorMax, minNFA);
+}
+"""),
+]
+# The resection's parallel loop over a round's views: a single view runs outside a parallel region, so its NACRANSAC
+# batches on every core. Each view has its own generator, so the views' results do not depend on it.
+STEP9B_CHUNK = [
+    ("    ALICEVISION_LOG_INFO(\"Resection start\");\n    #pragma omp parallel for\n",
+     "    ALICEVISION_LOG_INFO(\"Resection start\");\n"
+     "    // cheshire (step 9b): one view runs outside a parallel region, so its resection's NACRANSAC can use every core\n"
+     "    #pragma omp parallel for if (viewsChunk.size() > 1)\n"),
+]
+STEP9B_EXPPROC = [
+    ("#include <aliceVision/robustEstimation/ACRansac.hpp>  // cheshire: step 9a\n",
+     "#include <aliceVision/robustEstimation/ACRansac.hpp>  // cheshire: step 9a\n"
+     "#include <aliceVision/robustEstimation/NACRansac.hpp>  // cheshire: step 9b\n"),
+    ("    robustEstimation::cheshireAcrBoundReport();  // cheshire (step 9a): CHESHIRE_ACR_BOUND_CHECK's count, from the library that resects\n",
+     "    robustEstimation::cheshireAcrBoundReport();  // cheshire (step 9a): CHESHIRE_ACR_BOUND_CHECK's count, from the library that resects\n"
+     "    robustEstimation::cheshireNacrBatchReport();  // cheshire (step 9b): CHESHIRE_ACR_BATCH_CHECK's count\n"),
+]
 
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
@@ -1163,6 +1549,7 @@ TRACKED = [
     "src/aliceVision/robustEstimation/NACRansac.hpp",  # 9a
     "src/aliceVision/sfm/pipeline/expanding/ExpansionProcess.cpp",  # 9a
     "src/software/pipeline/main_relativePoseEstimating.cpp",  # 9a
+    "src/aliceVision/sfm/pipeline/expanding/ExpansionChunk.cpp",  # 9b
 ]
 
 
@@ -6237,6 +6624,24 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                     sys.exit(f"an anchor of NACRANSAC's bound not found once in {rel} (9a)")
                 t = t.replace(old, new, 1)
         f9a.write_text(t, encoding="utf-8", newline="")
+
+    # 9b (after 0.3.9). NACRANSAC's iterations in speculative batches on every core when its caller runs on one thread,
+    #     with the loop's answer: the draws in order, the models fitted and scored in parallel, the results taken in
+    #     order, and on a change of pool, mode or count the later iterations dropped and the generator restored.
+    #     SfMExpanding's single-view rounds stop opening a parallel region, so their resection is such a caller.
+    #     CHESHIRE_ACR_BATCH=0 keeps the loop; CHESHIRE_ACR_BATCH_CHECK=1 compares every call with the loop, reported
+    #     from the sfm library. After 9a, whose text the anchors are.
+    for rel, pairs in (("src/aliceVision/robustEstimation/NACRansac.hpp", STEP9B_NACR),
+                       ("src/aliceVision/sfm/pipeline/expanding/ExpansionChunk.cpp", STEP9B_CHUNK),
+                       ("src/aliceVision/sfm/pipeline/expanding/ExpansionProcess.cpp", STEP9B_EXPPROC)):
+        f9b = AV / rel
+        t = f9b.read_text(encoding="utf-8")
+        if "step 9b" not in t:
+            for old, new in pairs:
+                if t.count(old) != 1:
+                    sys.exit(f"an anchor of NACRANSAC's batches not found once in {rel} (9b)")
+                t = t.replace(old, new, 1)
+        f9b.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports
