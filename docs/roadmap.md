@@ -890,8 +890,12 @@ Plan, loosely, since the release date is not known:
    - **Not carried, export:** ExportImages warps every image with its own "full complex transform"
      (`main_exportImages.cpp`), one view at a time.
 3. **Port** (M-L). The nodes already build in our tree and the replay harness exists
-   (`build/nightly-cmp/run_ours.py`, `cmp_poses.py`), so this need not wait for the release. In
-   order of what it buys:
+   (`build/nightly-cmp/run_ours.py`, `cmp_poses.py`, `replay.py`), so this need not wait for the
+   release. **State on 2026-10-01, after steps 9a-9e:** the new chain (TracksBuilding to
+   ExportImages) takes about 54 s on 41 views, where it took 285.0 s with our build before and our
+   legacy chain takes 77.5 s. On the engine bay it takes about 83 s against 201.7 s and 55.4 s. What
+   is left there is RelativePoseEstimating's 5-point solver, SfMExpanding's four comparable parts,
+   and ExportImages' warp. In order of what it buys:
    - **NACRANSAC: the key sort and 8d's bound** (M). The bound ports with one change: NACRANSAC
      takes the residuals as they are where ACRANSAC takes square roots, so the bucket table drops
      the root. The port is exact (same models, same draws), with `CHESHIRE_ACR_BOUND_CHECK`
