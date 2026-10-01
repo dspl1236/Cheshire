@@ -3837,3 +3837,49 @@ Loading the tracks takes 0.50 s instead of 0.79 s per process on 41 views, and 0
 | `CHESHIRE_TRACKS_PARSE_INTO=0` | 7.9 s | 21.6 s | 1.8 s | 2.3 s |
 
 The outputs are 9e's: the same pairs, and SfMBootStrapping's and SfMExpanding's files byte for byte.
+
+## After 0.3.9: ExportImages' profile and its warp on the device (step 9i, 2026-10-01)
+
+`CHESHIRE_EXPORT_PROFILE=1` prints the thread-seconds of ExportImages' phases, as
+`CHESHIRE_PDS_PROFILE` does PrepareDenseScene's. On the RX 9070 box:
+
+| run | read | warp | write | wall |
+|---|---|---|---|---|
+| 41 views, 12 image threads | 29.1 s | 32.6 s | 38.2 s | 9.7 s |
+| engine bay, 12 image threads | 67.1 s | 66.2 s | 59.7 s | 17.7 s |
+| 41 views, 4 image threads | 14.2 s | 15.2 s | 11.6 s | 11.2 s |
+| engine bay, 4 image threads | 30.1 s | 29.6 s | 20.7 s | 21.4 s |
+
+The warp is a third of the work at either count, and four threads take nearly as long as twelve.
+ExportImages is bound by memory bandwidth here: each phase moves a 190 MB float image.
+
+Step 9i puts the warp on the device. CheshireRemap, 8g's library, gains a functor for `remapInter`:
+- the map's stretch from its neighbours, in double;
+- where the map shrinks the source in both directions, the area average. Each product is taken in
+  double and rounded to float, the products are summed in float, and the sum is divided by the
+  weight rounded to float, as Rgba's `*` and Eigen's `+=` and `/=` do;
+- elsewhere, 8g's bilinear sampler, now one function that both functors call.
+
+The shared map (9g) goes up once per remapper, as doubles. As in 8g, a pool of remappers (at most
+4, `CHESHIRE_EXPORT_DEVICE_REMAPPERS`) takes the images, and a thread that finds none free runs
+`remapInter`.
+
+`CHESHIRE_EXPORT_DEVICE_CHECK=1` runs `remapInter` as well and compares. It found 31 of 31 device
+images identical on 41 views and 97 of 97 on the engine bay. The EXR files with and without the
+device are byte for byte the same (41/41, 107/107). After the sampler moved into its function, 8g's
+own check still finds PrepareDenseScene's device images identical to the CPU loop (33 of 33).
+
+Whether it pays depends on the host, as 8g found. Same harness, test images cleared between runs:
+
+| run | ExportImages, 41 views | engine bay |
+|---|---|---|
+| 12 image threads, the device | 9.2 s | 20.1 s, 22.0 s |
+| 12 image threads, the CPU | 9.0 s, 9.0 s | 20.8 s, 17.3 s |
+| 4 image threads, the device | 9.9 s | 18.4 s |
+| 4 image threads, the CPU | 10.4 s | 23.3 s |
+
+On twelve threads the device's copies (into pinned memory, over the bus and back) add to the memory
+traffic that bounds the other threads, and cancel what they save. With four image threads the device
+gains 5 % and 21 %. So, as in 8g, the device takes the warp by default only on a host of four
+hardware threads or fewer; `CHESHIRE_EXPORT_DEVICE=1` or `0` overrides. A 12-thread device run on
+41 views straight after a CPU run's writes took 12.0 s; that was the disk, as in 9g.

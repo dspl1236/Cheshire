@@ -103,5 +103,19 @@ Status Remapper::remap(const float* src, int srcWidth, int srcHeight, const floa
     return impl_->pipeline.remap(src, srcWidth, srcHeight, fill, dst);
 }
 
+Status Remapper::setMapDouble(const void* key, const double* map, int width, int height)
+{
+    if (!deviceAvailable())
+        return Status::NoDevice;
+    return impl_->pipeline.setMapDouble(key, map, width, height);
+}
+
+Status Remapper::remapInter(const float* src, int srcWidth, int srcHeight, const float fill[4], float* dst)
+{
+    if (!deviceAvailable())
+        return Status::NoDevice;
+    return impl_->pipeline.remapInter(src, srcWidth, srcHeight, fill, dst);
+}
+
 }  // namespace remap
 }  // namespace cheshire

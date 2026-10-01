@@ -13019,7 +13019,7 @@ index a8714f8..1cf26df 100644
      cmdline.add(requiredParams);
      cmdline.add(optionalParams);
 diff --git a/src/software/utils/main_exportImages.cpp b/src/software/utils/main_exportImages.cpp
-index 8eeebe4..9d5d0ef 100644
+index 8eeebe4..9e9b886 100644
 --- a/src/software/utils/main_exportImages.cpp
 +++ b/src/software/utils/main_exportImages.cpp
 @@ -4,6 +4,7 @@
@@ -13030,18 +13030,24 @@ index 8eeebe4..9d5d0ef 100644
  #include <aliceVision/sfmData/SfMData.hpp>
  #include <aliceVision/alicevision_omp.hpp>
  #include <aliceVision/sfmDataIO/sfmDataIO.hpp>
-@@ -15,6 +16,10 @@
+@@ -15,6 +16,16 @@
  #include <aliceVision/image/Sampler.hpp>
  #include <aliceVision/image/remap.hpp>
  #include <aliceVision/camera/IntrinsicScaleOffsetDisto.hpp>
 +#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 9d
++#include <aliceVision/image/cheshireUndistort.hpp>  // cheshire: step 9i
++#include <cstring>  // cheshire
++#include <type_traits>  // cheshire
 +#include <map>  // cheshire: step 9g
++#include <atomic>  // cheshire: step 9i
++#include <chrono>  // cheshire
++#include <cstdio>  // cheshire
 +#include <memory>  // cheshire
 +#include <tuple>  // cheshire
  #include <boost/program_options.hpp>
  
  // These constants define the current software version.
-@@ -79,6 +84,43 @@ oiio::ROI convertRodToRoi(const camera::IntrinsicBase & intrinsic, const oiio::R
+@@ -79,6 +90,43 @@ oiio::ROI convertRodToRoi(const camera::IntrinsicBase & intrinsic, const oiio::R
      return roi;
  }
  
@@ -13085,7 +13091,7 @@ index 8eeebe4..9d5d0ef 100644
  template<typename T>
  void ImageIntrinsicsTransform(const image::Image<T>& imageIn,
                      const camera::IntrinsicBase & intrinsicSource,
-@@ -99,20 +141,15 @@ void ImageIntrinsicsTransform(const image::Image<T>& imageIn,
+@@ -99,20 +147,38 @@ void ImageIntrinsicsTransform(const image::Image<T>& imageIn,
          yOffset = roi.ybegin;
      }
  
@@ -13098,13 +13104,34 @@ index 8eeebe4..9d5d0ef 100644
 +    if (cheshireIt != cheshireMaps.end())
      {
 -        for (int x = 0; x < widthRoi; ++x)
--        {
++        // cheshire (step 9i): on the device when a remapper is free (CheshireRemap, remapInter's arithmetic to the bit),
++        // else remapInter. CHESHIRE_EXPORT_DEVICE_CHECK=1 runs remapInter as well, keeps its pixels and counts the
++        // images that came out the same.
++        if constexpr (std::is_same_v<T, image::RGBAfColor>)
+         {
 -            const Vec2 undisto_pix(x + xOffset, y + yOffset);
 -
 -            // compute coordinates with distortion
 -            const Vec3 intermediate = intrinsicOutput.backProjectUnit(undisto_pix);
 -            map(y, x) = intrinsicSource.project(intermediate.homogeneous(), true);
--        }
++            const image::Image<Vec2>& cheshireMap = *cheshireIt->second;
++            const bool cheshireCheck = image::cheshireRemapInterDeviceCheck();
++            image::Image<T> cheshireDevice;
++            image::Image<T>& cheshireOut = cheshireCheck ? cheshireDevice : image_ud;
++            cheshireOut.resize(cheshireMap.width(), cheshireMap.height(), false);
++            const float cheshireFill[4] = {fillcolor(0), fillcolor(1), fillcolor(2), fillcolor(3)};
++            if (image::cheshireRemapInterOnDevice(cheshireIt->second.get(), reinterpret_cast<const double*>(cheshireMap.data()),
++                                                  cheshireMap.width(), cheshireMap.height(), reinterpret_cast<const float*>(imageIn.data()),
++                                                  imageIn.width(), imageIn.height(), cheshireFill, reinterpret_cast<float*>(cheshireOut.data())))
++            {
++                if (!cheshireCheck)
++                    return;
++                remapInter(imageIn, cheshireMap, fillcolor, image_ud);
++                image::cheshireRemapInterCheckCount(
++                  std::memcmp(cheshireDevice.data(), image_ud.data(), sizeof(T) * std::size_t(cheshireMap.width()) * std::size_t(cheshireMap.height())) == 0);
++                return;
++            }
+         }
 +        remapInter(imageIn, *cheshireIt->second, fillcolor, image_ud);
 +        return;
      }
@@ -13113,7 +13140,7 @@ index 8eeebe4..9d5d0ef 100644
  
      remapInter(imageIn, map, fillcolor, image_ud);
  }
-@@ -190,6 +227,26 @@ void ImageRemoveDistortion(const image::Image<T>& imageIn,
+@@ -190,6 +256,50 @@ void ImageRemoveDistortion(const image::Image<T>& imageIn,
      }
  }
  
@@ -13121,6 +13148,30 @@ index 8eeebe4..9d5d0ef 100644
 +// level 1, sixteen lines per zlib stream where upstream's default (Auto, which OpenImageIO writes as ZIPS) has one, for
 +// a cheaper write and read and the same pixels. CHESHIRE_EXPORT_EXR_COMPRESSION=method[:level] names another;
 +// "default" leaves upstream's options, and so upstream's files.
++// cheshire (step 9i): CHESHIRE_EXPORT_PROFILE=1 prints the thread-seconds each phase of the exported images took
++struct CheshireExportProfile
++{
++    std::atomic<long long> read{0}, prep{0}, warp{0}, write{0}, views{0};
++    ~CheshireExportProfile()
++    {
++        if (::cheshire::env::flag("CHESHIRE_EXPORT_PROFILE") && views.load())
++            std::fprintf(stderr, "[cheshire] ExportImages profile: %lld views; thread-seconds: read %.1f, mask+exposure %.1f, warp %.1f, write %.1f\n",
++                         views.load(), read.load() / 1e6, prep.load() / 1e6, warp.load() / 1e6, write.load() / 1e6);
++    }
++};
++static CheshireExportProfile& cheshireExportProfile()
++{
++    static CheshireExportProfile p;
++    return p;
++}
++static long long cheshireUsSince(std::chrono::steady_clock::time_point& t)
++{
++    const auto now = std::chrono::steady_clock::now();
++    const long long us = std::chrono::duration_cast<std::chrono::microseconds>(now - t).count();
++    t = now;
++    return us;
++}
++
 +static void cheshireExportCompression(image::ImageWriteOptions& o)
 +{
 +    static const std::string method = [] {
@@ -13140,23 +13191,51 @@ index 8eeebe4..9d5d0ef 100644
  /**
   * @Brief process an image such that they appear captured by a new virtual intrinsic
   * @param dstFileName the image output file name
-@@ -221,6 +278,7 @@ bool processImage(const std::string& dstFileName,
+@@ -221,6 +331,8 @@ bool processImage(const std::string& dstFileName,
  {
      image::Image<image::RGBAfColor> image;
      image::Image<image::RGBAfColor> image_ud;
 +    image::ExrDeflateWriteScope cheshireDeflateScope;  // cheshire (step 9d): the EXR below, deflated with libdeflate (8f)
++    auto cheshireT = std::chrono::steady_clock::now();  // cheshire (step 9i): the profile's clock
  
      oiio::ParamValueList metadata;
      try 
-@@ -309,6 +367,7 @@ bool processImage(const std::string& dstFileName,
+@@ -252,6 +364,8 @@ bool processImage(const std::string& dstFileName,
+     }
+ 
+ 
++    cheshireExportProfile().read += cheshireUsSince(cheshireT);  // cheshire (step 9i)
++
+     //Applying optional external mask to image
+     image::Image<unsigned char> mask;
+     if (tryLoadMask(&mask, masksFolders, viewId, srcFileName, maskExtension))
+@@ -283,6 +397,7 @@ bool processImage(const std::string& dstFileName,
+         }
+     }
+ 
++    cheshireExportProfile().prep += cheshireUsSince(cheshireT);  // cheshire (step 9i)
+     oiio::ROI roi, rod;
+     if (exportFullRod)
+     {
+@@ -304,12 +419,17 @@ bool processImage(const std::string& dstFileName,
+         ImageRemoveDistortion(image, sourceIntrinsic, outputIntrinsic, image_ud, image::RGBAfColor(0.0), rod);
+     }
+ 
++    cheshireExportProfile().warp += cheshireUsSince(cheshireT);  // cheshire (step 9i)
++
+     //Write the result
+     try
      {
          image::ImageWriteOptions writeOptions;
          writeOptions.storageDataType(storageDataType);
 +        cheshireExportCompression(writeOptions);  // cheshire (step 9d)
          writeImage(dstFileName, image_ud, writeOptions, metadata, roi);
++        cheshireExportProfile().write += cheshireUsSince(cheshireT);  // cheshire (step 9i)
++        ++cheshireExportProfile().views;
      }
      catch (...)
-@@ -320,6 +379,67 @@ bool processImage(const std::string& dstFileName,
+     {
+@@ -320,6 +440,67 @@ bool processImage(const std::string& dstFileName,
      return true;
  }
  
@@ -13224,7 +13303,7 @@ index 8eeebe4..9d5d0ef 100644
  /**
   * @Brief process a set of images such that they appear captured by a new virtual intrinsic
   * @param input the original sfmData to parse
-@@ -350,7 +470,16 @@ bool process(const sfmData::SfMData & input,
+@@ -350,7 +531,16 @@ bool process(const sfmData::SfMData & input,
      // for exposure correction
      const double medianCameraExposure = input.getMedianCameraExposureSetting().getExposure(); 
  

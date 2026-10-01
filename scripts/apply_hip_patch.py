@@ -1828,6 +1828,85 @@ bool loadTracks(TracksMap& mapTracks, const std::string& filename)
 """),
 ]
 
+# 9i (after 0.3.9), first part: ExportImages' per-phase profile, as 5g's CHESHIRE_PDS_PROFILE is PrepareDenseScene's.
+STEP9I_PROFILE = [
+    ("#include <map>  // cheshire: step 9g\n",
+     "#include <map>  // cheshire: step 9g\n#include <atomic>  // cheshire: step 9i\n#include <chrono>  // cheshire\n#include <cstdio>  // cheshire\n"),
+    ("static void cheshireExportCompression(image::ImageWriteOptions& o)\n",
+     r"""// cheshire (step 9i): CHESHIRE_EXPORT_PROFILE=1 prints the thread-seconds each phase of the exported images took
+struct CheshireExportProfile
+{
+    std::atomic<long long> read{0}, prep{0}, warp{0}, write{0}, views{0};
+    ~CheshireExportProfile()
+    {
+        if (::cheshire::env::flag("CHESHIRE_EXPORT_PROFILE") && views.load())
+            std::fprintf(stderr, "[cheshire] ExportImages profile: %lld views; thread-seconds: read %.1f, mask+exposure %.1f, warp %.1f, write %.1f\n",
+                         views.load(), read.load() / 1e6, prep.load() / 1e6, warp.load() / 1e6, write.load() / 1e6);
+    }
+};
+static CheshireExportProfile& cheshireExportProfile()
+{
+    static CheshireExportProfile p;
+    return p;
+}
+static long long cheshireUsSince(std::chrono::steady_clock::time_point& t)
+{
+    const auto now = std::chrono::steady_clock::now();
+    const long long us = std::chrono::duration_cast<std::chrono::microseconds>(now - t).count();
+    t = now;
+    return us;
+}
+
+static void cheshireExportCompression(image::ImageWriteOptions& o)
+"""),
+    ("    image::ExrDeflateWriteScope cheshireDeflateScope;  // cheshire (step 9d): the EXR below, deflated with libdeflate (8f)\n",
+     "    image::ExrDeflateWriteScope cheshireDeflateScope;  // cheshire (step 9d): the EXR below, deflated with libdeflate (8f)\n"
+     "    auto cheshireT = std::chrono::steady_clock::now();  // cheshire (step 9i): the profile's clock\n"),
+    ("    //Applying optional external mask to image\n",
+     "    cheshireExportProfile().read += cheshireUsSince(cheshireT);  // cheshire (step 9i)\n\n    //Applying optional external mask to image\n"),
+    ("    oiio::ROI roi, rod;\n",
+     "    cheshireExportProfile().prep += cheshireUsSince(cheshireT);  // cheshire (step 9i)\n    oiio::ROI roi, rod;\n"),
+    ("    //Write the result\n",
+     "    cheshireExportProfile().warp += cheshireUsSince(cheshireT);  // cheshire (step 9i)\n\n    //Write the result\n"),
+    ("        writeImage(dstFileName, image_ud, writeOptions, metadata, roi);\n",
+     "        writeImage(dstFileName, image_ud, writeOptions, metadata, roi);\n"
+     "        cheshireExportProfile().write += cheshireUsSince(cheshireT);  // cheshire (step 9i)\n"
+     "        ++cheshireExportProfile().views;\n"),
+    ("#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 9d\n",
+     "#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 9d\n"
+     "#include <aliceVision/image/cheshireUndistort.hpp>  // cheshire: step 9i\n#include <cstring>  // cheshire\n#include <type_traits>  // cheshire\n"),
+    ("    if (cheshireIt != cheshireMaps.end())\n    {\n        remapInter(imageIn, *cheshireIt->second, fillcolor, image_ud);\n        return;\n    }\n",
+     r"""    if (cheshireIt != cheshireMaps.end())
+    {
+        // cheshire (step 9i): on the device when a remapper is free (CheshireRemap, remapInter's arithmetic to the bit),
+        // else remapInter. CHESHIRE_EXPORT_DEVICE_CHECK=1 runs remapInter as well, keeps its pixels and counts the
+        // images that came out the same.
+        if constexpr (std::is_same_v<T, image::RGBAfColor>)
+        {
+            const image::Image<Vec2>& cheshireMap = *cheshireIt->second;
+            const bool cheshireCheck = image::cheshireRemapInterDeviceCheck();
+            image::Image<T> cheshireDevice;
+            image::Image<T>& cheshireOut = cheshireCheck ? cheshireDevice : image_ud;
+            cheshireOut.resize(cheshireMap.width(), cheshireMap.height(), false);
+            const float cheshireFill[4] = {fillcolor(0), fillcolor(1), fillcolor(2), fillcolor(3)};
+            if (image::cheshireRemapInterOnDevice(cheshireIt->second.get(), reinterpret_cast<const double*>(cheshireMap.data()),
+                                                  cheshireMap.width(), cheshireMap.height(), reinterpret_cast<const float*>(imageIn.data()),
+                                                  imageIn.width(), imageIn.height(), cheshireFill, reinterpret_cast<float*>(cheshireOut.data())))
+            {
+                if (!cheshireCheck)
+                    return;
+                remapInter(imageIn, cheshireMap, fillcolor, image_ud);
+                image::cheshireRemapInterCheckCount(
+                  std::memcmp(cheshireDevice.data(), image_ud.data(), sizeof(T) * std::size_t(cheshireMap.width()) * std::size_t(cheshireMap.height())) == 0);
+                return;
+            }
+        }
+        remapInter(imageIn, *cheshireIt->second, fillcolor, image_ud);
+        return;
+    }
+"""),
+]
+
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
     if new in text:
@@ -7078,6 +7157,17 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                 sys.exit("an anchor of the tracks file's parse not found once in trackIO.cpp (9h)")
             t = t.replace(old, new, 1)
     f9h.write_text(t, encoding="utf-8", newline="")
+
+    # 9i (after 0.3.9). ExportImages' profile: CHESHIRE_EXPORT_PROFILE=1 prints the thread-seconds of reading, the mask
+    #     and exposure, the warp and writing, as CHESHIRE_PDS_PROFILE does for PrepareDenseScene. After 9g.
+    f9i = AV / "src/software/utils/main_exportImages.cpp"
+    t = f9i.read_text(encoding="utf-8")
+    if "step 9i" not in t:
+        for old, new in STEP9I_PROFILE:
+            if t.count(old) != 1:
+                sys.exit("an anchor of ExportImages' profile not found once in main_exportImages.cpp (9i)")
+            t = t.replace(old, new, 1)
+    f9i.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports

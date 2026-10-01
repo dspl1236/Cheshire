@@ -56,6 +56,13 @@ class Remapper
     // fill: the colour of the pixels outside the source.
     Status remap(const float* src, int srcWidth, int srcHeight, const float fill[4], float* dst);
 
+    // ExportImages' warp (step 9i), AliceVision's remapInter: map holds 2 doubles (x, y) per output pixel, width x
+    // height, row-major, as Image<Vec2> does; uploaded unless key, width and height are the last double map's.
+    Status setMapDouble(const void* key, const double* map, int width, int height);
+
+    // src through the double map into dst (the map's width x height RGBA floats), remapInter's arithmetic to the bit
+    Status remapInter(const float* src, int srcWidth, int srcHeight, const float fill[4], float* dst);
+
   private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

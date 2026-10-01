@@ -39,5 +39,23 @@ bool cheshireRemapOnDevice(const void* key, const float* coords, int width, int 
 /// cheshire (step 8g): the check mode's count, one image compared with the CPU loop
 void cheshireRemapCheckCount(bool identical);
 
+/// cheshire (step 9i): a device is present and CHESHIRE_EXPORT_DEVICE lets ExportImages warp on it (checked once)
+bool cheshireRemapInterDeviceEnabled();
+
+/// cheshire (step 9i): CHESHIRE_EXPORT_DEVICE_CHECK=1, every device warp compared with remapInter on the CPU
+bool cheshireRemapInterDeviceCheck();
+
+/**
+ * @brief cheshire (step 9i): src (srcWidth x srcHeight RGBA floats) warped through map (2 doubles per output pixel, as
+ * Image<Vec2> holds them, width x height) into dst (width x height RGBA floats) on the device, with remapInter's
+ * arithmetic to the bit; fill for the pixels outside. key names the map (uploaded once per remapper). False when it
+ * did not run; the caller then runs remapInter.
+ */
+bool cheshireRemapInterOnDevice(const void* key, const double* map, int width, int height, const float* src, int srcWidth,
+                                int srcHeight, const float fill[4], float* dst);
+
+/// cheshire (step 9i): the check mode's count, one image compared with remapInter
+void cheshireRemapInterCheckCount(bool identical);
+
 }  // namespace image
 }  // namespace aliceVision

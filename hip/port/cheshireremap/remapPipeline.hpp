@@ -22,6 +22,7 @@ class Pipeline
     ~Pipeline()
     {
         b_.release(dMap_);
+        b_.release(dMapD_);
         b_.release(dSrc_);
         b_.release(dDst_);
     }
@@ -73,6 +74,54 @@ class Pipeline
         return b_.finish() ? Status::Ok : Status::DeviceError;
     }
 
+    // ExportImages' warp (step 9i): remapInter's map as AliceVision holds it, 2 doubles (x, y) per output pixel,
+    // uploaded unless key, width and height are the last double map's
+    Status setMapDouble(const void* key, const double* map, int width, int height)
+    {
+        if (!map || width <= 0 || height <= 0)
+            return Status::InvalidArgument;
+        if (dMapD_ && key == mapKeyD_ && width == widthD_ && height == heightD_)
+            return Status::Ok;
+        if (!b_.begin())
+            return Status::DeviceError;
+        const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 2 * sizeof(double);
+        if (bytes > mapBytesD_)
+        {
+            b_.release(dMapD_);
+            dMapD_ = static_cast<double*>(b_.alloc(bytes));
+            mapBytesD_ = dMapD_ ? bytes : 0;
+        }
+        mapKeyD_ = nullptr;
+        if (!dMapD_)
+            return Status::DeviceError;
+        b_.upload(dMapD_, map, bytes);
+        if (!b_.finish())
+            return Status::DeviceError;
+        mapKeyD_ = key;
+        widthD_ = width;
+        heightD_ = height;
+        return Status::Ok;
+    }
+
+    // remapInter through the double map: src up, RemapInterPixel over every output pixel, the result down
+    Status remapInter(const float* src, int srcWidth, int srcHeight, const float fill[4], float* dst)
+    {
+        if (!src || !dst || !fill || srcWidth <= 0 || srcHeight <= 0 || !dMapD_)
+            return Status::InvalidArgument;
+        if (!b_.begin())
+            return Status::DeviceError;
+        const size_t srcBytes = static_cast<size_t>(srcWidth) * static_cast<size_t>(srcHeight) * 4 * sizeof(float);
+        const size_t n = static_cast<size_t>(widthD_) * static_cast<size_t>(heightD_);
+        const size_t dstBytes = n * 4 * sizeof(float);
+        if (!reserve(dSrc_, srcCap_, srcBytes) || !reserve(dDst_, dstCap_, dstBytes))
+            return Status::DeviceError;
+        b_.upload(dSrc_, src, srcBytes);
+        RemapInterPixel f{dSrc_, srcWidth, srcHeight, dMapD_, widthD_, heightD_, dDst_, {fill[0], fill[1], fill[2], fill[3]}};
+        b_.forEach(n, f);
+        b_.download(dst, dDst_, dstBytes);
+        return b_.finish() ? Status::Ok : Status::DeviceError;
+    }
+
   private:
     bool reserve(float*& p, size_t& cap, size_t bytes)
     {
@@ -89,6 +138,10 @@ class Pipeline
     int width_ = 0, height_ = 0;
     float* dMap_ = nullptr;
     size_t mapBytes_ = 0;
+    const void* mapKeyD_ = nullptr;  // step 9i: remapInter's double map
+    int widthD_ = 0, heightD_ = 0;
+    double* dMapD_ = nullptr;
+    size_t mapBytesD_ = 0;
     float* dSrc_ = nullptr;
     size_t srcCap_ = 0;
     float* dDst_ = nullptr;

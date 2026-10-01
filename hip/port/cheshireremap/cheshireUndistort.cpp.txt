@@ -47,6 +47,21 @@ struct CheshireRemapStats
     }
 } g_cheshireRemapStats;
 
+// step 9i: ExportImages' warp, counted apart
+struct CheshireRemapInterStats
+{
+    std::atomic<long long> device{0}, busy{0}, handedBack{0}, checked{0}, identical{0};
+    std::atomic<bool> announced{false}, warned{false};
+    ~CheshireRemapInterStats()
+    {
+        if (device.load() || busy.load() || handedBack.load())
+            std::fprintf(stderr, "[cheshire] export warp on the device: %lld images (CheshireRemap), %lld on the CPU while every remapper was busy, "
+                         "%lld handed back to remapInter\n", device.load(), busy.load(), handedBack.load());
+        if (checked.load())
+            std::fprintf(stderr, "[cheshire] export warp device check: %lld of %lld images identical to remapInter\n", identical.load(), checked.load());
+    }
+} g_cheshireRemapInterStats;
+
 #if defined(CHESHIRE_HAVE_REMAP)
 // Remappers up to the bound, fixed at the first image from its size and the device memory then free; a thread that
 // finds none idle gets nullptr and runs the CPU loop. Created once and never destroyed: at process exit the device
@@ -54,17 +69,23 @@ struct CheshireRemapStats
 class CheshireRemapPool
 {
   public:
+    // step 9i: the variable that sets the bound and the work the log line names, one pool per use
+    CheshireRemapPool(const char* env, const char* what)
+      : _env(env),
+        _what(what)
+    {}
+
     ::cheshire::remap::Remapper* tryAcquire(std::size_t bytesPerRemapper)
     {
         std::lock_guard<std::mutex> lock(_mutex);
         if (_max < 0)
         {
             const long long hw = std::max(1u, std::thread::hardware_concurrency());
-            long long want = ::cheshire::env::integer("CHESHIRE_UNDISTORT_DEVICE_REMAPPERS", std::min(4LL, hw));
+            long long want = ::cheshire::env::integer(_env, std::min(4LL, hw));
             const long long fit = static_cast<long long>(0.6 * double(::cheshire::remap::Remapper::deviceFreeBytes()) / double(std::max<std::size_t>(1, bytesPerRemapper)));
             _max = static_cast<int>(std::max(0LL, std::min(want, fit)));
-            ALICEVISION_LOG_INFO("cheshire: undistort on the device: up to " << _max << " remappers (" << (bytesPerRemapper >> 20)
-                                 << " MB of device memory each; CHESHIRE_UNDISTORT_DEVICE_REMAPPERS to change)");
+            ALICEVISION_LOG_INFO("cheshire: " << _what << " on the device: up to " << _max << " remappers (" << (bytesPerRemapper >> 20)
+                                 << " MB of device memory each; " << _env << " to change)");
         }
         if (!_idle.empty())
         {
@@ -84,6 +105,8 @@ class CheshireRemapPool
     }
 
   private:
+    const char* _env;
+    const char* _what;
     std::mutex _mutex;
     std::vector<std::unique_ptr<::cheshire::remap::Remapper>> _all;
     std::vector<::cheshire::remap::Remapper*> _idle;
@@ -122,7 +145,7 @@ bool cheshireRemapOnDevice(const void* key, const float* coords, int width, int 
 #if defined(CHESHIRE_HAVE_REMAP)
     if (!cheshireRemapDeviceEnabled())
         return false;
-    static CheshireRemapPool* pool = new CheshireRemapPool();
+    static CheshireRemapPool* pool = new CheshireRemapPool("CHESHIRE_UNDISTORT_DEVICE_REMAPPERS", "undistort");
     const std::size_t pixels = std::size_t(width) * std::size_t(height);
     const std::size_t bytes = pixels * 2 * sizeof(float) + pixels * 4 * sizeof(float) + std::size_t(srcWidth) * std::size_t(srcHeight) * 4 * sizeof(float);
     ::cheshire::remap::Remapper* r = pool->tryAcquire(bytes);
@@ -166,6 +189,78 @@ void cheshireRemapCheckCount(bool identical)
     ++g_cheshireRemapStats.checked;
     if (identical)
         ++g_cheshireRemapStats.identical;
+}
+
+// cheshire (step 9i): ExportImages' warp on the device. As for 8g, by default only on a host of four hardware threads or
+// fewer: on the twelve-thread RX 9070 box the device's copies cancel what it saves the CPU (9.2 s against 9.0 s on 41
+// views), with four image threads it gains 5-21 % (docs/04, 9i). CHESHIRE_EXPORT_DEVICE=1 or 0 overrides that.
+bool cheshireRemapInterDeviceEnabled()
+{
+#if defined(CHESHIRE_HAVE_REMAP)
+    static const bool on = ::cheshire::env::flag("CHESHIRE_EXPORT_DEVICE", std::thread::hardware_concurrency() <= 4) &&
+                           ::cheshire::remap::Remapper::deviceAvailable();
+    return on;
+#else
+    return false;
+#endif
+}
+
+bool cheshireRemapInterDeviceCheck()
+{
+    static const bool on = ::cheshire::env::flag("CHESHIRE_EXPORT_DEVICE_CHECK");
+    return on;
+}
+
+bool cheshireRemapInterOnDevice(const void* key, const double* map, int width, int height, const float* src, int srcWidth,
+                                int srcHeight, const float fill[4], float* dst)
+{
+#if defined(CHESHIRE_HAVE_REMAP)
+    if (!cheshireRemapInterDeviceEnabled())
+        return false;
+    static CheshireRemapPool* pool = new CheshireRemapPool("CHESHIRE_EXPORT_DEVICE_REMAPPERS", "export warp");
+    const std::size_t pixels = std::size_t(width) * std::size_t(height);
+    const std::size_t bytes = pixels * 2 * sizeof(double) + pixels * 4 * sizeof(float) + std::size_t(srcWidth) * std::size_t(srcHeight) * 4 * sizeof(float);
+    ::cheshire::remap::Remapper* r = pool->tryAcquire(bytes);
+    if (r == nullptr)
+    {
+        ++g_cheshireRemapInterStats.busy;
+        return false;
+    }
+    ::cheshire::remap::Status st = r->setMapDouble(key, map, width, height);
+    if (st == ::cheshire::remap::Status::Ok)
+        st = r->remapInter(src, srcWidth, srcHeight, fill, dst);
+    pool->release(r);
+    if (st != ::cheshire::remap::Status::Ok)
+    {
+        ++g_cheshireRemapInterStats.handedBack;
+        if (!g_cheshireRemapInterStats.warned.exchange(true))
+            ALICEVISION_LOG_WARNING("cheshire: the export warp on the device failed (" << ::cheshire::remap::statusName(st) << "); remapInter takes it");
+        return false;
+    }
+    ++g_cheshireRemapInterStats.device;
+    if (!g_cheshireRemapInterStats.announced.exchange(true))
+        ALICEVISION_LOG_INFO("cheshire: ExportImages' warp on the device (CheshireRemap, remapInter's arithmetic to the bit; "
+                             "CHESHIRE_EXPORT_DEVICE=0 for the CPU, CHESHIRE_EXPORT_DEVICE_CHECK=1 to compare every image)");
+    return true;
+#else
+    (void)key;
+    (void)map;
+    (void)width;
+    (void)height;
+    (void)src;
+    (void)srcWidth;
+    (void)srcHeight;
+    (void)fill;
+    (void)dst;
+    return false;
+#endif
+}
+
+void cheshireRemapInterCheckCount(bool identical)
+{
+    ++g_cheshireRemapInterStats.checked;
+    if (identical)
+        ++g_cheshireRemapInterStats.identical;
 }
 
 }  // namespace image

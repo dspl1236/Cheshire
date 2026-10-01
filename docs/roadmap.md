@@ -934,7 +934,9 @@ Plan, loosely, since the release date is not known:
      docs/04). ExportImages goes from 28.3 s to 12.6 s on 41 views and from 57.0 s to 23.6 s on the
      engine bay, with the same pixels; our PrepareDenseScene takes 9.6 s and 17.6 s. **The warp map
      once per camera done the same day** (step 9g, docs/04): 9.6 s and 18.1 s, the same files.
-     Still open: the device warp.
+     **The device warp too** (step 9i, docs/04): `remapInter` on the device, to the bit. As for 8g,
+     it is on by default only on hosts of four threads or fewer. There it gains 5-21 %; on the RX
+     9070 box's twelve threads its copies cancel the gain.
    - **The tracks file without the DOM copies** (S, exact). **Done 2026-10-01** (step 9e, docs/04).
      `dataio/json.hpp`'s map conversions copied the parsed arrays. RelativePoseEstimating goes from
      31.2 s to 23.0 s on the engine bay, and SfMBootStrapping from 4.0 s to 2.5 s, with the same
