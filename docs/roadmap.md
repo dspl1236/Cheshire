@@ -1110,6 +1110,21 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 - **GPU matcher throughput** (L). Register tiling is "a project, not a patch"
   (`docs/07-gpu-matcher.md:125-129`). Smaller steps first: run the shelved sliced variant
   (`CHESHIRE_MATCHER_SLICED=1`) on RDNA1/2, and batch per search instead of per pair.
+- **The matcher on the matrix cores, exact** (L; added 2026-10-01 from the user's question about FP8). Brute-force
+  matching of 8-bit SIFT descriptors is an integer matrix multiply (every query against every database row), and
+  RDNA3 and RDNA4 have WMMA with 8-bit integer inputs and 32-bit integer sums: a 16x16x16 block per instruction
+  against today's packed `v_dot4_u32_u8` (four multiply-adds). Integer sums keep the distances, so the matches, exactly
+  what they are (the largest dot product of two 128-byte descriptors is 128 x 255 x 255, about 8.3 M, far inside
+  int32); the iu8 instruction's operand-signedness flags take the unsigned bytes. RDNA1/2 have no WMMA and keep the
+  dot4 kernel; the CUDA build's counterpart would be the int8 tensor cores (sm_72+; the GTX 1080 Ti has none). FP8
+  itself is no use here: it would change the output, which every port is held to.
+  - Why it matters now: with the Fast Ransac counts the GPU matching phase is most of FeatureMatching on large sets
+    (False Door, 0.3.9: about 375 of 443 s; geometric filtering 67 s). Measure the phase's share on the engine bay and
+    the False Door first, then write the kernel behind a switch with the existing self-check
+    (`CHESHIRE_GPU_MATCHER_CHECK=1`, every sampled query against upstream's brute force) as the gate.
+  - Open points: the 2-NN selection still runs per query after the block products; descriptor counts are not multiples
+    of 16 (pad, as the dot4 kernel's tiles do); gfx11-generic and gfx12-generic code objects must carry the WMMA
+    variants of their family.
 
 ### Other
 
