@@ -34,6 +34,13 @@ set HERE=%~dp0
 set MR=%~1
 set PKG=%~2
 if "%PKG%"=="" ( echo usage: %~nx0 ^<Meshroom dir^> ^<Cheshire package dir^> ^| --unpair & exit /b 1 )
+rem A trailing backslash (C:\Meshroom-2025.1.0\) would end "%MR%" in \" on the PowerShell calls below, which
+rem powershell.exe reads as an escaped quote: the folder and the next argument arrived as one, so --unpair ran
+rem the template script's install and failed, and the pairing check got a mangled package path. Each folder is
+rem made absolute instead, with any trailing backslashes gone (C:\Meshroom\\ too); a drive root keeps its
+rem backslash and gains a dot (Q:\.), since a bare Q: would be the current folder on that drive.
+for %%I in ("%MR%\.") do set "MR=%%~fI"
+if "%MR:~-1%"=="\" set "MR=%MR%."
 set BIN=%MR%\aliceVision\bin
 if not exist "%BIN%\" ( echo %BIN% not found: is %MR% a Meshroom 2023.3 or 2025.1 Windows install? & exit /b 1 )
 if /i "%PKG%"=="--unpair" (
@@ -43,6 +50,10 @@ if /i "%PKG%"=="--unpair" (
   if exist "%HERE%meshroom-templates.ps1" powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%meshroom-templates.ps1" "%MR%" remove
   exit /b 0
 )
+
+rem The package folder as the Meshroom folder above (after --unpair, which is not a folder).
+for %%I in ("%PKG%\.") do set "PKG=%%~fI"
+if "%PKG:~-1%"=="\" set "PKG=%PKG%."
 
 rem Which shape is this? A bundle is the one with gpu\ and cheshire-run.cmd; its node binaries live
 rem in fam\<family>\bin (or common\bin when it holds a single family), and its payload DLLs - popsift
@@ -106,7 +117,8 @@ if defined FEOK ( call :pairif aliceVision_featureExtraction ) else ( echo packa
 rem Meshroom 2025.1 and later (0.3.9): the "Photogrammetry Fast Ransac" and "Photogrammetry Draft Fast Ransac"
 rem pipeline templates, the installed Photogrammetry and Draft templates with Meshroom 2023.3's two RANSAC
 rem counts set in the graph (FeatureMatching maxIteration 2048, and localizerEstimatorMaxIterations 4096 on
-rem StructureFromMotion, or on SfMExpanding in the new pipeline; 2025.1's defaults are 50000). Meshroom's own
+rem StructureFromMotion, or on SfMExpanding in the new pipeline; 2025.1's defaults are 50000), and since
+rem after 0.3.9 "Photogrammetry Experimental Fast Ransac" from 2025.1's new-pipeline template. Meshroom's own
 rem templates are not touched, so the paired nodes keep its defaults. Removed by --unpair. See
 rem meshroom-templates.ps1.
 if exist "%HERE%meshroom-templates.ps1" ( powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%meshroom-templates.ps1" "%MR%" install ) else ( echo meshroom-templates.ps1 not beside this script: no Fast Ransac templates )

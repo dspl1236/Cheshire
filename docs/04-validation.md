@@ -4013,3 +4013,76 @@ SfMExpanding's 4096 alone, on the same tracks, pairs and bootstrap as 9j's defau
 and from 8.8 s to 1.5 s; after 9a and 9b it was already a small part. All views are placed. The
 landmarks are 80,672 against 80,677 and 134,804 against 134,427, and the centres move 0.0024 % and
 0.12 %.
+
+### Photogrammetry Experimental's copy, and the 2025.1 gate (2026-10-01)
+
+On the user's OK, both generators also write "Photogrammetry Experimental Fast Ransac"
+(`photogrammetryExperimentalFastRansac.mg`) from 2025.1's Photogrammetry Experimental: the stock file plus
+FeatureMatching's 2048 and SfMExpanding's 4096. A Meshroom without that template is told so and goes on.
+Photogrammetry and Draft still come out in 0.3.9's bytes. `verify_end_to_end.py` gained two configs that
+run on 2025.1 only: `experimental` (the stock template; its 50000 and 50000 checked in the node logs) and
+`fastransacexp` (the copy, by name; 2048 and 4096 checked). Their marker set, `NEWCHAIN_MARKERS`, drops
+StructureFromMotion and PrepareDenseScene. The new chain does not run them, and its own nodes run
+Meshroom's binaries until the pivot pairs them.
+
+The gate: Meshroom 2025.1 on the RX 9070, with the v0.3.9 Windows AMD package carrying the new pairing
+scripts (`build/gate-fr`), as 0.3.9 itself was a repack.
+
+| config | mini6 | 41 views |
+|---|---|---|
+| experimental | ok, 6/6 ports, 65 s | ok, 6/6 ports, 744 s |
+| fastransacexp | ok, 6/6 ports, 60 s | ok, 6/6 ports, 463 s |
+
+On 41 views, Meshroom's own SfMExpanding takes 334.1 s at 50000 and 90.5 s at 4096. FeatureMatching
+goes from 37.0 s to 20.6 s, and the graph's node times sum to 742.5 s and 457.1 s. Both runs have the
+same features, byte for byte. Both place all 41 views, with 91,545 and 91,489 landmarks, and the
+cameras agree to 0.016 % of the scene's radius (0.011 % on mini6).
+
+`base` and `fastransac` failed on mini6 in that run for one line alone: the 5-point marker step 9j added
+to StructureFromMotion's markers today, which v0.3.9's incrementalSfM predates. Every other marker was
+there, the RANSAC values were checked, and the depth maps were byte for byte the 0.3.9 gate's
+(`7c5369fc`, `352f0abe`). The package that ships next carries 9j and prints it.
+
+Two adversarial review rounds checked the generators and the harness. Each claimed defect was given
+to two skeptics, who tried to refute it, so a finding stood only when both reproduced it. The first
+round (40 agents) confirmed eight defects, most from 0.3.9:
+- a same-named file counted as ours by substring, so a user's 20480 or 40960 was overwritten on
+  pairing and deleted on `--unpair`;
+- a Meshroom folder with a trailing backslash ran the template script's install on `--unpair`, which
+  then failed;
+- an unparseable edit stopped the whole script, so the templates after it were never written;
+- a layout difference was reported as the wrong graph;
+- the Linux script crashed on a user's non-UTF-8 file under our name;
+- the two scripts disagreed on a value already set under another case, or set to null;
+- the harness could not name a failed chunked node.
+
+The second round (91 agents) confirmed the fixes. It found three regressions in the backslash fix:
+- an empty argument became a syntax error that also stopped a calling batch;
+- a package at a drive root became that drive's current folder;
+- two trailing backslashes still broke it.
+It also found the remaining Windows/Linux differences on malformed templates.
+
+Now both scripts follow the same rules:
+- a member is looked up by its exact name, as Python's dicts do;
+- anything not shaped as expected is "not the graph this expects";
+- the input already set under any case counts as set;
+- ownership is tested on the bytes;
+- `meshroom-pair.cmd` makes both folders absolute (`%~f`), and a drive root keeps its backslash
+  behind a dot (`Q:\.`).
+
+`scripts/check_fast_ransac_templates.py <Meshroom>` checks both scripts from here on. On the stock
+templates it asserts:
+- each copy is the stock file plus exactly the two lines;
+- Windows and Linux write the same bytes;
+- a second install writes them again;
+- remove leaves only the stock files.
+It also feeds 29 crafted inputs from the reviews (user files under our names; truncated, empty, blank,
+non-object, deeply nested or differently laid-out templates; inputs of other types; keys in another
+case). Each must end the same way on both platforms, with the outcome expected for it. All hold on
+2025.1 and on the nightly. The gate with the final scripts (`build/gate-fr/gate3.sh`) passed 4 of 4 on
+mini6, and unpairing left Meshroom 2025.1 as it was.
+
+Across the three mini6 runs, `base` and `fastransac` gave the same depth maps each time, as the 0.3.9
+gate did. `experimental` and `fastransacexp` gave new ones each time. Meshroom's own SfMExpanding
+still draws every track's samples from one generator shared by its threads: the race step 9c removed
+from ours.

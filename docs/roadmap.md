@@ -962,9 +962,12 @@ Plan, loosely, since the release date is not known:
      the nightly, Photogrammetry Fast Ransac is now written, and Meshroom loads it with 2048 and
      4096. On the new chain, the template takes our FeatureMatching-to-SfMExpanding from 68.4 s to
      39.9 s on 41 views and from 411.5 s to 85.6 s on the engine bay. Every view is placed, and
-     the cameras move less than other RANSAC draws move them. 2025.1's Photogrammetry Experimental,
-     the same pipeline, gets no Fast Ransac copy: 0.3.9 wrote only Photogrammetry and Draft, the
-     user's choice.
+     the cameras move less than other RANSAC draws move them. **2025.1's Photogrammetry Experimental,
+     the same pipeline, gets a Fast Ransac copy too** (the user's OK, same day). Gated on 2025.1 on
+     the RX 9070 (`verify_end_to_end.py` configs `experimental` and `fastransacexp`): Meshroom's own
+     SfMExpanding goes from 334.1 s to 90.5 s on 41 views, and the whole run from 744 s to 463 s,
+     with all views placed and the cameras within 0.016 %. The README and USING still name two
+     templates; they change at the release.
 4. **Pivot** (M-L, smaller than first thought) when a Meshroom release ships the new pipeline:
    update the submodule to that release's AliceVision (anchors hold today), ship and pair the new
    binaries, build with USD, and port 5r, 5s and the ranking ties to SfmBundle and

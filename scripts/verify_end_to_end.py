@@ -231,6 +231,13 @@ BINARY = {
 # defaults are the counts the Fast Ransac template sets.
 RANSAC_2025 = {"FeatureMatching": [r"\* maxIteration = 50000\b"],
                "StructureFromMotion": [r"\* localizerEstimatorMaxIterations = 50000\b"]}
+# After 0.3.9: upstream's new SfM pipeline, Meshroom 2025.1's Photogrammetry Experimental. SfMExpanding takes
+# StructureFromMotion's place and IntrinsicsTransforming + ExportImages PrepareDenseScene's. The package pairs
+# none of the new nodes yet (the roadmap's pivot step), so those two markers drop out and every paired node
+# keeps its own; SfMExpanding's resection has the same 50000 default as StructureFromMotion's.
+NEWCHAIN_MARKERS = {n: p for n, p in GPU_MARKERS.items() if n not in ("StructureFromMotion", "PrepareDenseScene")}
+RANSAC_2025_NEW = {"FeatureMatching": [r"\* maxIteration = 50000\b"],
+                   "SfMExpanding": [r"\* localizerEstimatorMaxIterations = 50000\b"]}
 
 CONFIGS = {
     # Stock settings, to establish that the paired pipeline works at all. On 2025.1 also that pairing left
@@ -244,6 +251,14 @@ CONFIGS = {
     "fastransac": dict(overrides=SIFT, env={}, pipeline="photogrammetryFastRansac", meshroom2025=True, checks={
         "FeatureMatching": [r"\* maxIteration = 2048\b"],
         "StructureFromMotion": [r"\* localizerEstimatorMaxIterations = 4096\b"]}),
+    # After 0.3.9: Meshroom 2025.1's Photogrammetry Experimental (the new SfM pipeline) as shipped, and the Fast
+    # Ransac copy of it the pairing writes, by name, so the run also proves Meshroom lists it.
+    "experimental": dict(overrides=SIFT, env={}, pipeline="photogrammetryExperimental", meshroom2025=True,
+                         markers="newchain", checks=RANSAC_2025_NEW),
+    "fastransacexp": dict(overrides=SIFT, env={}, pipeline="photogrammetryExperimentalFastRansac", meshroom2025=True,
+                          markers="newchain", checks={
+                              "FeatureMatching": [r"\* maxIteration = 2048\b"],
+                              "SfMExpanding": [r"\* localizerEstimatorMaxIterations = 4096\b"]}),
     # Meshroom's defaults with nothing overridden: what a user who only pairs the package runs.
     # DSP-SIFT on the CPU, then the GPU matcher on its descriptors and every later port. Also the
     # parameter set of the upstream reference meshes the mesh quality gate compares against.
@@ -503,7 +518,8 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
     # Any extension: Meshroom's Texturing writes texture_1001.exr by default, not .png, so globbing
     # for .png reported a perfectly good textured mesh as having no textures.
     tex = list((out / "out").glob("texture_*.*"))
-    markers = {"cpu": CPU_MARKERS, "defaults": DEFAULT_MARKERS, "hostvotes": HOSTVOTES_MARKERS}.get(cfg.get("markers"), GPU_MARKERS)
+    markers = {"cpu": CPU_MARKERS, "defaults": DEFAULT_MARKERS, "hostvotes": HOSTVOTES_MARKERS,
+               "newchain": NEWCHAIN_MARKERS}.get(cfg.get("markers"), GPU_MARKERS)
 
     # Provenance first, then the port. A port marker alone is not proof the Cheshire binary ran:
     # Meshroom's own featureExtraction is a CUDA PopSIFT and prints the very same
@@ -587,13 +603,17 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
         # aliceVision_incrementalSfM hit a Ceres CHECK (zero-rotation pose after resection), and the
         # report should say so rather than leave the reader to work out from the log that no
         # Cheshire code ran there.
-        for st in sorted(cache.glob("*/*/status")):
+        # A node of one chunk writes <uid>/status; a chunked node writes <uid>/<chunk>.status (Meshroom 2025.1's
+        # FeatureMatching, DepthMap, RelativePoseEstimating, ExportImages, ...), which a bare */*/status missed.
+        named = set()
+        for st in sorted(cache.glob("*/*/status")) + sorted(cache.glob("*/*/*.status")):
             try:
                 j = json.loads(st.read_text(encoding="utf-8", errors="replace"))
             except ValueError:
                 continue
-            if j.get("status") == "ERROR":
+            if j.get("status") == "ERROR" and st.parent.parent.name not in named:
                 node = st.parent.parent.name
+                named.add(node)
                 ours = bool(re.search(r"\[cheshire\] \S+: Cheshire build", node_logs(cache, node)))
                 print(f"        failed node: {node} - "
                       + ("a Cheshire-paired binary" if ours else
@@ -659,7 +679,8 @@ def main(argv):
     if not meshroom_2025(meshroom):
         skipped = [n for n in names if CONFIGS[n].get("meshroom2025")]
         if skipped:
-            print(f"=== skipped on Meshroom 2023.3, which has no Fast Ransac template (its defaults are those counts): {', '.join(skipped)}")
+            print(f"=== skipped on Meshroom 2023.3, which has none of 2025.1's templates these run (no Fast Ransac"
+                  f" copies - its defaults are those counts - and no Photogrammetry Experimental): {', '.join(skipped)}")
             names = [n for n in names if n not in skipped]
 
     # Both platforms pair the same way and take the same two arguments; only the script's name,

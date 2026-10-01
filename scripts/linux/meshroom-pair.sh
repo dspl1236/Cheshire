@@ -54,7 +54,8 @@ BIN="$MESHROOM/aliceVision/bin"
 # their neighbours, with the stock line endings - and checked to parse as the stock graph plus those two
 # values. Upstream's new SfM pipeline (2025.1's Photogrammetry Experimental, the nightly's Photogrammetry)
 # has SfMExpanding instead of StructureFromMotion, with the same localizerEstimatorMaxIterations for its
-# resection: such a graph gets the 4096 there (after 0.3.9). Meshroom labels a template by splitting its
+# resection: such a graph gets the 4096 there, and Photogrammetry Experimental gets a copy too (after
+# 0.3.9); a Meshroom without that template is told so. Meshroom labels a template by splitting its
 # file name at capitals. The Windows pairing writes the same files (scripts/windows/meshroom-templates.ps1).
 # 2023.3 keeps its templates in lib/meshroom/pipelines and already runs these counts; a template whose
 # graph is not the expected shape is skipped, not guessed at; a file of the same name that does not carry
@@ -64,16 +65,20 @@ fast_ransac_templates() {  # install|remove
   python3 - "$MESHROOM/aliceVision/share/meshroom" "$1" <<'PY'
 import json, os, re, sys
 d, mode = sys.argv[1], sys.argv[2]
-variants = [("photogrammetry", "photogrammetryFastRansac"), ("photogrammetryDraft", "photogrammetryDraftFastRansac")]
+variants = [("photogrammetry", "photogrammetryFastRansac"), ("photogrammetryDraft", "photogrammetryDraftFastRansac"),
+            ("photogrammetryExperimental", "photogrammetryExperimentalFastRansac")]
 # each value goes to the one node of its types (the SfM node is one or the other)
 sets = [(("FeatureMatching",), "maxIteration", 2048), (("StructureFromMotion", "SfMExpanding"), "localizerEstimatorMaxIterations", 4096)]
 
 def ours(path):
+    """one of our names carrying both values as whole numbers (a substring test took "maxIteration": 20480 for
+    ours); read as bytes, so a user's file in another encoding is theirs rather than the end of the run"""
     if not os.path.isfile(path):
         return False
-    with open(path, encoding="utf-8") as f:
+    with open(path, "rb") as f:
         t = f.read()
-    return '"maxIteration": 2048' in t and '"localizerEstimatorMaxIterations": 4096' in t
+    return (re.search(rb'"maxIteration": 2048(?![0-9.eE])', t) is not None
+            and re.search(rb'"localizerEstimatorMaxIterations": 4096(?![0-9.eE])', t) is not None)
 
 def label(name):
     return " ".join(re.findall("[A-Z][^A-Z]*", name[0].upper() + name[1:]))
@@ -112,28 +117,51 @@ for stock_name, name in variants:
     if os.path.exists(dst) and not ours(dst):
         print(f"{name}.mg exists and is not Cheshire's: left alone")
         continue
-    with open(src, "rb") as f:
-        text = f.read().decode("utf-8")      # bytes, so the line endings are the stock file's
+    try:
+        with open(src, "rb") as f:
+            # bytes, so the line endings are the stock file's; a BOM is dropped, as .NET's ReadAllText drops it
+            text = f.read().decode("utf-8-sig")
+        stock = json.loads(text)
+    except (ValueError, RecursionError):  # UnicodeDecodeError is a ValueError; RecursionError: nesting too deep
+        print(f"{stock_name}.mg does not parse as JSON: {name}.mg not written")
+        continue
     eol = "\r\n" if "\r\n" in text else "\n"
-    stock = json.loads(text)
-    new, types = text, {}  # types: the node type each value went to
-    for node_types, inp, value in sets:
-        nodes = [n for n in stock["graph"].values() if n.get("nodeType") in node_types]
-        if len(nodes) != 1 or inp in nodes[0].get("inputs", {}):
-            new = None
+    # why: "shape", or the node type whose text is not laid out as expected; types: the node type each value went to
+    new, why, types = text, None, {}
+    graph = stock.get("graph") if isinstance(stock, dict) else None
+    if not isinstance(graph, dict):
+        why = "shape"
+    for node_types, inp, value in ([] if why else sets):
+        nodes = [n for n in graph.values() if isinstance(n, dict) and isinstance(n.get("nodeType"), str) and n["nodeType"] in node_types]
+        # inputs absent or null: nothing set (the text insertion then finds no inputs and says so); anything but an
+        # object, or the input already there under any case (the ps1's parser refuses two keys differing only in
+        # case): not the graph this expects
+        inputs = nodes[0].get("inputs") if len(nodes) == 1 else None
+        if len(nodes) != 1 or (inputs is not None and (not isinstance(inputs, dict) or any(k.lower() == inp.lower() for k in inputs))):
+            why = "shape"
             break
         types[inp] = nodes[0]["nodeType"]
         new = add_input(new, eol, types[inp], inp, value)
         if new is None:
+            why = types[inp]
             break
-    if new is None:
+    if why == "shape":
         print(f"{stock_name}.mg is not the graph this expects (one FeatureMatching, one StructureFromMotion or SfMExpanding, neither value set): {name}.mg not written")
         continue
-    graph, ok = json.loads(new), True
-    for _, inp, value in sets:
-        node = [n for n in graph["graph"].values() if n.get("nodeType") == types[inp]][0]
-        ok = ok and node["inputs"].pop(inp, None) == value
-    if not ok or graph != stock:
+    if why:
+        print(f'{stock_name}.mg: its {why} node is not laid out as this expects (its "nodeType" line, then "inputs": {{ ending a line): {name}.mg not written')
+        continue
+    # the result must parse, carry both values, and be the stock graph otherwise; anything that raises here (an
+    # inputs object the insertion broke) is the same verdict, not the end of the run
+    try:
+        graph, ok = json.loads(new), True
+        for _, inp, value in sets:
+            node = [n for n in graph["graph"].values() if isinstance(n, dict) and n.get("nodeType") == types[inp]][0]
+            ok = ok and node["inputs"].pop(inp, None) == value
+        same = ok and graph == stock
+    except Exception:
+        same = False
+    if not same:
         print(f"{name}.mg: the edit did not come out as the stock graph plus the two values: not written")
         continue
     with open(dst, "wb") as f:
