@@ -3701,3 +3701,30 @@ bay. `CHESHIRE_ACR_BATCH_CHECK=1` runs the loop as well for every batched call. 
 calls on 41 views and 28 of 28 on the engine bay returning the loop's model, inliers, error and NFA,
 and leaving the generator where the loop leaves it. The other parts of SfMExpanding cannot be
 compared between threaded runs until its triangulation draws reproducibly (9a, above).
+
+## After 0.3.9: SfMExpanding reproducible (step 9c, 2026-10-01)
+
+`SfmTriangulation::process` triangulates a round's tracks on every core, and every track's LO-RANSAC
+drew from the one generator its caller made. So the draws followed thread timing, and no two runs of
+SfMExpanding were the same (9a, above). Step 9c gives each track its own generator, derived the way
+5n derives the legacy engine's (0.3.4, above): from the caller's seed, the task kind, the track and
+the call. The caller's generator is only copied. `CHESHIRE_SFM_TASK_SEED=0` restores the shared
+generator, as for the legacy engine. Same harness and inputs as 9a and 9b:
+
+| run | SfMExpanding, 41 views | engine bay |
+|---|---|---|
+| 12 threads | 28.6 s | 30.2 s |
+| 12 threads again | 28.2 s | 30.1 s |
+| 4 threads | 38.7 s | 37.7 s |
+| 1 thread | 81.0 s | 85.1 s |
+| 12 threads, `CHESHIRE_ACR_BATCH=0` | 57.7 s | 41.4 s |
+| 12 threads, `CHESHIRE_SFM_TASK_SEED=0` (upstream's shared generator) | 29.9 s | 35.9 s |
+
+Every run but the last gives the same `cameras.sfm`, `sfmExpanded.usda` and
+`sfmExpanded_landmarks.usdc`, byte for byte, on both sets. SfMExpanding no longer depends on the
+run, the thread count or 9b's batches; this is the first end-to-end comparison of the batches.
+
+The draws differ from upstream's, so the reconstruction is a different sample of the same one:
+- camera centres within 0.0060 % (41 views) and 0.12 % (engine bay) of the scene's radius from the
+  stock nightly's, where the shared generator's run lands at 0.0094 % and 0.21 %;
+- 80,672 and 134,804 landmarks, against stock's 80,680 and 134,482.

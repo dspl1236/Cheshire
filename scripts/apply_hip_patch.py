@@ -1460,6 +1460,48 @@ STEP9B_EXPPROC = [
      "    robustEstimation::cheshireNacrBatchReport();  // cheshire (step 9b): CHESHIRE_ACR_BATCH_CHECK's count\n"),
 ]
 
+# 9c (after 0.3.9): 5n's generator per task for the new engine's triangulation. SfmTriangulation::process triangulates
+# the tracks on every core, and every track's LO-RANSAC drew from the caller's one generator, so the draws followed
+# thread timing and SfMExpanding differed from run to run.
+STEP9C_TRI_HPP = [
+    ("    const double _maxError;\n};\n",
+     "    const double _maxError;\n"
+     "    std::uint64_t _cheshirePass = 0;  // cheshire (step 9c): process()'s calls so far, the pass of its tracks' generators\n"
+     "};\n"),
+]
+STEP9C_TRI_CPP = [
+    ("#include <aliceVision/camera/camera.hpp>\n",
+     "#include <aliceVision/camera/camera.hpp>\n#include <aliceVision/sfm/deterministic.hpp>  // cheshire: step 9c\n"),
+    ("    #pragma omp parallel for\n    for(int pos = 0; pos < viewTracksVector.size(); pos++)\n    {\n"
+     "        const std::size_t trackId = viewTracksVector[pos];\n",
+     r"""    // cheshire (step 9c): 5n's generator per task, for the new engine. Every track's LO-RANSAC drew from the caller's
+    // one generator inside this OpenMP loop, so a track's samples followed thread timing and SfMExpanding differed from
+    // run to run. Each track now draws from its own generator, derived from (the caller's seed, 2 = triangulation, the
+    // track, this call's pass): the same samples on any thread and in any order. The seed is the caller's generator's
+    // first draw, taken from a copy, so the caller's generator is left as it was. CHESHIRE_SFM_TASK_SEED=0 restores the
+    // shared generator.
+    unsigned cheshireSeed = 0;
+    {
+        std::mt19937 cheshireProbe = randomNumberGenerator;
+        cheshireSeed = cheshireProbe();
+    }
+    const std::uint64_t cheshirePass = _cheshirePass++;
+
+    #pragma omp parallel for
+    for(int pos = 0; pos < viewTracksVector.size(); pos++)
+    {
+        const std::size_t trackId = viewTracksVector[pos];
+        std::mt19937 cheshireTaskGenerator = cheshire::taskGenerator(cheshireSeed, 2, trackId, cheshirePass);  // cheshire (step 9c)
+        std::mt19937& cheshireGenerator = cheshire::taskSeedEnabled() ? cheshireTaskGenerator : randomNumberGenerator;
+"""),
+    ("processTrackWithPointFetcher(sfmData, track, randomNumberGenerator, trackViewsFiltered, result)",
+     "processTrackWithPointFetcher(sfmData, track, cheshireGenerator, trackViewsFiltered, result)"),
+    ("processTrackWithPrior(sfmData, track, randomNumberGenerator, trackViewsFiltered, result)",
+     "processTrackWithPrior(sfmData, track, cheshireGenerator, trackViewsFiltered, result)"),
+    ("processTrack(sfmData, track, randomNumberGenerator, trackViewsFiltered, result)",
+     "processTrack(sfmData, track, cheshireGenerator, trackViewsFiltered, result)"),
+]
+
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
     if new in text:
@@ -1550,6 +1592,8 @@ TRACKED = [
     "src/aliceVision/sfm/pipeline/expanding/ExpansionProcess.cpp",  # 9a
     "src/software/pipeline/main_relativePoseEstimating.cpp",  # 9a
     "src/aliceVision/sfm/pipeline/expanding/ExpansionChunk.cpp",  # 9b
+    "src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.cpp",  # 9c
+    "src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.hpp",  # 9c
 ]
 
 
@@ -6642,6 +6686,21 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                     sys.exit(f"an anchor of NACRANSAC's batches not found once in {rel} (9b)")
                 t = t.replace(old, new, 1)
         f9b.write_text(t, encoding="utf-8", newline="")
+
+    # 9c (after 0.3.9). 5n's generator per task for SfMExpanding's triangulation: each track's LO-RANSAC draws from its
+    #     own generator, derived from (the caller's seed, triangulation, the track, the call), instead of the one the
+    #     OpenMP loop shared, so SfMExpanding is the same on every run and every thread count. CHESHIRE_SFM_TASK_SEED=0
+    #     restores the shared generator, as for the legacy engine. deterministic.hpp is 5n's copy.
+    for rel, pairs in (("src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.hpp", STEP9C_TRI_HPP),
+                       ("src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.cpp", STEP9C_TRI_CPP)):
+        f9c = AV / rel
+        t = f9c.read_text(encoding="utf-8")
+        if "step 9c" not in t:
+            for old, new in pairs:
+                if t.count(old) != 1:
+                    sys.exit(f"an anchor of the triangulation's generators not found once in {rel} (9c)")
+                t = t.replace(old, new, 1)
+        f9c.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports

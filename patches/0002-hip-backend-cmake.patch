@@ -10914,6 +10914,82 @@ index 392c5ac..057b809 100644
  
      _historyHandler->debrief(sfmData);
  
+diff --git a/src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.cpp b/src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.cpp
+index 6a8ae7a..2df6794 100644
+--- a/src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.cpp
++++ b/src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.cpp
+@@ -19,6 +19,7 @@
+ 
+ #include <aliceVision/numeric/projection.hpp>
+ #include <aliceVision/camera/camera.hpp>
++#include <aliceVision/sfm/deterministic.hpp>  // cheshire: step 9c
+ 
+ namespace aliceVision {
+ namespace sfm {
+@@ -55,10 +56,25 @@ bool SfmTriangulation::process(
+     allInterestingViews.insert(validViews.begin(), validViews.end());
+ 
+ 
++    // cheshire (step 9c): 5n's generator per task, for the new engine. Every track's LO-RANSAC drew from the caller's
++    // one generator inside this OpenMP loop, so a track's samples followed thread timing and SfMExpanding differed from
++    // run to run. Each track now draws from its own generator, derived from (the caller's seed, 2 = triangulation, the
++    // track, this call's pass): the same samples on any thread and in any order. The seed is the caller's generator's
++    // first draw, taken from a copy, so the caller's generator is left as it was. CHESHIRE_SFM_TASK_SEED=0 restores the
++    // shared generator.
++    unsigned cheshireSeed = 0;
++    {
++        std::mt19937 cheshireProbe = randomNumberGenerator;
++        cheshireSeed = cheshireProbe();
++    }
++    const std::uint64_t cheshirePass = _cheshirePass++;
++
+     #pragma omp parallel for
+     for(int pos = 0; pos < viewTracksVector.size(); pos++)
+     {
+         const std::size_t trackId = viewTracksVector[pos];
++        std::mt19937 cheshireTaskGenerator = cheshire::taskGenerator(cheshireSeed, 2, trackId, cheshirePass);  // cheshire (step 9c)
++        std::mt19937& cheshireGenerator = cheshire::taskSeedEnabled() ? cheshireTaskGenerator : randomNumberGenerator;
+         const track::Track& track = tracks.at(trackId);
+ 
+         // Get all views observing the current track (Keeping their Id)
+@@ -87,14 +103,14 @@ bool SfmTriangulation::process(
+         {
+             if (_pointFetcherHandler)
+             {
+-                if (!processTrackWithPointFetcher(sfmData, track, randomNumberGenerator, trackViewsFiltered, result))
++                if (!processTrackWithPointFetcher(sfmData, track, cheshireGenerator, trackViewsFiltered, result))
+                 {
+                     continue;
+                 }
+             }
+             else 
+             {
+-                if (!processTrackWithPrior(sfmData, track, randomNumberGenerator, trackViewsFiltered, result))
++                if (!processTrackWithPrior(sfmData, track, cheshireGenerator, trackViewsFiltered, result))
+                 {
+                     continue;
+                 }
+@@ -102,7 +118,7 @@ bool SfmTriangulation::process(
+         }
+         else 
+         {
+-            if (!processTrack(sfmData, track, randomNumberGenerator, trackViewsFiltered, result))
++            if (!processTrack(sfmData, track, cheshireGenerator, trackViewsFiltered, result))
+             {
+                 continue;
+             }
+diff --git a/src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.hpp b/src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.hpp
+index 662b32a..187439b 100644
+--- a/src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.hpp
++++ b/src/aliceVision/sfm/pipeline/expanding/SfmTriangulation.hpp
+@@ -148,6 +148,7 @@ private:
+ private:    
+     const size_t _minObservations;
+     const double _maxError;
++    std::uint64_t _cheshirePass = 0;  // cheshire (step 9c): process()'s calls so far, the pass of its tracks' generators
+ };
+ 
+ } // namespace sfm
 diff --git a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 index 097f8c9..5e25775 100644
 --- a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp

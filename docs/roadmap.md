@@ -919,7 +919,9 @@ Plan, loosely, since the release date is not known:
      `std::mt19937`. So SfMExpanding differs from run to run, upstream too. The legacy engine got a
      generator per task in 5n. The same for SfmTriangulation would make SfMExpanding reproducible:
      different draws from upstream's, as in the legacy engine. Then threaded runs could be compared
-     byte for byte.
+     byte for byte. **Done 2026-10-01** (step 9c, docs/04). Two 12-thread runs, 4 threads, 1 thread
+     and 9b's batches off now all give the same bytes on both sets. Camera centres stay within
+     0.0060 % and 0.12 % of the stock nightly's, at the same speed.
    - **ExportImages as PrepareDenseScene** (M): 4k's one image per thread, 5y/6f's ZIP level 1, 8f's
      libdeflate on Linux, and 8g's device remap widened to the full transform (its map is
      `source.project(target.backProjectUnit(p))`).
