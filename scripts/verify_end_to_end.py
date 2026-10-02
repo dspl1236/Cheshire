@@ -112,16 +112,32 @@ HOSTVOTES_MARKERS = dict(GPU_MARKERS, Meshing=[m for m in GPU_MARKERS["Meshing"]
 # any chunk's log. The epipolar loop (8e) falls back when its self-test finds this build's Eigen and flags
 # do not reproduce upstream's error(); the run is right, but slower, and the release should know.
 EPIPOLAR_FALLBACK = r"vectorised epipolar distance does not reproduce FundamentalEpipolarDistanceError"
+ACR_BOUND_WRONG = r"AC-RANSAC bound check: \d+ of \d+ models skipped the sort and the NFA scan, [1-9]\d* of them below minNFA"
+TRACKS_DIFFER = r"tracks file check: [1-9]\d* of \d+ tracks"
 FORBIDDEN = {
     "StructureFromMotion": [r"local BA graph: \d+ edges to posed views the graph was never handed were skipped",
                             EPIPOLAR_FALLBACK],
     "FeatureMatching": [EPIPOLAR_FALLBACK,
-                        r"AC-RANSAC bound check: \d+ of \d+ models skipped the sort and the NFA scan, [1-9]\d* of them below minNFA",
+                        ACR_BOUND_WRONG,
                         r"epipolar residual check: \b(\d+) of (?!\1 )\d+ residuals"],
     "PrepareDenseScene": [r"EXR deflate write check: '.*' does not read back as written",
                           r"EXR deflate write check: \b(\d+) of (?!\1 )\d+ files",
                           r"undistort on the device failed",
                           r"undistort device check: \b(\d+) of (?!\1 )\d+ images"],
+    # 0.4.0, the new SfM pipeline: its self-checks (under `verifyexp`) and the fallbacks its steps take. NACRANSAC
+    # takes 8d's bound (9a) and runs in batches (9b), the tracks file is parsed into structs (9h), and ExportImages
+    # reads, writes (9d, inside 8f's scope) and warps on the device (9i) as PrepareDenseScene does.
+    "RelativePoseEstimating": [ACR_BOUND_WRONG, TRACKS_DIFFER],
+    "SfMBootStrapping": [TRACKS_DIFFER],
+    "SfMExpanding": [ACR_BOUND_WRONG, TRACKS_DIFFER,
+                     r"NACRANSAC batch check: \b(\d+) of (?!\1 )\d+ calls",
+                     r"NACRANSAC batch check: the batches' answer differs"],
+    "SfMColorizing": [r"direct 8-bit read check: \b(\d+) of (?!\1 )\d+ images"],
+    "ExportImages": [r"direct 8-bit read check: \b(\d+) of (?!\1 )\d+ images",
+                     r"EXR deflate write check: '.*' does not read back as written",
+                     r"EXR deflate write check: \b(\d+) of (?!\1 )\d+ files",
+                     r"the export warp on the device failed",
+                     r"export warp device check: \b(\d+) of (?!\1 )\d+ images"],
 }
 
 # In-process self-checks: the port runs the CPU reference alongside itself and compares. These are
@@ -189,6 +205,29 @@ SELF_CHECK_VERDICTS = {
         r"facet weight check: .*differing from the sequential computation: 0\b",
     ],
 }
+
+# 0.4.0: the same on the new SfM pipeline (2025.1's Photogrammetry Experimental), whose nodes carry checks of their
+# own: NACRANSAC's bound (9a) in RelativePoseEstimating and SfMExpanding, its batches (9b) against the loop, the
+# tracks file's parse (9h) against Boost.JSON's DOM wherever it is loaded, the colours' 8-bit read (8b) in
+# SfMColorizing, and in ExportImages the direct read (6n), the libdeflate writer (8f, inside 9d's scope) and the warp
+# on the device (9i), both switched on whatever the platform's default. FeatureMatching, DepthMapFilter and Meshing
+# are the legacy pipeline's nodes and keep their verdicts.
+TRACKS_SAME = r"tracks file check: 0 of [1-9]\d* tracks \(\d+ observations\) differ between parse_into and the DOM"
+ACR_BOUND_RIGHT = r"AC-RANSAC bound check: \d+ of [1-9]\d* models skipped the sort and the NFA scan, 0 of them below minNFA"
+VERIFYEXP_ENV = dict(SELF_CHECK_ENV, CHESHIRE_ACR_BATCH_CHECK="1", CHESHIRE_TRACKS_PARSE_INTO_CHECK="1",
+                     CHESHIRE_EXPORT_DEVICE="1", CHESHIRE_EXPORT_DEVICE_CHECK="1")
+VERIFYEXP_VERDICTS = {n: SELF_CHECK_VERDICTS[n] for n in ("FeatureMatching", "DepthMapFilter", "Meshing")}
+VERIFYEXP_VERDICTS.update({
+    "RelativePoseEstimating": [ACR_BOUND_RIGHT, TRACKS_SAME],
+    "SfMBootStrapping": [TRACKS_SAME],
+    "SfMExpanding": [ACR_BOUND_RIGHT, TRACKS_SAME,
+                     r"NACRANSAC batch check: \b([1-9]\d*) of \1 calls returned the loop's model, inliers, error and NFA, "
+                     r"and left the generator where the loop leaves it"],
+    "SfMColorizing": [r"direct 8-bit read check: \b([1-9]\d*) of \1 images identical to OpenImageIO's path"],
+    "ExportImages": [r"direct 8-bit read check: \b([1-9]\d*) of \1 images identical to OpenImageIO's path",
+                     r"EXR deflate write check: \b([1-9]\d*) of \1 files read back identical through OpenEXR",
+                     r"export warp device check: \b([1-9]\d*) of \1 images identical to remapInter"],
+})
 
 # Meshroom's FeatureExtraction defaults to dspsift, which goes through vlfeat on the CPU whatever
 # the flags - so every config asks for sift, or GPU SIFT is never exercised and the run says
@@ -313,6 +352,9 @@ CONFIGS = {
         "CHESHIRE_GPU_VIS": "0", "CHESHIRE_UNDISTORT_DEVICE": "0"}),
     # Every in-process self-check on: each port must agree with its CPU reference, in its own words.
     "verify": dict(overrides=SIFT, env=dict(SELF_CHECK_ENV), checks=SELF_CHECK_VERDICTS),
+    # 0.4.0: and the new SfM pipeline under its own checks, Meshroom 2025.1 only.
+    "verifyexp": dict(overrides=SIFT, env=dict(VERIFYEXP_ENV), pipeline="photogrammetryExperimental", meshroom2025=True,
+                      markers="newchain", checks=VERIFYEXP_VERDICTS),
     # The host votes (bucketed), which the device votes replaced as the default in step 10: still the
     # fallback, so still checked against the ordered reference in both passes.
     "hostvotes": dict(overrides=SIFT, markers="hostvotes", env={"CHESHIRE_GPU_VIS_VOTES": "0", "CHESHIRE_GPU_VIS_CHECK": "1"}, checks={
