@@ -787,6 +787,32 @@ Started 2026-10-01.
   - Released in v0.3.9: README and USING describe it, and the Windows zips were repacked with
     `meshroom-templates.ps1` beside `meshroom-pair.cmd`.
 
+## 0.4.0
+
+**Released 2026-10-02 as v0.4.0**: upstream's new SfM pipeline paired on Meshroom 2025.1 (docs/04, "The 0.4.0
+release gate"; notes docs/releases/0.4.0.md).
+
+- **The port** ("Upstream's next pipeline", step 3, below): 9a-9k in the packages, 9j opt-in.
+- **The pairing** (step 4's first part, below): the eight nodes paired wherever Meshroom has its own
+  `aliceVision_sfmExpanding` (2025.1: seventeen nodes), 9l for 2025.1's SfMBootStrapping, the option check's
+  required-option refusal, and a node left to Meshroom getting Meshroom's binary back.
+- **Photogrammetry Experimental Fast Ransac**, the third template.
+- **The gate:** `experimental`, `fastransacexp` and `verifyexp` (the new pipeline under its own self-checks).
+
+**Found by the gate: house-pc's RX 5500 XT was reset by the driver mid-gate, and DepthMap stopped repeating
+itself after it** (docs/04, "The 0.4.0 release gate"). At 09:54 the kernel logged an sdma0 ring timeout, then a
+full GPU reset ("VRAM is lost due to GPU reset!"), and the card carried on. The four mini6 runs before it gave
+0.3.9's depth maps byte for byte; after it, five runs gave maps about 1 % of the pixels apart (a relative 3e-6 at
+the median), and 0.3.8's bundle varied the same way on the same inputs. The kernels are the same instructions in
+both builds, and no other card or system varied. **Confirmed after a reboot (12:41):** DepthMap six times on the
+same inputs, four with 0.4.0's bundle and two with 0.3.8's, gave one digest, the gate's `base` and 0.3.9's
+(`26fc558e`). If the reset recurs, the card or its PCIe slot is the suspect (kernel log kept in house-pc
+/data/tests/gate-040/gpu-reset-20261002).
+
+Left for the pivot proper: the submodule moved to the Meshroom release that makes the new pipeline its
+Photogrammetry, USD, 5r/5s and the ranking ties on SfmBundle and ExpansionPolicyLegacy, and a harness whose
+`base` runs the new chain.
+
 ## Upstream's next pipeline: detect, then pivot
 
 Added 2026-09-26. On discussion #2116 an AliceVision maintainer pointed out that StructureFromMotion,
@@ -981,8 +1007,10 @@ Plan, loosely, since the release date is not known:
    build requires and Meshroom's does not know. Step 9l takes 2025.1's SfMBootStrapping command line,
    and the harness checks the new chain on 2025.1 (`experimental`, `fastransacexp`,
    `NEWCHAIN_MARKERS`). Meshroom's own SfMExpanding took 334 s on 41 views, ours 27 s; the whole
-   Experimental run went from 743 s to 336 s. What is left for the pivot itself: the submodule, USD,
-   5r/5s/the ranking ties, and a harness whose default `photogrammetry` is the new chain.
+   Experimental run went from 743 s to 336 s. Released in v0.4.0. What is left for the pivot itself: the
+   submodule, USD, 5r/5s/the ranking ties, and a harness whose default `photogrammetry` is the new chain.
+   USD includes the Windows packages' plugin resources: both 0.4.0 zips ship USD's libraries without them, so a
+   node told to write `.usda` (the nightly's SfMBootStrapping) exits 0x80000003 (found by the 0.4.0 gate, docs/04).
 
 Effect on the open items: in the new chain too, Grin leaves bundle adjustment at about 5 s of
 SfMExpanding on these sets, so the new pipeline adds nothing to the case for BA on the device
@@ -1135,7 +1163,10 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   - about 50 M discarded slots are left in the kd-tree
   - NaN residuals break `std::sort` in AC-RANSAC (4w)
   - SfmTriangulation shares one `std::mt19937` across the OpenMP loop over tracks, so SfMExpanding
-    differs from run to run (found in step 9a)
+    differs from run to run (found in step 9a). **Filed 2026-10-02 as alicevision/AliceVision#2193**, with
+    the nightly's own binary measured (two threaded runs 80,680 against 80,675 landmarks, centres 0.004 % of
+    the radius apart; one thread: within 2e-12), the fix (9c) and the legacy engine's two loops of the same
+    kind (5n).
 - **AliceVision: silent CPU SIFT fallback** (S). No warning is printed when the GPU is denied
   (`feature/sift/ImageDescriber_SIFT.hpp:35`). Add a local warning step and file the same change
   upstream.
@@ -1145,6 +1176,14 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   search found. The drafted PR is not opened (`docs/upstream/alicevision-bundle-libs-paths.md`).
 - **OpenMesh `/bigobj`** (S). Exported without a language guard
   (`docs/upstream/openmesh-bigobj-language-guard.md`).
+
+- **Meshroom/AliceVision nightlies: the Python bindings cannot load** (S). **Commented 2026-10-02** on
+  alicevision/AliceVision#2145 (open since June, no cause given) with the cause: the AliceVision nightly's
+  `pyalicevision` is built for Python 3.12 (`build-windows.yml`) and the Meshroom nightly is frozen with 3.11
+  (`build-binary.yml`). With the real bindings, 19 node descriptions fail to load and `meshroom_batch` still
+  saves the graph and exits 0, with empty inputs downstream
+  (https://github.com/alicevision/AliceVision/issues/2145#issuecomment-5953272527). alicevision/Meshroom#3149 was the same
+  report, closed by its author in favour of alicevision/AliceVision#2145.
 
 ### Promised upstream
 

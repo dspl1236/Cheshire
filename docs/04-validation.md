@@ -4177,3 +4177,116 @@ standard (StructureFromMotion) or the new SfM pipeline. Under the new pipeline:
 
 The Backend tile shows each install's pairing, "2025.1 17/17 · 2023.3 9/9". The app is paired with that bundle
 (b039np). Old jobs read as the standard pipeline, as before.
+
+## The 0.4.0 release gate (2026-10-02)
+
+All four packages were built at e936dd6 (`build/chain-040.cmd`) in 54 minutes:
+- **Windows AMD:** 25 minutes, the two rocm7.2 targets in 7 and the nine hip6.2 targets in 16;
+- **Windows CUDA:** 5 minutes. The development tree had compiled 9a-9j before, so only what changed after it
+  was rebuilt;
+- **Linux HIP:** 21 minutes, from a fresh build directory as always;
+- **Linux CUDA:** 4 minutes.
+
+The packers' checks pass. Four more were made by hand:
+- each of the Windows AMD bundle's 11 targets carries an `aliceVision_image.dll` with its own code object and the
+  export warp's kernel (9i), and the zip lists the eight untested targets in `gpu/<family>/UNTESTED`;
+- the Windows CUDA zip and the Linux HIP tarball carry all eight programs of the new pipeline, and their
+  `aliceVision_sfmBootstrapping` carries 9l;
+- the Linux gates take the repository's `meshroom-pair.sh` (101c2da) from beside the harness, as before;
+- every package copied to a test box matched its SHA-256.
+
+The gate is 0.3.8's with the new pipeline added (98b41f4):
+- `experimental` and `fastransacexp` run Photogrammetry Experimental and its Fast Ransac copy by name. They score
+  fourteen nodes: the six GPU nodes and the new pipeline's eight, each held to the launcher's provenance line and to
+  what our build of it announces;
+- `verifyexp` runs the new pipeline under its self-checks: NACRANSAC's bound (9a) and batches (9b), the tracks
+  parse (9h) wherever the file is read, the colours' read (8b), and in ExportImages the direct read, the libdeflate
+  writer (8f) and the device warp (9i). The last two are switched on whatever the platform's default;
+- a failing count or a fallback warning in any of the new pipeline's nodes fails every configuration;
+- on 41 views the gate adds `experimental` and `verifyexp` to `base` and `verify`.
+
+A local mini6 run of the two new configs on the Windows AMD zip came first (`build/gate-040/precheck.sh`), so that
+no card would spend hours on a verdict that never matches. Both passed at 14/14, every verdict met.
+
+| package | hardware | 2025.1: mini6 | 2025.1: 41 views | 2023.3: mini6 |
+|---|---|---|---|---|
+| Windows AMD | RX 9070 (rocm7.2 gfx12-generic payload) | 19/19 | base 388 s, verify 821 s, experimental 359 s, fastransacexp 343 s, verifyexp 858 s | 4/4 |
+| Windows AMD | RX 6750 XT (hip6.2 gfx1031 payload, bench-pc, FX-8120) | 19/19 | base 783 s, verify 2069 s, experimental 769 s, verifyexp 2213 s | 4/4 |
+| Linux AMD | RX 5500 XT (house-pc, i3-4330) | 19/19 | base 886 s, verify 1932 s, experimental 896 s, verifyexp 2063 s | 4/4 |
+| Windows CUDA | not run on an NVIDIA card (below) | | | |
+| Linux CUDA | GTX 1080 Ti (house-pc, in place of the RX 5500 XT) | 19/19 | base 666 s, verify 1727 s, experimental 681 s, verifyexp 1842 s | 4/4 |
+
+109 runs, none failed. Every legacy run scored 8 of 8 nodes and every run of the new pipeline 14 of 14. `base` on 41 views took about what it
+took in 0.3.8 and 0.3.9 on the same cards (RX 9070 383 s, RX 6750 XT under Windows 779 s); the binaries for those
+nodes did not change. The FeatureMatching counts below are 0.3.8's to the model on each payload family, as its features
+are: the RX 6750 XT's under Windows are the RX 5500 XT's of 0.3.8 (hip6.2 builds), and the RX 5500 XT's under Linux
+the RX 6750 XT's of 0.3.8 there.
+
+The 41-view self-checks, `verify` and `verifyexp`:
+
+| card | AC-RANSAC bound (FeatureMatching): models skipped, none below `minNFA` | epipolar residuals identical | NACRANSAC: batch check; bound in RPE + SfMExpanding | tracks parse | device warp (9i) / undistortion (8g) |
+|---|---|---|---|---|---|
+| RX 9070 | 31,876,553 of 31,905,517 | 9,709,341,894 of 9,709,341,894 | 28 of 28 calls; 0 below `minNFA` | 0 of 101,437 tracks differ, 4 loads | 31 of 31 / 33 of 33 images |
+| RX 6750 XT | 31,809,482 of 31,837,595 | 9,697,870,823 of 9,697,870,823 | 28 of 28 calls; 0 below `minNFA` | 0 of 101,416, 4 loads | 36 of 36 / 37 of 37 |
+| GTX 1080 Ti, Linux | 31,996,349 of 32,030,204 | 9,709,966,459 of 9,709,966,459 | 28 of 28 calls; 0 below `minNFA` | 0 of 101,261, 4 loads | 40 of 40 / 41 of 41 |
+| RX 5500 XT, Linux | 31,996,079 of 32,029,909 | 9,710,963,964 of 9,710,963,964 | 28 of 28 calls; 0 below `minNFA` | 0 of 101,261, 4 loads | 40 of 40 / 41 of 41 |
+
+**The Windows CUDA zip was not run on an NVIDIA card in this release.** bench-pc, its box, did not find its boot drive
+after the GTX 1080 Ti went in, before the gate could start, and the zip ships on these checks (the user's choice):
+- the packer's: GPU SIFT linked (`aliceVision_feature.dll` imports `popsift.dll`), the CUDA runtime and the MSVC and
+  OpenMP runtimes bundled, the pairing launcher present, no GPL libraries;
+- all eight programs of the new pipeline in the zip, and the 9b, 9i, 9k and 9l code in its libraries;
+- the same sources as the Linux CUDA tarball gated on the GTX 1080 Ti (above) and the Windows AMD zip, built by the
+  same chain, with MSVC for the host code;
+- on the RX 9070 box, where no NVIDIA card can take any GPU work, the zip's eight new-pipeline programs ran the
+  command lines of this gate's 41-view `experimental` run, from the zip's own `bin` alone
+  (`build/nightly-cmp/replay_cudapkg.py`): all eight finished, the tracks file came out byte for byte the AMD zip's,
+  and SfMExpanding placed all 41 cameras within 0.0028 % of the scene's radius of the AMD zip's after a similarity
+  fit, the focal length 0.0005 % apart. The files after TracksBuilding differ in their last bits, as two compilers'
+  floating point does (MSVC against clang-cl).
+
+**Found on the way: neither Windows zip can write a USD file.** Run with the nightly's command lines, which write
+`bootstrap.usda`, the zips' `aliceVision_sfmBootstrapping` exits 0x80000003 (a breakpoint) after its last log line,
+where the development install writes the file and the zips write a `.sfm` without complaint. The zips carry USD's
+libraries (30 `usd_*.dll`) but not the plugin resources USD finds beside them; the development install finds those
+through the toolchain's library folder. No node of Meshroom 2025.1's or 2023.3's templates reads or writes a USD file
+(checked in this gate's caches), so it touches nothing these packages pair; it is in the pivot's way (roadmap).
+
+**DepthMap on house-pc's RX 5500 XT, and a GPU reset.** On the RX 9070 and the RX 6750 XT every configuration that shares `base`'s
+DepthMap settings gave `base`'s depth maps, byte for byte, and those are 0.3.8's and 0.3.9's on the same cards. On
+house-pc's RX 5500 XT under Linux five mini6 runs did not: `tiles`, `verify`, `bridgecap`, `bridgeoff` and `ds1` (and
+`verify` on 2023.3), where 0.3.9's check on the same card on 2026-10-01 gave nine of nine. Between `base` and `verify`
+the features, the matches, the SfM and PrepareDenseScene's images are the same bytes; DepthMap's maps differ at about
+1 % of the pixels, by a relative 3e-6 at the median and 0.7 % at most, with the same valid pixels. The variation is
+not new:
+
+| DepthMap again on `base`'s inputs (`build/gate-040` dm_ab.py) | digests |
+|---|---|
+| the 0.4.0 bundle, four runs | `26fc558e`, `ab915e2b`, `9588c028`, `8456424f` |
+| 0.3.8's bundle (b038a), four runs interleaved | `cf5c6530`, `e9fe23e2`, `9933bdf6`, `f8f350ea` |
+| 0.4.0, device downscale off, two runs | `d248d9c0`, `ab915e2b` |
+
+The gfx1012 kernels of the two builds are the same 24,984 instructions, the runtime libraries are the same files, and
+the device downscale's check finds 0 of 12,192,768 floats different on all six images. The cause is in house-pc's
+kernel log: at 09:54, nine minutes into the gate, the RX 5500 XT's sdma0 ring timed out and the driver reset the GPU
+("VRAM is lost due to GPU reset!"), after which the card carried on. The four mini6 runs before the reset gave
+0.3.9's depth maps; every deviation came after it. After a reboot, DepthMap on the same inputs gave one digest six
+times, four with 0.4.0's bundle and two with 0.3.8's: `26fc558e`, the gate's `base` and 0.3.9's. Neither Windows box
+logged a driver reset that day.
+
+**The new chain's time** with the release install, in the replay harness on the nightly's inputs (RX 9070 box,
+`build/nightly-cmp/plan-040.json`, two runs each), TracksBuilding to ExportImages:
+
+| node, seconds | 41 views | engine bay |
+|---|---|---|
+| TracksBuilding | 2.4, 1.9 | 2.7, 2.3 |
+| RelativePoseEstimating | 8.8, 8.8 | 23.3, 21.2 |
+| SfMBootStrapping | 1.9, 1.8 | 2.3, 2.1 |
+| SfMExpanding | 31.8, 29.2 | 30.4, 31.1 |
+| SfMTransform, SfMColorizing, IntrinsicsTransforming | 1.7, 1.6 | 2.8, 2.5 |
+| ExportImages | 9.8, 9.7 | 21.5, 18.8 |
+| total | 56.4, 53.0 | 83.0, 78.0 |
+
+Upstream's binaries took 397.9 s and 291.2 s, 0.3.8's build 285.0 s and 201.7 s (roadmap, "Upstream's next
+pipeline", step 2). The estimate of about 48 s and 70 s in the roadmap added the best of separate runs; these are
+whole runs of the release build.

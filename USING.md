@@ -81,21 +81,29 @@ That swaps the node binaries Cheshire accelerates and keeps Meshroom's originals
 unchanged; run it as you always do.
 
 Before it swaps a node, the pairing checks that the package's binary takes every option Meshroom's
-own binary takes (from both `--help` texts; no GPU needed). This package is built for Meshroom
-2023.3. A newer Meshroom whose nodes pass options this package does not know gets a line like
-`aliceVision_meshing: Meshroom's binary takes options this package's does not: --newOption`, and
-that node stays Meshroom's own instead of failing halfway through a job.
+own binary takes (from both `--help` texts; no GPU needed), and, from v0.4.0, that it requires no option
+Meshroom's binary does not know. A Meshroom whose nodes pass options this package does not know gets a line
+like `aliceVision_meshing: Meshroom's binary takes options this package's does not: --newOption`, and that
+node stays Meshroom's own instead of failing halfway through a job.
+
+**Meshroom 2025.1: the new SfM pipeline (from v0.4.0).** 2025.1's **Photogrammetry Experimental**
+template runs upstream's next structure-from-motion pipeline: TracksBuilding, RelativePoseEstimating,
+SfMBootStrapping and SfMExpanding instead of StructureFromMotion, IntrinsicsTransforming and ExportImages
+instead of PrepareDenseScene; upstream's development version already makes it the default. Pairing covers
+those eight nodes too, seventeen in all, so the template runs on Cheshire: on the RX 9070 box a 41-photo
+job's nodes took 357 s instead of 743 s with those eight on Meshroom's own binaries. *Photogrammetry* itself is still the legacy pipeline, and paired as before. Meshroom
+2023.3 has no such template, and its pairing is unchanged.
 
 **Meshroom 2025.1: the Fast Ransac templates (from v0.3.9).** 2025.1 raised two RANSAC limits to
 50,000: FeatureMatching's *Max Iterations* (2048 in 2023.3) and StructureFromMotion's *Localizer Max
-Ransac Iterations* (4096). The paired nodes keep those defaults, so Meshroom's own templates give what
-a stock Meshroom gives. Pairing adds two templates beside them, in *File > New Pipeline* and on the
-home page: **Photogrammetry Fast Ransac** and **Photogrammetry Draft Fast Ransac**, Meshroom's own
-Photogrammetry and Draft with 2023.3's two values set in the graph, where they show and can be
-changed like any other. On the RX 9070 box they took a 41-photo job from 378 s to 307 s, and
-FeatureMatching from 374 s to 117 s on 107 photos and from 30 minutes to 7.4 on 884, with the same
-views placed. `--unpair` removes them. On Meshroom 2023.3 there is
-nothing to add: its defaults are those counts.
+Ransac Iterations* (4096; SfMExpanding's in the new pipeline). The paired nodes keep those defaults, so
+Meshroom's own templates give what a stock Meshroom gives. Pairing adds templates beside them, in
+*File > New Pipeline* and on the home page: **Photogrammetry Fast Ransac**, **Photogrammetry Draft
+Fast Ransac** and, from v0.4.0, **Photogrammetry Experimental Fast Ransac**, Meshroom's own with
+2023.3's two values set in the graph, where they show and can be changed like any other. On the RX
+9070 box the first took a 41-photo job from 378 s to 307 s, and FeatureMatching from 374 s to 117 s
+on 107 photos and from 30 minutes to 7.4 on 884, with the same views placed. `--unpair` removes them.
+On Meshroom 2023.3 there is nothing to add: its defaults are those counts.
 
 **Driver:** an RX 7000/9000 card needs **Adrenalin 26.2.2 or newer**, because that half of the
 package carries the HIP 7.2 runtime and older drivers refuse it. RX 5000/6000 cards use the runtime
@@ -180,15 +188,26 @@ these are *on* unless set to `0`:
 | `CHESHIRE_GPU_VIS_BUCKETS=0` | the visibility votes through the ordered loop (one vertex range per thread) instead of vertex buckets spread over all threads; same result, slower at scale |
 | `CHESHIRE_SFM_PENDING_BA=0` | upstream's incremental SfM loop exit: a resection pass that ends because no candidate view reaches the score threshold leaves the views resected since the last bundle adjustment without one, and without a node in the local-BA graph; a later edge to one of them is the `[fatal] invalid map<K, T> key` of Meshroom #2344 (three of three runs on an 884-photo set, v0.3.3 finishes the pass with that bundle adjustment and the graph never throws) |
 | `CHESHIRE_BA_JACOBIANS=stride` / `=autodiff` | bundle adjustment's Jacobians through upstream's autodiff functor in one 32-wide pass (bit-identical to upstream, 1.9x on that phase) or upstream's own 4-wide passes; the default since 2026-09-23 is `analytic` (below) |
-| `CHESHIRE_SFM_TASK_SEED=0` | incremental SfM draws its RANSAC samples from upstream's one generator shared across threads again, so the result follows thread scheduling; the default gives every view's resection and every track's triangulation its own generator from (seed, view or track, pass), which is what makes `CHESHIRE_SFM_DETERMINISTIC=1` possible (docs/04, 0.3.4) |
+| `CHESHIRE_SFM_TASK_SEED=0` | incremental SfM draws its RANSAC samples from upstream's one generator shared across threads again, so the result follows thread scheduling; the default gives every view's resection and every track's triangulation its own generator from (seed, view or track, pass), which is what makes `CHESHIRE_SFM_DETERMINISTIC=1` possible (docs/04, 0.3.4). From 0.4.0 the same in SfMExpanding's triangulation (the new pipeline), which with it repeats itself byte for byte at any thread count |
 | `CHESHIRE_DEPTHMAP_ORDER=0` | DepthMap: process the cameras in index order; the default orders them as a nearest-neighbour tour over their centres so a chunk's views share their neighbours and the once-per-batch loader has something to reuse (docs/04, 0.3.4 "the depth-map node was decoding") |
 | `CHESHIRE_DEPTHMAP_BLOCK=12` | Meshroom 2023.3 only, read by the paired DepthMap node override: views per chunk (default 48; 0 or 12 for Meshroom's own). Each chunk is a process with a cold cache and its own SfM load (docs/04, 0.3.4 item 7) |
 | `CHESHIRE_PDS_EXR_COMPRESSION=zips` | PrepareDenseScene's EXR compression as `method[:level]`; the default is now `zip:1` (16 scanlines per block at zlib level 1: same pixels, 1.4 % larger than level 4, 30 % less write CPU, and cheaper to read in every later node) where upstream writes `zips` at level 4; `none`, `rle`, `piz` and the lossy `dwaa`/`dwab`/`b44`/`pxr24` are accepted for experiments |
 | `CHESHIRE_READ_DIRECT=0` | read 8-bit RGB JPEG and PNG files as float RGB/RGBA through OpenImageIO's whole-image passes (float read, colour conversion, alpha channel, copy); the default fills the same per-row scratch lines from the 8-bit pixels and applies the same colour processor, byte-identical and about 3x faster, which takes PrepareDenseScene's read from 139 to 67 thread-seconds on the engine bay (docs/04 6n). From 0.3.8 it also covers an 8-bit RGB file read as 8-bit RGB where no colour is converted (the SfM's colours, one read per view): the decoder's bytes without the round trip through float, used only when OpenImageIO's uint8 to float to uint8 gives every value back, which it checks once (docs/04, 0.3.8) |
 | `CHESHIRE_READ_DIRECT_CHECK=1` | with the direct read: read every such image both ways, keep upstream's result and print "direct 8-bit read check: N of N images identical" at exit |
 | `CHESHIRE_FEAT_READ=0` | (0.3.8) read `.feat` files through upstream's `istream_iterator` again; the default reads each file in one go and parses it with `std::from_chars`, the same floats to the bit (compared over the False Door's 20 million features under MSVC and GCC). On Windows the stream serialises on its locale, so it is the bigger gain there: 42.5 s to 0.8 s for the False Door's features on 12 threads (docs/04, 0.3.8) |
-| `CHESHIRE_ACR_BOUND=0` | (0.3.8) AC-RANSAC sorts every model's residuals and scans them for the NFA again; the default first bounds the NFA a model could reach, from a histogram of its unsorted residuals, and skips the sort and the scan when it cannot beat the best model so far. The same matches to the byte; geometric filtering 36.8 s to 18.8 s on 41 views at Meshroom 2025.1's 50,000 iterations ([docs/15](docs/15-acransac-cpu.md)) |
+| `CHESHIRE_ACR_BOUND=0` | (0.3.8) AC-RANSAC sorts every model's residuals and scans them for the NFA again; the default first bounds the NFA a model could reach, from a histogram of its unsorted residuals, and skips the sort and the scan when it cannot beat the best model so far. The same matches to the byte; geometric filtering 36.8 s to 18.8 s on 41 views at Meshroom 2025.1's 50,000 iterations ([docs/15](docs/15-acransac-cpu.md)). From 0.4.0 also NACRANSAC, the new SfM pipeline's variant, in RelativePoseEstimating and SfMExpanding's resection |
 | `CHESHIRE_ACR_BOUND_CHECK=1` | with it: sort and scan every skipped model as well, and print "AC-RANSAC bound check: N of M models skipped the sort and the NFA scan, 0 of them below minNFA in bestNFA" after geometric filtering |
+| `CHESHIRE_ACR_BATCH=0` | (0.4.0) SfMExpanding's resection runs NACRANSAC's iterations one after another; the default, when its caller runs on one thread (most rounds resect one view), draws the samples in order and fits and scores them in batches on every core, taking the results in order, so the answer is the loop's: SfMExpanding 55.6 s to 28.3 s on 41 views (docs/04, 9b) |
+| `CHESHIRE_ACR_BATCH_CHECK=1` | with it: run the loop as well for every batched call, and print "NACRANSAC batch check: N of N calls returned the loop's model, inliers, error and NFA, and left the generator where the loop leaves it" |
+| `CHESHIRE_TRACKS_PARSE_INTO=0` | (0.4.0) the new pipeline's tracks file through Boost.JSON's DOM, as upstream; the default parses it straight into structs with the same parser's numbers (a file the structs cannot hold takes the DOM's way): each load 1.44 s to 0.89 s on the engine bay (docs/04, 9h) |
+| `CHESHIRE_TRACKS_PARSE_INTO_CHECK=1` | with it: parse the file the DOM's way as well, compare every field bit for bit, and print "tracks file check: 0 of N tracks (M observations) differ between parse_into and the DOM" |
+| `CHESHIRE_EXPORT_THREADS=n` | (0.4.0) ExportImages, the new pipeline's PrepareDenseScene: images exported at once, one per thread (default: every core; upstream exports one at a time). The same files (docs/04, 9d) |
+| `CHESHIRE_EXPORT_EXR_COMPRESSION=default` | ExportImages' EXR compression as `method[:level]`; the default is `zip:1`, as PrepareDenseScene's, the same pixels; `default` writes upstream's files |
+| `CHESHIRE_EXPORT_MAP_CACHE_MB=0` | ExportImages builds the warp's map for every image, as upstream; the default builds each camera's once when two views or more share it, up to 2048 MB of maps. The same files (docs/04, 9g) |
+| `CHESHIRE_EXPORT_DEVICE=1` / `=0` | (0.4.0) ExportImages' warp on the GPU (CheshireRemap) or the CPU; the default, as for PrepareDenseScene's undistortion, is the GPU on a host of four hardware threads or fewer. The same pixels to the bit (docs/04, 9i) |
+| `CHESHIRE_EXPORT_DEVICE_REMAPPERS=N` | with it: at most N images on the GPU at once (default as `CHESHIRE_UNDISTORT_DEVICE_REMAPPERS`); an image beyond them takes the CPU |
+| `CHESHIRE_EXPORT_DEVICE_CHECK=1` | with it: run the CPU warp as well, keep its pixels, and print "export warp device check: N of M images identical to remapInter" at exit |
+| `CHESHIRE_EXPORT_PROFILE=1` | not a check: ExportImages' read, warp and write in thread-seconds |
 | `CHESHIRE_ACR_RESIDUALS=0` | (0.3.8) compute the epipolar residuals (the F and E geometric filters, SfM's initial pair) one correspondence at a time through Eigen again; the default runs them in one vectorised loop with Eigen's arithmetic, the same bits, after a self-test that falls back to the per-point loop on any build where they would differ ([docs/15](docs/15-acransac-cpu.md)) |
 | `CHESHIRE_ACR_RESIDUALS_CHECK=1` | with it: compute every residual both ways, keep Eigen's, and print "epipolar residual check: N of N residuals identical" after geometric filtering |
 | `CHESHIRE_GPS_PAIRING_RADIUS=80` | (0.3.5, off unless set) ImageMatching: pair every two photos that carry GPS within this many metres, instead of the vocabulary tree's choice between them; photos without GPS keep the method's pairs. For surveys of repetitive ground, where the tree pairs photos hundreds of metres apart (docs/04, the 444-photo drone survey: 80 m found every real pair with 9 % of the exhaustive matching) |
@@ -248,7 +267,8 @@ The memory bridge has more knobs than the two above, and one of them has mattere
 **Verify rather than trust** - each of these runs the CPU reference alongside the GPU port, in
 the same process, and prints its verdict. All off by default; `=1` enables. They cost time (the
 CPU reference runs too) and change nothing in the output. The release gate runs all of them
-together as its `verify` configuration ([docs/04](docs/04-validation.md)):
+together as its `verify` configuration, and the new pipeline's under `verifyexp`
+([docs/04](docs/04-validation.md)):
 
 | option (default: off) | what `=1` prints in the Meshing log |
 |---|---|
@@ -292,6 +312,7 @@ default); the rest are tuning values:
 | | |
 |---|---|
 | `CHESHIRE_QR_NULLSPACE=1` | 1.86x on geometric filtering, for 0.12 % fewer landmarks and 0.14 % more reprojection error ([docs/17](docs/17-svd-nullspace.md)) |
+| `CHESHIRE_QR_NULLSPACE5=1` | (0.4.0) the same for the 5-point solver, which the new pipeline's RelativePoseEstimating runs: about 5 % of that node, for poses that agree to rounding and RANSAC's spread, not to the bit (docs/04, 9j) |
 | `CHESHIRE_BA_JACOBIANS=analytic` (the default) | bundle adjustment's Jacobians by the chain rule instead of autodiff: 3.0x on that phase (13.0 s to 4.3 s on 41 views, the SfM node 67 s to 57 s), for rounding-level differences from upstream (max 4.4e-10 relative) that move the final landmark count within its run-to-run spread ([docs/04](docs/04-validation.md), 0.3.4); `=stride` keeps upstream's numbers bit for bit |
 
 Everything else produces the same output as the unmodified CPU build; that is checked per release
@@ -300,7 +321,8 @@ whose default output is not upstream's to the bit: the analytic Jacobians above,
 projection, the persistent Problem's summation order and, since 0.3.7, the own solver (Ceres' algorithm
 without fused multiply-adds, its sums in an order of its own) differ by rounding, and a random generator
 per task draws different samples than upstream's shared one. `CHESHIRE_SFM_DETERMINISTIC=1` makes
-it reproducible run to run. There are about fifty more
+it reproducible run to run. The new pipeline's SfMExpanding has the same per-track generators from 0.4.0,
+and repeats itself without any setting. There are about fifty more
 `CHESHIRE_*` variables in the code for profiling and debugging - they are in the docs for each
 stage, and none of them are needed to use this.
 
