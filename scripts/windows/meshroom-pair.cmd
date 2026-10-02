@@ -86,28 +86,28 @@ call :pairif aliceVision_depthMapEstimation sgmFilteringAxes
 rem only a package with the GPU matcher understands Meshroom 2023.3's --rangeStart/--rangeSize; older
 rem packages carry the plain CPU featureMatching, which must not be put in Meshroom's way
 call :gate aliceVision_featureMatching "--rangeStart" FMOK
-if defined FMOK ( call :pairif aliceVision_featureMatching ) else ( echo package's aliceVision_featureMatching has no GPU matcher ^(pre-v0.2.5^): DepthMap paired only )
+if defined FMOK ( call :pairif aliceVision_featureMatching ) else ( echo package's aliceVision_featureMatching has no GPU matcher ^(pre-v0.2.5^): DepthMap paired only & call :leave aliceVision_featureMatching )
 rem DepthMapFilter (v0.2.6+): the package's depthMapFiltering carries the GPU vote pass; older packages
 rem carry the plain CPU one, which is harmless but pointless, so gate on the newer help text
 call :gate aliceVision_depthMapFiltering "CHESHIRE_GPU_FILTER" DFOK
-if defined DFOK ( call :pairif aliceVision_depthMapFiltering ) else ( echo package's aliceVision_depthMapFiltering has no GPU pass ^(pre-v0.2.6^): not paired )
+if defined DFOK ( call :pairif aliceVision_depthMapFiltering ) else ( echo package's aliceVision_depthMapFiltering has no GPU pass ^(pre-v0.2.6^): not paired & call :leave aliceVision_depthMapFiltering )
 rem Meshing (v0.2.7+): the package's meshing carries the GPU graph-weight votes; gate on its help text
 call :gate aliceVision_meshing "CHESHIRE_GPU_VOTE" MSOK
-if defined MSOK ( call :pairif aliceVision_meshing ) else ( echo package's aliceVision_meshing has no GPU votes ^(pre-v0.2.7^): not paired )
+if defined MSOK ( call :pairif aliceVision_meshing ) else ( echo package's aliceVision_meshing has no GPU votes ^(pre-v0.2.7^): not paired & call :leave aliceVision_meshing )
 rem Texturing (v0.2.8+): the package's texturing carries the GPU pyramid + rasterisation; gate on its help text
 call :gate aliceVision_texturing "CHESHIRE_GPU_TEX" TXOK
-if defined TXOK ( call :pairif aliceVision_texturing ) else ( echo package's aliceVision_texturing has no GPU pass ^(pre-v0.2.8^): not paired )
+if defined TXOK ( call :pairif aliceVision_texturing ) else ( echo package's aliceVision_texturing has no GPU pass ^(pre-v0.2.8^): not paired & call :leave aliceVision_texturing )
 rem PrepareDenseScene (v0.2.9+): the package's prepareDenseScene runs its image loop on every core; gate on its help text
 call :gate aliceVision_prepareDenseScene "CHESHIRE_PDS_THREADS" PDOK
-if defined PDOK ( call :pairif aliceVision_prepareDenseScene ) else ( echo package's aliceVision_prepareDenseScene is upstream's ^(pre-v0.2.9^): not paired )
+if defined PDOK ( call :pairif aliceVision_prepareDenseScene ) else ( echo package's aliceVision_prepareDenseScene is upstream's ^(pre-v0.2.9^): not paired & call :leave aliceVision_prepareDenseScene )
 rem StructureFromMotion (v0.3.3+): the package's incrementalSfM finishes a resection pass with the bundle
 rem adjustment upstream skips, the crash of Meshroom #2344 on large sets (docs\04); gate on its help text
 call :gate aliceVision_incrementalSfM "CHESHIRE_SFM_PENDING_BA" SFOK
-if defined SFOK ( call :pairif aliceVision_incrementalSfM ) else ( echo package's aliceVision_incrementalSfM is upstream's ^(pre-v0.3.3^): not paired )
+if defined SFOK ( call :pairif aliceVision_incrementalSfM ) else ( echo package's aliceVision_incrementalSfM is upstream's ^(pre-v0.3.3^): not paired & call :leave aliceVision_incrementalSfM )
 rem ImageMatching (v0.3.5+): the package's imageMatching can pair views by GPS distance
 rem (CHESHIRE_GPS_PAIRING_RADIUS, off unless set); gate on its help text
 call :gate aliceVision_imageMatching "CHESHIRE_GPS_PAIRING" IMOK
-if defined IMOK ( call :pairif aliceVision_imageMatching ) else ( echo package's aliceVision_imageMatching is upstream's ^(pre-v0.3.5^): not paired )
+if defined IMOK ( call :pairif aliceVision_imageMatching ) else ( echo package's aliceVision_imageMatching is upstream's ^(pre-v0.3.5^): not paired & call :leave aliceVision_imageMatching )
 rem Upstream's new SfM pipeline (after 0.3.9): Meshroom 2025.1 runs it in Photogrammetry Experimental, upstream's
 rem nightly in Photogrammetry, on Meshroom's own binaries - SfMExpanding alone 334 s on 41 views where the package's
 rem takes about 30 (docs/04). Its nodes are paired only where Meshroom ships the pipeline, its own sfmExpanding being
@@ -128,7 +128,7 @@ if defined HAVE (
   rem in a bundle popsift is per GPU target, under gpu\<family>\<target>\
   for /d %%F in ("%PKG%\gpu\*") do for /d %%T in ("%%~fF\*") do if exist "%%~fT\popsift.dll" set FEOK=1
 )
-if defined FEOK ( call :pairif aliceVision_featureExtraction ) else ( echo package has no GPU SIFT ^(no popsift.dll^): featureExtraction not paired )
+if defined FEOK ( call :pairif aliceVision_featureExtraction ) else ( echo package has no GPU SIFT ^(no popsift.dll^): featureExtraction not paired & call :leave aliceVision_featureExtraction )
 rem Meshroom 2025.1 and later (0.3.9): the "Photogrammetry Fast Ransac" and "Photogrammetry Draft Fast Ransac"
 rem pipeline templates, the installed Photogrammetry and Draft templates with Meshroom 2023.3's two RANSAC
 rem counts set in the graph (FeatureMatching maxIteration 2048, and localizerEstimatorMaxIterations 4096 on
@@ -196,13 +196,13 @@ if exist "%HERE%meshroom-pair-check.ps1" (
   powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%meshroom-pair-check.ps1" "%MR%" "%PKG%" %1 %2
   if errorlevel 1 set COMPAT=
 )
-if defined COMPAT ( call :pair %1 ) else ( echo %1: not paired, Meshroom keeps its own binary )
+if defined COMPAT ( call :pair %1 ) else ( echo %1: not paired, Meshroom keeps its own binary & call :leave %1 )
 exit /b 0
 
 :pairnew
 rem :pairnew <node>: a node of the new SfM pipeline, paired when the package carries it
 call :have %1
-if not defined HAVE ( echo %1: the package does not carry it, Meshroom keeps its own & exit /b 0 )
+if not defined HAVE ( echo %1: the package does not carry it, Meshroom keeps its own & call :leave %1 & exit /b 0 )
 call :pairif %1
 exit /b 0
 
@@ -214,6 +214,20 @@ if not exist "%T%.cuda.exe" ren "%T%.exe" %1.cuda.exe
 copy /y "%L%" "%T%.exe" >nul
 for %%P in ("%PKG%") do echo %%~fP> "%T%.cheshire.txt"
 echo paired: %T%.exe -^> %1 from %PKG% (Meshroom's binary kept as %T%.cuda.exe)
+exit /b 0
+
+:leave
+rem :leave <node>: a node this run leaves to Meshroom - the option check refused it, or the package lacks it or
+rem predates its port - can still carry an earlier pairing's launcher, which would go on running that pairing's
+rem package while the line before says Meshroom keeps its own (found after 0.3.9: re-pairing with an older
+rem package left the new pipeline's nodes on the newer one). Put Meshroom's binary back.
+set T=%BIN%\%1
+if exist "%T%.cuda.exe" (
+  del /q "%T%.exe" "%T%.cheshire.txt" 2>nul
+  if exist "%T%.exe" ( echo %1: an earlier pairing's launcher is in use and stays ^(a Meshroom job still running?^) & exit /b 0 )
+  ren "%T%.cuda.exe" %1.exe
+  echo %1: an earlier pairing's launcher removed, Meshroom's own binary back
+)
 exit /b 0
 
 :unpair

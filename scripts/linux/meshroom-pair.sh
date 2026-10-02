@@ -238,12 +238,26 @@ compatible() {  # name  [option the wrapper drops]
   return 0
 }
 
+# A node this run leaves to Meshroom - the option check refused it, or the bundle lacks it or predates its port -
+# can still carry an earlier pairing's wrapper, which would go on exec'ing that pairing's bundle while the line
+# before says Meshroom keeps its own (found after 0.3.9: re-pairing with an older bundle left the new pipeline's
+# nodes on the newer one). Put Meshroom's binary back.
+leave() {  # name
+  local target="$BIN/$1"
+  [ "$CHECK_ONLY" = 1 ] && return 0
+  if [ -e "$target.cuda" ]; then
+    mv -f "$target.cuda" "$target"
+    echo "$1: an earlier pairing's wrapper removed, Meshroom's own binary back"
+  fi
+  return 0
+}
+
 pair() {  # name  drop-option
   local name="$1" drop="${2:-}" target="$BIN/$1"
   # a node this Meshroom does not have would otherwise get a wrapper with no binary of Meshroom's behind it
   # (and the mv below would stop the script under set -e)
   if [ ! -e "$target" ] && [ ! -e "$target.cuda" ]; then echo "$name: this Meshroom has no such binary, left alone"; return 0; fi
-  if ! compatible "$name" "$drop"; then echo "$name: not paired, Meshroom keeps its own binary"; return 0; fi
+  if ! compatible "$name" "$drop"; then echo "$name: not paired, Meshroom keeps its own binary"; leave "$name"; return 0; fi
   [ "$CHECK_ONLY" = 1 ] && return 0
   if [ ! -e "$target.cuda" ]; then mv "$target" "$target.cuda"; fi
   cat > "$target" <<EOF
@@ -314,6 +328,7 @@ if grep -q -- '--rangeStart' <<<"$fm_help"; then
   pair aliceVision_featureMatching
 else
   echo "bundle's aliceVision_featureMatching has no GPU matcher (pre-v0.2.5): DepthMap paired only"
+  leave aliceVision_featureMatching
 fi
 
 # GPU SIFT (docs/14): only pair featureExtraction when the bundle's binary actually links
@@ -336,6 +351,7 @@ if [ -x "$BUNDLE/bin/aliceVision_featureExtraction" ] \
   pair aliceVision_featureExtraction
 else
   echo "bundle's aliceVision_featureExtraction has no GPU SIFT: not paired"
+  leave aliceVision_featureExtraction
 fi
 # DepthMapFilter (v0.2.6+): the bundle's depthMapFiltering carries the GPU vote pass (its --help says so)
 df_help=$(ALICEVISION_ROOT="$BUNDLE" LD_LIBRARY_PATH="$BUNDLE/lib" "$BUNDLE/bin/aliceVision_depthMapFiltering" --help 2>&1 || true)
@@ -343,6 +359,7 @@ if grep -q 'CHESHIRE_GPU_FILTER' <<<"$df_help"; then
   pair aliceVision_depthMapFiltering
 else
   echo "bundle's aliceVision_depthMapFiltering has no GPU pass (pre-v0.2.6): not paired"
+  leave aliceVision_depthMapFiltering
 fi
 # Meshing (v0.2.7+): the bundle's meshing carries the GPU graph-weight votes (its --help says so)
 ms_help=$(ALICEVISION_ROOT="$BUNDLE" LD_LIBRARY_PATH="$BUNDLE/lib" "$BUNDLE/bin/aliceVision_meshing" --help 2>&1 || true)
@@ -350,6 +367,7 @@ if grep -q 'CHESHIRE_GPU_VOTE' <<<"$ms_help"; then
   pair aliceVision_meshing
 else
   echo "bundle's aliceVision_meshing has no GPU votes (pre-v0.2.7): not paired"
+  leave aliceVision_meshing
 fi
 # StructureFromMotion (v0.3.3+): the bundle's incrementalSfM finishes a resection pass with the bundle
 # adjustment upstream skips - the "invalid map<K, T> key" crash of Meshroom #2344 on large sets (docs/04)
@@ -358,6 +376,7 @@ if grep -q 'CHESHIRE_SFM_PENDING_BA' <<<"$sf_help"; then
   pair aliceVision_incrementalSfM
 else
   echo "bundle's aliceVision_incrementalSfM is upstream's (pre-v0.3.3): not paired"
+  leave aliceVision_incrementalSfM
 fi
 # ImageMatching (v0.3.5+): the bundle's imageMatching can pair views by GPS distance
 # (CHESHIRE_GPS_PAIRING_RADIUS, off unless set; its --help says so)
@@ -366,6 +385,7 @@ if grep -q 'CHESHIRE_GPS_PAIRING' <<<"$im_help"; then
   pair aliceVision_imageMatching
 else
   echo "bundle's aliceVision_imageMatching is upstream's (pre-v0.3.5): not paired"
+  leave aliceVision_imageMatching
 fi
 # Texturing (v0.2.8+): the bundle's texturing carries the GPU pyramid + rasterisation (its --help says so)
 tx_help=$(ALICEVISION_ROOT="$BUNDLE" LD_LIBRARY_PATH="$BUNDLE/lib" "$BUNDLE/bin/aliceVision_texturing" --help 2>&1 || true)
@@ -373,6 +393,7 @@ if grep -q 'CHESHIRE_GPU_TEX' <<<"$tx_help"; then
   pair aliceVision_texturing
 else
   echo "bundle's aliceVision_texturing has no GPU pass (pre-v0.2.8): not paired"
+  leave aliceVision_texturing
 fi
 # PrepareDenseScene (v0.2.9+): the bundle's prepareDenseScene runs its image loop on every core (its --help says so)
 pd_help=$(ALICEVISION_ROOT="$BUNDLE" LD_LIBRARY_PATH="$BUNDLE/lib" "$BUNDLE/bin/aliceVision_prepareDenseScene" --help 2>&1 || true)
@@ -380,6 +401,7 @@ if grep -q 'CHESHIRE_PDS_THREADS' <<<"$pd_help"; then
   pair aliceVision_prepareDenseScene
 else
   echo "bundle's aliceVision_prepareDenseScene is upstream's (pre-v0.2.9): not paired"
+  leave aliceVision_prepareDenseScene
 fi
 # Upstream's new SfM pipeline (after 0.3.9): Meshroom 2025.1 runs it in Photogrammetry Experimental, upstream's
 # nightly in Photogrammetry, on Meshroom's own binaries - SfMExpanding alone 334 s on 41 views where the bundle's
@@ -388,7 +410,7 @@ fi
 # option check, like the rest; a bundle without one leaves it to Meshroom.
 if [ -e "$BIN/aliceVision_sfmExpanding" ] || [ -e "$BIN/aliceVision_sfmExpanding.cuda" ]; then
   for name in $NEWSFM_NODES; do
-    if [ -x "$BUNDLE/bin/$name" ]; then pair "$name"; else echo "$name: the bundle does not carry it, Meshroom keeps its own"; fi
+    if [ -x "$BUNDLE/bin/$name" ]; then pair "$name"; else echo "$name: the bundle does not carry it, Meshroom keeps its own"; leave "$name"; fi
   done
 else
   echo "this Meshroom has no aliceVision_sfmExpanding (2023.3): upstream's new SfM pipeline is not there to pair"
