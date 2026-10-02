@@ -4141,3 +4141,39 @@ seconds:
 Every view is placed, with 91,526 and 91,462 landmarks (stock: 91,545 and 91,489). The Fast Ransac copy moves the
 cameras 0.016 % of the scene's radius, as it did on stock binaries. Since step 9c our build of the new nodes
 stays within 0.0060 % of stock's camera centres on 41 views (replay harness, above).
+
+### On house-pc, and its node app (2026-10-02)
+
+The same pairing on Linux: house-pc (i3, 4 threads; RX 5500 XT, gfx1012), with a HIP bundle of f85ae9d built
+in WSL (`scripts/linux/wsl-pack-bundle.sh`'s checks all passed). The gate ran on the scratch Meshroom copies
+under `/data/tests`, so the node app's own installs were untouched until the end:
+
+| Meshroom | set | result |
+|---|---|---|
+| 2025.1 | mini6 | 17 nodes paired; base 8/8, fastransac 8/8, experimental 14/14, fastransacexp 14/14 |
+| 2023.3 | mini6 | 9 nodes paired, the new pipeline left alone; base 8/8 |
+| 2025.1 | 41 views | experimental 14/14, 896 s |
+
+The fastransac depth maps are byte for byte the 0.3.9 Linux gate's (`c4e51fa5`), and 2023.3's base gives the same
+digest, as it should with the same RANSAC counts.
+
+Preparing the node app found a defect in both pairing scripts. A node a run leaves to Meshroom kept an earlier
+pairing's launcher or wrapper, so it went on running that pairing's build while the script said "Meshroom keeps
+its own binary". The cases are a node the option check refuses, one the package lacks, and one that predates its
+port. Re-pairing with an older bundle, such as b038a, whose sfmBootstrapping requires `--method`, left
+sfmBootstrapping on the newer one. Every such branch now puts Meshroom's binary back (101c2da). Tested on Windows
+with a node hidden from the package, and on house-pc's scratch Meshroom by re-pairing b038a over the new bundle:
+sfmBootstrapping was refused and restored, and the other 16 moved to b038a.
+
+The node app (`~/stacks/photogrammetry`, outside this repository) now offers the pipeline as a job option:
+standard (StructureFromMotion) or the new SfM pipeline. Under the new pipeline:
+- `reconstruct --pipeline` passes the choice to `meshroom_batch` and records it in `job-settings.json`.
+- The RANSAC counts and local BA go to SfMExpanding, and masks go to ExportImages.
+- Options of the standard pipeline's own nodes are refused and greyed out.
+- `reconstruct` refuses the new pipeline on Meshroom 2023.3, and any override naming a node the graph lacks,
+  before anything detaches. Meshroom 2025.1 does fail such a graph with "No node with the type", checked with
+  `--compute no`.
+- Stage numbers, registration, landmarks, Cheshire lines, colour and full texture follow the job's pipeline.
+
+The Backend tile shows each install's pairing, "2025.1 17/17 · 2023.3 9/9". The app is paired with that bundle
+(b039np). Old jobs read as the standard pipeline, as before.
