@@ -12088,7 +12088,7 @@ index 8f2d1c4..96fee8f 100644
          }
      }
 diff --git a/src/aliceVision/track/trackIO.cpp b/src/aliceVision/track/trackIO.cpp
-index 51638ec..d1d6939 100644
+index 51638ec..4c6f230 100644
 --- a/src/aliceVision/track/trackIO.cpp
 +++ b/src/aliceVision/track/trackIO.cpp
 @@ -4,9 +4,16 @@
@@ -12205,7 +12205,7 @@ index 51638ec..d1d6939 100644
  bool loadTracks(TracksMap& mapTracks, const std::string& filename)
  {
      std::ifstream tracksFile(filename);
-@@ -77,8 +174,32 @@ bool loadTracks(TracksMap& mapTracks, const std::string& filename)
+@@ -77,9 +174,48 @@ bool loadTracks(TracksMap& mapTracks, const std::string& filename)
      std::stringstream buffer;
      buffer << tracksFile.rdbuf();
  
@@ -12228,6 +12228,12 @@ index 51638ec..d1d6939 100644
 +                                     << " of " << cheshireReference.size() << " tracks (" << observations
 +                                     << " observations) differ between parse_into and the DOM");
 +            }
++            static const bool cheshireSaid = []() {  // cheshire (step 9k): once per process
++                ALICEVISION_LOG_INFO("cheshire: tracks file parsed straight into structs "
++                                     "(CHESHIRE_TRACKS_PARSE_INTO=0 for Boost.JSON's DOM, CHESHIRE_TRACKS_PARSE_INTO_CHECK=1 to compare)");
++                return true;
++            }();
++            (void)cheshireSaid;
 +            mapTracks = std::move(cheshireMap);
 +            return true;
 +        }
@@ -12237,8 +12243,18 @@ index 51638ec..d1d6939 100644
 -    boost::json::value jv = boost::json::parse(buffer.str());
 +    boost::json::value jv = boost::json::parse(cheshireText);
      mapTracks = track::TracksMap(map_value_to<std::size_t, track::Track>(jv));
++    static const bool cheshireSaidDom = []() {  // cheshire (step 9k): once per process
++        if (cheshireTracks::on()) {  // braces: the logging macro is a for statement
++            ALICEVISION_LOG_INFO("cheshire: tracks file read through Boost.JSON's DOM: the structs could not hold it");
++        } else {
++            ALICEVISION_LOG_INFO("cheshire: tracks file read through Boost.JSON's DOM (CHESHIRE_TRACKS_PARSE_INTO=0)");
++        }
++        return true;
++    }();
++    (void)cheshireSaidDom;
  
      return true;
+ }
 diff --git a/src/cmake/config.hpp.in b/src/cmake/config.hpp.in
 index 27e3ec0..027ba01 100644
 --- a/src/cmake/config.hpp.in
@@ -13072,6 +13088,37 @@ index 744e90d..70898ab 100644
 +
      return EXIT_SUCCESS;
  }
+diff --git a/src/software/pipeline/main_sfmBootstrapping.cpp b/src/software/pipeline/main_sfmBootstrapping.cpp
+index 6e171db..dc3fe68 100644
+--- a/src/software/pipeline/main_sfmBootstrapping.cpp
++++ b/src/software/pipeline/main_sfmBootstrapping.cpp
+@@ -392,11 +392,12 @@ int aliceVision_main(int argc, char** argv)
+     requiredParams.add_options()
+     ("input,i", po::value<std::string>(&sfmDataFilename)->required(), "SfMData file.")
+     ("output,o", po::value<std::string>(&sfmDataOutputFilename)->required(), "SfMData output file.")
+-    ("method", po::value<std::string>(&methodString)->required(), "Bootstrapping method: classic (epipolar geometry), mesh (3D mesh constraints), or depth (depth map information).")
+     ("tracksFilename,t", po::value<std::string>(&tracksFilename)->required(), "Tracks file.");
+ 
+     po::options_description optionalParams("Optional parameters");
+     optionalParams.add_options()
++    ("method", po::value<std::string>(&methodString)->default_value(methodString), "Bootstrapping method: classic (epipolar geometry), mesh (3D mesh constraints), or depth (depth map information). "
++     "cheshire (step 9l): when absent - a Meshroom whose node predates the option, 2025.1's - mesh if --meshFilename names one, else classic, as that Meshroom's own binary bootstraps.")
+     ("pairs", po::value<std::string>(&pairsDirectory)->default_value(pairsDirectory), "Path to the pairs directory.")
+     ("outputViewsAndPoses", po::value<std::string>(&outputSfMViewsAndPoses)->default_value(outputSfMViewsAndPoses), "Path to the output SfMData file (with only views and poses).")
+     ("minAngleSoftInitialPair", po::value<double>(&minAngleSoft)->default_value(minAngleSoft), "Minimum angle for the initial pair (Score is downgraded heavily if angle is under this value).")
+@@ -419,6 +420,12 @@ int aliceVision_main(int argc, char** argv)
+     HardwareContext hwc = cmdline.getHardwareContext();
+     omp_set_num_threads(hwc.getMaxThreads());
+ 
++    if (methodString.empty())  // cheshire (step 9l)
++    {
++        methodString = meshFilename.empty() ? "classic" : "mesh";
++        ALICEVISION_LOG_INFO("cheshire: no --method given (a Meshroom whose node predates it): " << methodString
++                             << ", as that Meshroom's own binary bootstraps");
++    }
+     EBOOTSTRAPMETHOD method = EBOOTSTRAPMETHOD_stringToEnum(methodString);
+     
+     // load input SfMData scene
 diff --git a/src/software/pipeline/main_texturing.cpp b/src/software/pipeline/main_texturing.cpp
 index a8714f8..1cf26df 100644
 --- a/src/software/pipeline/main_texturing.cpp

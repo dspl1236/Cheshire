@@ -8,8 +8,11 @@
 # libraries in front when the bundle matches the card (a CUDA bundle with an NVIDIA card that
 # answers nvidia-smi, an HIP bundle without one), or Meshroom's own binary (kept as <name>.cuda)
 # otherwise: the choice is made per run, so a node that swaps cards needs no re-pairing, and
-# CHESHIRE_BACKEND forces it. The nodes Cheshire does not carry - CameraInit, MeshFiltering,
-# Publish - keep running from the Meshroom bundle unchanged. `--unpair` restores.
+# CHESHIRE_BACKEND forces it. On a Meshroom that ships upstream's new SfM pipeline (2025.1's
+# Photogrammetry Experimental) eight more are paired (after 0.3.9): TracksBuilding,
+# RelativePoseEstimating, SfMBootStrapping, SfMExpanding, SfMTransform, SfMColorizing,
+# IntrinsicsTransforming and ExportImages. The nodes Cheshire does not carry - CameraInit,
+# MeshFiltering, Publish - keep running from the Meshroom bundle unchanged. `--unpair` restores.
 #
 # (Until v0.3.0 this header said two nodes and named meshing and texturing as staying on Meshroom's
 # side; the body has paired seven since v0.2.9.)
@@ -171,8 +174,11 @@ for stock_name, name in variants:
 PY
 }
 
+# upstream's new SfM pipeline, in the order it runs (paired below where Meshroom ships it)
+NEWSFM_NODES="aliceVision_tracksBuilding aliceVision_relativePoseEstimating aliceVision_sfmBootstrapping aliceVision_sfmExpanding aliceVision_sfmTransform aliceVision_sfmColorizing aliceVision_intrinsicsTransforming aliceVision_exportImages"
+
 if [ "${2:-}" = "--unpair" ]; then
-  for name in aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_featureExtraction aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene aliceVision_incrementalSfM aliceVision_imageMatching; do
+  for name in aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_featureExtraction aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene aliceVision_incrementalSfM aliceVision_imageMatching $NEWSFM_NODES; do
     if [ -x "$BIN/$name.cuda" ]; then mv -f "$BIN/$name.cuda" "$BIN/$name"; echo "restored $name"; else echo "$name: not paired"; fi
   done
   NODE="$MESHROOM/lib/meshroom/nodes/aliceVision/DepthMap.py"
@@ -201,10 +207,17 @@ fi
 # compatible, or when it cannot tell (Meshroom's binary lists no options); 1 with the missing
 # options printed. Options that kept their names but changed meaning are past what this can see.
 compatible() {  # name  [option the wrapper drops]
-  local name="$1" drop="${2:-}" own="$BIN/$1" mr ours missing
+  local name="$1" drop="${2:-}" own="$BIN/$1" mr ours missing required unknown
   [ -e "$BIN/$1.cuda" ] && own="$BIN/$1.cuda"   # once paired, Meshroom's own binary is <name>.cuda
   mr=$(ALICEVISION_ROOT="$MESHROOM/aliceVision" LD_LIBRARY_PATH="$MESHROOM/aliceVision/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$own" --help 2>&1 || true)
   ours=$(ALICEVISION_ROOT="$BUNDLE" LD_LIBRARY_PATH="$BUNDLE/lib" "$BUNDLE/bin/$1" --help 2>&1 || true)
+  # The options the bundle's binary lists under its "Required parameters:" heading, up to the next heading, each at
+  # the start of its line ("  --method arg", "  -i [ --input ] arg"). After 0.3.9: the bundle's sfmBootstrapping
+  # (AliceVision develop) required --method, which Meshroom 2025.1's node never passes - its own binary has no such
+  # option - and the paired node stopped at "is required but missing".
+  required=$(awk '/^[^[:space:]].*:[[:space:]]*$/ { f = ($0 ~ /^Required parameters:/); next } f' <<<"$ours" \
+             | grep -oE -- '^[[:space:]]+(-[[:alnum:]]+[[:space:]]+\[[[:space:]]+)?--[A-Za-z][A-Za-z0-9_.]*' \
+             | grep -oE -- '--[A-Za-z][A-Za-z0-9_.]*$' | sed 's/^/ /' | LC_ALL=C sort -u || true)
   # --help is left out: no node passes it, and whether a build lists it differs (Meshroom 2023.3's
   # Windows binaries do, its Linux ones and the bundle's do not)
   mr=$(grep -o -- ' --[A-Za-z][A-Za-z0-9_.]*' <<<"$mr" | grep -vxF -- ' --help' | LC_ALL=C sort -u || true)
@@ -215,12 +228,21 @@ compatible() {  # name  [option the wrapper drops]
     echo "$1: Meshroom's binary takes options this bundle's does not:$missing(a newer Meshroom than the bundle was built for?)"
     return 1
   fi
+  # and an option the bundle's binary requires must be one Meshroom's knows, or Meshroom's node never passes it
+  unknown=$(LC_ALL=C comm -23 <(printf '%s\n' "$required") <(printf '%s\n' "$mr") | grep -v '^$' | tr '\n' ' ' || true)
+  if [ -n "${unknown// /}" ]; then
+    echo "$1: this bundle's binary requires options Meshroom's does not know:$unknown(a bundle newer than this Meshroom?)"
+    return 1
+  fi
   [ "$CHECK_ONLY" = 1 ] && echo "$1: compatible ($(wc -l <<<"$mr") options)"
   return 0
 }
 
 pair() {  # name  drop-option
   local name="$1" drop="${2:-}" target="$BIN/$1"
+  # a node this Meshroom does not have would otherwise get a wrapper with no binary of Meshroom's behind it
+  # (and the mv below would stop the script under set -e)
+  if [ ! -e "$target" ] && [ ! -e "$target.cuda" ]; then echo "$name: this Meshroom has no such binary, left alone"; return 0; fi
   if ! compatible "$name" "$drop"; then echo "$name: not paired, Meshroom keeps its own binary"; return 0; fi
   [ "$CHECK_ONLY" = 1 ] && return 0
   if [ ! -e "$target.cuda" ]; then mv "$target" "$target.cuda"; fi
@@ -358,6 +380,18 @@ if grep -q 'CHESHIRE_PDS_THREADS' <<<"$pd_help"; then
   pair aliceVision_prepareDenseScene
 else
   echo "bundle's aliceVision_prepareDenseScene is upstream's (pre-v0.2.9): not paired"
+fi
+# Upstream's new SfM pipeline (after 0.3.9): Meshroom 2025.1 runs it in Photogrammetry Experimental, upstream's
+# nightly in Photogrammetry, on Meshroom's own binaries - SfMExpanding alone 334 s on 41 views where the bundle's
+# takes about 30 (docs/04). Its nodes are paired only where Meshroom ships the pipeline, its own sfmExpanding being
+# the sign: Meshroom 2023.3 carries three of these binaries and no template that runs them. Each node behind the
+# option check, like the rest; a bundle without one leaves it to Meshroom.
+if [ -e "$BIN/aliceVision_sfmExpanding" ] || [ -e "$BIN/aliceVision_sfmExpanding.cuda" ]; then
+  for name in $NEWSFM_NODES; do
+    if [ -x "$BUNDLE/bin/$name" ]; then pair "$name"; else echo "$name: the bundle does not carry it, Meshroom keeps its own"; fi
+  done
+else
+  echo "this Meshroom has no aliceVision_sfmExpanding (2023.3): upstream's new SfM pipeline is not there to pair"
 fi
 # The DepthMap node in blocks of 48 views instead of 12 (docs/04, 0.3.4 "the depth-map node was
 # loading images"): each chunk is a process that loads the SfM data, probes the device and starts

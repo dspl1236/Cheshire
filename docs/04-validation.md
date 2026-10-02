@@ -4086,3 +4086,58 @@ Across the three mini6 runs, `base` and `fastransac` gave the same depth maps ea
 gate did. `experimental` and `fastransacexp` gave new ones each time. Meshroom's own SfMExpanding
 still draws every track's samples from one generator shared by its threads: the race step 9c removed
 from ours.
+
+## After 0.3.9: the new SfM pipeline paired on Meshroom 2025.1 (2026-10-01)
+
+Meshroom 2025.1 ships upstream's new SfM pipeline as Photogrammetry Experimental and ran it on its own binaries.
+The package already carried all eight of its programs, unpaired. Both pairing scripts now pair them:
+TracksBuilding, RelativePoseEstimating, SfMBootStrapping, SfMExpanding, SfMTransform, SfMColorizing,
+IntrinsicsTransforming and ExportImages.
+- They are paired only where Meshroom ships the pipeline, its own `aliceVision_sfmExpanding` being the sign.
+  Meshroom 2023.3 carries three of the eight binaries and no template that runs them, and is left alone.
+- Each node goes through the option check, as the others do.
+- `pair` now refuses a node the Meshroom does not have. Before, it would have planted a launcher with no binary
+  of Meshroom's behind it, and on Linux the `mv` would have stopped the script under `set -e`.
+- `--unpair` restores all seventeen.
+- `verify_end_to_end.py` holds the eight to the launcher's provenance line and to what our build of each
+  announces (`NEWCHAIN_MARKERS`, used by `experimental` and `fastransacexp`).
+
+The first gate run stopped at SfMBootStrapping: "the option '--method' is required but missing". Upstream
+added a required `--method` after the AliceVision that 2025.1 ships. 2025.1's node never passes it, and its own
+binary has no such option: it bootstraps from the pairs by epipolar geometry, or with the mesh when
+`--meshFilename` names one. The option check asked only whether ours takes every option Meshroom's takes, so it
+let this through. Two changes:
+- **Step 9l:** an absent `--method` is inferred the same way and said so. The nightly passes `--method
+  "classic"` and is unaffected.
+- **The check:** both scripts now also refuse a node whose binary *requires* an option Meshroom's does not know,
+  from the "Required parameters" heading of its `--help`. Against Meshroom 2025.1 the pre-9l package was refused
+  at exactly SfMBootStrapping and nowhere else among the seventeen. Against 2023.3 nothing was refused.
+
+**Step 9k:** 9h's tracks parse now says which way the file went, once per process. It was silent on success,
+against the marker rule; RelativePoseEstimating, SfMBootStrapping and SfMExpanding carry the line.
+
+The gate, on the RX 9070 with a flat gfx1201 package of the development install (`build/gate-np`; its bundled
+HIP runtime set aside, the power-pc trap):
+
+| Meshroom | set | configs |
+|---|---|---|
+| 2025.1 | mini6 | base 8/8, fastransac 8/8, experimental 14/14, fastransacexp 14/14 |
+| 2025.1 | 41 views | experimental 14/14 (338 s), fastransacexp 14/14 (307 s) |
+| 2023.3 | mini6 | base 8/8; the new nodes left alone |
+
+The base and fastransac depth maps are byte for byte the 0.3.9 gate's (`7c5369fc`, `352f0abe`). On 41 views
+against the same graphs on Meshroom's own binaries earlier the same day (section above), node times summed in
+seconds:
+
+| node | stock, 50000 | paired, 50000 | paired, Fast Ransac | stock, Fast Ransac |
+|---|---|---|---|---|
+| SfMExpanding | 334.1 | 27.4 | 20.7 | 90.5 |
+| ExportImages | 63.3 | 9.7 | 9.6 | 51.9 |
+| RelativePoseEstimating | 16.8 | 6.8 | 6.7 | 18.5 |
+| FeatureMatching | 37.0 | 33.5 | 14.0 | 20.6 |
+| DepthMap | 110.8 | 100.4 | 99.7 | - |
+| all nodes | 742.6 | 336.3 | 304.9 | 457.1 |
+
+Every view is placed, with 91,526 and 91,462 landmarks (stock: 91,545 and 91,489). The Fast Ransac copy moves the
+cameras 0.016 % of the scene's radius, as it did on stock binaries. Since step 9c our build of the new nodes
+stays within 0.0060 % of stock's camera centres on 41 views (replay harness, above).

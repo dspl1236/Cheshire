@@ -4,7 +4,10 @@ rem
 rem Meshroom runs its nodes as aliceVision_*.exe from <Meshroom>\aliceVision\bin. Nine of them get
 rem the Cheshire treatment when the package carries them: PrepareDenseScene, FeatureExtraction,
 rem ImageMatching, FeatureMatching, StructureFromMotion, DepthMap, DepthMapFilter, Meshing and
-rem Texturing. Each becomes a copy of the launcher (meshroom-pair-launcher.exe, shipped beside this
+rem Texturing. On a Meshroom that ships upstream's new SfM pipeline (2025.1's Photogrammetry
+rem Experimental) eight more do: TracksBuilding, RelativePoseEstimating, SfMBootStrapping,
+rem SfMExpanding, SfMTransform, SfMColorizing, IntrinsicsTransforming and ExportImages (after 0.3.9).
+rem Each becomes a copy of the launcher (meshroom-pair-launcher.exe, shipped beside this
 rem script) that starts the Cheshire build from the package when the package matches the card (a
 rem CUDA package with an NVIDIA card that answers nvidia-smi, an AMD package without one), or
 rem Meshroom's own binary (kept as <name>.cuda.exe) otherwise. Decided per run, so a box that swaps
@@ -31,6 +34,8 @@ rem Meshroom's own binary takes with the package's: a Meshroom newer than the pa
 rem the package does not know, and the node is then left to Meshroom instead of failing mid-job.
 setlocal
 set HERE=%~dp0
+rem upstream's new SfM pipeline, in the order it runs (see below)
+set NEWSFM_NODES=aliceVision_tracksBuilding aliceVision_relativePoseEstimating aliceVision_sfmBootstrapping aliceVision_sfmExpanding aliceVision_sfmTransform aliceVision_sfmColorizing aliceVision_intrinsicsTransforming aliceVision_exportImages
 set MR=%~1
 set PKG=%~2
 if "%PKG%"=="" ( echo usage: %~nx0 ^<Meshroom dir^> ^<Cheshire package dir^> ^| --unpair & exit /b 1 )
@@ -47,6 +52,7 @@ if /i "%PKG%"=="--unpair" (
   if exist "%MR%\lib\meshroom\nodes\aliceVision\DepthMap.py" ( findstr /c:"Cheshire" "%MR%\lib\meshroom\nodes\aliceVision\DepthMap.py" >nul && del /q "%MR%\lib\meshroom\nodes\aliceVision\DepthMap.py" && echo removed the DepthMap node override )
   if exist "%MR%\aliceVision\share\meshroom\aliceVision\DepthMap.py.meshroom" ( findstr /c:"Cheshire" "%MR%\aliceVision\share\meshroom\aliceVision\DepthMap.py" >nul && move /y "%MR%\aliceVision\share\meshroom\aliceVision\DepthMap.py.meshroom" "%MR%\aliceVision\share\meshroom\aliceVision\DepthMap.py" >nul && echo restored Meshroom's DepthMap node )
   for %%N in (aliceVision_depthMapEstimation aliceVision_featureMatching aliceVision_featureExtraction aliceVision_depthMapFiltering aliceVision_meshing aliceVision_texturing aliceVision_prepareDenseScene aliceVision_incrementalSfM aliceVision_imageMatching) do call :unpair %%N
+  for %%N in (%NEWSFM_NODES%) do call :unpair %%N
   if exist "%HERE%meshroom-templates.ps1" powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%meshroom-templates.ps1" "%MR%" remove
   exit /b 0
 )
@@ -102,6 +108,15 @@ rem ImageMatching (v0.3.5+): the package's imageMatching can pair views by GPS d
 rem (CHESHIRE_GPS_PAIRING_RADIUS, off unless set); gate on its help text
 call :gate aliceVision_imageMatching "CHESHIRE_GPS_PAIRING" IMOK
 if defined IMOK ( call :pairif aliceVision_imageMatching ) else ( echo package's aliceVision_imageMatching is upstream's ^(pre-v0.3.5^): not paired )
+rem Upstream's new SfM pipeline (after 0.3.9): Meshroom 2025.1 runs it in Photogrammetry Experimental, upstream's
+rem nightly in Photogrammetry, on Meshroom's own binaries - SfMExpanding alone 334 s on 41 views where the package's
+rem takes about 30 (docs/04). Its nodes are paired only where Meshroom ships the pipeline, its own sfmExpanding being
+rem the sign: Meshroom 2023.3 carries three of these binaries and no template that runs them. Each node behind the
+rem option check, like the rest; a package without one leaves it to Meshroom.
+set NEWSFM=
+if exist "%BIN%\aliceVision_sfmExpanding.exe" set NEWSFM=1
+if exist "%BIN%\aliceVision_sfmExpanding.cuda.exe" set NEWSFM=1
+if defined NEWSFM ( for %%N in (%NEWSFM_NODES%) do call :pairnew %%N ) else ( echo this Meshroom has no aliceVision_sfmExpanding ^(2023.3^): upstream's new SfM pipeline is not there to pair )
 rem GPU SIFT (v0.2.13+, docs\14-gpu-sift.md): gate on popsift.dll being in the package, since
 rem without it this node would move CPU SIFT from one build to another for nothing. Note the
 rem describer falls back to the CPU silently when no GPU is visible, so a paired node that
@@ -184,8 +199,17 @@ if exist "%HERE%meshroom-pair-check.ps1" (
 if defined COMPAT ( call :pair %1 ) else ( echo %1: not paired, Meshroom keeps its own binary )
 exit /b 0
 
+:pairnew
+rem :pairnew <node>: a node of the new SfM pipeline, paired when the package carries it
+call :have %1
+if not defined HAVE ( echo %1: the package does not carry it, Meshroom keeps its own & exit /b 0 )
+call :pairif %1
+exit /b 0
+
 :pair
 set T=%BIN%\%1
+rem a node this Meshroom does not have would otherwise get a launcher with no binary of Meshroom's behind it
+if not exist "%T%.exe" if not exist "%T%.cuda.exe" ( echo %1: this Meshroom has no such binary, left alone & exit /b 0 )
 if not exist "%T%.cuda.exe" ren "%T%.exe" %1.cuda.exe
 copy /y "%L%" "%T%.exe" >nul
 for %%P in ("%PKG%") do echo %%~fP> "%T%.cheshire.txt"

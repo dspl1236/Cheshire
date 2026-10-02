@@ -21,6 +21,20 @@ function Get-Options([string]$text) {
     [regex]::Matches($text, ' --[A-Za-z][A-Za-z0-9_.]*') | ForEach-Object { $_.Value.Trim() } | Where-Object { $_ -ne '--help' } | Sort-Object -Unique
 }
 
+# The options a --help text lists under its "Required parameters:" heading, up to the next heading; only an option at
+# the start of its line ("  --method arg", "  -i [ --input ] arg"), not one a description mentions. After 0.3.9: the
+# package's sfmBootstrapping (AliceVision develop) requires --method, which Meshroom 2025.1's node never passes - its
+# own binary has no such option - and the paired node stopped at "is required but missing". Options the other way
+# round, taken by Meshroom's binary and not by ours, were all this checked before.
+function Get-Required([string]$text) {
+    $in = $false
+    $found = foreach ($line in ($text -split "`r?`n")) {
+        if ($line -match '^\S.*:\s*$') { $in = $line -match '^Required parameters:'; continue }
+        if ($in -and $line -match '^\s+(?:-\w+\s+\[\s+)?(--[A-Za-z][A-Za-z0-9_.]*)') { $Matches[1] }
+    }
+    @($found | Sort-Object -Unique)
+}
+
 $bin = Join-Path $Meshroom "aliceVision\bin"
 # once paired, Meshroom's own binary is kept as <node>.cuda.exe and <node>.exe is the launcher
 $own = Join-Path $bin "$Node.cuda.exe"
@@ -42,6 +56,7 @@ try {
         $ours = (& (Join-Path $Package "bin\$Node.exe") --help 2>&1) | Out-String
     }
     $cheshireOptions = @(Get-Options $ours)
+    $cheshireRequired = @(Get-Required $ours)
 } finally {
     $env:PATH = $saved.PATH
     $env:ALICEVISION_ROOT = $saved.ALICEVISION_ROOT
@@ -54,6 +69,12 @@ $dropped = if ($Drop) { "--" + $Drop.TrimStart('-') } else { "" }
 $missing = @($meshroomOptions | Where-Object { $_ -notin $cheshireOptions -and $_ -ne $dropped })
 if ($missing.Count -gt 0) {
     Write-Output ("${Node}: Meshroom's binary takes options this package's does not: " + ($missing -join " ") + " (a newer Meshroom than the package was built for?)")
+    exit 1
+}
+# and an option the package's binary requires must be one Meshroom's knows, or Meshroom's node never passes it
+$unknown = @($cheshireRequired | Where-Object { $_ -notin $meshroomOptions })
+if ($unknown.Count -gt 0) {
+    Write-Output ("${Node}: this package's binary requires options Meshroom's does not know: " + ($unknown -join " ") + " (a package newer than this Meshroom?)")
     exit 1
 }
 exit 0

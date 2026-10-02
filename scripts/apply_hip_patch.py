@@ -1958,6 +1958,56 @@ Mat fivePointsNullspaceBasis(const Mat2X& x1, const Mat2X& x2)
      "    Eigen::JacobiSVD<Eigen::Matrix<double, 9, 9>> svd(A, Eigen::ComputeFullV);\n"),
 ]
 
+# 9k (after 0.3.9): 9h's tracks parse says which way the file went, once per process and path (the marker rule of
+# docs/04: a port that is silent on success cannot be told from one that never ran). The new SfM nodes that read the
+# tracks file - RelativePoseEstimating, SfMBootStrapping, SfMExpanding, IntrinsicsTransforming - carry it, so the
+# end-to-end gate can ask for it once they are paired.
+STEP9K_TRACKIO = [
+    ("            mapTracks = std::move(cheshireMap);\n            return true;\n",
+     "            static const bool cheshireSaid = []() {  // cheshire (step 9k): once per process\n"
+     "                ALICEVISION_LOG_INFO(\"cheshire: tracks file parsed straight into structs \"\n"
+     "                                     \"(CHESHIRE_TRACKS_PARSE_INTO=0 for Boost.JSON's DOM, CHESHIRE_TRACKS_PARSE_INTO_CHECK=1 to compare)\");\n"
+     "                return true;\n"
+     "            }();\n"
+     "            (void)cheshireSaid;\n"
+     "            mapTracks = std::move(cheshireMap);\n            return true;\n"),
+    ("    boost::json::value jv = boost::json::parse(cheshireText);\n"
+     "    mapTracks = track::TracksMap(map_value_to<std::size_t, track::Track>(jv));\n",
+     "    boost::json::value jv = boost::json::parse(cheshireText);\n"
+     "    mapTracks = track::TracksMap(map_value_to<std::size_t, track::Track>(jv));\n"
+     "    static const bool cheshireSaidDom = []() {  // cheshire (step 9k): once per process\n"
+     "        if (cheshireTracks::on()) {  // braces: the logging macro is a for statement\n"
+     "            ALICEVISION_LOG_INFO(\"cheshire: tracks file read through Boost.JSON's DOM: the structs could not hold it\");\n"
+     "        } else {\n"
+     "            ALICEVISION_LOG_INFO(\"cheshire: tracks file read through Boost.JSON's DOM (CHESHIRE_TRACKS_PARSE_INTO=0)\");\n"
+     "        }\n"
+     "        return true;\n"
+     "    }();\n"
+     "    (void)cheshireSaidDom;\n"),
+]
+
+# 9l (after 0.3.9): SfMBootStrapping as Meshroom 2025.1 runs it. Upstream added a required --method (classic, mesh,
+# mesh_single, depth) after the AliceVision that 2025.1 ships, whose node never passes it, so the paired node stopped at
+# "the option '--method' is required but missing". 2025.1's own binary has no such option: it bootstraps from the pairs
+# by epipolar geometry, or with the mesh when --meshFilename names one. Absent, the method is now inferred the same way
+# and said so; a Meshroom that passes it (the nightly sends --method "classic") is unaffected.
+STEP9L_BOOTSTRAP = [
+    ("    (\"method\", po::value<std::string>(&methodString)->required(), \"Bootstrapping method: classic (epipolar geometry), mesh (3D mesh constraints), or depth (depth map information).\")\n",
+     ""),
+    ("    (\"pairs\", po::value<std::string>(&pairsDirectory)->default_value(pairsDirectory), \"Path to the pairs directory.\")\n",
+     "    (\"method\", po::value<std::string>(&methodString)->default_value(methodString), \"Bootstrapping method: classic (epipolar geometry), mesh (3D mesh constraints), or depth (depth map information). \"\n"
+     "     \"cheshire (step 9l): when absent - a Meshroom whose node predates the option, 2025.1's - mesh if --meshFilename names one, else classic, as that Meshroom's own binary bootstraps.\")\n"
+     "    (\"pairs\", po::value<std::string>(&pairsDirectory)->default_value(pairsDirectory), \"Path to the pairs directory.\")\n"),
+    ("    EBOOTSTRAPMETHOD method = EBOOTSTRAPMETHOD_stringToEnum(methodString);\n",
+     "    if (methodString.empty())  // cheshire (step 9l)\n"
+     "    {\n"
+     "        methodString = meshFilename.empty() ? \"classic\" : \"mesh\";\n"
+     "        ALICEVISION_LOG_INFO(\"cheshire: no --method given (a Meshroom whose node predates it): \" << methodString\n"
+     "                             << \", as that Meshroom's own binary bootstraps\");\n"
+     "    }\n"
+     "    EBOOTSTRAPMETHOD method = EBOOTSTRAPMETHOD_stringToEnum(methodString);\n"),
+]
+
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
     if new in text:
@@ -2054,6 +2104,7 @@ TRACKED = [
     "src/aliceVision/dataio/json.hpp",  # 9e
     "src/aliceVision/track/trackIO.cpp",  # 9h
     "src/aliceVision/multiview/relativePose/Essential5PSolver.cpp",  # 9j
+    "src/software/pipeline/main_sfmBootstrapping.cpp",  # 9l
 ]
 
 
@@ -7232,6 +7283,28 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                 sys.exit("an anchor of the 5-point solver's nullspace not found once in Essential5PSolver.cpp (9j)")
             t = t.replace(old, new, 1)
     f9j.write_text(t, encoding="utf-8", newline="")
+
+    # 9k (after 0.3.9). The tracks file's parse (9h) announces its path once per process, so the gate can tell the new
+    #     SfM nodes ran it.
+    f9k = AV / "src/aliceVision/track/trackIO.cpp"
+    t = f9k.read_text(encoding="utf-8")
+    if "step 9k" not in t:
+        for old, new in STEP9K_TRACKIO:
+            if t.count(old) != 1:
+                sys.exit("an anchor of the tracks file's announcement not found once in trackIO.cpp (9k)")
+            t = t.replace(old, new, 1)
+    f9k.write_text(t, encoding="utf-8", newline="")
+
+    # 9l (after 0.3.9). SfMBootStrapping takes Meshroom 2025.1's command line: --method optional, inferred as 2025.1's own
+    #     binary chooses when absent.
+    f9l = AV / "src/software/pipeline/main_sfmBootstrapping.cpp"
+    t = f9l.read_text(encoding="utf-8")
+    if "step 9l" not in t:
+        for old, new in STEP9L_BOOTSTRAP:
+            if t.count(old) != 1:
+                sys.exit("an anchor of SfMBootStrapping's --method not found once in main_sfmBootstrapping.cpp (9l)")
+            t = t.replace(old, new, 1)
+    f9l.write_text(t, encoding="utf-8", newline="")
 
     # 6q. Every CHESHIRE_* variable is read through cheshire/env.h (hip/compat/include/cheshire/env.h,
     #     copied in step 1): one rule per kind - flag, integer, real, text, isSet - where the ports

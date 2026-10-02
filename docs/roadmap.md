@@ -975,7 +975,14 @@ Plan, loosely, since the release date is not known:
    Versioning then follows the Meshroom release: one package per supported release, chosen by the
    detection in step 1. `verify_end_to_end.py` needs the new chain too: its markers and its
    `fastransac` check name StructureFromMotion and PrepareDenseScene, which a new Photogrammetry
-   does not run.
+   does not run. **Pairing done ahead of it, 2026-10-01** (docs/04): Meshroom 2025.1 already ships the
+   pipeline as Photogrammetry Experimental, so both pairing scripts pair its eight nodes wherever
+   Meshroom has its own sfmExpanding, behind an option check that now also refuses options our
+   build requires and Meshroom's does not know. Step 9l takes 2025.1's SfMBootStrapping command line,
+   and the harness checks the new chain on 2025.1 (`experimental`, `fastransacexp`,
+   `NEWCHAIN_MARKERS`). Meshroom's own SfMExpanding took 334 s on 41 views, ours 27 s; the whole
+   Experimental run went from 743 s to 336 s. What is left for the pivot itself: the submodule, USD,
+   5r/5s/the ranking ties, and a harness whose default `photogrammetry` is the new chain.
 
 Effect on the open items: in the new chain too, Grin leaves bundle adjustment at about 5 s of
 SfMExpanding on these sets, so the new pipeline adds nothing to the case for BA on the device

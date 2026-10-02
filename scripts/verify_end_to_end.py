@@ -216,6 +216,15 @@ BINARY = {
     "StructureFromMotion": "aliceVision_incrementalSfM",
     # 0.3.6: paired since v0.2.9, checked from here on (its launcher line and the 6n marker above).
     "PrepareDenseScene": "aliceVision_prepareDenseScene",
+    # After 0.3.9: upstream's new SfM pipeline, paired where Meshroom ships it (2025.1's Photogrammetry Experimental).
+    "TracksBuilding": "aliceVision_tracksBuilding",
+    "RelativePoseEstimating": "aliceVision_relativePoseEstimating",
+    "SfMBootStrapping": "aliceVision_sfmBootstrapping",
+    "SfMExpanding": "aliceVision_sfmExpanding",
+    "SfMTransform": "aliceVision_sfmTransform",
+    "SfMColorizing": "aliceVision_sfmColorizing",
+    "IntrinsicsTransforming": "aliceVision_intrinsicsTransforming",
+    "ExportImages": "aliceVision_exportImages",
 }
 
 # Override paths are Meshroom ATTRIBUTE paths, not AliceVision command-line flags, and the two are
@@ -232,10 +241,30 @@ BINARY = {
 RANSAC_2025 = {"FeatureMatching": [r"\* maxIteration = 50000\b"],
                "StructureFromMotion": [r"\* localizerEstimatorMaxIterations = 50000\b"]}
 # After 0.3.9: upstream's new SfM pipeline, Meshroom 2025.1's Photogrammetry Experimental. SfMExpanding takes
-# StructureFromMotion's place and IntrinsicsTransforming + ExportImages PrepareDenseScene's. The package pairs
-# none of the new nodes yet (the roadmap's pivot step), so those two markers drop out and every paired node
-# keeps its own; SfMExpanding's resection has the same 50000 default as StructureFromMotion's.
+# StructureFromMotion's place and IntrinsicsTransforming + ExportImages PrepareDenseScene's, so those two markers
+# drop out. The pipeline's own nodes are paired too, each held to the launcher's provenance line and to what our
+# build of it announces: NACRANSAC's bound (9a) and batches (9b), the 5-point nullspace (9j), the tracks file's
+# parse (9k), the colours' direct 8-bit read (8b), ExportImages' threads and EXR compression (9d). TracksBuilding,
+# SfMTransform and IntrinsicsTransforming announce nothing of their own (IntrinsicsTransforming reads no tracks
+# file in this template); the provenance line is their check. SfMExpanding's resection has the same 50000 default
+# as StructureFromMotion's.
+TRACKS_PARSE = r"cheshire: tracks file parsed straight into structs"
 NEWCHAIN_MARKERS = {n: p for n, p in GPU_MARKERS.items() if n not in ("StructureFromMotion", "PrepareDenseScene")}
+NEWCHAIN_MARKERS.update({
+    "TracksBuilding": [],
+    "RelativePoseEstimating": [r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far",
+                               r"5-point nullspace: (SVD \(default|Householder QR \(CHESHIRE_QR_NULLSPACE5=1\))",
+                               TRACKS_PARSE],
+    "SfMBootStrapping": [TRACKS_PARSE],
+    "SfMExpanding": [r"cheshire: NACRANSAC runs its iterations in batches on every core",
+                     r"cheshire: BA solver: Grin, Cheshire's own, for the Schur solves",
+                     TRACKS_PARSE],
+    "SfMTransform": [],
+    "SfMColorizing": [r"cheshire: 8-bit images read as 8-bit RGB directly"],
+    "IntrinsicsTransforming": [],
+    "ExportImages": [r"cheshire: images exported \d+ at a time, one per thread",
+                     r"cheshire: exported images written with EXR compression"],
+})
 RANSAC_2025_NEW = {"FeatureMatching": [r"\* maxIteration = 50000\b"],
                    "SfMExpanding": [r"\* localizerEstimatorMaxIterations = 50000\b"]}
 
