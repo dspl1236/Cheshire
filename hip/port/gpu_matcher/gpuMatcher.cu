@@ -9,16 +9,23 @@
 //
 // CUDA dialect. Under HIP the build force-includes cheshire/cuda_to_hip.h, which maps the runtime
 // calls; __global__/__shared__/__syncthreads are the same in both.
+//
+// For 128-byte uint8 descriptors two faster kernels give the same rows and distances, bit for bit:
+// knn2_wmma on RDNA4 (gfx120x: the 8-bit matrix instructions, 9.4x knn2_u8 on the RX 9070) and
+// knn2_dot4q on NVIDIA sm_61+ (2.0x on the GTX 1080 Ti); everything else keeps knn2_u8 until it is
+// measured. CHESHIRE_MATCHER_KERNEL=u8|sliced|dot4q|wmma picks one; the log line names the choice.
 #include "gpuMatcher.hpp"
 #include <cuda_runtime.h>
 #include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
 #include <aliceVision/depthMap/cuda/hip/cheshire/env.h>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <chrono>
 #include <mutex>
+#include <string>
 
 namespace aliceVision {
 namespace matching {
@@ -226,6 +233,243 @@ __global__ void merge2(const int* __restrict__ partIdx, const float* __restrict_
     outDist[2 * qi] = d0; outDist[2 * qi + 1] = d1;
 }
 
+// ---------------------------------------------------------------------------------------------------------- 0.4.x
+// knn2_wmma and knn2_dot4q keep a query's two best as packed integer keys over windows of 240 rows:
+// key = 256 (2 dot - rowNorm) + f. 2 dot - rowNorm is queryNorm - distance, a per-query constant away from
+// the distance, and |2 dot - rowNorm| <= 128 * 255^2 < 2^23, so a key fits an int32. The tie field f is
+// 254 - rowInWindow for the window's rows and 255 for the two carried in from earlier windows (lower rows,
+// so they win ties). Per candidate that is one shift-add, a max and a min-max. At the end of a window f
+// says whether each of the two is new (row base + 254 - f) or carried (rows i0, then i1), and both are
+// marked carried; equal keys always hold rows i0 < i1. Integer sums in any grouping are the same integers,
+// so both kernels give knn2_u8's rows and distances, bit for bit (hip/tests/gpumatcher_wmma: every query
+// of 8 engine-bay pairs of 20000 x 20000, and wmma_edge.hip's sizes 0 to 7201, heavy ties and extremes).
+constexpr int kKeyWindowRows = 240;       // f = 255 stays free for the carried two
+constexpr int kEmptyKey = INT_MIN + 255;  // carried, with rows INT_MAX: nothing yet
+
+__device__ __forceinline__ void carryWindow(int& p0, int& p1, int& i0, int& i1, int base)
+{
+    const int top = base + 254;
+    const int f0 = p0 & 255, f1 = p1 & 255;
+    const bool c0 = f0 == 255, c1 = f1 == 255;
+    const int n1 = c1 ? (c0 ? i1 : i0) : top - f1;
+    if (!c0) i0 = top - f0;
+    i1 = n1;
+    p0 |= 255; p1 |= 255;
+}
+
+// knn2_dot4q: Q queries per thread, so every shared-memory read of a database word feeds Q dot4, one per
+// query, instead of one. On Pascal a warp's broadcast read costs about what the 32 dp4a it feeds for one
+// query cost, so knn2_u8 is bound by those reads: Q = 2 in blocks of 128 is 2.03x knn2_u8 on the GTX
+// 1080 Ti (cuda_matcher.cu). On the RX 9070 it is 1.13x (blocks of 256); RDNA1/2 are unmeasured.
+template<int Q>
+__global__ void knn2_dot4q(const unsigned int* __restrict__ db, const unsigned int* __restrict__ dbNorm, int rows,
+                           const unsigned int* __restrict__ q, const unsigned int* __restrict__ qNorm, int nbQuery,
+                           int* __restrict__ outIdx, float* __restrict__ outDist)
+{
+    constexpr int W = 32;
+    __shared__ __align__(16) unsigned int tile[kKeyWindowRows * W];
+    __shared__ int tileC[kKeyWindowRows];
+    const int q0 = (blockIdx.x * blockDim.x + threadIdx.x) * Q;
+    unsigned int qreg[Q][W];
+    int p0[Q], p1[Q], i0[Q], i1[Q];
+#pragma unroll
+    for (int j = 0; j < Q; ++j) {
+        const int qi = q0 + j;
+#pragma unroll
+        for (int k = 0; k < W; ++k) qreg[j][k] = qi < nbQuery ? q[size_t(qi) * W + k] : 0u;
+        p0[j] = kEmptyKey; p1[j] = kEmptyKey; i0[j] = INT_MAX; i1[j] = INT_MAX;
+    }
+    for (int base = 0; base < rows; base += kKeyWindowRows) {
+        const int n = min(kKeyWindowRows, rows - base);
+        for (int t = threadIdx.x; t < n * W; t += blockDim.x) tile[t] = db[size_t(base) * W + t];
+        for (int t = threadIdx.x; t < n; t += blockDim.x) tileC[t] = int((254u - unsigned(t)) - (dbNorm[base + t] << 8));
+        __syncthreads();
+        for (int r = 0; r < n; ++r) {
+            unsigned int acc[Q];
+#pragma unroll
+            for (int j = 0; j < Q; ++j) acc[j] = 0u;
+#pragma unroll
+            for (int c = 0; c < W / 4; ++c) {
+                const uint4 w = reinterpret_cast<const uint4*>(tile + r * W)[c];
+#pragma unroll
+                for (int j = 0; j < Q; ++j) {
+                    acc[j] = dot4u8(qreg[j][4 * c], w.x, acc[j]);
+                    acc[j] = dot4u8(qreg[j][4 * c + 1], w.y, acc[j]);
+                    acc[j] = dot4u8(qreg[j][4 * c + 2], w.z, acc[j]);
+                    acc[j] = dot4u8(qreg[j][4 * c + 3], w.w, acc[j]);
+                }
+            }
+            const unsigned int cr = unsigned(tileC[r]);
+#pragma unroll
+            for (int j = 0; j < Q; ++j) {
+                const int y = int((acc[j] << 9) + cr);   // wrapping shift-add; the key itself is in range
+                p1[j] = max(min(p0[j], y), p1[j]);
+                p0[j] = max(p0[j], y);
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < Q; ++j) carryWindow(p0[j], p1[j], i0[j], i1[j], base);
+        __syncthreads();
+    }
+#pragma unroll
+    for (int j = 0; j < Q; ++j) {
+        const int qi = q0 + j;
+        if (qi < nbQuery) {
+            const int qn = int(qNorm[qi]);
+            outIdx[2 * qi] = i0[j] == INT_MAX ? -1 : i0[j]; outIdx[2 * qi + 1] = i1[j] == INT_MAX ? -1 : i1[j];
+            outDist[2 * qi] = i0[j] == INT_MAX ? 3.4e38f : float(qn - (p0[j] >> 8));
+            outDist[2 * qi + 1] = i1[j] == INT_MAX ? 3.4e38f : float(qn - (p1[j] >> 8));
+        }
+    }
+}
+
+#if defined(__HIP_PLATFORM_AMD__)
+// knn2_wmma: RDNA4's v_wmma_i32_16x16x16_iu8 (gfx120x only; other code objects get an empty body and the
+// host never launches it there). A wave takes kWmmaTiles 16-query tiles (A, rows m) and walks the
+// database 16 rows at a time (B, columns n); eight instructions cover the 128 bytes, the dot products
+// exact int32. Layout, measured by hip/tests/gpumatcher_wmma/wmma_probe.hip: lane l holds A row l % 16
+// and B column l % 16, bytes 8 (l / 16) .. +7 of each 16-byte step, and receives D for column l % 16,
+// rows 8 (l / 16) + v. Each lane keeps a best two for its 8 queries over the rows n = l % 16 (mod 16);
+// a butterfly over the 16 lanes of a half merges them lexicographically on (distance, row). The database
+// goes through LDS in the 240-row key windows, transposed (k-group, row) so the B reads of a k-group are
+// consecutive 8-byte words, and filled with 16-byte global reads written as two 8-byte LDS stores that
+// never share a bank. RX 9070, 8 engine-bay pairs: 21.4 ms against knn2_u8's 197 ms.
+typedef int cheshireV2i __attribute__((ext_vector_type(2)));
+typedef int cheshireV8i __attribute__((ext_vector_type(8)));
+constexpr int kWmmaWaves = 8;   // waves per block
+constexpr int kWmmaTiles = 2;   // 16-query tiles per wave (3 is 2 % faster at 206 VGPRs; 4 spills)
+
+struct KeyBest2 { int d0, i0, d1, i1; };
+
+__device__ __forceinline__ bool lexLess(int d, int i, int e, int j) { return d < e || (d == e && i < j); }
+
+__device__ __forceinline__ void mergeBest2(KeyBest2& a, int b0, int bi0, int b1, int bi1)
+{
+    // both sorted on (distance, row); keep the first two of their merge
+    if (lexLess(b0, bi0, a.d0, a.i0)) {
+        if (lexLess(b1, bi1, a.d0, a.i0)) { a.d1 = b1; a.i1 = bi1; } else { a.d1 = a.d0; a.i1 = a.i0; }
+        a.d0 = b0; a.i0 = bi0;
+    } else if (lexLess(b0, bi0, a.d1, a.i1)) {
+        a.d1 = b0; a.i1 = bi0;
+    }
+}
+
+__global__ void __launch_bounds__(kWmmaWaves * 32)
+knn2_wmma(const unsigned int* __restrict__ db, const unsigned int* __restrict__ dbNorm, int rows,
+          const unsigned int* __restrict__ q, const unsigned int* __restrict__ qNorm, int nbQuery,
+          int* __restrict__ outIdx, float* __restrict__ outDist)
+{
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1200__) || defined(__gfx1201__) || defined(__gfx12_generic__))
+    constexpr int W = 32;
+    constexpr int MT = kWmmaTiles;
+    __shared__ __align__(16) unsigned int tile[kKeyWindowRows * W];
+    __shared__ int tileC[kKeyWindowRows];
+    const int lane = threadIdx.x & 31, wave = threadIdx.x >> 5;
+    const int col = lane & 15, h = lane >> 4;
+    const int qbase = (blockIdx.x * kWmmaWaves + wave) * 16 * MT;
+
+    cheshireV2i a[MT][8];
+#pragma unroll
+    for (int t = 0; t < MT; ++t) {
+        const int qr = qbase + 16 * t + col;
+#pragma unroll
+        for (int s = 0; s < 8; ++s) {
+            if (qr < nbQuery) { a[t][s][0] = int(q[size_t(qr) * W + 4 * s + 2 * h]); a[t][s][1] = int(q[size_t(qr) * W + 4 * s + 2 * h + 1]); }
+            else { a[t][s][0] = 0; a[t][s][1] = 0; }
+        }
+    }
+    int p0[MT][8], p1[MT][8], i0[MT][8], i1[MT][8];
+#pragma unroll
+    for (int t = 0; t < MT; ++t)
+#pragma unroll
+        for (int v = 0; v < 8; ++v) { p0[t][v] = kEmptyKey; p1[t][v] = kEmptyKey; i0[t][v] = INT_MAX; i1[t][v] = INT_MAX; }
+
+    for (int base = 0; base < rows; base += kKeyWindowRows) {
+        const int n = min(kKeyWindowRows, rows - base);
+        const int ntiles = (n + 15) >> 4;
+        // wave w fills n-tiles w, w + 8; lane (col, h) moves 16-byte chunks 2j + h of row col: k-groups 2i, 2i + 1
+        for (int nt = wave; nt < ntiles; nt += kWmmaWaves) {
+            const int r = nt * 16 + col;
+            unsigned int* T = tile + nt * 512;
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const int i = 2 * j + h;
+                uint4 w = make_uint4(0u, 0u, 0u, 0u);
+                if (r < n) w = reinterpret_cast<const uint4*>(db + size_t(base + r) * W)[i];
+                *reinterpret_cast<uint2*>(T + ((2 * i) * 16 + col) * 2) = make_uint2(w.x, w.y);
+                *reinterpret_cast<uint2*>(T + ((2 * i + 1) * 16 + col) * 2) = make_uint2(w.z, w.w);
+            }
+        }
+        // past the end: zero descriptors and the lowest key, never chosen
+        for (int t = threadIdx.x; t < ntiles * 16; t += blockDim.x)
+            tileC[t] = t < n ? int((254u - unsigned(t)) - (dbNorm[base + t] << 8)) : INT_MIN;
+        __syncthreads();
+        for (int nt = 0; nt < ntiles; ++nt) {
+            const unsigned int* T = tile + nt * 512;
+            cheshireV2i b[8];
+#pragma unroll
+            for (int s = 0; s < 8; ++s) {
+                const uint2 w = *reinterpret_cast<const uint2*>(T + ((2 * s + h) * 16 + col) * 2);
+                b[s][0] = int(w.x); b[s][1] = int(w.y);
+            }
+            const unsigned int c = unsigned(tileC[nt * 16 + col]);
+#pragma unroll
+            for (int t = 0; t < MT; ++t) {
+                cheshireV8i acc = {0, 0, 0, 0, 0, 0, 0, 0};
+#pragma unroll
+                for (int s = 0; s < 8; ++s) acc = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(false, a[t][s], false, b[s], acc, false);
+#pragma unroll
+                for (int v = 0; v < 8; ++v) {
+                    const int y = int((unsigned(acc[v]) << 9) + c);
+                    p1[t][v] = max(min(p0[t][v], y), p1[t][v]);
+                    p0[t][v] = max(p0[t][v], y);
+                }
+            }
+        }
+#pragma unroll
+        for (int t = 0; t < MT; ++t)
+#pragma unroll
+            for (int v = 0; v < 8; ++v) carryWindow(p0[t][v], p1[t][v], i0[t][v], i1[t][v], base);
+        __syncthreads();
+    }
+    KeyBest2 best[MT][8];
+#pragma unroll
+    for (int t = 0; t < MT; ++t)
+#pragma unroll
+        for (int v = 0; v < 8; ++v) {
+            const int m = qbase + 16 * t + 8 * h + v;
+            const int qn = m < nbQuery ? int(qNorm[m]) : 0;
+            best[t][v].i0 = i0[t][v]; best[t][v].d0 = i0[t][v] == INT_MAX ? INT_MAX : qn - (p0[t][v] >> 8);
+            best[t][v].i1 = i1[t][v]; best[t][v].d1 = i1[t][v] == INT_MAX ? INT_MAX : qn - (p1[t][v] >> 8);
+        }
+#pragma unroll
+    for (int t = 0; t < MT; ++t)
+#pragma unroll
+        for (int v = 0; v < 8; ++v)
+#pragma unroll
+            for (int x = 1; x < 16; x <<= 1) {
+                const int b0 = __shfl_xor(best[t][v].d0, x, 16), bi0 = __shfl_xor(best[t][v].i0, x, 16);
+                const int b1 = __shfl_xor(best[t][v].d1, x, 16), bi1 = __shfl_xor(best[t][v].i1, x, 16);
+                mergeBest2(best[t][v], b0, bi0, b1, bi1);
+            }
+    if (col == 0) {
+#pragma unroll
+        for (int t = 0; t < MT; ++t)
+#pragma unroll
+            for (int v = 0; v < 8; ++v) {
+                const int m = qbase + 16 * t + 8 * h + v;
+                if (m < nbQuery) {
+                    const KeyBest2& b = best[t][v];
+                    outIdx[2 * m] = b.i0 == INT_MAX ? -1 : b.i0; outIdx[2 * m + 1] = b.i1 == INT_MAX ? -1 : b.i1;
+                    outDist[2 * m] = b.i0 == INT_MAX ? 3.4e38f : float(b.d0);
+                    outDist[2 * m + 1] = b.i1 == INT_MAX ? 3.4e38f : float(b.d1);
+                }
+            }
+    }
+#endif
+}
+#endif  // __HIP_PLATFORM_AMD__
+
 template<int DIM>
 __global__ void knn2_f32(const float* __restrict__ db, int rows, const float* __restrict__ q, int nbQuery,
                          int* __restrict__ outIdx, float* __restrict__ outDist)
@@ -262,6 +506,11 @@ __global__ void knn2_f32(const float* __restrict__ db, int rows, const float* __
 bool g_checked = false, g_available = false;
 std::mutex g_mutex;
 
+// The uint8 kernel for 128-byte descriptors, chosen once in available(); 64-byte ones always take knn2_u8.
+enum U8Kernel { kU8, kSliced, kDot4q, kWmma };
+const char* const kU8KernelNames[] = {"knn2_u8", "knn2_u8_sliced", "knn2_dot4q", "knn2_wmma"};
+int g_u8Kernel = kU8;
+
 // CHESHIRE_GPU_MATCHER_LOG=1: cumulative time inside build()/search2() (uploads, kernel, downloads)
 // printed at exit, to split the matcher's share of "Regions Matching" from the CPU work around it.
 struct Profile {
@@ -297,8 +546,27 @@ bool available()
     if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1) { logOnce("no GPU device, CPU matcher"); return g_available = false; }
     cudaDeviceProp p{};
     if (cudaGetDeviceProperties(&p, 0) != cudaSuccess) { logOnce("cannot query device 0, CPU matcher"); return g_available = false; }
-    char line[320];
-    std::snprintf(line, sizeof line, "GPU brute-force L2 2-NN on %s (exact; CHESHIRE_GPU_MATCHER=0 for the CPU matcher)", p.name);
+    // The uint8 kernel: the matrix instructions on gfx120x, the dp4a kernel on NVIDIA sm_61+, knn2_u8 on the
+    // cards the new kernels are unmeasured on. CHESHIRE_MATCHER_KERNEL=u8|sliced|dot4q|wmma overrides it (wmma
+    // only where the device has gfx120x code); CHESHIRE_MATCHER_SLICED=1 is the older switch for "sliced".
+#if defined(__HIP_PLATFORM_AMD__)
+    const bool gfx120 = std::strncmp(p.gcnArchName, "gfx120", 6) == 0;
+    g_u8Kernel = gfx120 ? kWmma : kU8;
+#else
+    const bool gfx120 = false;
+    g_u8Kernel = (p.major * 10 + p.minor >= 61) ? kDot4q : kU8;
+#endif
+    if (::cheshire::env::flag("CHESHIRE_MATCHER_SLICED")) g_u8Kernel = kSliced;
+    const std::string want = ::cheshire::env::text("CHESHIRE_MATCHER_KERNEL");
+    if (want == "u8") g_u8Kernel = kU8;
+    else if (want == "sliced") g_u8Kernel = kSliced;
+    else if (want == "dot4q") g_u8Kernel = kDot4q;
+    else if (want == "wmma" && gfx120) g_u8Kernel = kWmma;
+    else if (!want.empty())
+        std::fprintf(stderr, "[cheshire] matcher: CHESHIRE_MATCHER_KERNEL=%s not usable here, keeping %s\n", want.c_str(), kU8KernelNames[g_u8Kernel]);
+    char line[400];
+    std::snprintf(line, sizeof line, "GPU brute-force L2 2-NN on %s, %s for 128-byte uint8 (exact; CHESHIRE_GPU_MATCHER=0 for the CPU matcher)",
+                  p.name, kU8KernelNames[g_u8Kernel]);
     logOnce(line);
     return g_available = true;
 }
@@ -347,6 +615,7 @@ struct KnnMatcher::Impl {
     int* idx = nullptr; float* dist = nullptr; size_t outCap = 0;   // in queries
     void* pIdx = nullptr; size_t pIdxCap = 0;       // per-slice partial 2-NN (sliced kernel)
     void* pDist = nullptr; size_t pDistCap = 0;
+    void* qNorm = nullptr; size_t qNormCap = 0;     // |query|^2 for knn2_dot4q / knn2_wmma
     int rows = 0, dim = 0; bool isFloat = false;
     size_t rowBytes() const { return size_t(dim) * (isFloat ? 4 : 1); }
     static bool grow(void** p, size_t* cap, size_t need) {
@@ -357,7 +626,7 @@ struct KnnMatcher::Impl {
         *cap = need; return true;
     }
     ~Impl() { if (db) cheshire::devFree(db); if (dbNorm) cheshire::devFree(dbNorm); if (q) cheshire::devFree(q); if (idx) cheshire::devFree(idx); if (dist) cheshire::devFree(dist);
-              if (pIdx) cheshire::devFree(pIdx); if (pDist) cheshire::devFree(pDist); }
+              if (pIdx) cheshire::devFree(pIdx); if (pDist) cheshire::devFree(pDist); if (qNorm) cheshire::devFree(qNorm); }
 };
 
 KnnMatcher::KnnMatcher() : impl_(new Impl) {}
@@ -403,8 +672,30 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
         if (m.dim == 128) knn2_f32<128><<<grid, block>>>((const float*)m.db, m.rows, (const float*)m.q, nbQuery, m.idx, m.dist);
         else              knn2_f32<64><<<grid, block>>>((const float*)m.db, m.rows, (const float*)m.q, nbQuery, m.idx, m.dist);
     } else {
-        static const bool sliced = ::cheshire::env::flag("CHESHIRE_MATCHER_SLICED");
-        if (!sliced) {
+        int kernel = g_u8Kernel;
+        if (m.dim != 128 && (kernel == kDot4q || kernel == kWmma)) kernel = kU8;
+        if (kernel == kDot4q || kernel == kWmma) {
+            if (!Impl::grow(&m.qNorm, &m.qNormCap, size_t(nbQuery) * sizeof(unsigned int))) return false;
+            rowNormsU8<128><<<dim3((nbQuery + 255) / 256), dim3(256)>>>((const unsigned int*)m.q, nbQuery, (unsigned int*)m.qNorm);
+#if defined(__HIP_PLATFORM_AMD__)
+            if (kernel == kWmma) {
+                constexpr int perBlock = kWmmaWaves * 16 * kWmmaTiles;
+                knn2_wmma<<<dim3((nbQuery + perBlock - 1) / perBlock), dim3(kWmmaWaves * 32)>>>(
+                    (const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q,
+                    (const unsigned int*)m.qNorm, nbQuery, m.idx, m.dist);
+            } else
+#endif
+            {
+#if defined(__HIP_PLATFORM_AMD__)
+                constexpr int threads = 256;   // 1.13x knn2_u8 on the RX 9070; 128 was 1.03x
+#else
+                constexpr int threads = 128;   // 2.03x on the GTX 1080 Ti; 256 was 1.92x
+#endif
+                knn2_dot4q<2><<<dim3((nbQuery + 2 * threads - 1) / (2 * threads)), dim3(threads)>>>(
+                    (const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q,
+                    (const unsigned int*)m.qNorm, nbQuery, m.idx, m.dist);
+            }
+        } else if (kernel != kSliced) {
             if (m.dim == 128) knn2_u8<128><<<grid, block>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);
             else              knn2_u8<64><<<grid, block>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);
         } else {

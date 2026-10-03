@@ -10,7 +10,12 @@
 //   1  v3  knn2_wmma128p  packed (distance << 8 | rowInTile) keys, min/max insertion, merged per 256-row tile
 //   2  v4  knn2_wmma128s  keys without the query norm and no per-candidate predicate, 128-row windows
 //   3  v5  knn2_wmma_c    keys valid across 240-row windows (carried tie field): 3 VALU per candidate
-//   4  v6  knn2_wmma_c    v5 with a conflict-free LDS fill
+//   4  v6  knn2_wmma_c    v5 with a conflict-free LDS fill (integrated in gpuMatcher.cu as knn2_wmma)
+// and the dot4 kernel restructured, for cards without matrix instructions (arg 4 is then rows per iteration or block
+// size; on the RX 9070 none passed 1.23x, see docs/07; cuda_matcher.cu measures them on NVIDIA):
+//   5  dot4b  RPI rows per iteration, all of a row's LDS reads together, v6's insertion   1.02x / 1.01x / 1.17x
+//   6  dot4s  the wave-uniform row by scalar loads into SGPRs, no LDS                     1.23x / 1.18x / 1.14x
+//   7  dot4q  two queries per thread (blocks of 64 / 128 / 256)                           0.56x / 1.03x / 1.13x
 // RX 9070, 8 engine-bay pairs of 20000 x 20000, 4 timed reps each: knn2_u8 about 197 ms (8.3 TMAC/s); v3 MT=2 38.8 ms;
 // v6 MT=2 21.4 ms (9.25x), MT=3 21.0 ms (9.43x). wmma_peak.hip: the card sustains 144 TMAC/s of WMMA alone and about
 // 112 with v6's 3 VALU per value, so v6 runs at about 70 % of what this design can reach.
@@ -588,6 +593,210 @@ void launchC(const unsigned int* db, const unsigned int* dbNorm, int rows, const
     knn2_wmma_c<MT, STORE, WV><<<(nbQuery + WV * 16 * MT - 1) / (WV * 16 * MT), WV * 32>>>(db, dbNorm, rows, q, qNorm, nbQuery, outIdx, outDist);
 }
 
+// dot4b: knn2_u8 restructured, still one query per thread. The shipped loop is one dependent chain of 32 dot4 per row
+// (66 % of the instruction's rate at best, dot4_peak.hip), with the row's eight 16-byte LDS reads issued two at a time and
+// a branchy insertion. Here each thread takes RPI rows per iteration - RPI independent chains reusing the query's
+// registers - with all of a row's reads issued together, and the insertion is v6's: one shift-add, a max and a min-max
+// on keys 256 (2 dot - rowNorm) + f over 240-row windows, the two best carried from window to window with f = 255.
+// Integer sums in any grouping are the same integers, so the result is knn2_u8's, bit for bit.
+constexpr int kDot4bWinRows = 240;
+template<int RPI>
+__global__ void __launch_bounds__(256)
+knn2_dot4b(const unsigned int* __restrict__ db, const unsigned int* __restrict__ dbNorm, int rows,
+           const unsigned int* __restrict__ q, const unsigned int* __restrict__ qNorm, int nbQuery,
+           int* __restrict__ outIdx, float* __restrict__ outDist)
+{
+    constexpr int W = 32;
+    constexpr int kEmpty = INT_MIN + 255;
+    __shared__ __align__(16) unsigned int tile[kDot4bWinRows * W];
+    __shared__ int tileC[kDot4bWinRows];
+    const int qi = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int qreg[W];
+    for (int k = 0; k < W; ++k) qreg[k] = qi < nbQuery ? q[size_t(qi) * W + k] : 0u;
+    int p0 = kEmpty, p1 = kEmpty, i0 = INT_MAX, i1 = INT_MAX;
+
+    for (int base = 0; base < rows; base += kDot4bWinRows) {
+        const int n = min(kDot4bWinRows, rows - base);
+        const int nPad = (n + RPI - 1) / RPI * RPI;   // padding rows: zero descriptors, never selected
+        for (int t = threadIdx.x; t < nPad * W; t += blockDim.x) {
+            const int r = t / W;
+            tile[t] = r < n ? db[size_t(base) * W + t] : 0u;
+        }
+        for (int t = threadIdx.x; t < nPad; t += blockDim.x)
+            tileC[t] = t < n ? int((254u - unsigned(t)) - (dbNorm[base + t] << 8)) : INT_MIN;
+        __syncthreads();
+        for (int r = 0; r < nPad; r += RPI) {
+            unsigned int acc[RPI];
+#pragma unroll
+            for (int j = 0; j < RPI; ++j) acc[j] = 0u;
+#pragma unroll
+            for (int c = 0; c < W / 4; ++c) {
+                uint4 w[RPI];
+#pragma unroll
+                for (int j = 0; j < RPI; ++j) w[j] = reinterpret_cast<const uint4*>(tile + (r + j) * W)[c];
+#pragma unroll
+                for (int j = 0; j < RPI; ++j) {
+                    acc[j] = __builtin_amdgcn_udot4(qreg[4 * c], w[j].x, acc[j], false);
+                    acc[j] = __builtin_amdgcn_udot4(qreg[4 * c + 1], w[j].y, acc[j], false);
+                    acc[j] = __builtin_amdgcn_udot4(qreg[4 * c + 2], w[j].z, acc[j], false);
+                    acc[j] = __builtin_amdgcn_udot4(qreg[4 * c + 3], w[j].w, acc[j], false);
+                }
+            }
+#pragma unroll
+            for (int j = 0; j < RPI; ++j) {
+                const int y = int((acc[j] << 9) + unsigned(tileC[r + j]));
+                p1 = max(min(p0, y), p1);
+                p0 = max(p0, y);
+            }
+        }
+        const int top = base + 254;
+        const int f0 = p0 & 255, f1 = p1 & 255;
+        const bool c0 = f0 == 255, c1 = f1 == 255;
+        const int n1 = c1 ? (c0 ? i1 : i0) : top - f1;
+        if (!c0) i0 = top - f0;
+        i1 = n1;
+        p0 |= 255; p1 |= 255;
+        __syncthreads();
+    }
+    if (qi < nbQuery) {
+        const int qn = int(qNorm[qi]);
+        outIdx[2 * qi] = i0 == INT_MAX ? -1 : i0; outIdx[2 * qi + 1] = i1 == INT_MAX ? -1 : i1;
+        outDist[2 * qi] = i0 == INT_MAX ? 3.4e38f : float(qn - (p0 >> 8));
+        outDist[2 * qi + 1] = i1 == INT_MAX ? 3.4e38f : float(qn - (p1 >> 8));
+    }
+}
+
+// dot4s: no LDS. All lanes of a wave compare their own query with the same database row, so the row is wave-uniform:
+// read through the constant address space it comes in by scalar loads into SGPRs, and v_dot4 takes each word as an
+// SGPR operand, broadcast to every lane for free, instead of eight 16-byte LDS reads per row per wave. With no LDS
+// tile, occupancy is bounded by registers only. RPI rows per iteration give RPI independent chains. Insertion and
+// windows as dot4b (240 rows per key window, the two best carried with f = 255). Same result as knn2_u8, bit for bit.
+typedef const __attribute__((address_space(4))) unsigned int ConstWord;
+template<int RPI>
+__global__ void __launch_bounds__(256)
+knn2_dot4s(const unsigned int* __restrict__ db, const unsigned int* __restrict__ dbNorm, int rows,
+           const unsigned int* __restrict__ q, const unsigned int* __restrict__ qNorm, int nbQuery,
+           int* __restrict__ outIdx, float* __restrict__ outDist)
+{
+    constexpr int W = 32;
+    constexpr int kEmpty = INT_MIN + 255;
+    ConstWord* cdb = (ConstWord*)(uintptr_t)db;
+    ConstWord* cnorm = (ConstWord*)(uintptr_t)dbNorm;
+    const int qi = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int qreg[W];
+    for (int k = 0; k < W; ++k) qreg[k] = qi < nbQuery ? q[size_t(qi) * W + k] : 0u;
+    int p0 = kEmpty, p1 = kEmpty, i0 = INT_MAX, i1 = INT_MAX;
+
+    for (int base = 0; base < rows; base += kDot4bWinRows) {
+        const int n = min(kDot4bWinRows, rows - base);
+        for (int r = 0; r < n; r += RPI) {
+            unsigned int acc[RPI];
+            int rowOf[RPI];
+#pragma unroll
+            for (int j = 0; j < RPI; ++j) { acc[j] = 0u; rowOf[j] = min(r + j, n - 1); }   // past the end: a real row, ignored
+#pragma unroll
+            for (int k = 0; k < W; ++k)
+#pragma unroll
+                for (int j = 0; j < RPI; ++j)
+                    acc[j] = __builtin_amdgcn_udot4(qreg[k], cdb[size_t(base + rowOf[j]) * W + k], acc[j], false);
+#pragma unroll
+            for (int j = 0; j < RPI; ++j) {
+                const unsigned int c = (254u - unsigned(rowOf[j])) - (cnorm[base + rowOf[j]] << 8);
+                const int y = r + j < n ? int((acc[j] << 9) + c) : INT_MIN;
+                p1 = max(min(p0, y), p1);
+                p0 = max(p0, y);
+            }
+        }
+        const int top = base + 254;
+        const int f0 = p0 & 255, f1 = p1 & 255;
+        const bool c0 = f0 == 255, c1 = f1 == 255;
+        const int n1 = c1 ? (c0 ? i1 : i0) : top - f1;
+        if (!c0) i0 = top - f0;
+        i1 = n1;
+        p0 |= 255; p1 |= 255;
+    }
+    if (qi < nbQuery) {
+        const int qn = int(qNorm[qi]);
+        outIdx[2 * qi] = i0 == INT_MAX ? -1 : i0; outIdx[2 * qi + 1] = i1 == INT_MAX ? -1 : i1;
+        outDist[2 * qi] = i0 == INT_MAX ? 3.4e38f : float(qn - (p0 >> 8));
+        outDist[2 * qi + 1] = i1 == INT_MAX ? 3.4e38f : float(qn - (p1 >> 8));
+    }
+}
+
+// dot4q: Q queries per thread sharing every LDS read of the database row (Q dot4 per word read). The CUDA harness's best
+// on the GTX 1080 Ti (Q = 2, 128 threads: 2.03x knn2_u8). Insertion and windows as dot4b, per query.
+template<int Q, int BLOCK>
+__global__ void __launch_bounds__(BLOCK)
+knn2_dot4q(const unsigned int* __restrict__ db, const unsigned int* __restrict__ dbNorm, int rows,
+           const unsigned int* __restrict__ q, const unsigned int* __restrict__ qNorm, int nbQuery,
+           int* __restrict__ outIdx, float* __restrict__ outDist)
+{
+    constexpr int W = 32;
+    constexpr int kEmpty = INT_MIN + 255;
+    __shared__ __align__(16) unsigned int tile[kDot4bWinRows * W];
+    __shared__ int tileC[kDot4bWinRows];
+    const int q0 = (blockIdx.x * blockDim.x + threadIdx.x) * Q;
+    unsigned int qreg[Q][W];
+    int p0[Q], p1[Q], i0[Q], i1[Q];
+#pragma unroll
+    for (int j = 0; j < Q; ++j) {
+        const int qi = q0 + j;
+#pragma unroll
+        for (int k = 0; k < W; ++k) qreg[j][k] = qi < nbQuery ? q[size_t(qi) * W + k] : 0u;
+        p0[j] = kEmpty; p1[j] = kEmpty; i0[j] = INT_MAX; i1[j] = INT_MAX;
+    }
+    for (int base = 0; base < rows; base += kDot4bWinRows) {
+        const int n = min(kDot4bWinRows, rows - base);
+        for (int t = threadIdx.x; t < n * W; t += blockDim.x) tile[t] = db[size_t(base) * W + t];
+        for (int t = threadIdx.x; t < n; t += blockDim.x) tileC[t] = int((254u - unsigned(t)) - (dbNorm[base + t] << 8));
+        __syncthreads();
+        for (int r = 0; r < n; ++r) {
+            unsigned int acc[Q];
+#pragma unroll
+            for (int j = 0; j < Q; ++j) acc[j] = 0u;
+#pragma unroll
+            for (int c = 0; c < W / 4; ++c) {
+                const uint4 w = reinterpret_cast<const uint4*>(tile + r * W)[c];
+#pragma unroll
+                for (int j = 0; j < Q; ++j) {
+                    acc[j] = __builtin_amdgcn_udot4(qreg[j][4 * c], w.x, acc[j], false);
+                    acc[j] = __builtin_amdgcn_udot4(qreg[j][4 * c + 1], w.y, acc[j], false);
+                    acc[j] = __builtin_amdgcn_udot4(qreg[j][4 * c + 2], w.z, acc[j], false);
+                    acc[j] = __builtin_amdgcn_udot4(qreg[j][4 * c + 3], w.w, acc[j], false);
+                }
+            }
+            const unsigned int cr = unsigned(tileC[r]);
+#pragma unroll
+            for (int j = 0; j < Q; ++j) {
+                const int y = int((acc[j] << 9) + cr);
+                p1[j] = max(min(p0[j], y), p1[j]);
+                p0[j] = max(p0[j], y);
+            }
+        }
+        const int top = base + 254;
+#pragma unroll
+        for (int j = 0; j < Q; ++j) {
+            const int f0 = p0[j] & 255, f1 = p1[j] & 255;
+            const bool c0 = f0 == 255, c1 = f1 == 255;
+            const int n1 = c1 ? (c0 ? i1[j] : i0[j]) : top - f1;
+            if (!c0) i0[j] = top - f0;
+            i1[j] = n1;
+            p0[j] |= 255; p1[j] |= 255;
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int j = 0; j < Q; ++j) {
+        const int qi = q0 + j;
+        if (qi < nbQuery) {
+            const int qn = int(qNorm[qi]);
+            outIdx[2 * qi] = i0[j] == INT_MAX ? -1 : i0[j]; outIdx[2 * qi + 1] = i1[j] == INT_MAX ? -1 : i1[j];
+            outDist[2 * qi] = i0[j] == INT_MAX ? 3.4e38f : float(qn - (p0[j] >> 8));
+            outDist[2 * qi + 1] = i1[j] == INT_MAX ? 3.4e38f : float(qn - (p1[j] >> 8));
+        }
+    }
+}
+
 // ---------------------------------------------------------------- harness
 static std::vector<uint8_t> loadDesc(const std::string& path, int& count)
 {
@@ -645,7 +854,21 @@ int main(int argc, char** argv)
             CHECK(hipEventRecord(e1)); CHECK(hipEventSynchronize(e1)); CHECK(hipEventElapsedTime(&ms, e0, e1));
             if (r) tRef += ms;   // the first rep warms up
             CHECK(hipEventRecord(e0));
-            if (VER == 3) {
+            if (VER == 7) {
+                if (MT == 64)       knn2_dot4q<2, 64><<<(nq + 127) / 128, 64>>>(dDb, dDbN, nr, dQ, dQN, nq, dI2, dD2);
+                else if (MT == 128) knn2_dot4q<2, 128><<<(nq + 255) / 256, 128>>>(dDb, dDbN, nr, dQ, dQN, nq, dI2, dD2);
+                else                knn2_dot4q<2, 256><<<(nq + 511) / 512, 256>>>(dDb, dDbN, nr, dQ, dQN, nq, dI2, dD2);
+            } else if (VER == 6) {
+                const int g = (nq + 255) / 256;
+                if (MT == 1)      knn2_dot4s<1><<<g, 256>>>(dDb, dDbN, nr, dQ, dQN, nq, dI2, dD2);
+                else if (MT == 2) knn2_dot4s<2><<<g, 256>>>(dDb, dDbN, nr, dQ, dQN, nq, dI2, dD2);
+                else              knn2_dot4s<4><<<g, 256>>>(dDb, dDbN, nr, dQ, dQN, nq, dI2, dD2);
+            } else if (VER == 5) {
+                const int g = (nq + 255) / 256;
+                if (MT == 1)      knn2_dot4b<1><<<g, 256>>>(dDb, dDbN, nr, dQ, dQN, nq, dI2, dD2);
+                else if (MT == 2) knn2_dot4b<2><<<g, 256>>>(dDb, dDbN, nr, dQ, dQN, nq, dI2, dD2);
+                else              knn2_dot4b<4><<<g, 256>>>(dDb, dDbN, nr, dQ, dQN, nq, dI2, dD2);
+            } else if (VER == 3) {
                 if (MT == 1) launchC<1, false, kWaves>(dDb, dDbN, nr, dQ, dQN, nq, dI2, dD2);
                 else         launchC<2, false, kWaves>(dDb, dDbN, nr, dQ, dQN, nq, dI2, dD2);
             } else if (VER == 4) {

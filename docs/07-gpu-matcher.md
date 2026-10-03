@@ -130,3 +130,60 @@ cards with fewer CUs, where the block count may matter more.
 
 The compiler remarks that settled it (`-Rpass-analysis=kernel-resource-usage` on a standalone
 `clang++ -x hip` compile of the port) are the cheap way to ask this question before a rebuild.
+
+## The 8-bit matrix instructions on RDNA4, a dp4a kernel for NVIDIA (after 0.4.0)
+
+Two kernels for 128-byte uint8 descriptors, chosen once per process (the log line names it):
+`knn2_wmma` on gfx120x and `knn2_dot4q` on NVIDIA sm_61+; every other card keeps `knn2_u8`.
+`CHESHIRE_MATCHER_KERNEL=u8|sliced|dot4q|wmma` picks one (wmma only where the device runs gfx120x
+code). Both were developed in `hip/tests/gpumatcher_wmma/` against a verbatim copy of `knn2_u8`.
+
+**Exact by construction.** Both keep a query's two best as packed integer keys over 240-row
+windows, 256 (2 dot - rowNorm) + f: 2 dot - rowNorm is queryNorm - distance, so it orders and ties
+as the distance does, and fits an int32 at 128 x 255^2. The tie field f is 254 - rowInWindow for
+the window's rows and 255 for the two carried in from earlier windows, so the lower row wins every
+tie, as a sequential scan with a strict '<' keeps it. Integer sums in any grouping are the same
+integers. Tested on every query of 8 engine-bay pairs of 20000 x 20000, and by `wmma_edge.hip`:
+database sizes 0 to 7201 around every tile boundary, all-0 and all-255 descriptors, and heavy exact
+ties (about 28 000 of 49 000 queries with equal nearest and second distances), three seeds.
+
+**`knn2_wmma`** (RDNA4, `v_wmma_i32_16x16x16_iu8`): a wave takes two 16-query tiles and walks the
+database 16 rows at a time; eight instructions cover the 128 bytes. The operand and result layout
+was measured by `wmma_probe.hip`. The database goes through LDS transposed, filled with 16-byte
+global reads written as two 8-byte stores that never share a bank (the first fill, one word per
+thread, was a hidden 16-way conflict: fixing it took one variant from 41.7 to 24.0 ms). Per
+candidate: one shift-add, a max and a min-max. On 8 pairs it takes 21.4 ms against `knn2_u8`'s
+197 ms (9.2x). `wmma_peak.hip`: the card sustains 144 TMAC/s of WMMA alone and about 112 with three
+VALU per value, so the kernel (77) is at about 70 % of what this design allows.
+
+**`knn2_dot4q`** (two queries per thread, so every shared-memory read of a database word feeds two
+dp4a): on the GTX 1080 Ti it is 2.03x `knn2_u8` (8 pairs: 133.7 ms against about 270, blocks of
+128 threads; `cuda_matcher.cu`). There the card's dp4a peak is about 22 TMAC/s
+(`cuda_matcher --peak`); `knn2_u8` runs at 27 % of it, `knn2_dot4q` at 55 %.
+
+**dot4 on RDNA.** `dot4_peak.hip` shows `v_dot4_u32_u8` at full rate on the RX 9070 (39.4 TMAC/s with
+eight independent chains, 23.7 with one), and `knn2_u8` at 8.3 TMAC/s. Its loop is 103 instructions
+per row for 32 dot4 (one dependent chain, LDS waits, a branchy insertion), but the restructurings
+tried stayed near 1.1-1.2x on this card: several rows per iteration 1.17x, scalar loads of the
+wave-uniform row 1.23x, `knn2_dot4q` 1.13x. 20000 queries at one query per lane are about 5.6 waves
+per SIMD on its 56 CUs, too few to hide latency. RDNA1/2 have fewer CUs and no matrix instructions, so
+`knn2_dot4q` may well pay there as it does on Pascal; until it is measured on one
+(`CHESHIRE_MATCHER_KERNEL=dot4q`), `knn2_u8` stays their default.
+
+**FeatureMatching end to end** (the node's own command lines, AC-RANSAC at 2048 iterations; the
+search phase from `CHESHIRE_GPU_MATCHER_LOG=1`):
+
+| card | set | `knn2_u8` (two runs) | new kernel (two runs) | search phase |
+|---|---|---|---|---|
+| RX 9070, Windows | 41 views | 9.9 / 8.8 s | 4.0 / 4.0 s (`knn2_wmma`) | 1.83 s -> 0.37 s per chunk |
+| RX 9070, Windows | engine bay | 57.3 / 56.4 s | 25.6 / 24.9 s | 6.3 s -> 1.15 s per chunk |
+| GTX 1080 Ti, Linux | 41 views | 13.1 / 13.0 s | 9.8 / 9.8 s (`knn2_dot4q`) | 7.42 s -> 4.27 s |
+
+The matches are byte-identical to `knn2_u8`'s in every run, and the self-check
+(`CHESHIRE_GPU_MATCHER_CHECK=1`) found 53,300 of 53,300 sampled queries identical to upstream's
+brute force on each card. The Linux numbers are the 0.4.0 CUDA bundle with only
+`libaliceVision_matching` rebuilt.
+
+What is left: with the search at about 0.67 ms of kernel per 20000 x 20000 search on the RX 9070,
+the per-search uploads and downloads (about 0.55 ms) are now the larger part; RDNA3 has matrix
+instructions too, but other operand shapes (`v4i`), and needs its own layout probe.

@@ -1292,6 +1292,10 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 - **GPU matcher throughput** (L). Register tiling is "a project, not a patch"
   (`docs/07-gpu-matcher.md:125-129`). Smaller steps first: run the shelved sliced variant
   (`CHESHIRE_MATCHER_SLICED=1`) on RDNA1/2, and batch per search instead of per pair.
+  - 2026-10-03: `dot4_peak.hip` shows `v_dot4_u32_u8` at full rate on the RX 9070 (39.4 TMAC/s, `knn2_u8` 8.3). Two
+    queries per thread (`knn2_dot4q`) is now NVIDIA's default (2.03x on Pascal) but only 1.13x on the RX 9070, which
+    takes the WMMA kernel anyway; on RDNA1/2 it is unmeasured (`CHESHIRE_MATCHER_KERNEL=dot4q`). The transfers (about
+    0.55 ms per search) are the next cost on every card.
 - **The matcher on the matrix cores, exact** (L; added 2026-10-01 from the user's question about FP8). Brute-force
   matching of 8-bit SIFT descriptors is an integer matrix multiply (every query against every database row), and
   RDNA3 and RDNA4 have WMMA with 8-bit integer inputs and 32-bit integer sums: a 16x16x16 block per instruction
@@ -1326,6 +1330,12 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
     code objects, the dot4 kernel everywhere else), plus one `rowNormsU8` launch for the query norms; the self-check
     and the gate as above. gfx11's WMMA has other operand shapes (`v4i` per lane, not `v2i`) and needs its own probe, on
     an RDNA3 card we do not have.
+  - **Integrated 2026-10-03, not released yet** (`docs/07-gpu-matcher.md`, last section): `knn2_wmma` on gfx120x and
+    `knn2_dot4q` (two queries per thread, 2.03x on the GTX 1080 Ti) on NVIDIA sm_61+; `CHESHIRE_MATCHER_KERNEL` picks one.
+    FeatureMatching on the RX 9070: 41 views 9.9 / 8.8 s -> 4.0 / 4.0 s, engine bay 57.3 / 56.4 s -> 25.6 / 24.9 s. On
+    the GTX 1080 Ti (0.4.0 CUDA bundle, matching library rebuilt): 41 views 13.1 / 13.0 s -> 9.8 / 9.8 s. Matches
+    byte-identical everywhere; self-check 53,300 of 53,300 on each card. Next: the release gate with it, an RDNA2 card
+    (the user can swap one in) to decide `knn2_dot4q` for RDNA1/2, and the transfers.
 
 ### Other
 
