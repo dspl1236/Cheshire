@@ -41,7 +41,8 @@ struct Best2 {
 };
 
 // Dot product of two words of four uint8 each, accumulated into acc. One hardware instruction
-// (v_dot4_u32_u8 on RDNA2+/Vega 20, dp4a on sm_61+), else four multiply-adds. Exact in every case.
+// (v_dot4_u32_u8 on Vega 20, RDNA1's gfx1011/gfx1012 and RDNA2 on; dp4a on sm_61+), else four
+// multiply-adds (gfx1010, gfx900). Exact in every case.
 __device__ __forceinline__ unsigned int dot4u8(unsigned int a, unsigned int b, unsigned int acc)
 {
 #if defined(CHESHIRE_MATCHER_NO_DOT4)
