@@ -1192,6 +1192,18 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   (2026-09-30): the SfM quality comparison as a `.mg` pipeline next to `photogrammetry.mg` in AliceVision's `meshroom/`,
   with a comparison node, on `dataset_monstree` and the new SfM nodes (TracksBuilding, SfmBootstrapping, SfmExpanding).
   The deliverable is a draft PR.
+  - **Opened 2026-10-03 as draft alicevision/AliceVision#2194** (`dspl1236:dev/sfmQualityPipeline`, 4 commits on
+    develop 5d73fa0). It adds `sfmQualityComparison.mg` (photogrammetry.mg's sparse chain, the last three nodes repeated
+    for seeds 1 to 10, view ids from the file names), the `SfMComparing` Python node (Welch t-test on views, landmarks
+    and RMSE, pose agreement after a similarity alignment, raising on FAIL), `--randomSeed` on the three new SfM programs
+    (default unchanged), `pyalicevision.sfm.RMSE`, and a build-linux.yml step on monstree mini6 at 4096 resection
+    iterations against a stored reference. Validated in CI's own image (alicevision-deps:2026.09.29) on four cores: the
+    step replayed from the workflow passes in 64 s, ten other seeds pass, and a worse configuration fails.
+  - Lessons from it: CameraInit's default view id hashes the folder of images that have no serial number or unique id
+    (`sfmData/uid.cpp`), so results depend on where the dataset sits; and in pyalicevision `getPose()` returns by
+    value, so `getPose(view).getTransform()` dangles.
+  - Offered in the PR as separate fixes, not filed: an SfM-only configure fails (`find_package(nanoflann)` runs only
+    for MVS or LIDAR, but `aliceVision_sfm` links it), and `aliceVision_sfmBootstrapping` declares `-t` twice.
 
 ### Waiting on maintainers
 
