@@ -1295,6 +1295,25 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   - Open points: the 2-NN selection still runs per query after the block products; descriptor counts are not multiples
     of 16 (pad, as the dot4 kernel's tiles do); gfx11-generic and gfx12-generic code objects must carry the WMMA
     variants of their family.
+  - **Experiment done 2026-10-02** (`hip/tests/gpumatcher_wmma/`, RX 9070). `wmma_probe.hip` pinned gfx12's operand
+    and result layout; six kernel versions followed (table in `wmma_matcher.hip`'s header). The keeper, v6: two or
+    three 16-query tiles per wave, the database in 240-row LDS windows filled with conflict-free 8-byte stores, and per
+    candidate one shift-add, a max and a min-max on a 32-bit key 256 (2 dot - rowNorm) + f. The tie field f
+    (254 - row in the window, 255 for the two carried over from earlier windows) keeps the lower row on equal distances.
+    On 8 engine-bay pairs of 20000 x 20000 it takes 21.0-21.4 ms against the dot4 kernel's 197 ms (9.3-9.4x), every
+    query identical in rows and distances. `wmma_edge.hip` adds 570 runs per seed (database sizes 0 to 7201 around
+    every tile boundary, all-0 and all-255 descriptors, and heavy exact ties: about 28 000 of 49 000 queries have equal
+    nearest and second distances); three seeds, no mismatch. `wmma_peak.hip`: the card sustains 144 TMAC/s of WMMA alone
+    and about 112 with v6's 3 VALU per value, so v6 (77 TMAC/s) runs at about 70 % of what this design allows.
+  - What the node would gain: FeatureMatching's own profile (`CHESHIRE_GPU_MATCHER_LOG=1`, engine bay, Fast Ransac
+    counts) shows 945 searches of 20000 x 20000 in 6.32 s per chunk, 6.69 ms each, of which about 6.15 ms is the
+    kernel and about 0.5 ms the synchronous query upload and result download. With v6 a search would take about
+    1.2 ms: the engine bay's search phase from about 38 s to about 7 s over its 6 chunks, the 41 views' from 5.5 s to
+    about 1 s. After that the transfers are the larger cost (the "batch per search" item above).
+  - Integration (M): `search2()` takes v6 for uint8 descriptors of dim 128 on gfx12 devices (the kernel only in gfx12
+    code objects, the dot4 kernel everywhere else), plus one `rowNormsU8` launch for the query norms; the self-check
+    and the gate as above. gfx11's WMMA has other operand shapes (`v4i` per lane, not `v2i`) and needs its own probe, on
+    an RDNA3 card we do not have.
 
 ### Other
 
