@@ -516,9 +516,11 @@ int g_u8Kernel = kU8;
 struct Profile {
     bool on = ::cheshire::env::flag("CHESHIRE_GPU_MATCHER_LOG");
     double buildSec = 0, searchSec = 0; size_t builds = 0, searches = 0, queries = 0;
+    double uploadSec = 0, kernelSec = 0, downloadSec = 0;   // the searches' three phases (the kernel phase synchronized)
     ~Profile() {
-        if (on) std::fprintf(stderr, "[cheshire] matcher profile: %zu builds %.2f s, %zu searches %.2f s (%zu query descriptors)\n",
-                             builds, buildSec, searches, searchSec, queries);
+        if (on) std::fprintf(stderr, "[cheshire] matcher profile: %zu builds %.2f s, %zu searches %.2f s (%zu query descriptors; "
+                             "upload %.2f s, kernels %.2f s, download %.2f s)\n",
+                             builds, buildSec, searches, searchSec, queries, uploadSec, kernelSec, downloadSec);
     }
 } g_profile;
 struct ScopedTimer {
@@ -612,6 +614,8 @@ struct KnnMatcher::Impl {
     void* db = nullptr; size_t dbCap = 0;
     void* dbNorm = nullptr; size_t dbNormCap = 0;   // uint8 path: |row|^2 per database row
     void* q = nullptr; size_t qCap = 0;
+    // A search's results. One contiguous buffer copied once into pinned memory was slower on the RX 9070 (FeatureMatching
+    // engine bay 26.0 s against 24.7: HIP's default pinned memory is coherent, slow for the CPU to read), so two copies.
     int* idx = nullptr; float* dist = nullptr; size_t outCap = 0;   // in queries
     void* pIdx = nullptr; size_t pIdxCap = 0;       // per-slice partial 2-NN (sliced kernel)
     void* pDist = nullptr; size_t pDistCap = 0;
@@ -666,7 +670,11 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
         if (cheshire::devMalloc((void**)&m.dist, size_t(nbQuery) * 2 * sizeof(float)) != cudaSuccess) return false;
         m.outCap = size_t(nbQuery);
     }
+    const bool prof = g_profile.on;
+    std::chrono::steady_clock::time_point t0, t1, t2;
+    if (prof) t0 = std::chrono::steady_clock::now();
     if (cudaMemcpy(m.q, queries, qBytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    if (prof) t1 = std::chrono::steady_clock::now();
     const dim3 block(kQueriesPerBlock), grid((nbQuery + kQueriesPerBlock - 1) / kQueriesPerBlock);
     if (m.isFloat) {
         if (m.dim == 128) knn2_f32<128><<<grid, block>>>((const float*)m.db, m.rows, (const float*)m.q, nbQuery, m.idx, m.dist);
@@ -713,8 +721,16 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
         }
     }
     if (cudaGetLastError() != cudaSuccess) return false;
+    if (prof) {
+        // profiling only: wait for the kernels so the three phases can be told apart
+        if (cudaDeviceSynchronize() != cudaSuccess) return false;
+        t2 = std::chrono::steady_clock::now();
+        g_profile.uploadSec += std::chrono::duration<double>(t1 - t0).count();
+        g_profile.kernelSec += std::chrono::duration<double>(t2 - t1).count();
+    }
     if (cudaMemcpy(idx, m.idx, size_t(nbQuery) * 2 * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
     if (cudaMemcpy(dist, m.dist, size_t(nbQuery) * 2 * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+    if (prof) g_profile.downloadSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t2).count();
     return true;
 }
 

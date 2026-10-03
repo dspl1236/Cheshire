@@ -184,6 +184,10 @@ The matches are byte-identical to `knn2_u8`'s in every run, and the self-check
 brute force on each card. The Linux numbers are the 0.4.0 CUDA bundle with only
 `libaliceVision_matching` rebuilt.
 
-What is left: with the search at about 0.67 ms of kernel per 20000 x 20000 search on the RX 9070,
-the per-search uploads and downloads (about 0.55 ms) are now the larger part; RDNA3 has matrix
-instructions too, but other operand shapes (`v4i`), and needs its own layout probe.
+What is left: `CHESHIRE_GPU_MATCHER_LOG=1` now splits the searches into upload, kernels and download
+(the kernels synchronized, only when profiling). On the RX 9070 an engine-bay chunk's 945 searches
+are 0.26 s of query uploads, 0.69 s of kernels and 0.19 s of downloads, so the transfers are now
+40 % of the search. One contiguous result buffer copied once into pinned memory was tried and was
+slower (engine bay 26.0 s against 24.7: HIP's default pinned memory is coherent, slow for the CPU to
+read back), so the two copies stay. RDNA3 has matrix instructions too, but other operand shapes
+(`v4i`), and needs its own layout probe.
