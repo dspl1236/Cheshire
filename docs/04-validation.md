@@ -4418,9 +4418,31 @@ read per camera against two in the slow pass. The textures differ from the run's
 runs of the same build do: 0.001-0.002 % of the texels by one half-float step (0.000488), the GPU's float atomics
 adding in a different order.
 
-Estimated from these measurements, not yet run end to end, the False Door job would take about 8,000 s instead of
-10,913: FeatureMatching about 115 s, TracksBuilding 28 s, RelativePoseEstimating about 150 s, SfMExpanding about
-490 s, DepthMap about 4,300 s and Texturing about 1,300 s on C:.
+**The False Door end to end with 10a-10g** (2026-10-04, `C:\cheshire-fd-test\out-v10`): the same photos, Meshroom
+2025.1 and `fastransacexp`, all on C:, with a flat test package of the development install (8f01f1a) whose bundled
+HIP runtime was moved aside, as the gates do on this box. The harness: `ok`, 14 of 14 ports, one mesh, 53 textures,
+7,987 s.
+
+| node | 0.4.0 + `knn2_wmma` (2026-10-03) | 10a-10g |
+|---|---|---|
+| FeatureExtraction | 557 s | 556 s |
+| FeatureMatching | 181 s | 136 s |
+| TracksBuilding | 19 s | 31 s |
+| RelativePoseEstimating | 373 s | 156 s |
+| SfMBootStrapping | 14 s | 8 s |
+| SfMExpanding | 741 s | 451 s |
+| ExportImages | 304 s | 301 s |
+| DepthMap | 5,587 s | 4,278 s |
+| DepthMapFilter | 336 s | 339 s |
+| Meshing | 215 s | 217 s |
+| MeshFiltering | 78 s | 88 s |
+| Texturing | 2,480 s | 1,379 s |
+| whole job (sum of the nodes) | 10,913 s | 7,969 s |
+
+27 % less, as estimated from the parts. Up to SfMExpanding the two jobs computed the same things: FeatureMatching's
+45 match files, the tracks file and SfMBootStrapping's files are byte for byte the earlier job's, and
+RelativePoseEstimating's 5,629 pairs the same set (all 36 of its chunks read TracksBuilding's copy). SfMExpanding's result differs, as two runs of it do on this set (below), so the depth maps, the mesh and
+its 53 texture atlases (51 before) differ too. Every texturing pass read each image once (86-88 s a pass).
 
 ## The texturing disk test: the NVMe drive against the SATA SSD (2026-10-04)
 
