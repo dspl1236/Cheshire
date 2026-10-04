@@ -813,6 +813,34 @@ Left for the pivot proper: the submodule moved to the Meshroom release that make
 Photogrammetry, USD, 5r/5s and the ranking ties on SfmBundle and ExpansionPolicyLegacy, and a harness whose
 `base` runs the new chain.
 
+## After 0.4.0
+
+Not released yet.
+
+- **The matcher kernels** (`docs/07-gpu-matcher.md`, last section): `knn2_wmma` on RDNA4, `knn2_dot4q` on NVIDIA
+  (308252d, a4d0a79).
+- **Steps 10a-10g, done 2026-10-04** (`docs/04-validation.md`, "After 0.4.0: what the False Door's logs showed"):
+  exact host-side fixes found in a False Door job run from the NVMe drive. FeatureMatching's GPU search and
+  geometric filter at the same time (10a); the regions loaded on every core, the descriptors in one read (10b); a
+  binary copy of the tracks file for its readers (10c); SfM's residual statistics and outlier filters on every core
+  (10d); DepthMap's T cameras from per-camera landmark lists (10e); the images folder listed once (10f); the image
+  cache's oldest slot by load order, which ends texturing's double reads (10g). Estimated False Door job 10,913 s to
+  about 8,000 s.
+- **The texturing disk test** (same doc): per pass of the False Door, 90 s from the NVMe drive and 154 s from the
+  SATA SSD once each image is read once; the double reads made a pass about 250 s on either drive.
+
+Next:
+- **SfMExpanding does not repeat itself on the False Door** (found 2026-10-04; docs/04). Two identical runs part
+  after a round that resected 30 views, at the new landmarks' triangulation; the engine bay's two 30-view rounds
+  repeat. Find the source before any SfM digest on the False Door is trusted.
+- **The False Door end to end with 10a-10g**, to measure the estimate.
+- **A release gate** with the matcher kernels and 10a-10g, when the user decides.
+- **Smaller host costs in the same logs:** `MultiViewParams` reads every image's header one at a time (884 EXR
+  headers, about 3-4 s of every DepthMap and DepthMapFilter process); Meshing's "Create visibilities" (64 s).
+- **The reference patch is not cacheable exactly.** `volume_computeSimilarity_kernel` samples the R camera on a
+  3D patch built per depth (epipolar-aligned axes); its pixel positions agree across depths only in exact
+  arithmetic, and bilinear sampling sees the rounding. It stays with "Texture-window caching" under DepthMap below.
+
 ## Upstream's next pipeline: detect, then pivot
 
 Added 2026-09-26. On discussion #2116 an AliceVision maintainer pointed out that StructureFromMotion,

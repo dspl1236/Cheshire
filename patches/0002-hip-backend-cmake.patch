@@ -450,12 +450,14 @@ index 25b80d4..84dba54 100644
          aliceVision_gpu
          aliceVision_sfmData
 diff --git a/src/aliceVision/depthMap/DepthMapEstimator.cpp b/src/aliceVision/depthMap/DepthMapEstimator.cpp
-index 187e8f5..4d7d6e7 100644
+index 187e8f5..04824af 100644
 --- a/src/aliceVision/depthMap/DepthMapEstimator.cpp
 +++ b/src/aliceVision/depthMap/DepthMapEstimator.cpp
-@@ -5,6 +5,10 @@
+@@ -4,7 +4,12 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
  #include "DepthMapEstimator.hpp"
 +#include <aliceVision/depthMap/cuda/host/memory.hpp>  // cheshire: memory bridge
 +#include <aliceVision/alicevision_omp.hpp>
@@ -464,7 +466,7 @@ index 187e8f5..4d7d6e7 100644
  
  #include <aliceVision/system/Logger.hpp>
  #include <aliceVision/system/Timer.hpp>
-@@ -19,6 +23,11 @@
+@@ -19,6 +24,11 @@
  #include <aliceVision/depthMap/cuda/host/utils.hpp>
  #include <aliceVision/depthMap/cuda/host/patchPattern.hpp>
  #include <aliceVision/depthMap/cuda/host/DeviceCache.hpp>
@@ -476,7 +478,7 @@ index 187e8f5..4d7d6e7 100644
  #include <aliceVision/depthMap/cuda/host/DeviceStreamManager.hpp>
  #include <aliceVision/depthMap/cuda/planeSweeping/deviceDepthSimilarityMap.hpp>
  
-@@ -109,6 +118,68 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
+@@ -109,6 +119,68 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
      const double rcMinCostMB = rcCamsCostMB + tileCostMB;
      const double rcMaxCostMB = rcCamsCostMB + nbTilesPerCamera * tileCostMB;
  
@@ -545,7 +547,7 @@ index 187e8f5..4d7d6e7 100644
      // available device memory
      double deviceMemoryMB;
      {
-@@ -126,6 +197,7 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
+@@ -126,6 +198,7 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
          const double remainingMemoryMB = deviceMemoryMB - (nbSimultaneousFullRc * rcMaxCostMB);
          nbRemainingTiles = static_cast<int>(std::max(0.0, remainingMemoryMB - rcCamsCostMB) / tileCostMB);
      }
@@ -553,7 +555,99 @@ index 187e8f5..4d7d6e7 100644
  
      // check that we do not need more constant camera parameters than the ones in device constant memory
      if (ALICEVISION_DEVICE_MAX_CONSTANT_CAMERA_PARAM_SETS < ((nbSimultaneousFullRc + ((nbRemainingTiles > 0) ? 1 : 0)) * rcCamParams))
-@@ -230,6 +302,15 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -170,6 +243,25 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
+     return out_nbSimultaneousTiles;
+ }
+ 
++// cheshire (step 10e): the T cameras of a depth map camera and of its tiles from that camera's own landmarks, listed once
++// per process. Upstream walked all of them for the camera and twice more for each tile: on the False Door (1.31 M
++// landmarks) 48 cameras x 8 tiles took about 59 s of every 48-view chunk. The same landmarks in the same order, so the
++// same cameras. CHESHIRE_DEPTHMAP_TCAMS_LISTS=0 for upstream's walks, CHESHIRE_DEPTHMAP_TCAMS_CHECK=1 to compare.
++static bool cheshireTCamsLists()
++{
++    static const bool v = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_TCAMS_LISTS", true);
++    static const bool said = []() {
++        if (v)
++        {
++            ALICEVISION_LOG_INFO("cheshire: depth map T cameras from each camera's own landmarks, listed once "
++                                 "(CHESHIRE_DEPTHMAP_TCAMS_LISTS=0 for upstream's walks over every landmark)");
++        }
++        return true;
++    }();
++    (void)said;
++    return v;
++}
++
+ void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<Tile>& tiles) const
+ {
+     const int nbTilesPerCamera = _tileRoiList.size();
+@@ -180,10 +272,15 @@ void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<T
+     // reserve memory
+     tiles.reserve(cams.size() * nbTilesPerCamera);
+ 
++    // cheshire (step 10e): each camera's landmarks listed once
++    const mvsUtils::MultiViewParams::CheshireLandmarksPerCamera cheshirePerCamera =
++      cheshireTCamsLists() ? _mp.cheshireLandmarksPerCamera() : mvsUtils::MultiViewParams::CheshireLandmarksPerCamera();
++    const mvsUtils::MultiViewParams::CheshireLandmarksPerCamera* const cheshireLists = cheshirePerCamera.empty() ? nullptr : &cheshirePerCamera;
++
+     for (int rc : cams)
+     {
+         // get R camera Tcs list
+-        const std::vector<int> tCams = _mp.findNearestCamsFromLandmarks(rc, _depthMapParams.maxTCams).getDataWritable();
++        const std::vector<int> tCams = _mp.findNearestCamsFromLandmarks(rc, _depthMapParams.maxTCams, cheshireLists).getDataWritable();
+ 
+         // get R camera ROI
+         const ROI rcImageRoi(Range(0, _mp.getWidth(rc)), Range(0, _mp.getHeight(rc)));
+@@ -204,10 +301,10 @@ void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<T
+             else if (_depthMapParams.chooseTCamsPerTile)
+             {
+                 // find nearest T cameras per tile
+-                t.sgmTCams = _mp.findTileNearestCams(rc, _sgmParams.maxTCamsPerTile, tCams, t.roi);
++                t.sgmTCams = _mp.findTileNearestCams(rc, _sgmParams.maxTCamsPerTile, tCams, t.roi, cheshireLists);  // cheshire (step 10e)
+ 
+                 if (_depthMapParams.useRefine)
+-                    t.refineTCams = _mp.findTileNearestCams(rc, _refineParams.maxTCamsPerTile, tCams, t.roi);
++                    t.refineTCams = _mp.findTileNearestCams(rc, _refineParams.maxTCamsPerTile, tCams, t.roi, cheshireLists);  // cheshire (step 10e)
+             }
+             else
+             {
+@@ -219,6 +316,35 @@ void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<T
+             tiles.push_back(t);
+         }
+     }
++
++    // cheshire (step 10e): CHESHIRE_DEPTHMAP_TCAMS_CHECK=1 - every tile's T cameras again by upstream's walks
++    if (cheshireLists && ::cheshire::env::flag("CHESHIRE_DEPTHMAP_TCAMS_CHECK"))
++    {
++        std::size_t same = 0;
++        for (const Tile& t : tiles)
++        {
++            const std::vector<int> tCams = _mp.findNearestCamsFromLandmarks(t.rc, _depthMapParams.maxTCams, nullptr).getDataWritable();
++            std::vector<int> sgmTCams, refineTCams;
++            if (t.roi.isEmpty())
++            {
++                // no T cameras, as above
++            }
++            else if (_depthMapParams.chooseTCamsPerTile)
++            {
++                sgmTCams = _mp.findTileNearestCams(t.rc, _sgmParams.maxTCamsPerTile, tCams, t.roi, nullptr);
++                if (_depthMapParams.useRefine)
++                    refineTCams = _mp.findTileNearestCams(t.rc, _refineParams.maxTCamsPerTile, tCams, t.roi, nullptr);
++            }
++            else
++            {
++                sgmTCams = tCams;
++                refineTCams = tCams;
++            }
++            same += (sgmTCams == t.sgmTCams && refineTCams == t.refineTCams) ? 1 : 0;
++        }
++        ALICEVISION_LOG_INFO("cheshire: depth map T cameras check: " << same << " of " << tiles.size()
++                             << " tiles identical to upstream's walks over every landmark");
++    }
+ }
+ 
+ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -230,6 +356,15 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
      // initialize RAM image cache
      // note: maybe move it as class member in order to share it across multiple GPUs
      mvsUtils::ImagesCache<image::Image<image::RGBAfColor>> ic(_mp, image::EImageColorSpace::LINEAR);
@@ -569,7 +663,7 @@ index 187e8f5..4d7d6e7 100644
  
      // build tile list order by R camera
      std::vector<Tile> tiles;
-@@ -331,6 +412,114 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -331,6 +466,114 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          const int firstTileIndex = b * nbTilesPerBatch;
          const int lastTileIndex = std::min((b + 1) * nbTilesPerBatch, static_cast<int>(tiles.size()));
  
@@ -684,7 +778,7 @@ index 187e8f5..4d7d6e7 100644
          // load tile R and corresponding T cameras in device cache
          for (int i = firstTileIndex; i < lastTileIndex; ++i)
          {
-@@ -375,7 +564,10 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -375,7 +618,10 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          for (int i = firstTileIndex; i < lastTileIndex; ++i)
          {
              Tile& tile = tiles.at(i);
@@ -696,7 +790,7 @@ index 187e8f5..4d7d6e7 100644
              const int streamIndex = tile.id % nbStreams;
  
              // do not compute empty ROI
-@@ -446,18 +638,22 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -446,18 +692,22 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          // wait for tiles batch computation
          cudaDeviceSynchronize();
  
@@ -4778,6 +4872,51 @@ index 514487d..8f5fb98 100644
  endif()
  
  # Link OpenCV library
+diff --git a/src/aliceVision/feature/Descriptor.hpp b/src/aliceVision/feature/Descriptor.hpp
+index 4de7d90..31d0771 100644
+--- a/src/aliceVision/feature/Descriptor.hpp
++++ b/src/aliceVision/feature/Descriptor.hpp
+@@ -6,6 +6,7 @@
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
+ #pragma once
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ 
+ #include <aliceVision/numeric/numeric.hpp>
+ 
+@@ -15,6 +16,7 @@
+ #include <string>
+ #include <vector>
+ #include <exception>
++#include <type_traits>  // cheshire: step 10b
+ 
+ namespace aliceVision {
+ namespace feature {
+@@ -270,6 +272,24 @@ inline void loadDescsFromBinFile(const std::string& sfileNameDescs, std::vector<
+     // Compute the memory size of one descriptor
+     constexpr std::size_t oneDescSize = FileDescriptorT::static_size * sizeof(typename FileDescriptorT::bin_type);
+ 
++    // cheshire (step 10b): when the file's descriptors are the vector's - the same type, nothing in it but the bins -
++    // they are read in one call, not one read and one copy per descriptor (23 000 per view on the False Door): the same
++    // bytes land in the same places. CHESHIRE_DESC_READ=0 restores upstream's loop.
++    if constexpr (std::is_same<DescriptorT, FileDescriptorT>::value && sizeof(DescriptorT) == oneDescSize &&
++                  std::is_trivially_copyable<DescriptorT>::value)
++    {
++        if (::cheshire::env::flag("CHESHIRE_DESC_READ", true))
++        {
++            const std::size_t count = vec_desc.size() - previousSize;
++            if (count != 0)
++                fileIn.read(reinterpret_cast<char*>(vec_desc.data() + previousSize), static_cast<std::streamsize>(count * oneDescSize));
++            if (fileIn.bad())
++                throw std::runtime_error("Can't load descriptor binary file, '" + sfileNameDescs + "' is incorrect !");
++            fileIn.close();
++            return;
++        }
++    }
++
+     FileDescriptorT fileDescriptor;
+     for (typename std::vector<DescriptorT>::iterator iter = begin; iter != vec_desc.end(); ++iter)
+     {
 diff --git a/src/aliceVision/feature/PointFeature.hpp b/src/aliceVision/feature/PointFeature.hpp
 index 4d09efb..bc1c92d 100644
 --- a/src/aliceVision/feature/PointFeature.hpp
@@ -7054,7 +7193,7 @@ index a7544f6..381f19b 100644
  alicevision_add_test(matching_test.cpp NAME "matching"          LINKS aliceVision_matching ${FLANN_LIBRARIES})
  alicevision_add_test(filters_test.cpp  NAME "matching_filters"  LINKS aliceVision_matching)
 diff --git a/src/aliceVision/matching/RegionsMatcher.cpp b/src/aliceVision/matching/RegionsMatcher.cpp
-index 00d1c75..72c300e 100644
+index 00d1c75..2553f56 100644
 --- a/src/aliceVision/matching/RegionsMatcher.cpp
 +++ b/src/aliceVision/matching/RegionsMatcher.cpp
 @@ -10,6 +10,9 @@
@@ -7067,7 +7206,32 @@ index 00d1c75..72c300e 100644
  
  #include <aliceVision/system/Logger.hpp>
  
-@@ -69,6 +72,16 @@ std::unique_ptr<IRegionsMatcher> createRegionsMatcher(std::mt19937& randomNumber
+@@ -51,6 +54,24 @@ RegionsDatabaseMatcher::RegionsDatabaseMatcher(std::mt19937& randomNumberGenerat
+     _regionsMatcher = createRegionsMatcher(randomNumberGenerator, databaseRegions, matcherType);
+ }
+ 
++// cheshire (step 10a): true when createRegionsMatcher below takes the GPU matcher for these regions - the test of its
++// GPU blocks. That matcher's Build never reads the generator, which FeatureMatching's overlap of the search with the
++// geometric filter relies on (matching/gpu/featureMatchingOverlap.hpp).
++bool cheshireGpuSearches(const feature::Regions& regions, matching::EMatcherType matcherType)
++{
++#ifdef ALICEVISION_HAVE_GPU_MATCHER
++    if (!regions.IsScalar() || (matcherType != ANN_L2 && matcherType != BRUTE_FORCE_L2))
++        return false;
++    if (regions.Type_id() != typeid(unsigned char).name() && regions.Type_id() != typeid(float).name())
++        return false;
++    return gpu::available() && gpu::supportsDim(regions.DescriptorLength());
++#else
++    (void)regions;
++    (void)matcherType;
++    return false;
++#endif
++}
++
+ std::unique_ptr<IRegionsMatcher> createRegionsMatcher(std::mt19937& randomNumberGenerator,
+                                                       const feature::Regions& regions,
+                                                       matching::EMatcherType matcherType)
+@@ -69,6 +90,16 @@ std::unique_ptr<IRegionsMatcher> createRegionsMatcher(std::mt19937& randomNumber
          if (regions.Type_id() == typeid(unsigned char).name())
          {
              // Build on the fly unsigned char based Matcher
@@ -7084,7 +7248,7 @@ index 00d1c75..72c300e 100644
              switch (matcherType)
              {
                  case BRUTE_FORCE_L2:
-@@ -98,6 +111,16 @@ std::unique_ptr<IRegionsMatcher> createRegionsMatcher(std::mt19937& randomNumber
+@@ -98,6 +129,16 @@ std::unique_ptr<IRegionsMatcher> createRegionsMatcher(std::mt19937& randomNumber
          else if (regions.Type_id() == typeid(float).name())
          {
              // Build on the fly float based Matcher
@@ -7102,7 +7266,7 @@ index 00d1c75..72c300e 100644
              {
                  case BRUTE_FORCE_L2:
 diff --git a/src/aliceVision/matchingImageCollection/GeometricFilter.hpp b/src/aliceVision/matchingImageCollection/GeometricFilter.hpp
-index ecd698a..d400a5f 100644
+index ecd698a..cc937d2 100644
 --- a/src/aliceVision/matchingImageCollection/GeometricFilter.hpp
 +++ b/src/aliceVision/matchingImageCollection/GeometricFilter.hpp
 @@ -8,6 +8,8 @@
@@ -7114,7 +7278,67 @@ index ecd698a..d400a5f 100644
  #include <aliceVision/feature/PointFeature.hpp>
  #include <aliceVision/feature/RegionsPerView.hpp>
  #include <aliceVision/matching/MatchesCollections.hpp>
-@@ -86,6 +88,8 @@ void robustModelEstimation(PairwiseMatches& out_geometricMatches,
+@@ -25,6 +27,38 @@ namespace matchingImageCollection {
+ 
+ using namespace aliceVision::matching;
+ 
++/**
++ * cheshire (step 10a): one pair of robustModelEstimation's loop below - the loop's body, moved here unchanged so that
++ * FeatureMatching's overlap of the GPU search with this filter (matching/gpu/featureMatchingOverlap.hpp) runs the very
++ * same steps. True, with out_inliers, when the pair keeps a model.
++ */
++template<typename GeometryFunctor>
++bool robustModelEstimationOne(MatchesPerDescType& out_inliers,
++                              const sfmData::SfMData& sfmData,
++                              const feature::RegionsPerView& regionsPerView,
++                              const GeometryFunctor& functor,
++                              const Pair& imagePair,
++                              const MatchesPerDescType& putativeMatchesPerType,
++                              std::mt19937& randomNumberGenerator,
++                              const bool guidedMatching,
++                              const double distanceRatio)
++{
++    MatchesPerDescType inliers;
++    GeometryFunctor geometricFilter = functor;  // use a copy since we are in a multi-thread context
++    const EstimationStatus state =
++      geometricFilter.geometricEstimation(sfmData, regionsPerView, imagePair, putativeMatchesPerType, randomNumberGenerator, inliers);
++    if (!state.hasStrongSupport)
++        return false;
++    if (guidedMatching)
++    {
++        MatchesPerDescType guidedGeometricInliers;
++        geometricFilter.Geometry_guided_matching(sfmData, regionsPerView, imagePair, distanceRatio, guidedGeometricInliers);
++        std::swap(inliers, guidedGeometricInliers);
++    }
++    out_inliers = std::move(inliers);
++    return true;
++}
++
+ /**
+  * @brief Perform robust model estimation (with optional guided_matching)
+  * or all the pairs and regions correspondences contained in the putativeMatches set.
+@@ -66,18 +100,9 @@ void robustModelEstimation(PairwiseMatches& out_geometricMatches,
+         // apply the geometric filter (robust model estimation)
+         {
+             MatchesPerDescType inliers;
+-            GeometryFunctor geometricFilter = functor;  // use a copy since we are in a multi-thread context
+-            const EstimationStatus state =
+-              geometricFilter.geometricEstimation(sfmData, regionsPerView, imagePair, putativeMatchesPerType, randomNumberGenerator, inliers);
+-            if (state.hasStrongSupport)
++            if (robustModelEstimationOne(inliers, sfmData, regionsPerView, functor, imagePair, putativeMatchesPerType, randomNumberGenerator,
++                                         guidedMatching, distanceRatio))  // cheshire (step 10a): the body, shared with FeatureMatching's overlap
+             {
+-                if (guidedMatching)
+-                {
+-                    MatchesPerDescType guidedGeometricInliers;
+-                    geometricFilter.Geometry_guided_matching(sfmData, regionsPerView, imagePair, distanceRatio, guidedGeometricInliers);
+-                    std::swap(inliers, guidedGeometricInliers);
+-                }
+-
+ #pragma omp critical
+                 {
+                     out_geometricMatches.emplace(currentPair, std::move(inliers));
+@@ -86,6 +111,8 @@ void robustModelEstimation(PairwiseMatches& out_geometricMatches,
          }
          ++progressDisplay;
      }
@@ -7123,7 +7347,7 @@ index ecd698a..d400a5f 100644
  }
  
  /**
-@@ -154,6 +158,8 @@ void robustModelEstimation(PairwiseGeometricInfo& out_geometricInfos,
+@@ -154,6 +181,8 @@ void robustModelEstimation(PairwiseGeometricInfo& out_geometricInfos,
          }
          ++progressDisplay;
      }
@@ -8866,10 +9090,14 @@ index e3b2880..b4e5c7b 100644
  {
      os << range.begin << "-" << range.end;
 diff --git a/src/aliceVision/mvsUtils/ImagesCache.cpp b/src/aliceVision/mvsUtils/ImagesCache.cpp
-index c7e42f4..701ad91 100644
+index c7e42f4..a333ae3 100644
 --- a/src/aliceVision/mvsUtils/ImagesCache.cpp
 +++ b/src/aliceVision/mvsUtils/ImagesCache.cpp
-@@ -7,6 +7,9 @@
+@@ -4,9 +4,13 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
  #include "ImagesCache.hpp"
  #include <aliceVision/mvsUtils/common.hpp>
  #include <aliceVision/mvsUtils/fileIO.hpp>
@@ -8879,7 +9107,31 @@ index c7e42f4..701ad91 100644
  
  #include <future>
  
-@@ -89,22 +92,29 @@ void ImagesCache<Image>::setCacheSize(int nbPreload)
+@@ -77,34 +81,52 @@ void ImagesCache<Image>::initIC(std::vector<std::string>& imagesNames)
+     }
+ }
+ 
++// cheshire (step 10g): a slot's age is its place in the load order. Upstream stamped it with clock(), which counts
++// milliseconds on Windows: the read-ahead fills many slots within one, the oldest is then the lowest slot index among
++// the ties, and when the slots' order no longer follows the cameras' - after a pass of texturing left them rotated - a
++// read-ahead evicted images not used yet, which were read again. On the False Door's texturing most passes decoded
++// every image twice (250 s against 88 s a pass). The same images, read once. CHESHIRE_IMAGES_CACHE_CLOCK=1: clock().
++static bool cheshireLoadOrderOn()
++{
++    static const bool v = !::cheshire::env::flag("CHESHIRE_IMAGES_CACHE_CLOCK");
++    return v;
++}
++
+ template<typename Image>
+ void ImagesCache<Image>::setCacheSize(int nbPreload)
+ {
+     _N_PRELOADED_IMAGES = nbPreload;
+     _imgs.resize(_N_PRELOADED_IMAGES);
+     _mapIdCamId.resize(_N_PRELOADED_IMAGES, -1);
+-    _mapIdClock.resize(_N_PRELOADED_IMAGES, clock());
++    _mapIdClock.resize(_N_PRELOADED_IMAGES, cheshireLoadOrderOn() ? 0L : long(clock()));  // cheshire (step 10g): new slots first
+ }
+ 
  template<typename Image>
  void ImagesCache<Image>::refreshData(int camId)
  {
@@ -8914,7 +9166,7 @@ index c7e42f4..701ad91 100644
 +            // replace with new new
 +            _camIdMapId[camId] = mapId;
 +            _mapIdCamId[mapId] = camId;
-+            _mapIdClock[mapId] = clock();
++            _mapIdClock[mapId] = cheshireLoadOrderOn() ? ++_cheshireLoadOrder : long(clock());  // cheshire (step 10g)
 +        }
 +    }
  
@@ -8923,7 +9175,7 @@ index c7e42f4..701ad91 100644
          // reload data from files
          long t1 = clock();
          if (_imgs[mapId] == nullptr)
-@@ -115,7 +125,10 @@ void ImagesCache<Image>::refreshData(int camId)
+@@ -115,7 +137,10 @@ void ImagesCache<Image>::refreshData(int camId)
          }
  
          const std::string imagePath = _imagesNames.at(camId);
@@ -8935,7 +9187,7 @@ index c7e42f4..701ad91 100644
  
          ALICEVISION_LOG_DEBUG("Add " << imagePath << " to image cache. " << formatElapsedTime(t1));
      }
-@@ -125,6 +138,22 @@ void ImagesCache<Image>::refreshData(int camId)
+@@ -125,6 +150,22 @@ void ImagesCache<Image>::refreshData(int camId)
      }
  }
  
@@ -8958,7 +9210,7 @@ index c7e42f4..701ad91 100644
  template<typename Image>
  void ImagesCache<Image>::refreshImage_sync(int camId)
  {
-@@ -135,7 +164,24 @@ void ImagesCache<Image>::refreshImage_sync(int camId)
+@@ -135,7 +176,24 @@ void ImagesCache<Image>::refreshImage_sync(int camId)
  template<typename Image>
  void ImagesCache<Image>::refreshImage_async(int camId)
  {
@@ -8985,19 +9237,20 @@ index c7e42f4..701ad91 100644
  
  template<typename Image>
 diff --git a/src/aliceVision/mvsUtils/ImagesCache.hpp b/src/aliceVision/mvsUtils/ImagesCache.hpp
-index 8849153..dd4e886 100644
+index 8849153..d9877f8 100644
 --- a/src/aliceVision/mvsUtils/ImagesCache.hpp
 +++ b/src/aliceVision/mvsUtils/ImagesCache.hpp
-@@ -49,6 +49,8 @@ class ImagesCache
+@@ -49,6 +49,9 @@ class ImagesCache
      StaticVector<long> _mapIdClock;
  
      std::vector<std::mutex> _imagesMutexes;
 +    std::mutex _slotMutex;  // cheshire: slot bookkeeping, allows parallel loads of different cameras
++    long _cheshireLoadOrder = 0;  // cheshire (step 10g): the slots' load order, under _slotMutex
 +    bool _fullResolution = false;  // cheshire (step 6d): images kept at full resolution, downscaled on the device
      std::vector<std::string> _imagesNames;
  
      std::list<std::future<void>> _asyncObjects;
-@@ -66,6 +68,13 @@ class ImagesCache
+@@ -66,6 +69,13 @@ class ImagesCache
  
      void initIC(std::vector<std::string>& imagesNames);
      void setCacheSize(int nbPreload);
@@ -9011,6 +9264,223 @@ index 8849153..dd4e886 100644
      void setCorrectEV(const ECorrectEV correctEV) { _correctEV = correctEV; }
      ~ImagesCache() = default;
  
+diff --git a/src/aliceVision/mvsUtils/MultiViewParams.cpp b/src/aliceVision/mvsUtils/MultiViewParams.cpp
+index 6a8da9f..def44f0 100644
+--- a/src/aliceVision/mvsUtils/MultiViewParams.cpp
++++ b/src/aliceVision/mvsUtils/MultiViewParams.cpp
+@@ -4,6 +4,7 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include "MultiViewParams.hpp"
+ 
+ #include <aliceVision/sfmData/SfMData.hpp>
+@@ -36,6 +37,13 @@ namespace mvsUtils {
+ 
+ namespace fs = std::filesystem;
+ 
++// cheshire (step 10f): CHESHIRE_IMAGES_FOLDER_INDEX=0 searches the images folder once per view, as upstream
++static bool cheshireFolderIndex()
++{
++    static const bool v = ::cheshire::env::flag("CHESHIRE_IMAGES_FOLDER_INDEX", true);
++    return v;
++}
++
+ MultiViewParams::MultiViewParams(const sfmData::SfMData& sfmData,
+                                  const std::string& imagesFolder,
+                                  const std::string& depthMapsFolder,
+@@ -56,6 +64,8 @@ MultiViewParams::MultiViewParams(const sfmData::SfMData& sfmData,
+     {
+         std::set<std::pair<int, int>> dimensions;  // for print only
+         int i = 0;
++        std::map<fs::path, std::vector<fs::path>> cheshireFilesByStem;  // cheshire (step 10f)
++        bool cheshireFolderListed = false;
+         for (const auto& viewPair : sfmData.getViews())
+         {
+             const sfmData::View& view = *(viewPair.second.get());
+@@ -85,7 +95,35 @@ MultiViewParams::MultiViewParams(const sfmData::SfMData& sfmData,
+             else if (_imagesFolder != "/" && !_imagesFolder.empty() && fs::is_directory(_imagesFolder) && !fs::is_empty(_imagesFolder))
+             {
+                 // find folder file extension
+-                std::vector<std::string> paths = utils::getFilesPathsFromFolder(_imagesFolder, [&view](const fs::path& path) {
++                // cheshire (step 10f): the folder listed once for all the views - upstream listed it, with a stat of every
++                // entry, once per view: 884 x 954 files, about 13 s of every depth map process on the False Door - its
++                // regular files grouped by stem in the listing's order; a view takes upstream's test on its stem's files.
++                // The same paths.
++                std::vector<std::string> paths;
++                if (cheshireFolderIndex())
++                {
++                    if (!cheshireFolderListed)
++                    {
++                        for (const auto& pathIt : fs::directory_iterator(_imagesFolder))
++                        {
++                            const fs::path folderPath = pathIt.path();
++                            if (is_regular_file(folderPath))
++                                cheshireFilesByStem[folderPath.stem()].push_back(folderPath);
++                        }
++                        cheshireFolderListed = true;
++                    }
++                    const auto stemFiles = cheshireFilesByStem.find(fs::path(std::to_string(view.getViewId())));
++                    if (stemFiles != cheshireFilesByStem.end())
++                    {
++                        for (const fs::path& path : stemFiles->second)
++                        {
++                            if (path.stem() == std::to_string(view.getViewId()) && (image::isSupportedUndistortFormat(path.extension().string())))
++                                paths.push_back(path.generic_string());
++                        }
++                    }
++                }
++                else
++                paths = utils::getFilesPathsFromFolder(_imagesFolder, [&view](const fs::path& path) {
+                     return (path.stem() == std::to_string(view.getViewId()) && (image::isSupportedUndistortFormat(path.extension().string())));
+                 });
+ 
+@@ -519,6 +557,43 @@ void MultiViewParams::decomposeProjectionMatrix(Point3d& Co,
+ }
+ 
+ StaticVector<int> MultiViewParams::findNearestCamsFromLandmarks(int rc, int nbNearestCams) const
++{
++    return findNearestCamsFromLandmarks(rc, nbNearestCams, nullptr);  // cheshire (step 10e)
++}
++
++// cheshire (step 10e): every landmark rc observes, in the landmark map's order - from the caller's per-camera lists when
++// it has them, else from the map itself, as upstream walks it (then the visit's first test skips the others)
++template<typename F>
++static void cheshireForEachLandmarkOf(const sfmData::SfMData& sfmData, const MultiViewParams::CheshireLandmarksPerCamera* perCamera, int rc, F&& visit)
++{
++    if (perCamera)
++    {
++        for (const sfmData::Landmark* landmark : (*perCamera)[rc])
++            visit(*landmark);
++    }
++    else
++    {
++        for (const auto& landmarkPair : sfmData.getLandmarks())
++            visit(landmarkPair.second);
++    }
++}
++
++MultiViewParams::CheshireLandmarksPerCamera MultiViewParams::cheshireLandmarksPerCamera() const
++{
++    CheshireLandmarksPerCamera out(getNbCameras());
++    for (const auto& landmarkPair : _sfmData.getLandmarks())
++    {
++        for (const auto& observationPair : landmarkPair.second.getObservations())
++        {
++            const auto camera = _imageIdsPerViewId.find(observationPair.first);
++            if (camera != _imageIdsPerViewId.end() && camera->second >= 0 && camera->second < static_cast<int>(out.size()))
++                out[camera->second].push_back(&landmarkPair.second);
++        }
++    }
++    return out;
++}
++
++StaticVector<int> MultiViewParams::findNearestCamsFromLandmarks(int rc, int nbNearestCams, const CheshireLandmarksPerCamera* perCamera) const
+ {
+     StaticVector<int> out;
+     std::vector<SortedId> ids;
+@@ -532,13 +607,12 @@ StaticVector<int> MultiViewParams::findNearestCamsFromLandmarks(int rc, int nbNe
+     const geometry::Pose3 pose = _sfmData.getPose(view).getTransform();
+     const camera::IntrinsicBase* intrinsicPtr = _sfmData.getIntrinsicPtr(view.getIntrinsicId());
+ 
+-    for (const auto& landmarkPair : _sfmData.getLandmarks())
+-    {
+-        const auto& observations = landmarkPair.second.getObservations();
++    cheshireForEachLandmarkOf(_sfmData, perCamera, rc, [&](const sfmData::Landmark& cheshireLandmark) {  // cheshire (step 10e)
++        const auto& observations = cheshireLandmark.getObservations();
+ 
+         auto viewObsIt = observations.find(viewId);
+         if (viewObsIt == observations.end())
+-            continue;
++            return;
+ 
+         for (const auto& observationPair : observations)
+         {
+@@ -560,7 +634,7 @@ StaticVector<int> MultiViewParams::findNearestCamsFromLandmarks(int rc, int nbNe
+             const int tc = getIndexFromViewId(otherViewId);
+             ++ids.at(tc).value;
+         }
+-    }
++    });  // cheshire (step 10e)
+ 
+     qsort(&ids[0], ids.size(), sizeof(SortedId), qsortCompareSortedIdDesc);
+ 
+@@ -582,6 +656,12 @@ StaticVector<int> MultiViewParams::findNearestCamsFromLandmarks(int rc, int nbNe
+ }
+ 
+ std::vector<int> MultiViewParams::findTileNearestCams(int rc, int nbNearestCams, const std::vector<int>& tCams, const ROI& roi) const
++{
++    return findTileNearestCams(rc, nbNearestCams, tCams, roi, nullptr);  // cheshire (step 10e)
++}
++
++std::vector<int> MultiViewParams::findTileNearestCams(int rc, int nbNearestCams, const std::vector<int>& tCams, const ROI& roi,
++                                                      const CheshireLandmarksPerCamera* perCamera) const
+ {
+     auto plateauFunction = [](int a, int b, int c, int d, int x) {
+         if (x > a && x <= b)
+@@ -608,19 +688,18 @@ std::vector<int> MultiViewParams::findTileNearestCams(int rc, int nbNearestCams,
+ 
+     const ROI fullsizeRoi = upscaleROI(roi, getProcessDownscale());  // landmark observations are in the full-size image coordinate system
+ 
+-    for (const auto& landmarkPair : sfmData.getLandmarks())
+-    {
+-        const auto& observations = landmarkPair.second.getObservations();
++    cheshireForEachLandmarkOf(sfmData, perCamera, rc, [&](const sfmData::Landmark& cheshireLandmark) {  // cheshire (step 10e)
++        const auto& observations = cheshireLandmark.getObservations();
+ 
+         auto viewObsIt = observations.find(viewId);
+ 
+         // has landmark observation for the R camera
+         if (viewObsIt == observations.end())
+-            continue;
++            return;
+ 
+         // landmark R camera observation is in the image full-size ROI
+         if (!fullsizeRoi.contains(viewObsIt->second.getX(), viewObsIt->second.getY()))
+-            continue;
++            return;
+ 
+         for (const auto& observationPair : observations)
+         {
+@@ -645,7 +724,7 @@ std::vector<int> MultiViewParams::findTileNearestCams(int rc, int nbNearestCams,
+ 
+             tcScore[tc] += plateauFunction(1, 10, 50, 150, angle);
+         }
+-    }
++    });  // cheshire (step 10e)
+ 
+     std::vector<SortedId> ids;
+     ids.reserve(tcScore.size());
+diff --git a/src/aliceVision/mvsUtils/MultiViewParams.hpp b/src/aliceVision/mvsUtils/MultiViewParams.hpp
+index 911eab0..a803207 100644
+--- a/src/aliceVision/mvsUtils/MultiViewParams.hpp
++++ b/src/aliceVision/mvsUtils/MultiViewParams.hpp
+@@ -26,6 +26,7 @@ namespace bpt = boost::property_tree;
+ 
+ namespace sfmData {
+ class SfMData;
++class Landmark;  // cheshire: step 10e
+ }  // namespace sfmData
+ 
+ namespace mvsUtils {
+@@ -244,6 +245,16 @@ class MultiViewParams
+      */
+     std::vector<int> findTileNearestCams(int rc, int nbNearestCams, const std::vector<int>& tCams, const ROI& roi) const;
+ 
++    /// cheshire (step 10e): the landmarks each camera observes, by camera index, in the landmark map's order
++    using CheshireLandmarksPerCamera = std::vector<std::vector<const sfmData::Landmark*>>;
++    CheshireLandmarksPerCamera cheshireLandmarksPerCamera() const;
++
++    /// cheshire (step 10e): the two above, walking only rc's own landmarks from cheshireLandmarksPerCamera() - every
++    /// other landmark fails their loops' first test - in the map's order: the same cameras. nullptr: upstream's walk.
++    StaticVector<int> findNearestCamsFromLandmarks(int rc, int nbNearestCams, const CheshireLandmarksPerCamera* perCamera) const;
++    std::vector<int> findTileNearestCams(int rc, int nbNearestCams, const std::vector<int>& tCams, const ROI& roi,
++                                         const CheshireLandmarksPerCamera* perCamera) const;
++
+     inline void setMinViewAngle(float minViewAngle) { _minViewAngle = minViewAngle; }
+ 
+     inline void setMaxViewAngle(float maxViewAngle) { _maxViewAngle = maxViewAngle; }
 diff --git a/src/aliceVision/mvsUtils/fileIO.cpp b/src/aliceVision/mvsUtils/fileIO.cpp
 index 0403b03..eec2160 100644
 --- a/src/aliceVision/mvsUtils/fileIO.cpp
@@ -11103,6 +11573,41 @@ index 662b32a..187439b 100644
  };
  
  } // namespace sfm
+diff --git a/src/aliceVision/sfm/pipeline/regionsIO.cpp b/src/aliceVision/sfm/pipeline/regionsIO.cpp
+index 34b25de..ebb7a24 100644
+--- a/src/aliceVision/sfm/pipeline/regionsIO.cpp
++++ b/src/aliceVision/sfm/pipeline/regionsIO.cpp
+@@ -5,14 +5,17 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include "regionsIO.hpp"
+ 
+ #include <aliceVision/system/Logger.hpp>
+ #include <aliceVision/system/ProgressDisplay.hpp>
+ #include <aliceVision/utils/filesIO.hpp>
++#include <aliceVision/alicevision_omp.hpp>  // cheshire: step 10b
+ 
+ #include <boost/algorithm/string/join.hpp>
+ 
++#include <algorithm>  // cheshire: step 10b
+ #include <atomic>
+ #include <cassert>
+ #include <filesystem>
+@@ -221,7 +224,11 @@ bool loadRegionsPerView(feature::RegionsPerView& regionsPerView,
+     for (std::size_t i = 0; i < imageDescriberTypes.size(); ++i)
+         imageDescribers.at(i) = createImageDescriber(imageDescriberTypes.at(i));
+ 
+-#pragma omp parallel num_threads(3)
++    // cheshire (step 10b): every core. Upstream's three left most of them idle while a FeatureMatching chunk of the
++    // False Door loaded its 2.6 GB of regions - 2 s of a 4 s chunk. A view's regions load on their own and land in the
++    // map under its id, so the thread count changes nothing loaded. CHESHIRE_REGIONS_THREADS=3 is upstream's.
++    const int cheshireThreads = std::max(1, static_cast<int>(::cheshire::env::integer("CHESHIRE_REGIONS_THREADS", omp_get_max_threads())));
++#pragma omp parallel num_threads(cheshireThreads)
+     for (auto iter = sfmData.getViews().begin(); iter != sfmData.getViews().end() && !invalid; ++iter)
+     {
+ #pragma omp single nowait
 diff --git a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp b/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
 index 097f8c9..5e25775 100644
 --- a/src/aliceVision/sfm/pipeline/sequential/ReconstructionEngine_sequentialSfM.cpp
@@ -11935,6 +12440,356 @@ index 9825380..863dc95 100644
  
      // Data providers
  
+diff --git a/src/aliceVision/sfm/sfmFilters.cpp b/src/aliceVision/sfm/sfmFilters.cpp
+index 61c2c53..3ca477a 100644
+--- a/src/aliceVision/sfm/sfmFilters.cpp
++++ b/src/aliceVision/sfm/sfmFilters.cpp
+@@ -5,6 +5,7 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include "sfmFilters.hpp"
+ #include <aliceVision/sfmData/SfMData.hpp>
+ #include <aliceVision/stl/stl.hpp>
+@@ -12,10 +13,156 @@
+ #include <aliceVision/sfm/bundle/BundleAdjustment.hpp>
+ 
+ #include <iterator>
++#include <aliceVision/alicevision_omp.hpp>  // cheshire: step 10d
++#include <algorithm>  // cheshire
++#include <atomic>  // cheshire
++#include <map>  // cheshire
++#include <vector>  // cheshire
+ 
+ namespace aliceVision {
+ namespace sfm {
+ 
++// cheshire (step 10d): the SfM statistics' and filters' loops over every observation on every core. Each ran on one
++// thread, twice or three times around every bundle adjustment: on the False Door (884 views, 1.31 M landmarks) they were
++// about 340 s of SfMExpanding's 741, the adjustments themselves 62. CHESHIRE_SFM_FILTER_THREADS=1 runs upstream's loops;
++// CHESHIRE_SFM_FILTER_CHECK=1 runs both and compares.
++static int cheshireFilterThreads()
++{
++    static const int v = std::max(1, static_cast<int>(::cheshire::env::integer("CHESHIRE_SFM_FILTER_THREADS", omp_get_max_threads())));
++    static const bool said = []() {
++        if (v > 1)
++        {
++            ALICEVISION_LOG_INFO("cheshire: SfM residual statistics and outlier filters on " << v
++                                 << " threads (CHESHIRE_SFM_FILTER_THREADS=1 for upstream's loops, CHESHIRE_SFM_FILTER_CHECK=1 to compare)");
++        }
++        return true;
++    }();
++    (void)said;
++    return v;
++}
++
++static bool cheshireFilterCheck()
++{
++    static const bool v = ::cheshire::env::flag("CHESHIRE_SFM_FILTER_CHECK");
++    return v;
++}
++
++/// The landmarks in the map's order, for loops that hand them out by index
++static std::vector<const sfmData::Landmark*> cheshireLandmarks(const sfmData::SfMData& sfmData)
++{
++    std::vector<const sfmData::Landmark*> out;
++    out.reserve(sfmData.getLandmarks().size());
++    for (const auto& landmark : sfmData.getLandmarks())
++        out.push_back(&landmark.second);
++    return out;
++}
++
++/// CHESHIRE_SFM_FILTER_CHECK's tally, printed when the count of comparisons reaches a power of two
++static void cheshireCheckTally(const char* what, bool same)
++{
++    static std::atomic<long long> runs{0}, differing{0};
++    const long long n = ++runs;
++    const long long d = same ? differing.load() : ++differing;
++    if (!same)
++    {
++        ALICEVISION_LOG_WARNING("cheshire: SfM filter check: " << what << " differs from upstream's loop");
++    }
++    if ((n & (n - 1)) == 0)
++    {
++        ALICEVISION_LOG_INFO("cheshire: SfM filter check: " << n - d << " of " << n << " comparisons identical to upstream's loops");
++    }
++}
++
++/// For each landmark in the map's order, whether removeOutliersWithPixelResidualError's test rejects one of its
++/// observations - the test as written there, on every core. Empty on one thread: then the walk tests every landmark.
++static std::vector<char> cheshirePixelOutliers(const sfmData::SfMData& sfmData, EFeatureConstraint featureConstraint, const double dThresholdPixel)
++{
++    std::vector<char> flagged;
++    const int threads = cheshireFilterThreads();
++    if (threads < 2)
++        return flagged;
++    const std::vector<const sfmData::Landmark*> landmarks = cheshireLandmarks(sfmData);
++    auto rejects = [&](const sfmData::Landmark& landmark) {
++        for (const auto& [viewId, observation] : landmark.getObservations())
++        {
++            const sfmData::View* view = sfmData.getViews().at(viewId).get();
++            const geometry::Pose3 pose = sfmData.getPose(*view).getTransform();
++            const camera::IntrinsicBase* intrinsic = sfmData.getIntrinsics().at(view->getIntrinsicId()).get();
++
++            Vec2 residual = intrinsic->residual(pose, landmark.getX().homogeneous(), observation.getCoordinates());
++            if (featureConstraint == EFeatureConstraint::SCALE && observation.getScale() > 0.0)
++            {
++                // Apply the scale of the feature to get a residual value
++                // relative to the feature precision.
++                residual /= observation.getScale();
++            }
++
++            if ((pose.depth(landmark.getX()) < 0) || (residual.norm() > dThresholdPixel))
++                return true;
++        }
++        return false;
++    };
++    flagged.assign(landmarks.size(), 0);
++#pragma omp parallel for num_threads(threads) schedule(dynamic, 1024)
++    for (int i = 0; i < static_cast<int>(landmarks.size()); ++i)
++        flagged[i] = rejects(*landmarks[i]) ? 1 : 0;
++    if (cheshireFilterCheck())
++    {
++        bool same = true;
++        for (std::size_t i = 0; i < landmarks.size(); ++i)
++            same = same && (flagged[i] != 0) == rejects(*landmarks[i]);
++        cheshireCheckTally("the landmarks removeOutliersWithPixelResidualError tests", same);
++    }
++    return flagged;
++}
++
++/// eraseUnstablePoses' count of each pose's observations on every core: one map per block of landmarks, added up. The
++/// same integers; false, and nothing done, on one thread.
++static bool cheshirePoseCounts(const sfmData::SfMData& sfmData, std::map<IndexT, IndexT>& posesCount)
++{
++    const int threads = cheshireFilterThreads();
++    if (threads < 2)
++        return false;
++    std::map<IndexT, IndexT> serial;
++    if (cheshireFilterCheck())
++        serial = posesCount;
++    const std::vector<const sfmData::Landmark*> landmarks = cheshireLandmarks(sfmData);
++    const int blocks = 4 * threads;
++    std::vector<std::map<IndexT, IndexT>> parts(blocks);
++#pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
++    for (int b = 0; b < blocks; ++b)
++    {
++        const std::size_t lo = landmarks.size() * b / blocks, hi = landmarks.size() * (b + 1) / blocks;
++        std::map<IndexT, IndexT>& part = parts[b];
++        for (std::size_t i = lo; i < hi; ++i)
++        {
++            for (const auto& [viewId, obs] : landmarks[i]->getObservations())
++            {
++                const IndexT poseId = sfmData.getView(viewId).getPoseId();
++                if (posesCount.count(poseId) != 0)
++                    ++part[poseId];
++            }
++        }
++    }
++    for (const std::map<IndexT, IndexT>& part : parts)
++        for (const auto& [poseId, n] : part)
++            posesCount[poseId] += n;
++    if (cheshireFilterCheck())
++    {
++        for (const auto& [idLandmark, landmark] : sfmData.getLandmarks())
++        {
++            for (const auto& [viewId, obs] : landmark.getObservations())
++            {
++                const auto it = serial.find(sfmData.getView(viewId).getPoseId());
++                if (it != serial.end())
++                    it->second++;
++            }
++        }
++        cheshireCheckTally("eraseUnstablePoses' counts", serial == posesCount);
++    }
++    return true;
++}
++
+ IndexT removeOutliersWithPixelResidualError(sfmData::SfMData& sfmData,
+                                             EFeatureConstraint featureConstraint,
+                                             const double dThresholdPixel,
+@@ -24,11 +171,18 @@ IndexT removeOutliersWithPixelResidualError(sfmData::SfMData& sfmData,
+     IndexT outlierCount = 0;
+     sfmData::Landmarks::iterator iterTracks = sfmData.getLandmarks().begin();
+ 
++    // cheshire (step 10d): which landmarks have an observation the test below rejects, decided on every core by the same
++    // test; the walk then tests and erases on those alone, in the same order, and only checks the others' lengths -
++    // all it did to them, since their every observation passes
++    const std::vector<char> cheshireFlagged = cheshirePixelOutliers(sfmData, featureConstraint, dThresholdPixel);
++    std::size_t cheshireIndex = 0;
++
+     while (iterTracks != sfmData.getLandmarks().end())
+     {
+         sfmData::Observations& observations = iterTracks->second.getObservations();
+         sfmData::Observations::iterator itObs = observations.begin();
+ 
++        if (cheshireFlagged.empty() || cheshireFlagged[cheshireIndex++] != 0)  // cheshire (step 10d)
+         while (itObs != observations.end())
+         {
+             const sfmData::View* view = sfmData.getViews().at(itObs->first).get();
+@@ -178,6 +332,7 @@ bool eraseUnstablePoses(sfmData::SfMData& sfmData, const IndexT minPointsPerPose
+     }
+ 
+     // Count occurrence of the poses in the Landmark observations
++    if (!cheshirePoseCounts(sfmData, posesCount))  // cheshire (step 10d): on every core, the same counts
+     for (const auto & [idLandmark, landmark] : landmarks)
+     {
+         const sfmData::Observations& observations = landmark.getObservations();
+diff --git a/src/aliceVision/sfm/sfmStatistics.cpp b/src/aliceVision/sfm/sfmStatistics.cpp
+index 27a2bb3..9da7c7c 100644
+--- a/src/aliceVision/sfm/sfmStatistics.cpp
++++ b/src/aliceVision/sfm/sfmStatistics.cpp
+@@ -4,6 +4,7 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include "sfmStatistics.hpp"
+ 
+ #include <aliceVision/sfm/pipeline/localization/SfMLocalizer.hpp>
+@@ -11,6 +12,12 @@
+ #include <aliceVision/sfm/pipeline/regionsIO.hpp>
+ #include <aliceVision/sfm/pipeline/pairwiseMatchesIO.hpp>
+ #include <aliceVision/track/TracksBuilder.hpp>
++#include <aliceVision/alicevision_omp.hpp>  // cheshire: step 10d
++#include <aliceVision/system/Logger.hpp>  // cheshire
++#include <algorithm>  // cheshire
++#include <atomic>  // cheshire
++#include <cstring>  // cheshire
++#include <vector>  // cheshire
+ 
+ namespace aliceVision {
+ namespace sfm {
+@@ -73,6 +80,120 @@ void computeResidualsHistogram(const sfmData::SfMData& sfmData,
+     }
+ }
+ 
++// cheshire (step 10d): the SfM statistics' and filters' loops over every observation on every core. Each ran on one
++// thread, twice or three times around every bundle adjustment: on the False Door (884 views, 1.31 M landmarks) they were
++// about 340 s of SfMExpanding's 741, the adjustments themselves 62. CHESHIRE_SFM_FILTER_THREADS=1 runs upstream's loops;
++// CHESHIRE_SFM_FILTER_CHECK=1 runs both and compares.
++static int cheshireFilterThreads()
++{
++    static const int v = std::max(1, static_cast<int>(::cheshire::env::integer("CHESHIRE_SFM_FILTER_THREADS", omp_get_max_threads())));
++    static const bool said = []() {
++        if (v > 1)
++        {
++            ALICEVISION_LOG_INFO("cheshire: SfM residual statistics and outlier filters on " << v
++                                 << " threads (CHESHIRE_SFM_FILTER_THREADS=1 for upstream's loops, CHESHIRE_SFM_FILTER_CHECK=1 to compare)");
++        }
++        return true;
++    }();
++    (void)said;
++    return v;
++}
++
++static bool cheshireFilterCheck()
++{
++    static const bool v = ::cheshire::env::flag("CHESHIRE_SFM_FILTER_CHECK");
++    return v;
++}
++
++/// The landmarks in the map's order, for loops that hand them out by index
++static std::vector<const sfmData::Landmark*> cheshireLandmarks(const sfmData::SfMData& sfmData)
++{
++    std::vector<const sfmData::Landmark*> out;
++    out.reserve(sfmData.getLandmarks().size());
++    for (const auto& landmark : sfmData.getLandmarks())
++        out.push_back(&landmark.second);
++    return out;
++}
++
++/// CHESHIRE_SFM_FILTER_CHECK's tally, printed when the count of comparisons reaches a power of two
++static void cheshireCheckTally(const char* what, bool same)
++{
++    static std::atomic<long long> runs{0}, differing{0};
++    const long long n = ++runs;
++    const long long d = same ? differing.load() : ++differing;
++    if (!same)
++    {
++        ALICEVISION_LOG_WARNING("cheshire: SfM filter check: " << what << " differs from upstream's loop");
++    }
++    if ((n & (n - 1)) == 0)
++    {
++        ALICEVISION_LOG_INFO("cheshire: SfM filter check: " << n - d << " of " << n << " comparisons identical to upstream's loops");
++    }
++}
++
++/// computeResidualsMeanMedian's residuals on every core: blocks of landmarks in the map's order, each block's residuals
++/// in the loop's order, joined in block order - the loop's very vector, so BoxStats gives the same numbers whatever the
++/// values (NaN included). False, and nothing done, on one thread.
++static bool cheshireStatsResiduals(const sfmData::SfMData& sfmData, const std::set<IndexT>& specificViews, std::vector<double>& out)
++{
++    const int threads = cheshireFilterThreads();
++    if (threads < 2)
++        return false;
++    const std::vector<const sfmData::Landmark*> landmarks = cheshireLandmarks(sfmData);
++    const int blocks = 4 * threads;
++    std::vector<std::vector<double>> parts(blocks);
++#pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
++    for (int b = 0; b < blocks; ++b)
++    {
++        const std::size_t lo = landmarks.size() * b / blocks, hi = landmarks.size() * (b + 1) / blocks;
++        std::vector<double>& part = parts[b];
++        for (std::size_t i = lo; i < hi; ++i)
++        {
++            const sfmData::Landmark& landmark = *landmarks[i];
++            for (const auto& obs : landmark.getObservations())
++            {
++                if (!specificViews.empty() && specificViews.count(obs.first) == 0)
++                {
++                    continue;
++                }
++
++                const sfmData::View& view = sfmData.getView(obs.first);
++                const aliceVision::geometry::Pose3 pose = sfmData.getPose(view).getTransform();
++                const aliceVision::camera::IntrinsicBase& intrinsic = sfmData.getIntrinsic(view.getIntrinsicId());
++                const Vec2 residual = intrinsic.residual(pose, landmark.getX().homogeneous(), obs.second.getCoordinates());
++                part.push_back(residual.norm());
++            }
++        }
++    }
++    const std::size_t first = out.size();
++    for (const std::vector<double>& part : parts)
++        out.insert(out.end(), part.begin(), part.end());
++    if (cheshireFilterCheck())
++    {
++        std::vector<double> serial;
++        for (const auto& track : sfmData.getLandmarks())
++        {
++            for (const auto& obs : track.second.getObservations())
++            {
++                if (!specificViews.empty() && specificViews.count(obs.first) == 0)
++                {
++                    continue;
++                }
++
++                const sfmData::View& view = sfmData.getView(obs.first);
++                const aliceVision::geometry::Pose3 pose = sfmData.getPose(view).getTransform();
++                const aliceVision::camera::IntrinsicBase& intrinsic = sfmData.getIntrinsic(view.getIntrinsicId());
++                const Vec2 residual = intrinsic.residual(pose, track.second.getX().homogeneous(), obs.second.getCoordinates());
++                serial.push_back(residual.norm());
++            }
++        }
++        const bool same = serial.size() == out.size() - first &&
++                          (serial.empty() || std::memcmp(serial.data(), out.data() + first, serial.size() * sizeof(double)) == 0);
++        cheshireCheckTally("the residuals of computeResidualsMeanMedian", same);
++    }
++    return true;
++}
++
+ void computeResidualsMeanMedian(const sfmData::SfMData& sfmData,
+                             double & mean,
+                             double & median,
+@@ -90,6 +211,7 @@ void computeResidualsMeanMedian(const sfmData::SfMData& sfmData,
+     std::vector<double> vecResiduals;
+     vecResiduals.reserve(sfmData.getLandmarks().size());
+ 
++    if (!cheshireStatsResiduals(sfmData, specificViews, vecResiduals))  // cheshire (step 10d): on every core, the same vector
+     for (const auto& track : sfmData.getLandmarks())
+     {
+         const aliceVision::sfmData::Observations& observations = track.second.getObservations();
 diff --git a/src/aliceVision/sfmData/colorize.cpp b/src/aliceVision/sfmData/colorize.cpp
 index 0724197..6c5fcba 100644
 --- a/src/aliceVision/sfmData/colorize.cpp
@@ -12088,10 +12943,10 @@ index 8f2d1c4..96fee8f 100644
          }
      }
 diff --git a/src/aliceVision/track/trackIO.cpp b/src/aliceVision/track/trackIO.cpp
-index 51638ec..4c6f230 100644
+index 51638ec..f249e76 100644
 --- a/src/aliceVision/track/trackIO.cpp
 +++ b/src/aliceVision/track/trackIO.cpp
-@@ -4,9 +4,16 @@
+@@ -4,9 +4,19 @@
  // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
@@ -12103,12 +12958,15 @@ index 51638ec..4c6f230 100644
 +#include <boost/describe.hpp>  // cheshire
 +#include <boost/json/parse_into.hpp>  // cheshire
 +#include <cstring>  // cheshire
++#include <cstdint>  // cheshire: step 10c
++#include <cstdio>  // cheshire
++#include <string>  // cheshire
 +#include <optional>  // cheshire
 +#include <vector>  // cheshire
  
  namespace aliceVision {
  namespace track {
-@@ -66,6 +73,96 @@ aliceVision::track::Track tag_invoke(boost::json::value_to_tag<aliceVision::trac
+@@ -66,7 +76,325 @@ aliceVision::track::Track tag_invoke(boost::json::value_to_tag<aliceVision::trac
      return ret;
  }
  
@@ -12200,12 +13058,241 @@ index 51638ec..4c6f230 100644
 +    }
 +    return n;
 +}
++
++// cheshire (step 10c): TracksBuilding's binary copy of the tracks file, <file>.cheshire. TracksBuilding parses the file
++// it has just written as every reader without the copy parses it (9h, else the DOM) and writes the result; a reader
++// takes the copy only when it was made from the bytes the file holds now - their count and a 64-bit hash of them, read
++// from the file each time - and parses the file otherwise. RelativePoseEstimating parses the file once per chunk: on
++// the False Door 769 MB, 7.5 s of each 10 s chunk, 36 times. Little-endian, fixed widths: a header (magic, the file's
++// size and hash, the track and observation counts), then per track its id, describer type and observation count, then
++// per observation view id, feature id, x, y, scale and depth; a hash of everything before it closes the copy.
++// CHESHIRE_TRACKS_SIDECAR=0 neither writes nor reads it; CHESHIRE_TRACKS_SIDECAR_CHECK=1 parses the file too and compares.
++inline bool sidecarOn()
++{
++    static const bool v = ::cheshire::env::flag("CHESHIRE_TRACKS_SIDECAR", true);
++    return v;
++}
++
++inline bool sidecarCheck()
++{
++    static const bool v = ::cheshire::env::flag("CHESHIRE_TRACKS_SIDECAR_CHECK");
++    return v;
++}
++
++inline std::string sidecarPath(const std::string& file) { return file + ".cheshire"; }
++
++constexpr char sidecarMagic[8] = {'C', 'H', 'T', 'R', 'K', 'S', '0', '1'};
++
++/// A 64-bit hash of a byte range (four lanes of multiply-xorshift, several GB/s): it tells a changed file from the one
++/// the copy was made from, and a damaged copy from a whole one - nothing more is asked of it
++inline std::uint64_t hash64(const char* p, std::size_t n)
++{
++    constexpr std::uint64_t k = 0x9E3779B97F4A7C15ull;
++    std::uint64_t h[4] = {std::uint64_t(n), k, ~std::uint64_t(n), k ^ std::uint64_t(n)};
++    std::size_t i = 0;
++    for (; i + 32 <= n; i += 32)
++        for (int l = 0; l < 4; ++l)
++        {
++            std::uint64_t w;
++            std::memcpy(&w, p + i + 8 * l, 8);
++            h[l] = (h[l] ^ w) * k;
++            h[l] ^= h[l] >> 29;
++        }
++    for (; i < n; ++i)
++        h[0] = (h[0] ^ static_cast<unsigned char>(p[i])) * k;
++    std::uint64_t r = h[0] ^ (h[1] * 3) ^ (h[2] * 5) ^ (h[3] * 7);
++    r ^= r >> 31;
++    r *= k;
++    r ^= r >> 29;
++    return r;
++}
++
++/// The whole file, as bytes, in one read
++inline bool readFile(const std::string& path, std::string& out)
++{
++    std::ifstream f(path, std::ios::binary);
++    if (!f.is_open())
++        return false;
++    f.seekg(0, std::ios::end);
++    const std::streamoff n = f.tellg();
++    if (n < 0)
++        return false;
++    f.seekg(0, std::ios::beg);
++    out.assign(static_cast<std::size_t>(n), '\0');
++    return n == 0 || static_cast<bool>(f.read(&out[0], n));
++}
++
++inline void put(std::string& b, std::uint64_t v)
++{
++    char c[8];
++    std::memcpy(c, &v, 8);
++    b.append(c, 8);
++}
++
++inline void put(std::string& b, double v)
++{
++    char c[8];
++    std::memcpy(c, &v, 8);
++    b.append(c, 8);
++}
++
++inline bool writeSidecar(const TracksMap& tracks, const std::string& file, std::uint64_t fileSize, std::uint64_t fileHash, std::size_t& observations)
++{
++    observations = 0;
++    for (const auto& t : tracks)
++        observations += t.second.featPerView.size();
++    std::string b;
++    b.reserve(8 + 4 * 8 + tracks.size() * 24 + observations * 48 + 8);
++    b.append(sidecarMagic, 8);
++    put(b, fileSize);
++    put(b, fileHash);
++    put(b, std::uint64_t(tracks.size()));
++    put(b, std::uint64_t(observations));
++    for (const auto& [trackId, track] : tracks)
++    {
++        put(b, std::uint64_t(trackId));
++        put(b, std::uint64_t(static_cast<std::int64_t>(track.descType)));
++        put(b, std::uint64_t(track.featPerView.size()));
++        for (const auto& [viewId, item] : track.featPerView)
++        {
++            put(b, std::uint64_t(viewId));
++            put(b, std::uint64_t(item.featureId));
++            put(b, double(item.coords(0)));
++            put(b, double(item.coords(1)));
++            put(b, double(item.scale));
++            put(b, double(item.depth));
++        }
++    }
++    put(b, hash64(b.data(), b.size()));
++    const std::string path = sidecarPath(file), tmp = path + ".tmp";
++    {
++        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
++        if (!out.is_open())
++            return false;
++        out.write(b.data(), static_cast<std::streamsize>(b.size()));
++        out.close();
++        if (!out)
++        {
++            std::remove(tmp.c_str());
++            return false;
++        }
++    }
++    std::remove(path.c_str());  // rename replaces nothing on Windows
++    if (std::rename(tmp.c_str(), path.c_str()) != 0)
++    {
++        std::remove(tmp.c_str());
++        return false;
++    }
++    return true;
++}
++
++/// False - and out untouched - unless there is a whole copy made from the bytes the file holds now
++inline bool readSidecar(TracksMap& out, const std::string& file, std::size_t& observations)
++{
++    std::string c;
++    if (!readFile(sidecarPath(file), c) || c.size() < 8 + 4 * 8 + 8 || std::memcmp(c.data(), sidecarMagic, 8) != 0)
++        return false;
++    std::uint64_t stored;
++    std::memcpy(&stored, c.data() + c.size() - 8, 8);
++    if (hash64(c.data(), c.size() - 8) != stored)
++        return false;
++    const char* p = c.data() + 8;
++    const char* const e = c.data() + c.size() - 8;
++    auto u64 = [&](std::uint64_t& v) {
++        if (e - p < 8)
++            return false;
++        std::memcpy(&v, p, 8);
++        p += 8;
++        return true;
++    };
++    auto f64 = [&](double& v) {
++        if (e - p < 8)
++            return false;
++        std::memcpy(&v, p, 8);
++        p += 8;
++        return true;
++    };
++    std::uint64_t fileSize, fileHash, nTracks, nObservations;
++    if (!u64(fileSize) || !u64(fileHash) || !u64(nTracks) || !u64(nObservations))
++        return false;
++    {
++        std::string bytes;
++        if (!readFile(file, bytes) || bytes.size() != fileSize || hash64(bytes.data(), bytes.size()) != fileHash)
++            return false;
++    }
++    TracksMap tracks;
++    std::uint64_t seen = 0;
++    for (std::uint64_t t = 0; t < nTracks; ++t)
++    {
++        std::uint64_t trackId, descType, n;
++        if (!u64(trackId) || !u64(descType) || !u64(n))
++            return false;
++        Track track;
++        track.descType = static_cast<feature::EImageDescriberType>(static_cast<std::int64_t>(descType));
++        for (std::uint64_t o = 0; o < n; ++o)
++        {
++            std::uint64_t viewId, featureId;
++            double x, y, scale, depth;
++            if (!u64(viewId) || !u64(featureId) || !f64(x) || !f64(y) || !f64(scale) || !f64(depth))
++                return false;
++            TrackItem item;
++            item.featureId = static_cast<std::size_t>(featureId);
++            item.coords = Vec2(x, y);
++            item.scale = scale;
++            item.depth = depth;
++            track.featPerView.emplace_hint(track.featPerView.end(), static_cast<std::size_t>(viewId), item);
++        }
++        seen += n;
++        tracks.emplace_hint(tracks.end(), static_cast<std::size_t>(trackId), std::move(track));
++    }
++    if (p != e || seen != nObservations || tracks.size() != nTracks)
++        return false;
++    observations = static_cast<std::size_t>(seen);
++    out = std::move(tracks);
++    return true;
++}
 +}  // namespace cheshireTracks
 +
++static bool cheshireParseTracksFile(TracksMap& mapTracks, const std::string& filename);
++
  bool loadTracks(TracksMap& mapTracks, const std::string& filename)
++{
++    // cheshire (step 10c): TracksBuilding's binary copy of this very file when there is one, else the file's parse
++    if (cheshireTracks::sidecarOn())
++    {
++        TracksMap cheshireCopy;
++        std::size_t cheshireObservations = 0;
++        if (cheshireTracks::readSidecar(cheshireCopy, filename, cheshireObservations))
++        {
++            if (cheshireTracks::sidecarCheck())
++            {
++                TracksMap cheshireParsed;
++                if (cheshireParseTracksFile(cheshireParsed, filename))
++                {
++                    ALICEVISION_LOG_INFO("cheshire: tracks copy check: " << cheshireTracks::differences(cheshireCopy, cheshireParsed) << " of "
++                                         << cheshireParsed.size() << " tracks differ from the parsed file (" << cheshireCopy.size()
++                                         << " tracks, " << cheshireObservations << " observations in the copy)");
++                }
++            }
++            static const bool cheshireSaid = []() {  // once per process
++                ALICEVISION_LOG_INFO("cheshire: tracks read from TracksBuilding's binary copy of the file, made from the same bytes "
++                                     "(CHESHIRE_TRACKS_SIDECAR=0 to parse the JSON, CHESHIRE_TRACKS_SIDECAR_CHECK=1 to compare)");
++                return true;
++            }();
++            (void)cheshireSaid;
++            mapTracks = std::move(cheshireCopy);
++            return true;
++        }
++    }
++    return cheshireParseTracksFile(mapTracks, filename);
++}
++
++/// cheshire (step 10c): the file's own parse - upstream's loadTracks, with 9h's
++static bool cheshireParseTracksFile(TracksMap& mapTracks, const std::string& filename)
  {
      std::ifstream tracksFile(filename);
-@@ -77,9 +174,48 @@ bool loadTracks(TracksMap& mapTracks, const std::string& filename)
+     if (tracksFile.is_open() == false)
+@@ -77,13 +405,78 @@ bool loadTracks(TracksMap& mapTracks, const std::string& filename)
      std::stringstream buffer;
      buffer << tracksFile.rdbuf();
  
@@ -12255,6 +13342,53 @@ index 51638ec..4c6f230 100644
  
      return true;
  }
+ 
++bool cheshireWriteTracksSidecar(const std::string& filename)
++{
++    if (!cheshireTracks::sidecarOn())
++        return false;
++    std::uint64_t size = 0, hash = 0;
++    {
++        std::string bytes;
++        if (!cheshireTracks::readFile(filename, bytes))
++            return false;
++        size = bytes.size();
++        hash = cheshireTracks::hash64(bytes.data(), bytes.size());
++    }
++    TracksMap tracks;
++    if (!cheshireParseTracksFile(tracks, filename))  // as a reader without the copy parses it
++        return false;
++    std::size_t observations = 0;
++    if (!cheshireTracks::writeSidecar(tracks, filename, size, hash, observations))
++    {
++        ALICEVISION_LOG_WARNING("cheshire: the tracks file's binary copy could not be written; its readers parse the file");
++        return false;
++    }
++    ALICEVISION_LOG_INFO("cheshire: tracks file's binary copy written beside it: " << tracks.size() << " tracks, " << observations
++                         << " observations; readers take it when the file's bytes match (CHESHIRE_TRACKS_SIDECAR=0 for none)");
++    return true;
++}
++
+ bool saveTracks(const TracksMap& mapTracks, const std::string& filename)
+ {
+     std::ofstream tracksFile(filename);
+diff --git a/src/aliceVision/track/trackIO.hpp b/src/aliceVision/track/trackIO.hpp
+index 19425d0..c7a11f2 100644
+--- a/src/aliceVision/track/trackIO.hpp
++++ b/src/aliceVision/track/trackIO.hpp
+@@ -39,5 +39,12 @@ bool loadTracks(TracksMap& mapTracks, const std::string& filename);
+ */
+ bool saveTracks(const TracksMap& mapTracks, const std::string& filename);
+ 
++/**
++ * cheshire (step 10c): parse the tracks file as loadTracks does without a binary copy, and write that copy beside it
++ * (<file>.cheshire) for the readers that come after. False when CHESHIRE_TRACKS_SIDECAR=0 or anything fails; then there
++ * is no copy and every reader parses the file.
++ */
++bool cheshireWriteTracksSidecar(const std::string& filename);
++
+ }  // namespace track
+ }  // namespace aliceVision
 diff --git a/src/cmake/config.hpp.in b/src/cmake/config.hpp.in
 index 27e3ec0..027ba01 100644
 --- a/src/cmake/config.hpp.in
@@ -12384,10 +13518,18 @@ index 0c2eec6..412d275 100644
      cmdline.add(optionalParams);
      if (!cmdline.execute(argc, argv))
 diff --git a/src/software/pipeline/main_featureMatching.cpp b/src/software/pipeline/main_featureMatching.cpp
-index cc6313f..7e5c3ac 100644
+index cc6313f..827c645 100644
 --- a/src/software/pipeline/main_featureMatching.cpp
 +++ b/src/software/pipeline/main_featureMatching.cpp
-@@ -105,6 +105,9 @@ int aliceVision_main(int argc, char** argv)
+@@ -24,6 +24,7 @@
+ #include <aliceVision/matchingImageCollection/GeometricFilterMatrix_H_AC.hpp>
+ #include <aliceVision/matchingImageCollection/GeometricFilterMatrix_HGrowing.hpp>
+ #include <aliceVision/matchingImageCollection/GeometricFilterType.hpp>
++#include <aliceVision/matching/gpu/featureMatchingOverlap.hpp>  // cheshire: step 10a
+ #include <aliceVision/matchingImageCollection/ImagePairListIO.hpp>
+ #include <aliceVision/matching/pairwiseAdjacencyDisplay.hpp>
+ #include <aliceVision/matching/io.hpp>
+@@ -105,6 +106,9 @@ int aliceVision_main(int argc, char** argv)
      float distRatio = 0.8f;
      std::vector<std::string> predefinedPairList;
      int rangeIteration = 0;
@@ -12397,7 +13539,7 @@ index cc6313f..7e5c3ac 100644
      int rangeBlocksCount = 1;
      std::string nearestMatchingMethod = "ANN_L2";
      robustEstimation::ERobustEstimator geometricEstimator = robustEstimation::ERobustEstimator::ACRANSAC;
-@@ -183,6 +186,10 @@ int aliceVision_main(int argc, char** argv)
+@@ -183,6 +187,10 @@ int aliceVision_main(int argc, char** argv)
           "Export debug files (svg, dot).")
          ("maxMatches", po::value<std::size_t>(&numMatchesToKeep)->default_value(numMatchesToKeep),
           "Maximum number pf matches to keep.")
@@ -12408,7 +13550,7 @@ index cc6313f..7e5c3ac 100644
          ("rangeIteration", po::value<int>(&rangeIteration)->default_value(rangeIteration),
           "chunk index.")
          ("rangeBlocksCount", po::value<int>(&rangeBlocksCount)->default_value(rangeBlocksCount),
-@@ -275,6 +282,27 @@ int aliceVision_main(int argc, char** argv)
+@@ -275,6 +283,27 @@ int aliceVision_main(int argc, char** argv)
  
      ALICEVISION_LOG_INFO("Number of pairs: " << allPairs.size());
  
@@ -12436,7 +13578,59 @@ index cc6313f..7e5c3ac 100644
      int chunkStart, chunkEnd;
      if (!rangeComputation(chunkStart, chunkEnd, rangeIteration, rangeBlocksCount, allPairs.size()))
      {
-@@ -401,7 +429,7 @@ int aliceVision_main(int argc, char** argv)
+@@ -346,6 +375,32 @@ int aliceVision_main(int argc, char** argv)
+         pairsPoseUnknown = pairs;
+     }
+ 
++    // cheshire (step 10a): when the GPU searches every pair, the geometric filter runs on the other cores while it does
++    // (matching/gpu/featureMatchingOverlap.hpp): the same matches; CHESHIRE_FM_OVERLAP=0 for one after the other
++    PairwiseMatches cheshireGeometricMatches;
++    const bool cheshireOverlapped =
++      pairsPoseKnown.empty() && !pairsPoseUnknown.empty() && describerTypes.size() == 1 && !crossMatching &&
++      (geometricFilterType == EGeometricFilterType::FUNDAMENTAL_MATRIX || geometricFilterType == EGeometricFilterType::FUNDAMENTAL_WITH_DISTORTION) &&
++      matchingImageCollection::cheshireOverlapPossible(regionPerView, pairsPoseUnknown, describerTypes.front(), collectionMatcherType);
++    if (cheshireOverlapped)
++    {
++        ALICEVISION_LOG_INFO("Putative matches (unknown poses): " << pairsPoseUnknown.size() << " image pairs.");
++        ALICEVISION_LOG_INFO(EImageDescriberType_enumToString(describerTypes.front()) + " Regions Matching");
++        const bool withDistortion = geometricFilterType == EGeometricFilterType::FUNDAMENTAL_WITH_DISTORTION;
++        matchingImageCollection::cheshireSearchAndFilter(mapPutativesMatches,
++                                                         cheshireGeometricMatches,
++                                                         sfmData,
++                                                         regionPerView,
++                                                         pairsPoseUnknown,
++                                                         describerTypes.front(),
++                                                         collectionMatcherType,
++                                                         distRatio,
++                                                         minRequired2DMotion,
++                                                         GeometricFilterMatrix_F_AC(geometricErrorMax, maxIteration, geometricEstimator, withDistortion),
++                                                         randomNumberGenerator,
++                                                         guidedMatching);
++    }
++
+     if (!pairsPoseKnown.empty())
+     {
+         // compute matches from known camera poses when you have an initialization on the camera poses
+@@ -356,7 +411,7 @@ int aliceVision_main(int argc, char** argv)
+         mapPutativesMatches = structureEstimator.getPutativesMatches();
+     }
+ 
+-    if (!pairsPoseUnknown.empty())
++    if (!cheshireOverlapped && !pairsPoseUnknown.empty())  // cheshire (step 10a)
+     {
+         ALICEVISION_LOG_INFO("Putative matches (unknown poses): " << pairsPoseUnknown.size() << " image pairs.");
+         // match feature descriptors between them without geometric notion
+@@ -374,7 +429,8 @@ int aliceVision_main(int argc, char** argv)
+         }
+     }
+ 
+-    filterMatchesByMin2DMotion(mapPutativesMatches, regionPerView, minRequired2DMotion);
++    if (!cheshireOverlapped)  // cheshire (step 10a): pair by pair in the overlap, above
++        filterMatchesByMin2DMotion(mapPutativesMatches, regionPerView, minRequired2DMotion);
+ 
+     if (mapPutativesMatches.empty())
+     {
+@@ -401,7 +457,7 @@ int aliceVision_main(int argc, char** argv)
      // when a range is specified, generate a file prefix to reflect the current iteration
      // => with matchFilePerImage: avoids overwriting files if a view is present in several iterations
      // => without matchFilePerImage: avoids overwriting the unique resulting file
@@ -12445,6 +13639,16 @@ index cc6313f..7e5c3ac 100644
  
      ALICEVISION_LOG_INFO(std::to_string(mapPutativesMatches.size()) << " putative image pair matches");
  
+@@ -436,6 +492,9 @@ int aliceVision_main(int argc, char** argv)
+ 
+     ALICEVISION_LOG_INFO("Geometric filtering: using " << matchingImageCollection::EGeometricFilterType_enumToString(geometricFilterType));
+ 
++    if (cheshireOverlapped)  // cheshire (step 10a): filtered while the GPU searched
++        geometricMatches = std::move(cheshireGeometricMatches);
++    else
+     switch (geometricFilterType)
+     {
+         case EGeometricFilterType::NO_FILTERING:
 diff --git a/src/software/pipeline/main_imageMatching.cpp b/src/software/pipeline/main_imageMatching.cpp
 index a3a04a0..51e9df2 100644
 --- a/src/software/pipeline/main_imageMatching.cpp
@@ -13132,6 +14336,19 @@ index a8714f8..1cf26df 100644
  
      cmdline.add(requiredParams);
      cmdline.add(optionalParams);
+diff --git a/src/software/pipeline/main_tracksBuilding.cpp b/src/software/pipeline/main_tracksBuilding.cpp
+index 4db34bb..d318833 100644
+--- a/src/software/pipeline/main_tracksBuilding.cpp
++++ b/src/software/pipeline/main_tracksBuilding.cpp
+@@ -145,6 +145,8 @@ int aliceVision_main(int argc, char** argv)
+     std::ofstream of(tracksFilename);
+     of << boost::json::serialize(jv);
+     of.close();
++    jv.emplace_null();  // cheshire (step 10c): the DOM's memory goes before the copy's parse
++    track::cheshireWriteTracksSidecar(tracksFilename);  // cheshire (step 10c): the binary copy its readers take
+ 
+     ///////// Statistics
+ 
 diff --git a/src/software/utils/main_exportImages.cpp b/src/software/utils/main_exportImages.cpp
 index 8eeebe4..9e9b886 100644
 --- a/src/software/utils/main_exportImages.cpp

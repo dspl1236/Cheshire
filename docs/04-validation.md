@@ -4290,3 +4290,165 @@ logged a driver reset that day.
 Upstream's binaries took 397.9 s and 291.2 s, 0.3.8's build 285.0 s and 201.7 s (roadmap, "Upstream's next
 pipeline", step 2). The estimate of about 48 s and 70 s in the roadmap added the best of separate runs; these are
 whole runs of the release build.
+
+## After 0.4.0: the False Door end to end, its cache on the NVMe drive (2026-10-03)
+
+The question was whether texturing on the RX 9070 box is held back by D:, the SATA SSD every job so far ran from.
+For one job everything went to C:, the NVMe drive: the 884 photos (5.1 GB, `C:\cheshire-fd-test\photos`), the
+Meshroom cache and the outputs. The package was the v0.4.0 Windows AMD zip with
+`gpu\rocm7.2\gfx12-generic\aliceVision_matching.dll` replaced by the development build's (308252d and a4d0a79, `knn2_wmma`;
+the new DLL exports every symbol of the old one and its imports all resolve in the package), on Meshroom 2025.1
+with `fastransacexp` (the new pipeline at 2048 and 4096 iterations). The harness: `ok`, 14 of 14 ports, one mesh,
+51 textures, 10,930 s.
+
+| node | 0.3.3, legacy chain, D: (2026-09-22) | 0.4.0 + `knn2_wmma`, new chain, C: |
+|---|---|---|
+| FeatureExtraction | 560 s | 557 s |
+| FeatureMatching (45 chunks) | 796 s | 181 s |
+| StructureFromMotion / the new chain (TracksBuilding to IntrinsicsTransforming) | 1,636 s | 1,168 s |
+| PrepareDenseScene / ExportImages | 721 s | 304 s |
+| DepthMap | 12,010 s (74 chunks) | 5,587 s (19 chunks) |
+| DepthMapFilter | 521 s | 336 s |
+| Meshing | 852 s | 215 s |
+| MeshFiltering | 83 s | 78 s |
+| Texturing | 5,847 s | 2,480 s |
+| whole job | 23,041 s | 10,913 s |
+
+This is not a drive comparison: the builds, the SfM chains and the RANSAC counts all differ. The drive comparison
+is the texturing test below, one build on both drives. What the run's logs showed instead was host time that
+neither the GPU nor the disk explains, which steps 10a-10g (next section) take out.
+
+## After 0.4.0: what the False Door's logs showed (steps 10a-10g, 2026-10-04)
+
+Seven changes, every one exact, found in the C: run's logs and validated on the RX 9070 box with the development
+install (the same build as the package, gfx12-generic). Each has a switch back to upstream's code and, where the
+work is restructured, a check mode that runs both and compares.
+
+**10a: FeatureMatching's GPU search and geometric filter at the same time.** A False Door chunk was 2 s of
+loading, 2.2-3.1 s of search on the GPU and 3.2-4.2 s of geometric filtering on every core, one after the other,
+the other cores idle during the search. Now the thread that drives the GPU searches the pairs in upstream's order
+and the other cores filter each pair as soon as its putative matches exist, by upstream's own steps
+(`filterMatchesByMin2DMotion`, then `robustModelEstimationOne`, which is `robustModelEstimation`'s loop body moved
+into a function both call; `hip/port/gpu_matcher/featureMatchingOverlap.hpp`). Exact: the GPU matcher's `Build`
+ignores the random generator, and the pinhole AC-RANSAC filters copy it by value, so each pair's filter starts
+from the generator state upstream's would (it runs only when every view takes the GPU matcher; the spherical and
+LO-RANSAC filters share the generator across upstream's threads already). `CHESHIRE_FM_OVERLAP=0` for one after
+the other. Engine bay, one process: search 7.7 s and filter 13.3 s one after the other (21.0 s); overlapped, the
+search takes 10.0 s on its thread and everything is filtered by 14.8 s.
+
+**10b: the regions load on every core, the descriptors in one read.** `loadRegionsPerView` ran on three threads,
+and a `.desc` file was read one 128-byte descriptor at a time. Now every core (`CHESHIRE_REGIONS_THREADS=3` is
+upstream's), and a file whose descriptors are the vector's type in one read (`CHESHIRE_DESC_READ=0`): the same
+bytes. Loading: 1.38 s to 0.07 s on 41 views, 2.45 s to 0.14 s on the engine bay, about 2 s to 0.7-0.9 s on a
+False Door chunk.
+
+| FeatureMatching, 2048 iterations | 10a and 10b off | on | match files |
+|---|---|---|---|
+| 41 views (`fmbench.py`) | 4.8 s | 4.7 s (the first run after the build: search 4.1 s), 2.5 s | the same bytes (`64397675b2fed423`) |
+| engine bay | 24.0 s | 15.7 s, 15.5 s | the same bytes (`f063ea6d15c0aa2e`) |
+| False Door, chunks 0-5 (the run's command lines) | 49.5 s | 31.1 s | the run's bytes, both ways |
+
+**10c: TracksBuilding writes a binary copy of the tracks file, and its readers take it.** Each of
+RelativePoseEstimating's 36 False Door chunks parsed the 769 MB tracks JSON again: 7.5 s of each 10 s chunk.
+TracksBuilding now parses the file it has just written, as every reader would (9h, else the DOM), and writes the
+result beside it (`tracksFile.json.cheshire`: fixed-width little-endian records, the JSON's size and a 64-bit
+hash of its bytes, a hash of the copy's own payload). A reader takes the copy only when the JSON's bytes still
+match, and parses the JSON otherwise. `CHESHIRE_TRACKS_SIDECAR=0` neither writes nor reads it;
+`CHESHIRE_TRACKS_SIDECAR_CHECK=1` parses too and compares every field bit for bit. On the False Door the copy is
+311 MB (1,537,700 tracks, 5,714,255 observations), TracksBuilding takes 27.8 s instead of 19 s and writes the
+JSON byte for byte as before, a RelativePoseEstimating chunk takes 4.1 s instead of 10.2 s (chunks 0-3: 16.4 s
+against 40.9 s, the same pairs as the run either way), and the check finds 0 of 1,537,700 tracks different.
+
+**10d: SfM's residual statistics and outlier filters on every core.** SfMExpanding took 741 s on the False Door;
+its bundle adjustments 62 s of it, and about 340 s went to three serial loops over every landmark's observations
+that run two or three times around each adjustment: `computeResidualsMeanMedian`,
+`removeOutliersWithPixelResidualError` and `eraseUnstablePoses`' count. Each now runs on every core with
+upstream's result: the residuals in blocks of landmarks joined in order (the loop's own vector, so `BoxStats`
+gives the same numbers), the landmarks with an observation the pixel test rejects found in parallel and only
+those walked by upstream's erasing loop, in order, and the poses' counts summed from per-block maps.
+`CHESHIRE_SFM_FILTER_THREADS=1` is upstream's loops; `CHESHIRE_SFM_FILTER_CHECK=1` runs both and compares
+(printed when the count reaches a power of two). False Door SfMExpanding: 730 s with 10c and 10d off, 486 s on.
+
+The new chain with 10c and 10d (replay harness, `build/nightly-cmp/plan-10c.json`):
+
+| node, seconds, off / on | 41 views | engine bay |
+|---|---|---|
+| TracksBuilding | 1.5, 1.3 / 1.9, 2.0 | 2.4, 2.0 / 3.3, 3.2 |
+| RelativePoseEstimating | 7.3, 7.2 / 6.5, 6.5 | 18.8, 18.7 / 15.4, 15.3 |
+| SfMBootStrapping | 1.7, 1.5 / 1.2, 1.2 | 1.7, 1.7 / 1.0, 1.0 |
+| SfMExpanding | 26.1, 26.1 / 22.3, 22.3 | 26.9, 27.0 / 23.2, 23.1 |
+
+Every off run, on run and check run gives the same RelativePoseEstimating pairs (as a set) and the same
+SfMBootStrapping and SfMExpanding files, byte for byte, on both sets. The checks: 0 of 87,729 tracks (four loads)
+and 0 of 202,290 (seven) differ from the parsed file, the filters' comparisons 32 of 32 and 64 of 64 identical at
+the last count printed, no comparison different. On the False Door, where SfMExpanding does not repeat itself
+(below), the check run found 0 of 1,537,700 tracks different and every filter comparison identical (128 of 128 at
+the last count printed).
+
+**10e: a depth map camera's T cameras from its own landmarks.** Before its first batch every DepthMap chunk spent
+about 59 s choosing T cameras: `findNearestCamsFromLandmarks` per camera and `findTileNearestCams` twice per tile
+each walked all 1.31 million landmarks to find the few thousand the camera sees. Over the run's 19 chunks the
+startup was 1,473 s of DepthMap's 5,570, 999 s of it this. `MultiViewParams::cheshireLandmarksPerCamera` lists
+each camera's landmarks once per process, in the map's order, and both functions walk the camera's own list: the
+same landmarks in the same order, so the same float sums. `CHESHIRE_DEPTHMAP_TCAMS_LISTS=0` for upstream's walks,
+`CHESHIRE_DEPTHMAP_TCAMS_CHECK=1` to compare: 384 of 384 tiles identical on chunk 1.
+
+**10f: the images folder listed once.** `MultiViewParams` found each view's image by listing the folder, with a
+stat of every entry, once per view: 884 views of a 954-file folder, about 20 s of every DepthMap and Texturing
+process. It now lists the folder once, groups the regular files by stem in the listing's order and gives each view
+upstream's test on its stem's files: the same paths. `CHESHIRE_IMAGES_FOLDER_INDEX=0` for upstream's search.
+
+| DepthMap chunk 0 of the False Door | 10e-10g off | on |
+|---|---|---|
+| start to the image sizes (10f) | 23.4 s | 1.3 s |
+| T cameras, "Number of GPU devices" to the planner (10e) | 80.2 s | 2.3 s |
+| start to the first batch | 111.3 s | 11.9 s |
+| whole chunk | 336.7 s | 239.4 s |
+| its 96 depth and similarity maps | the run's bytes | the run's bytes |
+
+**10g: the image cache's oldest slot by load order.** Texturing's passes over the False Door alternated: some
+read each of its 823 cameras' images once and took about 88 s, others read almost every image twice and took about
+255 s (the run: six of each kind and one more slow one, 2,480 s in all). The image cache evicts the slot with the
+smallest stamp, and the stamp was `clock()`, which counts milliseconds on Windows: the read-ahead fills many slots
+within one, the oldest is then the lowest slot index among the ties, and when a pass began with the slots rotated
+against the cameras' order the read-ahead evicted images not yet used, which were read again. The stamp is now
+the slot's place in the load order (`CHESHIRE_IMAGES_CACHE_CLOCK=1` for `clock()`). On the same build and the same
+inputs on C:, three passes take 90, 90 and 92 s with the load order and 93, 246 and 90 s with `clock()`, one image
+read per camera against two in the slow pass. The textures differ from the run's, and from each other, only as two
+runs of the same build do: 0.001-0.002 % of the texels by one half-float step (0.000488), the GPU's float atomics
+adding in a different order.
+
+Estimated from these measurements, not yet run end to end, the False Door job would take about 8,000 s instead of
+10,913: FeatureMatching about 115 s, TracksBuilding 28 s, RelativePoseEstimating about 150 s, SfMExpanding about
+490 s, DepthMap about 4,300 s and Texturing about 1,300 s on C:.
+
+## The texturing disk test: the NVMe drive against the SATA SSD (2026-10-04)
+
+The development build (10a-10g) textured the False Door from the C: run's inputs, once on C: and once from a byte
+for byte copy on D: (`build/tex-drive-test`, 60 GB of exported images, the dense point cloud and the mesh), each
+stopped after three passes of four atlases (the C: run's Texturing options), with the image cache's load order
+and with `clock()`:
+
+| per pass | C: (NVMe) | D: (SATA SSD) |
+|---|---|---|
+| load, unwrap and visibility | 76 s | 76 s |
+| load order (10g) | 90, 90, 92 s | 154, 154, 154 s |
+| `clock()` | 93, 246, 90 s | 152, 250, 266 s |
+
+A pass reads all 60 GB of images. With one read per image, C: is CPU-bound (the run's counters: 98 % processor,
+about 710 MB/s read with the drive idle 64 % of the time) and D: is disk-bound (about 415 MB/s). So the drive does
+matter here: 1.7x per pass. The bigger cost was the double reads, which made a pass about 250 s on either drive.
+
+## SfMExpanding does not repeat itself on the False Door (found 2026-10-04)
+
+9c made SfMExpanding byte-reproducible on 41 views and the engine bay (above). On the False Door it is not, with
+none of 10a-10g involved: the development build with 10c and 10d off and the bundle adjustment on the host
+(`CHESHIRE_BA_DEVICE=0`), run twice on the same inputs, wrote different `cameras.sfm` and `sfmExpanded.abc`.
+Between those two runs the 827 camera centres differ by up to 0.041, 0.7 % of the scene's radius (6.07); between
+the runs with the bundle adjustment on the device, the package's included, by up to 0.11-0.14, the focal lengths
+in their fourth digit. Both pairs agree to 385 views and 774,861 landmarks and part at the same place: the
+residual statistics before the bundle adjustment that follows a round which resected 30 views in parallel, so
+the new landmarks' triangulation in that round is where they first differ (each view's resection has its own
+generator). The round's size alone does not explain it: the engine bay resects 30 views at once in two
+rounds and the 41-view set 11 views in one, and both repeat byte for byte. The False Door has 41 rounds of 30 and
+far larger bundle adjustments. The cause is not found yet (roadmap).

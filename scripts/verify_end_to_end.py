@@ -45,9 +45,11 @@ GPU_MARKERS = {
                           r"GPU SIFT keypoints in stable order"],
     # 0.3.8: AC-RANSAC's bound (step 8d) announces itself at the first estimation it serves; CPU code, so it
     # is required in the fallback run too
+    # after 0.4.0: the GPU search and the geometric filter at the same time (step 10a)
     "FeatureMatching":   [r"GPU brute-force L2 2-NN on",
                           r"7-point nullspace: (SVD \(default|Householder QR \(CHESHIRE_QR_NULLSPACE=1\))",
-                          r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far"],
+                          r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far",
+                          r"cheshire: GPU search and geometric filter overlapped"],
     "DepthMap":          [r"Number of GPU devices"],
     "DepthMapFilter":    [r"depth map filter: group votes on",
                           r"depth map filter cache: cap \d+ MB"],
@@ -283,20 +285,22 @@ RANSAC_2025 = {"FeatureMatching": [r"\* maxIteration = 50000\b"],
 # StructureFromMotion's place and IntrinsicsTransforming + ExportImages PrepareDenseScene's, so those two markers
 # drop out. The pipeline's own nodes are paired too, each held to the launcher's provenance line and to what our
 # build of it announces: NACRANSAC's bound (9a) and batches (9b), the 5-point nullspace (9j), the tracks file's
-# parse (9k), the colours' direct 8-bit read (8b), ExportImages' threads and EXR compression (9d). TracksBuilding,
-# SfMTransform and IntrinsicsTransforming announce nothing of their own (IntrinsicsTransforming reads no tracks
-# file in this template); the provenance line is their check. SfMExpanding's resection has the same 50000 default
-# as StructureFromMotion's.
-TRACKS_PARSE = r"cheshire: tracks file parsed straight into structs"
+# parse (9k), the colours' direct 8-bit read (8b), ExportImages' threads and EXR compression (9d). After 0.4.0 the
+# tracks file's readers take TracksBuilding's binary copy of it (10c), which TracksBuilding announces writing, and
+# a reader announces either the copy or the parse. SfMTransform and IntrinsicsTransforming announce nothing of their
+# own (IntrinsicsTransforming reads no tracks file in this template); the provenance line is their check.
+# SfMExpanding's resection has the same 50000 default as StructureFromMotion's.
+TRACKS_PARSE = r"cheshire: tracks (file parsed straight into structs|read from TracksBuilding's binary copy)"
 NEWCHAIN_MARKERS = {n: p for n, p in GPU_MARKERS.items() if n not in ("StructureFromMotion", "PrepareDenseScene")}
 NEWCHAIN_MARKERS.update({
-    "TracksBuilding": [],
+    "TracksBuilding": [r"cheshire: tracks file's binary copy written beside it"],
     "RelativePoseEstimating": [r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far",
                                r"5-point nullspace: (SVD \(default|Householder QR \(CHESHIRE_QR_NULLSPACE5=1\))",
                                TRACKS_PARSE],
     "SfMBootStrapping": [TRACKS_PARSE],
     "SfMExpanding": [r"cheshire: NACRANSAC runs its iterations in batches on every core",
                      r"cheshire: BA solver: Grin, Cheshire's own, for the Schur solves",
+                     r"cheshire: SfM residual statistics and outlier filters on \d+ threads",  # after 0.4.0 (step 10d)
                      TRACKS_PARSE],
     "SfMTransform": [],
     "SfMColorizing": [r"cheshire: 8-bit images read as 8-bit RGB directly"],
