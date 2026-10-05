@@ -116,9 +116,15 @@ HOSTVOTES_MARKERS = dict(GPU_MARKERS, Meshing=[m for m in GPU_MARKERS["Meshing"]
 EPIPOLAR_FALLBACK = r"vectorised epipolar distance does not reproduce FundamentalEpipolarDistanceError"
 ACR_BOUND_WRONG = r"AC-RANSAC bound check: \d+ of \d+ models skipped the sort and the NFA scan, [1-9]\d* of them below minNFA"
 TRACKS_DIFFER = r"tracks file check: [1-9]\d* of \d+ tracks"
+# after 0.4.0 (steps 10c-10e): the tracks file's binary copy against the parsed file, SfM's statistics and filters
+# on every core against upstream's loops, and the depth map's T cameras against upstream's walks
+TRACKS_COPY_DIFFER = r"tracks copy check: [1-9]\d* of \d+ tracks differ"
+SFM_FILTER_WRONG = [r"SfM filter check: .* differs from upstream's loop", r"SfM filter check: \b(\d+) of (?!\1 )\d+ comparisons"]
 FORBIDDEN = {
     "StructureFromMotion": [r"local BA graph: \d+ edges to posed views the graph was never handed were skipped",
-                            EPIPOLAR_FALLBACK],
+                            EPIPOLAR_FALLBACK] + SFM_FILTER_WRONG,
+    "DepthMap": [r"depth map T cameras check: \b(\d+) of (?!\1 )\d+ tiles"],
+    "TracksBuilding": [r"the tracks file's binary copy could not be written", TRACKS_DIFFER],
     "FeatureMatching": [EPIPOLAR_FALLBACK,
                         ACR_BOUND_WRONG,
                         r"epipolar residual check: \b(\d+) of (?!\1 )\d+ residuals"],
@@ -129,11 +135,11 @@ FORBIDDEN = {
     # 0.4.0, the new SfM pipeline: its self-checks (under `verifyexp`) and the fallbacks its steps take. NACRANSAC
     # takes 8d's bound (9a) and runs in batches (9b), the tracks file is parsed into structs (9h), and ExportImages
     # reads, writes (9d, inside 8f's scope) and warps on the device (9i) as PrepareDenseScene does.
-    "RelativePoseEstimating": [ACR_BOUND_WRONG, TRACKS_DIFFER],
-    "SfMBootStrapping": [TRACKS_DIFFER],
-    "SfMExpanding": [ACR_BOUND_WRONG, TRACKS_DIFFER,
+    "RelativePoseEstimating": [ACR_BOUND_WRONG, TRACKS_DIFFER, TRACKS_COPY_DIFFER],
+    "SfMBootStrapping": [TRACKS_DIFFER, TRACKS_COPY_DIFFER],
+    "SfMExpanding": [ACR_BOUND_WRONG, TRACKS_DIFFER, TRACKS_COPY_DIFFER,
                      r"NACRANSAC batch check: \b(\d+) of (?!\1 )\d+ calls",
-                     r"NACRANSAC batch check: the batches' answer differs"],
+                     r"NACRANSAC batch check: the batches' answer differs"] + SFM_FILTER_WRONG,
     "SfMColorizing": [r"direct 8-bit read check: \b(\d+) of (?!\1 )\d+ images"],
     "ExportImages": [r"direct 8-bit read check: \b(\d+) of (?!\1 )\d+ images",
                      r"EXR deflate write check: '.*' does not read back as written",
@@ -157,7 +163,11 @@ SELF_CHECK_ENV = {
     "CHESHIRE_ACR_BOUND_CHECK": "1", "CHESHIRE_ACR_RESIDUALS_CHECK": "1",
     "CHESHIRE_EXR_DEFLATE_WRITE": "1", "CHESHIRE_EXR_DEFLATE_WRITE_CHECK": "1",
     "CHESHIRE_UNDISTORT_DEVICE": "1", "CHESHIRE_UNDISTORT_DEVICE_CHECK": "1",
+    # after 0.4.0: SfM's statistics and filters on every core (10d) and the depth map's T cameras (10e)
+    "CHESHIRE_SFM_FILTER_CHECK": "1", "CHESHIRE_DEPTHMAP_TCAMS_CHECK": "1",
 }
+SFM_FILTER_SAME = r"SfM filter check: \b([1-9]\d*) of \1 comparisons identical to upstream's loops"
+TCAMS_SAME = r"depth map T cameras check: \b([1-9]\d*) of \1 tiles identical to upstream's walks over every landmark"
 SELF_CHECK_VERDICTS = {
     # The direct 8-bit read (6n) against OpenImageIO's path, every image, printed at process exit. Since
     # 0.3.8 also the device undistortion (8g) against the CPU loop, and the libdeflate writer's files (8f)
@@ -165,8 +175,11 @@ SELF_CHECK_VERDICTS = {
     "PrepareDenseScene": [r"direct 8-bit read check: (\d+) of \1 images identical to OpenImageIO's path",
                           r"undistort device check: \b([1-9]\d*) of \1 images identical to the CPU loop",
                           r"EXR deflate write check: \b([1-9]\d*) of \1 files read back identical through OpenEXR"],
-    # The colours' 8-bit read (8b) against OpenImageIO's path, every reconstructed view.
+    # The colours' 8-bit read (8b) against OpenImageIO's path, every reconstructed view. (The legacy engine runs its
+    # own passes after each adjustment, on every core since 7l - postAdjust.inc - so 10d's shared ones never run here.)
     "StructureFromMotion": [r"direct 8-bit read check: \b([1-9]\d*) of \1 images identical to OpenImageIO's path"],
+    # after 0.4.0: every tile's T cameras from the per-camera lists (10e) against upstream's walks.
+    "DepthMap": [TCAMS_SAME],
     # The GPU matcher against upstream's brute force on a sample of every search (uint8 descriptors).
     # Since 0.3.8 also AC-RANSAC: every model the bound (8d) skipped sorted and scanned anyway, none below
     # minNFA, and every residual of the epipolar loop (8e) against upstream's error().
@@ -216,13 +229,17 @@ SELF_CHECK_VERDICTS = {
 # are the legacy pipeline's nodes and keep their verdicts.
 TRACKS_SAME = r"tracks file check: 0 of [1-9]\d* tracks \(\d+ observations\) differ between parse_into and the DOM"
 ACR_BOUND_RIGHT = r"AC-RANSAC bound check: \d+ of [1-9]\d* models skipped the sort and the NFA scan, 0 of them below minNFA"
+# After 0.4.0 the readers take TracksBuilding's binary copy (10c), which skips the parse; its check reads the copy AND
+# parses the file, so 9h's parse check runs too, and both verdicts are asserted.
+TRACKS_COPY_SAME = r"tracks copy check: 0 of [1-9]\d* tracks differ from the parsed file"
 VERIFYEXP_ENV = dict(SELF_CHECK_ENV, CHESHIRE_ACR_BATCH_CHECK="1", CHESHIRE_TRACKS_PARSE_INTO_CHECK="1",
-                     CHESHIRE_EXPORT_DEVICE="1", CHESHIRE_EXPORT_DEVICE_CHECK="1")
-VERIFYEXP_VERDICTS = {n: SELF_CHECK_VERDICTS[n] for n in ("FeatureMatching", "DepthMapFilter", "Meshing")}
+                     CHESHIRE_EXPORT_DEVICE="1", CHESHIRE_EXPORT_DEVICE_CHECK="1", CHESHIRE_TRACKS_SIDECAR_CHECK="1")
+VERIFYEXP_VERDICTS = {n: SELF_CHECK_VERDICTS[n] for n in ("FeatureMatching", "DepthMap", "DepthMapFilter", "Meshing")}
 VERIFYEXP_VERDICTS.update({
-    "RelativePoseEstimating": [ACR_BOUND_RIGHT, TRACKS_SAME],
-    "SfMBootStrapping": [TRACKS_SAME],
-    "SfMExpanding": [ACR_BOUND_RIGHT, TRACKS_SAME,
+    "TracksBuilding": [TRACKS_SAME],
+    "RelativePoseEstimating": [ACR_BOUND_RIGHT, TRACKS_SAME, TRACKS_COPY_SAME],
+    "SfMBootStrapping": [TRACKS_SAME, TRACKS_COPY_SAME],
+    "SfMExpanding": [ACR_BOUND_RIGHT, TRACKS_SAME, TRACKS_COPY_SAME, SFM_FILTER_SAME,
                      r"NACRANSAC batch check: \b([1-9]\d*) of \1 calls returned the loop's model, inliers, error and NFA, "
                      r"and left the generator where the loop leaves it"],
     "SfMColorizing": [r"direct 8-bit read check: \b([1-9]\d*) of \1 images identical to OpenImageIO's path"],

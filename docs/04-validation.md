@@ -4365,7 +4365,9 @@ that run two or three times around each adjustment: `computeResidualsMeanMedian`
 `removeOutliersWithPixelResidualError` and `eraseUnstablePoses`' count. Each now runs on every core with
 upstream's result: the residuals in blocks of landmarks joined in order (the loop's own vector, so `BoxStats`
 gives the same numbers), the landmarks with an observation the pixel test rejects found in parallel and only
-those walked by upstream's erasing loop, in order, and the poses' counts summed from per-block maps.
+those walked by upstream's erasing loop, in order, and the poses' counts summed from per-block maps. (The legacy
+engine has had the same since 7l, in its own passes after each adjustment, `postAdjust.inc`; SfMExpanding calls the
+shared functions, which 10d now gives it.)
 `CHESHIRE_SFM_FILTER_THREADS=1` is upstream's loops; `CHESHIRE_SFM_FILTER_CHECK=1` runs both and compares
 (printed when the count reaches a power of two). False Door SfMExpanding: 730 s with 10c and 10d off, 486 s on.
 
@@ -4460,6 +4462,36 @@ and with `clock()`:
 A pass reads all 60 GB of images. With one read per image, C: is CPU-bound (the run's counters: 98 % processor,
 about 710 MB/s read with the drive idle 64 % of the time) and D: is disk-bound (about 415 MB/s). So the drive does
 matter here: 1.7x per pass. The bigger cost was the double reads, which made a pass about 250 s on either drive.
+
+## Steps 10a-10g on the other builds (2026-10-05)
+
+**Compiled** at bc8dea4, incrementally over the 0.4.0 trees (`build/check10.cmd`): Linux HIP 371 of 371 and Linux
+CUDA 371 of 371 in WSL, Windows CUDA 529 of 529. No warning in the code 10a-10g touch beyond two upstream ones
+about an unused `hipError_t` in DepthMapEstimator.cpp.
+
+**Run on Linux CUDA**, house-pc's GTX 1080 Ti (i3-4330, four threads, GCC and libgomp), a bundle of the checked tree
+(`build/gate-10`, sha256 `488c128a…`) paired into the scratch Meshroom installs (`/data/tests/gate-10`):
+- Meshroom 2025.1 mini6: `base` 8 of 8, `experimental` and `fastransacexp` 14 of 14, `verifyexp` 14 of 14 and
+  `verify` 8 of 8 with every verdict met; Meshroom 2023.3 mini6 `base` 8 of 8.
+- 41 views, `experimental` with the checks on: 14 of 14; the tracks copy 0 of 101,261 tracks different in all four
+  loads, every SfM filter comparison identical, 246 of 246 tiles' T cameras identical.
+- 41 views, `experimental` with every new step off against the same as shipped (`cmp10.py`): every file the same
+  bytes but two kinds - ExportImages' `sfm.abc`, which stores each exported image's absolute path and so the run's
+  folder (41 occurrences, all image paths, 41 bytes for `v41-off` against `v41-on`), and Meshing, MeshFiltering and
+  Texturing, which do not repeat themselves run to run. The 41 exported images, the depth maps (one digest,
+  `19c5b1ff…`, in all three 41-view runs), the filtered maps, the matches, the tracks file, RelativePoseEstimating's
+  1,428 pairs and SfMExpanding's files are identical.
+
+**The gate's checks, fixed.** `verifyexp` first failed on its own assertion that the tracks file's parse check
+(9h) prints in RelativePoseEstimating, SfMBootStrapping and SfMExpanding: with 10c those readers take the binary
+copy and never parse. `verifyexp` now also switches on the copy's check, whose reader parses as well, and asserts
+both verdicts; `verify` and `verifyexp` switch on the SfM filters' and the T cameras' checks and assert them where
+they run. The legacy engine runs its own passes after each adjustment (7l) and never the shared functions 10d
+changed, so `verify` asserts no filter verdict for StructureFromMotion. On the RX 9070 with the Windows build, mini6
+`verifyexp` 14 of 14 and `verify` 8 of 8, 36 of 36 tiles' T cameras identical.
+
+Still to run: the Linux HIP bundle (`build/gate-10`, sha256 `5dbdcac7…`) on an AMD card in house-pc. The Windows
+CUDA zip has no NVIDIA card to run on, as in 0.4.0.
 
 ## SfMExpanding does not repeat itself on the False Door (found 2026-10-04)
 
