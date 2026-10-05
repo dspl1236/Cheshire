@@ -830,12 +830,19 @@ Not released yet.
   SATA SSD once each image is read once; the double reads made a pass about 250 s on either drive.
 - **Step 10h, done 2026-10-05** (same doc, "After 0.4.0: a tile's depth list from its camera's own landmarks"):
   DepthMap's SGM depth lists walk the R camera's own landmarks (10e's lists) instead of all 1.31 million for the
-  camera and again for each T camera; the same depths. False Door DepthMap chunk 0: 237.6 s in the run (288.4 s
-  replayed) to 108-114 s, the same maps. The chunks are now bound by the GPU's work.
+  camera and again for each T camera; the same depths. False Door DepthMap: chunk 0 237.6 s in the run (288.4 s
+  replayed) to 108-114 s, the same maps; the whole node replayed, 4,257 s of chunk time in the run to 2,247 s. The
+  chunks are now bound by the GPU's work.
 
 Next:
 - **DepthMap's GPU stages**, now that a chunk waits on them (10h): the refine-and-fuse stage first, the largest
   under the stage syncs (`CHESHIRE_PROFILE_SGM=1`); exact or not at all, as the rest.
+- **DepthMap's tiles one after another.** Each tile gets a stream, but the host waits for the device twice a tile
+  (inside "SGM Optimizing volume" and "Color optimize depth/sim map", each about as long as the stages before it),
+  so a tile's host work (about 0.05 s with 10h) never overlaps the previous tile's GPU work. A guess to check first:
+  the texture objects those functions create and destroy per call (`cuda_depthSimMapOptimizeGradientDescent`'s
+  `imgVarianceTex` and `depthTex`), if HIP's destroy waits for the device. Kept with the stream's buffers instead,
+  chunk 0 would be bound by the GPU's 80 s and its startup rather than 108-114 s.
 - **SfMExpanding does not repeat itself on the False Door** (found 2026-10-04; docs/04). Two identical runs part
   after a round that resected 30 views, at the new landmarks' triangulation; the engine bay's two 30-view rounds
   repeat. Find the source before any SfM digest on the False Door is trusted.

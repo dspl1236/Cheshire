@@ -4540,8 +4540,13 @@ Chunk 0 replayed from the run's command line with the development build, its inp
 The walks ran on the CPU and varied from run to run (0.38-0.50 s a tile, about twice the tile's GPU work); the
 GPU's stages did not change. With 10h they are 72 % of the chunk: refine and fuse 48.2 s, the similarity
 volume 13.8 s, colour optimisation 13.4 s, the SGM optimisation 4.4 s. A chunk is now bound by the GPU's work, and
-DepthMap's next gains are in those kernels (roadmap). An estimate, not a measurement: if every chunk loses the
-share chunk 0 lost in the run, the False Door's DepthMap goes from 4,278 s to about 2,000 s.
+DepthMap's next gains are in those kernels (roadmap).
+
+The whole node, its 19 chunks replayed one after another from the run's command lines with the build as committed
+(`C:\cheshire-fd-test\prof\dm-all-10h`): 2,273 s of processes, the chunks' own clocks 2,247 s against the run's
+4,257 s (-47 %; the run's node took 4,278 s), 826 depth maps, chunks 0 and 1 the same bytes as the replays above.
+The chunks that took longest in the run took longest again (chunks 5-9: 258-291 s in the run, 145-163 s here, by
+the chunks' clocks).
 
 **Exact.** Chunk 0's 96 depth and similarity maps are the same bytes in all six replays, with and without 10h.
 Chunk 1 with the checks on: 384 of 384 tiles' T cameras identical, and the depth lists 256 of 256 at the last
