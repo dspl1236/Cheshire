@@ -4490,8 +4490,8 @@ they run. The legacy engine runs its own passes after each adjustment (7l) and n
 changed, so `verify` asserts no filter verdict for StructureFromMotion. On the RX 9070 with the Windows build, mini6
 `verifyexp` 14 of 14 and `verify` 8 of 8, 36 of 36 tiles' T cameras identical.
 
-Still to run: the Linux HIP bundle (`build/gate-10`, sha256 `5dbdcac7…`) on an AMD card in house-pc. The Windows
-CUDA zip has no NVIDIA card to run on, as in 0.4.0.
+Still to run: Linux HIP on an AMD card in house-pc, now with the bundle of 10a-10i (below). The Windows CUDA zip has
+no NVIDIA card to run on, as in 0.4.0.
 
 ## SfMExpanding does not repeat itself on the False Door (found 2026-10-04)
 
@@ -4598,3 +4598,24 @@ On the RX 9070, mini6 on Meshroom 2025.1 with a flat test package of 10a-10i: `v
 SfMExpanding announcing the ranking), `verify` 8 of 8, `tiles` and `coarse` 8 of 8, the depth maps as before.
 The gate requires the ranking's announcement in SfMExpanding's log. Compiled incrementally: Windows CUDA, and at
 9c09766 Linux HIP 91 of 91 and Linux CUDA 91 of 91 steps in WSL, no warning in the file 10i touches.
+
+## Steps 10h and 10i on Linux (2026-10-05)
+
+**Linux CUDA**, house-pc's GTX 1080 Ti (i3-4330, GCC and libgomp), a bundle of 9c09766 built in WSL from the 0.4.0
+release tree (`build/gate-10i`, sha256 `544b9eaa…`), paired into the scratch Meshroom installs (`/data/tests/gate-10i`,
+`build/gate-10i/gate10i.sh`):
+- Meshroom 2025.1 mini6: `base` 8 of 8, `experimental`, `fastransacexp` and `verifyexp` 14 of 14, `verify` 8 of 8
+  with every verdict met (the depth lists 32 of 32 at the last count printed in both); with the T camera and depth
+  list checks on, `tiles` 8 of 8 (144 of 144 tiles' T cameras, depth lists 128 of 128) and `coarse` 8 of 8 (6 of 6,
+  4 of 4). Meshroom 2023.3 mini6 `base` 8 of 8.
+- 41 views, `experimental` with the checks on: 14 of 14, 246 of 246 tiles' T cameras and the depth lists 128 of 128
+  identical, the tracks copy 0 of 101,261 tracks different, every SfM filter comparison identical, SfMExpanding
+  announcing the ranking. No tile different in any run.
+- 41 views, `experimental` with every new step off, 10h and 10i included, against the same as shipped (`cmp10.py`):
+  the same bytes everywhere but ExportImages' `sfm.abc` (its images' absolute paths) and the nodes that do not repeat
+  themselves (Meshing, MeshFiltering, Texturing), as for 10a-10g. The depth maps are `19c5b1ff…` in all three runs,
+  the 10a-10g runs' digest on this card.
+
+**Linux HIP:** the bundle of the same commit (`build/gate-10i`, sha256 `91658083…`, code objects for gfx900 to
+gfx1201, gfx1031 among them) waits for an AMD card in house-pc. The 10a-10g HIP bundle (`build/gate-10`) never ran
+and is superseded.
