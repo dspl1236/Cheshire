@@ -3005,6 +3005,201 @@ void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<T
 """),
 ]
 
+# 10h: a tile's SGM depth list from its R camera's own landmarks (10e's lists, kept by the estimator)
+STEP10H_TILE = [
+    ("namespace aliceVision {\nnamespace depthMap {\n",
+     "namespace aliceVision {\nnamespace sfmData {\nclass Landmark;  // cheshire: step 10h\n}  // namespace sfmData\n}  // namespace aliceVision\n\n"
+     "namespace aliceVision {\nnamespace depthMap {\n"),
+    ("    ROI roi;                       //< 2d region of interest of the R image\n",
+     "    ROI roi;                       //< 2d region of interest of the R image\n"
+     "    const std::vector<const sfmData::Landmark*>* cheshireRcLandmarks = nullptr;  //< cheshire (step 10h): the R camera's landmarks, map order\n"),
+]
+
+STEP10H_DME_HPP = [
+    ("#include <vector>\n\nnamespace aliceVision {\n",
+     "#include <mutex>  // cheshire: step 10h\n#include <vector>\n\nnamespace aliceVision {\n"),
+    ("    std::vector<ROI> _tileRoiList;            //< depth maps region-of-interest list\n",
+     "    std::vector<ROI> _tileRoiList;            //< depth maps region-of-interest list\n"
+     "    mutable mvsUtils::MultiViewParams::CheshireLandmarksPerCamera _cheshirePerCamera;  //< cheshire (step 10h, with 10e): each camera's landmarks\n"
+     "    mutable std::once_flag _cheshirePerCameraOnce;  //< cheshire (step 10h): _cheshirePerCamera built once for every GPU's thread\n"),
+]
+
+STEP10H_DME = [
+    ("#include <algorithm>\n#include <chrono>\n",
+     "#include <algorithm>\n#include <atomic>  // cheshire: step 10h\n#include <chrono>\n"),
+    ("void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<Tile>& tiles) const\n",
+     r"""// cheshire (step 10h): a tile's SGM depth list from its R camera's own landmarks (the lists 10e keeps), not by walking
+// every landmark for the camera and again for each T camera: about 0.4 s of every tile on the False Door, more than the
+// tile's GPU work, which waited for it. The same landmarks in the same order, so the same depths.
+// CHESHIRE_DEPTHMAP_DEPTHLIST_LISTS=0 for upstream's walks, CHESHIRE_DEPTHMAP_DEPTHLIST_CHECK=1 to compare.
+static bool cheshireDepthListLists()
+{
+    static const bool v = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_DEPTHLIST_LISTS", true);
+    static const bool said = []() {
+        if (v)
+        {
+            ALICEVISION_LOG_INFO("cheshire: depth map depth lists from each camera's own landmarks "
+                                 "(CHESHIRE_DEPTHMAP_DEPTHLIST_LISTS=0 for upstream's walks over every landmark)");
+        }
+        return true;
+    }();
+    (void)said;
+    return v;
+}
+
+static bool cheshireDepthListCheck()
+{
+    static const bool v = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_DEPTHLIST_CHECK");
+    return v;
+}
+
+/// CHESHIRE_DEPTHMAP_DEPTHLIST_CHECK's tally, printed when the count reaches a power of two
+static void cheshireDepthListTally(bool same)
+{
+    static std::atomic<long long> runs{0}, differing{0};
+    const long long n = ++runs;
+    const long long d = same ? differing.load() : ++differing;
+    if (!same)
+    {
+        ALICEVISION_LOG_WARNING("cheshire: depth list check: a tile's depth list differs from upstream's walks");
+    }
+    if ((n & (n - 1)) == 0)
+    {
+        ALICEVISION_LOG_INFO("cheshire: depth list check: " << n - d << " of " << n << " tiles identical to upstream's walks over every landmark");
+    }
+}
+
+void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<Tile>& tiles) const
+"""),
+    (r"""    // cheshire (step 10e): each camera's landmarks listed once
+    const mvsUtils::MultiViewParams::CheshireLandmarksPerCamera cheshirePerCamera =
+      cheshireTCamsLists() ? _mp.cheshireLandmarksPerCamera() : mvsUtils::MultiViewParams::CheshireLandmarksPerCamera();
+    const mvsUtils::MultiViewParams::CheshireLandmarksPerCamera* const cheshireLists = cheshirePerCamera.empty() ? nullptr : &cheshirePerCamera;
+""", r"""    // cheshire (step 10e): each camera's landmarks listed once, kept by the estimator for the tiles' depth lists (10h).
+    // Once per estimator: with more than one GPU, computeOnMultiGPUs runs compute(), and so this, on several threads.
+    if (cheshireTCamsLists() || cheshireDepthListLists())
+        std::call_once(_cheshirePerCameraOnce, [this]() { _cheshirePerCamera = _mp.cheshireLandmarksPerCamera(); });
+    const mvsUtils::MultiViewParams::CheshireLandmarksPerCamera* const cheshireAll = _cheshirePerCamera.empty() ? nullptr : &_cheshirePerCamera;
+    const mvsUtils::MultiViewParams::CheshireLandmarksPerCamera* const cheshireLists = cheshireTCamsLists() ? cheshireAll : nullptr;
+"""),
+    ("            t.roi = intersect(_tileRoiList.at(i), rcImageRoi);\n",
+     "            t.roi = intersect(_tileRoiList.at(i), rcImageRoi);\n"
+     "            t.cheshireRcLandmarks = (cheshireAll && cheshireDepthListLists()) ? &(*cheshireAll)[rc] : nullptr;  // cheshire (step 10h)\n"),
+    ("            sgmDepthList.computeListRc();\n",
+     r"""            sgmDepthList.computeListRc();
+
+            if (cheshireDepthListCheck() && tile.cheshireRcLandmarks)  // cheshire (step 10h): the same list by upstream's walks
+            {
+                Tile cheshireRef = tile;
+                cheshireRef.cheshireRcLandmarks = nullptr;
+                SgmDepthList cheshireRefList(_mp, _sgmParams, cheshireRef);
+                cheshireRefList.computeListRc();
+                bool same = cheshireRefList.getDepths() == sgmDepthList.getDepths() &&
+                            cheshireRefList.getDepthsTcLimits().size() == sgmDepthList.getDepthsTcLimits().size();
+                for (std::size_t k = 0; same && k < sgmDepthList.getDepthsTcLimits().size(); ++k)
+                    same = cheshireRefList.getDepthsTcLimits()[k].x == sgmDepthList.getDepthsTcLimits()[k].x &&
+                           cheshireRefList.getDepthsTcLimits()[k].y == sgmDepthList.getDepthsTcLimits()[k].y;
+                cheshireDepthListTally(same);
+            }
+"""),
+]
+
+STEP10H_SGMLIST = [
+    ("void SgmDepthList::getMinMaxMidNbDepthFromSfM(float& out_min, float& out_max, float& out_mid, std::size_t& out_nbDepths) const\n",
+     r"""// cheshire (step 10h): every landmark the tile's R camera observes, in the landmark map's order - from the per-camera
+// list the estimator keeps (10e) when the tile carries it, else from the map itself, as upstream walks it (whose first
+// test for the R camera's observation skips the others)
+template<typename F>
+static void cheshireForEachRcLandmark(const mvsUtils::MultiViewParams& mp, const Tile& tile, F&& visit)
+{
+    if (tile.cheshireRcLandmarks)
+    {
+        for (const sfmData::Landmark* landmark : *tile.cheshireRcLandmarks)
+            visit(*landmark);
+    }
+    else
+    {
+        for (const auto& landmarkPair : mp.getInputSfMData().getLandmarks())
+            visit(landmarkPair.second);
+    }
+}
+
+void SgmDepthList::getMinMaxMidNbDepthFromSfM(float& out_min, float& out_max, float& out_mid, std::size_t& out_nbDepths) const
+"""),
+    (r"""    // for each landmark
+    for (const auto& landmarkPair : _mp.getInputSfMData().getLandmarks())
+    {
+        const sfmData::Landmark& landmark = landmarkPair.second;
+        const Point3d point(landmark.getX()(0), landmark.getX()(1), landmark.getX()(2));
+
+        // find rc observation
+        const auto it = landmark.getObservations().find(viewId);
+
+        // no rc observation
+        if (it == landmark.getObservations().end())
+            continue;
+""", r"""    // for each landmark
+    cheshireForEachRcLandmark(_mp, _tile, [&](const sfmData::Landmark& landmark) {  // cheshire (step 10h)
+        const Point3d point(landmark.getX()(0), landmark.getX()(1), landmark.getX()(2));
+
+        // find rc observation
+        const auto it = landmark.getObservations().find(viewId);
+
+        // no rc observation
+        if (it == landmark.getObservations().end())
+            return;
+"""),
+    (r"""            midDepthPoint = midDepthPoint + point;
+            ++out_nbDepths;
+        }
+    }
+""", r"""            midDepthPoint = midDepthPoint + point;
+            ++out_nbDepths;
+        }
+    });  // cheshire (step 10h)
+"""),
+    (r"""    // for each landmark
+    for (const auto& landmarkPair : _mp.getInputSfMData().getLandmarks())
+    {
+        const sfmData::Landmark& landmark = landmarkPair.second;
+        const Point3d point(landmark.getX()(0), landmark.getX()(1), landmark.getX()(2));
+
+        // no tc observation
+        if (landmark.getObservations().find(tcViewId) == landmark.getObservations().end())
+            continue;
+
+        // find rc observation
+        const auto it = landmark.getObservations().find(rcViewId);
+
+        // no rc observation
+        if (it == landmark.getObservations().end())
+            continue;
+""", r"""    // for each landmark
+    cheshireForEachRcLandmark(_mp, _tile, [&](const sfmData::Landmark& landmark) {  // cheshire (step 10h)
+        const Point3d point(landmark.getX()(0), landmark.getX()(1), landmark.getX()(2));
+
+        // no tc observation
+        if (landmark.getObservations().find(tcViewId) == landmark.getObservations().end())
+            return;
+
+        // find rc observation
+        const auto it = landmark.getObservations().find(rcViewId);
+
+        // no rc observation
+        if (it == landmark.getObservations().end())
+            return;
+"""),
+    (r"""            out_zmin = std::min(out_zmin, depth);
+            out_zmax = std::max(out_zmax, depth);
+        }
+    }
+""", r"""            out_zmin = std::min(out_zmin, depth);
+            out_zmax = std::max(out_zmax, depth);
+        }
+    });  // cheshire (step 10h)
+"""),
+]
+
 # 10g: the image cache's "oldest" slot by load order, not by clock() - whose millisecond ties evicted read-ahead images
 # before their use, so texturing decoded most images twice in most passes
 STEP10G_CACHE_HPP = [
@@ -3147,6 +3342,9 @@ TRACKED = [
     "src/aliceVision/sfm/sfmFilters.cpp",  # 10d
     "src/aliceVision/mvsUtils/MultiViewParams.hpp",  # 10e
     "src/aliceVision/mvsUtils/MultiViewParams.cpp",  # 10e, 10f
+    "src/aliceVision/depthMap/Tile.hpp",  # 10h
+    "src/aliceVision/depthMap/DepthMapEstimator.hpp",  # 10h
+    "src/aliceVision/depthMap/SgmDepthList.cpp",  # 10h
 ]
 
 
@@ -8422,6 +8620,21 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                     sys.exit(f"an anchor of the depth map T cameras' lists not found once in {f10e.name} (10e/10f)")
                 t = t.replace(old, new, 1)
         f10e.write_text(t, encoding="utf-8", newline="")
+
+    # 10h (after 0.4.0). A tile's SGM depth list (SgmDepthList's two walks over every landmark) from its R camera's
+    #     own landmarks, 10e's per-camera lists now kept by the estimator and carried by each tile; the same landmarks
+    #     in the same order. CHESHIRE_DEPTHMAP_DEPTHLIST_LISTS=0 / _CHECK=1. After 10e, whose text is the anchor.
+    for f10h, steps10h in ((AV / "src/aliceVision/depthMap/Tile.hpp", STEP10H_TILE),
+                           (AV / "src/aliceVision/depthMap/DepthMapEstimator.hpp", STEP10H_DME_HPP),
+                           (AV / "src/aliceVision/depthMap/DepthMapEstimator.cpp", STEP10H_DME),
+                           (AV / "src/aliceVision/depthMap/SgmDepthList.cpp", STEP10H_SGMLIST)):
+        t = f10h.read_text(encoding="utf-8")
+        if "step 10h" not in t:
+            for old, new in steps10h:
+                if t.count(old) != 1:
+                    sys.exit(f"an anchor of the tiles' depth lists not found once in {f10h.name} (10h)")
+                t = t.replace(old, new, 1)
+        f10h.write_text(t, encoding="utf-8", newline="")
 
     # 10g (after 0.4.0). The image cache evicts by load order instead of clock(), whose millisecond ties made the
     #     texturing read-ahead evict images before their use (most False Door passes decoded each image twice).

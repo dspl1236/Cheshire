@@ -828,8 +828,14 @@ Not released yet.
   with them on 2026-10-04: 10,913 s to 7,969 s (-27 %).
 - **The texturing disk test** (same doc): per pass of the False Door, 90 s from the NVMe drive and 154 s from the
   SATA SSD once each image is read once; the double reads made a pass about 250 s on either drive.
+- **Step 10h, done 2026-10-05** (same doc, "After 0.4.0: a tile's depth list from its camera's own landmarks"):
+  DepthMap's SGM depth lists walk the R camera's own landmarks (10e's lists) instead of all 1.31 million for the
+  camera and again for each T camera; the same depths. False Door DepthMap chunk 0: 237.6 s in the run (288.4 s
+  replayed) to 108-114 s, the same maps. The chunks are now bound by the GPU's work.
 
 Next:
+- **DepthMap's GPU stages**, now that a chunk waits on them (10h): the refine-and-fuse stage first, the largest
+  under the stage syncs (`CHESHIRE_PROFILE_SGM=1`); exact or not at all, as the rest.
 - **SfMExpanding does not repeat itself on the False Door** (found 2026-10-04; docs/04). Two identical runs part
   after a round that resected 30 views, at the new landmarks' triangulation; the engine bay's two 30-view rounds
   repeat. Find the source before any SfM digest on the False Door is trusted.

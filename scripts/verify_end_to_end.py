@@ -50,7 +50,11 @@ GPU_MARKERS = {
                           r"7-point nullspace: (SVD \(default|Householder QR \(CHESHIRE_QR_NULLSPACE=1\))",
                           r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far",
                           r"cheshire: GPU search and geometric filter overlapped"],
-    "DepthMap":          [r"Number of GPU devices"],
+    # after 0.4.0: the T cameras (step 10e) and the tiles' depth lists (10h) from each camera's own landmarks; CPU
+    # code, so required in the fallback run too
+    "DepthMap":          [r"Number of GPU devices",
+                          r"cheshire: depth map T cameras from each camera's own landmarks",
+                          r"cheshire: depth map depth lists from each camera's own landmarks"],
     "DepthMapFilter":    [r"depth map filter: group votes on",
                           r"depth map filter cache: cap \d+ MB"],
     # 0.3.2: every port announces on both paths, so the three that were silent on success
@@ -123,7 +127,8 @@ SFM_FILTER_WRONG = [r"SfM filter check: .* differs from upstream's loop", r"SfM 
 FORBIDDEN = {
     "StructureFromMotion": [r"local BA graph: \d+ edges to posed views the graph was never handed were skipped",
                             EPIPOLAR_FALLBACK] + SFM_FILTER_WRONG,
-    "DepthMap": [r"depth map T cameras check: \b(\d+) of (?!\1 )\d+ tiles"],
+    "DepthMap": [r"depth map T cameras check: \b(\d+) of (?!\1 )\d+ tiles",
+                 r"depth list check: a tile's depth list differs", r"depth list check: \b(\d+) of (?!\1 )\d+ tiles"],
     "TracksBuilding": [r"the tracks file's binary copy could not be written", TRACKS_DIFFER],
     "FeatureMatching": [EPIPOLAR_FALLBACK,
                         ACR_BOUND_WRONG,
@@ -163,11 +168,13 @@ SELF_CHECK_ENV = {
     "CHESHIRE_ACR_BOUND_CHECK": "1", "CHESHIRE_ACR_RESIDUALS_CHECK": "1",
     "CHESHIRE_EXR_DEFLATE_WRITE": "1", "CHESHIRE_EXR_DEFLATE_WRITE_CHECK": "1",
     "CHESHIRE_UNDISTORT_DEVICE": "1", "CHESHIRE_UNDISTORT_DEVICE_CHECK": "1",
-    # after 0.4.0: SfM's statistics and filters on every core (10d) and the depth map's T cameras (10e)
-    "CHESHIRE_SFM_FILTER_CHECK": "1", "CHESHIRE_DEPTHMAP_TCAMS_CHECK": "1",
+    # after 0.4.0: SfM's statistics and filters on every core (10d), the depth map's T cameras (10e) and its tiles'
+    # depth lists (10h)
+    "CHESHIRE_SFM_FILTER_CHECK": "1", "CHESHIRE_DEPTHMAP_TCAMS_CHECK": "1", "CHESHIRE_DEPTHMAP_DEPTHLIST_CHECK": "1",
 }
 SFM_FILTER_SAME = r"SfM filter check: \b([1-9]\d*) of \1 comparisons identical to upstream's loops"
 TCAMS_SAME = r"depth map T cameras check: \b([1-9]\d*) of \1 tiles identical to upstream's walks over every landmark"
+DEPTHLIST_SAME = r"depth list check: \b([1-9]\d*) of \1 tiles identical to upstream's walks over every landmark"
 SELF_CHECK_VERDICTS = {
     # The direct 8-bit read (6n) against OpenImageIO's path, every image, printed at process exit. Since
     # 0.3.8 also the device undistortion (8g) against the CPU loop, and the libdeflate writer's files (8f)
@@ -178,8 +185,8 @@ SELF_CHECK_VERDICTS = {
     # The colours' 8-bit read (8b) against OpenImageIO's path, every reconstructed view. (The legacy engine runs its
     # own passes after each adjustment, on every core since 7l - postAdjust.inc - so 10d's shared ones never run here.)
     "StructureFromMotion": [r"direct 8-bit read check: \b([1-9]\d*) of \1 images identical to OpenImageIO's path"],
-    # after 0.4.0: every tile's T cameras from the per-camera lists (10e) against upstream's walks.
-    "DepthMap": [TCAMS_SAME],
+    # after 0.4.0: every tile's T cameras (10e) and depth list (10h) from the per-camera lists against upstream's walks.
+    "DepthMap": [TCAMS_SAME, DEPTHLIST_SAME],
     # The GPU matcher against upstream's brute force on a sample of every search (uint8 descriptors).
     # Since 0.3.8 also AC-RANSAC: every model the bound (8d) skipped sorted and scanned anyway, none below
     # minNFA, and every residual of the epipolar loop (8e) against upstream's error().

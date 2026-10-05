@@ -4506,3 +4506,56 @@ the new landmarks' triangulation in that round is where they first differ (each 
 generator). The round's size alone does not explain it: the engine bay resects 30 views at once in two
 rounds and the 41-view set 11 views in one, and both repeat byte for byte. The False Door has 41 rounds of 30 and
 far larger bundle adjustments. The cause is not found yet (roadmap).
+
+## After 0.4.0: a tile's depth list from its camera's own landmarks (step 10h, 2026-10-05)
+
+With 10e and 10f a False Door DepthMap chunk reached its first batch in 12 s instead of 111 s, and the chunks still
+took 212-291 s each: 4,257 s by their own clocks over the 18 chunks of the 10a-10g run that had cameras. Chunk 0's
+log, with each gap between two lines charged to the first of them (`log_gaps.py`), showed where: 145.0 s of its
+237.6 s came after the lines that end a tile ("Refine depth/sim map done.", 378 tiles, 0.38 s each), before the
+next tile's first line. That is where the next tile's SGM depth list is made (`SgmDepthList::computeListRc`):
+`getMinMaxMidNbDepthFromSfM` walked all 1.31 million landmarks to find the R camera's observations, then
+`getRcTcDepthRangeFromSfM` walked them all again for each T camera. The GPU's stages, timed in a replay with a
+stream sync at the end of each (`CHESHIRE_PROFILE_SGM=1`, `profile_log.py`), took 79.7 s.
+
+Both loops skip a landmark the R camera does not observe before they use it, so walking only the landmarks the R
+camera observes, in the map's order, gives them the same landmarks in the same order and the same float
+accumulations. 10e's per-camera lists are exactly that. The estimator now keeps them for the process (built once,
+with `std::call_once`: with more than one GPU, `computeOnMultiGPUs` runs the same estimator on a thread per GPU),
+each tile carries its R camera's list, and both loops walk it (the map itself, as upstream, when the tile carries
+none). `CHESHIRE_DEPTHMAP_DEPTHLIST_LISTS=0` for upstream's walks; `CHESHIRE_DEPTHMAP_DEPTHLIST_CHECK=1` makes every
+tile's list again by upstream's walks and compares its depths and every T camera's depth limits (printed when the
+count reaches a power of two, with a warning for any tile that differs).
+
+Chunk 0 replayed from the run's command line with the development build, its inputs and outputs on C:
+
+| False Door DepthMap chunk 0 | whole chunk | after each tile's last line | GPU stages, stage syncs on |
+|---|---|---|---|
+| 10a-10g, the run (2026-10-04) | 237.6 s | 145.0 s | - |
+| 10h switched off (`CHESHIRE_DEPTHMAP_DEPTHLIST_LISTS=0`), replay | 288.4 s | 190.2 s | - |
+| 10a-10g, replay with the stage syncs | 250.4 s | 153.9 s | 79.7 s |
+| 10h, replays (the third as committed, `std::call_once`) | 107.9 s, 113.6 s, 113.7 s | 16.8 s, 19.9 s, 19.2 s | - |
+| 10h, replay with the stage syncs | 110.8 s | 18.2 s | 79.9 s |
+
+The walks ran on the CPU and varied from run to run (0.38-0.50 s a tile, about twice the tile's GPU work); the
+GPU's stages did not change. With 10h they are 72 % of the chunk: refine and fuse 48.2 s, the similarity
+volume 13.8 s, colour optimisation 13.4 s, the SGM optimisation 4.4 s. A chunk is now bound by the GPU's work, and
+DepthMap's next gains are in those kernels (roadmap). An estimate, not a measurement: if every chunk loses the
+share chunk 0 lost in the run, the False Door's DepthMap goes from 4,278 s to about 2,000 s.
+
+**Exact.** Chunk 0's 96 depth and similarity maps are the same bytes in all six replays, with and without 10h.
+Chunk 1 with the checks on: 384 of 384 tiles' T cameras identical, and the depth lists 256 of 256 at the last
+count printed, with no tile different. On the RX 9070 (Windows, a flat test package of the development install,
+its HIP runtime moved aside), Meshroom 2025.1, mini6: `verifyexp` 14 of 14 with the depth maps of the 10a-10g
+build's gate run (`839b89c2…`), 36 of 36 tiles' T cameras and the depth lists 32 of 32 at the last count printed;
+`verify` 8 of 8, also with the 10a-10g build's depth maps (`7c5369fc…`). With both checks switched on, `tiles`
+(many 512-pixel tiles per camera) 8 of 8 with 144 of 144 tiles' T cameras and the depth lists 128 of 128, and
+`coarse` (one depth list for the whole image, `sgmDepthListPerTile=False`) 8 of 8 with 6 of 6 and 4 of 4. No tile
+differed in any of the four. Run again on the build as committed (the lists built by `std::call_once`): the same
+verdicts and the same depth maps (`tiles` `2b82a5aa…` and `coarse` `0b8241ff…` both times).
+The gate now requires 10e's and 10h's announcements in every DepthMap log. Under `verify` and `verifyexp` it
+asserts the depth list check's verdict and forbids a differing count or a differing tile.
+
+**Compiled:** Windows CUDA, incrementally over the 10a-10g tree, 165 of 165 steps, and 155 of 155 again for the
+`std::call_once`, with no warning in the files 10h touches. The Linux HIP and CUDA trees in WSL build `origin/main`,
+so they follow this commit.
