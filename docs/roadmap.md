@@ -833,6 +833,11 @@ Not released yet.
   camera and again for each T camera; the same depths. False Door DepthMap: chunk 0 237.6 s in the run (288.4 s
   replayed) to 108-114 s, the same maps; the whole node replayed, 4,257 s of chunk time in the run to 2,247 s. The
   chunks are now bound by the GPU's work.
+- **Step 10i, done 2026-10-05** (same doc, "After 0.4.0: SfMExpanding's next views in a total order"): why the False
+  Door's SfMExpanding did not repeat itself (found 2026-10-04). Each round's views were ranked by score alone with
+  `std::sort` after a parallel loop, so tied scores at the round's cutoff went in the threads' order; ties now go by
+  view id, as 5n made the legacy engine's. Three False Door runs the same bytes; 41 views and the engine bay
+  unchanged.
 
 Next:
 - **DepthMap's GPU stages**, now that a chunk waits on them (10h): the refine-and-fuse stage first, the largest
@@ -843,10 +848,7 @@ Next:
   the texture objects those functions create and destroy per call (`cuda_depthSimMapOptimizeGradientDescent`'s
   `imgVarianceTex` and `depthTex`), if HIP's destroy waits for the device. Kept with the stream's buffers instead,
   chunk 0 would be bound by the GPU's 80 s and its startup rather than 108-114 s.
-- **SfMExpanding does not repeat itself on the False Door** (found 2026-10-04; docs/04). Two identical runs part
-  after a round that resected 30 views, at the new landmarks' triangulation; the engine bay's two 30-view rounds
-  repeat. Find the source before any SfM digest on the False Door is trusted.
-- **A release gate** with the matcher kernels and 10a-10g, when the user decides.
+- **A release gate** with the matcher kernels and 10a-10i, when the user decides.
 - **Smaller host costs in the same logs:** `MultiViewParams` reads every image's header one at a time (884 EXR
   headers, about 3-4 s of every DepthMap and DepthMapFilter process); Meshing's "Create visibilities" (64 s).
 - **The reference patch is not cacheable exactly.** `volume_computeSimilarity_kernel` samples the R camera on a

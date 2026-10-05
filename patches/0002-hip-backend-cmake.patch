@@ -11686,6 +11686,60 @@ index 08b266a..dd9af9d 100644
      for (int i = 0; i < viewsChunk.size(); i++)
      {
          auto it = viewsChunk.begin();
+diff --git a/src/aliceVision/sfm/pipeline/expanding/ExpansionPolicyLegacy.cpp b/src/aliceVision/sfm/pipeline/expanding/ExpansionPolicyLegacy.cpp
+index f71dc5f..46e8c9e 100644
+--- a/src/aliceVision/sfm/pipeline/expanding/ExpansionPolicyLegacy.cpp
++++ b/src/aliceVision/sfm/pipeline/expanding/ExpansionPolicyLegacy.cpp
+@@ -4,6 +4,7 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include <aliceVision/system/Logger.hpp>
+ #include <aliceVision/sfm/pipeline/expanding/ExpansionPolicyLegacy.hpp>
+ #include <aliceVision/stl/mapUtils.hpp>
+@@ -26,6 +27,25 @@ bool ExpansionPolicyLegacy::initialize(const sfmData::SfMData & sfmData)
+     return true;
+ }
+ 
++// cheshire (step 10i): the next-best views ranked by score, then by view id, as 5n ranks the legacy engine's. The scores
++// arrive from the parallel loop below in the order the threads finish, and std::sort left equal scores in that order, so
++// which of them made a round's cutoff followed the threads: two runs of the False Door's SfMExpanding took different
++// views into the same round and parted there. CHESHIRE_SFM_VIEW_TIEBREAK=0 for upstream's comparator (score only).
++static bool cheshireViewTieBreak()
++{
++    static const bool v = ::cheshire::env::flag("CHESHIRE_SFM_VIEW_TIEBREAK", true);
++    static const bool said = []() {
++        if (v)
++        {
++            ALICEVISION_LOG_INFO("cheshire: next-best views ranked by score, then by view id "
++                                 "(CHESHIRE_SFM_VIEW_TIEBREAK=0 for upstream's ties in the threads' order)");
++        }
++        return true;
++    }();
++    (void)said;
++    return v;
++}
++
+ bool ExpansionPolicyLegacy::process(const sfmData::SfMData & sfmData, const track::TracksHandler & tracksHandler)
+ {
+     _selectedViews.clear();
+@@ -116,9 +136,14 @@ bool ExpansionPolicyLegacy::process(const sfmData::SfMData & sfmData, const trac
+     }
+ 
+     //Sort views by decreasing scores
++    const bool cheshireTieBreak = cheshireViewTieBreak();  // cheshire (step 10i)
+     std::sort(vscoring.begin(), vscoring.end(), 
+-                [](const ViewScoring & v1, const ViewScoring & v2) 
++                [cheshireTieBreak](const ViewScoring & v1, const ViewScoring & v2) 
+                 {
++                    if (cheshireTieBreak && v1.score == v2.score)  // cheshire (step 10i): ties by view id
++                    {
++                        return v1.id < v2.id;
++                    }
+                     return v1.score > v2.score;
+                 });
+ 
 diff --git a/src/aliceVision/sfm/pipeline/expanding/ExpansionProcess.cpp b/src/aliceVision/sfm/pipeline/expanding/ExpansionProcess.cpp
 index 392c5ac..057b809 100644
 --- a/src/aliceVision/sfm/pipeline/expanding/ExpansionProcess.cpp

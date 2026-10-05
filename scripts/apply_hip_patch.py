@@ -3200,6 +3200,52 @@ void SgmDepthList::getMinMaxMidNbDepthFromSfM(float& out_min, float& out_max, fl
 """),
 ]
 
+# 10i: the new engine's next-best-views ranking a total order (score, then view id), as 5n made the legacy engine's: the
+# scores arrive from a parallel loop in the order the threads finish and std::sort left equal scores in that order, so
+# which of them made a round's cutoff followed the threads - the False Door's SfMExpanding parted from run to run there
+STEP10I_POLICY = [
+    ("bool ExpansionPolicyLegacy::process(const sfmData::SfMData & sfmData, const track::TracksHandler & tracksHandler)\n",
+     r"""// cheshire (step 10i): the next-best views ranked by score, then by view id, as 5n ranks the legacy engine's. The scores
+// arrive from the parallel loop below in the order the threads finish, and std::sort left equal scores in that order, so
+// which of them made a round's cutoff followed the threads: two runs of the False Door's SfMExpanding took different
+// views into the same round and parted there. CHESHIRE_SFM_VIEW_TIEBREAK=0 for upstream's comparator (score only).
+static bool cheshireViewTieBreak()
+{
+    static const bool v = ::cheshire::env::flag("CHESHIRE_SFM_VIEW_TIEBREAK", true);
+    static const bool said = []() {
+        if (v)
+        {
+            ALICEVISION_LOG_INFO("cheshire: next-best views ranked by score, then by view id "
+                                 "(CHESHIRE_SFM_VIEW_TIEBREAK=0 for upstream's ties in the threads' order)");
+        }
+        return true;
+    }();
+    (void)said;
+    return v;
+}
+
+bool ExpansionPolicyLegacy::process(const sfmData::SfMData & sfmData, const track::TracksHandler & tracksHandler)
+"""),
+    ("""    //Sort views by decreasing scores
+    std::sort(vscoring.begin(), vscoring.end(), 
+                [](const ViewScoring & v1, const ViewScoring & v2) 
+                {
+                    return v1.score > v2.score;
+                });
+""", """    //Sort views by decreasing scores
+    const bool cheshireTieBreak = cheshireViewTieBreak();  // cheshire (step 10i)
+    std::sort(vscoring.begin(), vscoring.end(), 
+                [cheshireTieBreak](const ViewScoring & v1, const ViewScoring & v2) 
+                {
+                    if (cheshireTieBreak && v1.score == v2.score)  // cheshire (step 10i): ties by view id
+                    {
+                        return v1.id < v2.id;
+                    }
+                    return v1.score > v2.score;
+                });
+"""),
+]
+
 # 10g: the image cache's "oldest" slot by load order, not by clock() - whose millisecond ties evicted read-ahead images
 # before their use, so texturing decoded most images twice in most passes
 STEP10G_CACHE_HPP = [
@@ -3345,6 +3391,7 @@ TRACKED = [
     "src/aliceVision/depthMap/Tile.hpp",  # 10h
     "src/aliceVision/depthMap/DepthMapEstimator.hpp",  # 10h
     "src/aliceVision/depthMap/SgmDepthList.cpp",  # 10h
+    "src/aliceVision/sfm/pipeline/expanding/ExpansionPolicyLegacy.cpp",  # 10i
 ]
 
 
@@ -8635,6 +8682,18 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                     sys.exit(f"an anchor of the tiles' depth lists not found once in {f10h.name} (10h)")
                 t = t.replace(old, new, 1)
         f10h.write_text(t, encoding="utf-8", newline="")
+
+    # 10i (after 0.4.0). The new engine's next-best-views ranking (ExpansionPolicyLegacy) a total order, score then view
+    #     id, as 5n made the legacy engine's; CHESHIRE_SFM_VIEW_TIEBREAK=0 for upstream's comparator. Before 6q, which
+    #     gives the file its env.h include.
+    f10i = AV / "src/aliceVision/sfm/pipeline/expanding/ExpansionPolicyLegacy.cpp"
+    t = f10i.read_text(encoding="utf-8")
+    if "step 10i" not in t:
+        for old, new in STEP10I_POLICY:
+            if t.count(old) != 1:
+                sys.exit("an anchor of the next-best-views ranking not found once in ExpansionPolicyLegacy.cpp (10i)")
+            t = t.replace(old, new, 1)
+    f10i.write_text(t, encoding="utf-8", newline="")
 
     # 10g (after 0.4.0). The image cache evicts by load order instead of clock(), whose millisecond ties made the
     #     texturing read-ahead evict images before their use (most False Door passes decoded each image twice).

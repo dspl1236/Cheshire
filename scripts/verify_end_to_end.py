@@ -325,6 +325,7 @@ NEWCHAIN_MARKERS.update({
     "SfMExpanding": [r"cheshire: NACRANSAC runs its iterations in batches on every core",
                      r"cheshire: BA solver: Grin, Cheshire's own, for the Schur solves",
                      r"cheshire: SfM residual statistics and outlier filters on \d+ threads",  # after 0.4.0 (step 10d)
+                     r"cheshire: next-best views ranked by score, then by view id",  # after 0.4.0 (step 10i)
                      TRACKS_PARSE],
     "SfMTransform": [],
     "SfMColorizing": [r"cheshire: 8-bit images read as 8-bit RGB directly"],

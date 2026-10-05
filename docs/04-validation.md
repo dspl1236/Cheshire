@@ -4495,17 +4495,14 @@ CUDA zip has no NVIDIA card to run on, as in 0.4.0.
 
 ## SfMExpanding does not repeat itself on the False Door (found 2026-10-04)
 
-9c made SfMExpanding byte-reproducible on 41 views and the engine bay (above). On the False Door it is not, with
+9c made SfMExpanding byte-reproducible on 41 views and the engine bay (above). On the False Door it was not, with
 none of 10a-10g involved: the development build with 10c and 10d off and the bundle adjustment on the host
 (`CHESHIRE_BA_DEVICE=0`), run twice on the same inputs, wrote different `cameras.sfm` and `sfmExpanded.abc`.
 Between those two runs the 827 camera centres differ by up to 0.041, 0.7 % of the scene's radius (6.07); between
 the runs with the bundle adjustment on the device, the package's included, by up to 0.11-0.14, the focal lengths
-in their fourth digit. Both pairs agree to 385 views and 774,861 landmarks and part at the same place: the
-residual statistics before the bundle adjustment that follows a round which resected 30 views in parallel, so
-the new landmarks' triangulation in that round is where they first differ (each view's resection has its own
-generator). The round's size alone does not explain it: the engine bay resects 30 views at once in two
-rounds and the 41-view set 11 views in one, and both repeat byte for byte. The False Door has 41 rounds of 30 and
-far larger bundle adjustments. The cause is not found yet (roadmap).
+in their fourth digit. Both pairs agree to 385 views and 774,861 landmarks, and the first number that differs is
+the residual statistics before the next round's bundle adjustment, a round that resected 30 views in parallel.
+Read at first as that round's triangulation; it was the round's choice of views (step 10i, below).
 
 ## After 0.4.0: a tile's depth list from its camera's own landmarks (step 10h, 2026-10-05)
 
@@ -4565,3 +4562,38 @@ asserts the depth list check's verdict and forbids a differing count or a differ
 `std::call_once`; at 1eb2d2f, incrementally over the 10a-10g trees in WSL (`build/wsl-check10.lf.sh`), Linux HIP 13
 of 13 and Linux CUDA 14 of 14 steps, the seven depth map objects that include the changed headers among them. No
 warning in the files 10h touches beyond the two upstream ones about an unused `hipError_t`.
+
+## After 0.4.0: SfMExpanding's next views in a total order (step 10i, 2026-10-05)
+
+Two runs of the development build (10a-10h) on the False Door, compared line by line with the lines printed inside
+parallel loops left out (their order follows the threads): the same to the end of the round that left 385 valid
+views and 774,861 landmarks, its bundle adjustment's statistics included. Then the next round's 30 views differ in
+one view, 470504773 in one run and 1141050117 in the other, and everything after follows from that.
+
+A round's views are chosen by `ExpansionPolicyLegacy::process`. It scores every candidate view in a parallel loop,
+appending each score from a critical section in the order the threads finish, then sorts by the score alone with
+`std::sort` and keeps the first 30. The score is a power-of-two-weighted count of the grid cells the view's
+reconstructed points occupy, an integer in a double, so views tie. `std::sort` is not stable: tied views keep an
+order that follows the threads, and so does which of them makes the cutoff. The legacy engine ranked its views the
+same way, and 5n gave that ranking a total order, ties by view id. 10i does the same for the new engine.
+`CHESHIRE_SFM_VIEW_TIEBREAK=0` for upstream's comparator.
+
+The first suspect was the pose refinement after each resection, a one-pose Ceres solve that Grin declines and Ceres
+runs on every thread, whose per-worker sums can round differently from run to run. It is not the cause: with that
+solve on one thread two runs still parted, at this choice of views. That change was not kept.
+
+| False Door SfMExpanding, replayed from the run's command line | `cameras.sfm` | `sfmExpanded.abc` |
+|---|---|---|
+| the pose refinement on one thread (not kept), run 1 | `c41c32e8…` | `b8036c2a…` |
+| the same build, run 2 | `233ae431…` | `93034aaa…` |
+| 10i, run 1 | `4429a859…` | `72d34017…` |
+| 10i, run 2 | `4429a859…` | `72d34017…` |
+| 10i, run 3, while the mini6 gate ran | `4429a859…` | `72d34017…` |
+
+With 10i the False Door's SfMExpanding poses 827 views with 1,297,619 landmarks in 180 rounds, 516.6 and 517.7 s
+(the run's took 448 s over 165 rounds; a run's time follows its trajectory). On 41 views and the engine bay, the
+new chain replayed with 10i on and with it off (`build/nightly-cmp/plan-10i.json`): every file of TracksBuilding,
+RelativePoseEstimating (the pairs as a set), SfMBootStrapping and SfMExpanding byte for byte the 10c-10d runs'.
+On the RX 9070, mini6 on Meshroom 2025.1 with a flat test package of 10a-10i: `verifyexp` 14 of 14 (its
+SfMExpanding announcing the ranking), `verify` 8 of 8, `tiles` and `coarse` 8 of 8, the depth maps as before.
+The gate requires the ranking's announcement in SfMExpanding's log.
