@@ -4557,5 +4557,6 @@ The gate now requires 10e's and 10h's announcements in every DepthMap log. Under
 asserts the depth list check's verdict and forbids a differing count or a differing tile.
 
 **Compiled:** Windows CUDA, incrementally over the 10a-10g tree, 165 of 165 steps, and 155 of 155 again for the
-`std::call_once`, with no warning in the files 10h touches. The Linux HIP and CUDA trees in WSL build `origin/main`,
-so they follow this commit.
+`std::call_once`; at 1eb2d2f, incrementally over the 10a-10g trees in WSL (`build/wsl-check10.lf.sh`), Linux HIP 13
+of 13 and Linux CUDA 14 of 14 steps, the seven depth map objects that include the changed headers among them. No
+warning in the files 10h touches beyond the two upstream ones about an unused `hipError_t`.
