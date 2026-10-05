@@ -4596,4 +4596,5 @@ new chain replayed with 10i on and with it off (`build/nightly-cmp/plan-10i.json
 RelativePoseEstimating (the pairs as a set), SfMBootStrapping and SfMExpanding byte for byte the 10c-10d runs'.
 On the RX 9070, mini6 on Meshroom 2025.1 with a flat test package of 10a-10i: `verifyexp` 14 of 14 (its
 SfMExpanding announcing the ranking), `verify` 8 of 8, `tiles` and `coarse` 8 of 8, the depth maps as before.
-The gate requires the ranking's announcement in SfMExpanding's log.
+The gate requires the ranking's announcement in SfMExpanding's log. Compiled incrementally: Windows CUDA, and at
+9c09766 Linux HIP 91 of 91 and Linux CUDA 91 of 91 steps in WSL, no warning in the file 10i touches.
