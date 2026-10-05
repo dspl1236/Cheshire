@@ -134,7 +134,8 @@ The compiler remarks that settled it (`-Rpass-analysis=kernel-resource-usage` on
 ## The 8-bit matrix instructions on RDNA4, a dp4a kernel for NVIDIA (after 0.4.0)
 
 Two kernels for 128-byte uint8 descriptors, chosen once per process (the log line names it):
-`knn2_wmma` on gfx120x and `knn2_dot4q` on NVIDIA sm_61+; every other card keeps `knn2_u8`.
+`knn2_wmma` on gfx120x and `knn2_dot4q` on NVIDIA sm_61+ and, since its measurement below, RDNA2
+(gfx103x); every other card keeps `knn2_u8`.
 `CHESHIRE_MATCHER_KERNEL=u8|sliced|dot4q|wmma` picks one (wmma only where the device runs gfx120x
 code). Both were developed in `hip/tests/gpumatcher_wmma/` against a verbatim copy of `knn2_u8`.
 
@@ -167,8 +168,8 @@ per row for 32 dot4 (one dependent chain, LDS waits, a branchy insertion), but t
 tried stayed near 1.1-1.2x on this card: several rows per iteration 1.17x, scalar loads of the
 wave-uniform row 1.23x, `knn2_dot4q` 1.13x. 20000 queries at one query per lane are about 5.6 waves
 per SIMD on its 56 CUs, too few to hide latency. RDNA1/2 have fewer CUs and no matrix instructions, so
-`knn2_dot4q` may well pay there as it does on Pascal; until it is measured on one
-(`CHESHIRE_MATCHER_KERNEL=dot4q`), `knn2_u8` stays their default.
+`knn2_dot4q` may well pay there as it does on Pascal. On RDNA2 it does (below); RDNA1 and RDNA3 are not
+measured yet (`CHESHIRE_MATCHER_KERNEL=dot4q`), and `knn2_u8` stays their default.
 
 **FeatureMatching end to end** (the node's own command lines, AC-RANSAC at 2048 iterations; the
 search phase from `CHESHIRE_GPU_MATCHER_LOG=1`):
@@ -183,6 +184,23 @@ The matches are byte-identical to `knn2_u8`'s in every run, and the self-check
 (`CHESHIRE_GPU_MATCHER_CHECK=1`) found 53,300 of 53,300 sampled queries identical to upstream's
 brute force on each card. The Linux numbers are the 0.4.0 CUDA bundle with only
 `libaliceVision_matching` rebuilt.
+
+**RDNA2** (2026-10-05): the RX 6750 XT (gfx1031) in house-pc, Linux, the HIP bundle of 10a-10i
+(`build/gate-10i`), the 41-view FeatureMatching of its gate run replayed three times with each kernel,
+alternating (`build/gate-10i/fm_kernels.py`). The matches are byte-identical to the gate run's with both kernels.
+That run used Meshroom 2025.1's 50,000 AC-RANSAC iterations, so on house-pc's four-thread i3 the
+geometric filter takes about 131 s, and the search overlaps it (10a):
+
+| per run, three runs each | `knn2_u8` | `knn2_dot4q` |
+|---|---|---|
+| kernels (`CHESHIRE_GPU_MATCHER_LOG=1`) | 13.45-13.48 s | 7.05-7.06 s |
+| searches, uploads and downloads included | 14.13-14.17 s | 7.75 s |
+| the search thread | 15.22-15.35 s | 8.81-8.83 s |
+| the node, three chunks | 132.42-132.48 s | 130.58-130.87 s |
+
+1.9x on the kernels, so `knn2_dot4q` is RDNA2's default from now on (the gfx103x family shares gfx1031's
+ISA). On this machine the node gains only the 1.7 s the filter does not cover; with a CPU fast enough that
+the search is the longer of the two, it gains up to the 6.4 s.
 
 What is left: `CHESHIRE_GPU_MATCHER_LOG=1` now splits the searches into upload, kernels and download
 (the kernels synchronized, only when profiling). On the RX 9070 an engine-bay chunk's 945 searches

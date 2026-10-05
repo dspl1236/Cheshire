@@ -4616,6 +4616,17 @@ release tree (`build/gate-10i`, sha256 `544b9eaa…`), paired into the scratch M
   themselves (Meshing, MeshFiltering, Texturing), as for 10a-10g. The depth maps are `19c5b1ff…` in all three runs,
   the 10a-10g runs' digest on this card.
 
-**Linux HIP:** the bundle of the same commit (`build/gate-10i`, sha256 `91658083…`, code objects for gfx900 to
-gfx1201, gfx1031 among them) waits for an AMD card in house-pc. The 10a-10g HIP bundle (`build/gate-10`) never ran
-and is superseded.
+**Linux HIP**, house-pc's RX 6750 XT (gfx1031) after the card swap, the bundle of the same commit (`build/gate-10i`,
+sha256 `91658083…`, code objects for gfx900 to gfx1201) through the same script (`build/gate-10i/gate10i-hip.sh`):
+- Meshroom 2025.1 mini6: `base` 8 of 8, `experimental`, `fastransacexp` and `verifyexp` 14 of 14, `verify` 8 of 8,
+  every verdict met (the depth lists 32 of 32 in both); with the checks on, `tiles` 8 of 8 (144 of 144 tiles' T
+  cameras, depth lists 128 of 128) and `coarse` 8 of 8 (6 of 6, 4 of 4). Meshroom 2023.3 mini6 `base` 8 of 8.
+- 41 views with the checks on: 14 of 14, 246 of 246 tiles' T cameras and the depth lists 128 of 128 identical, the
+  tracks copy 0 of 101,261 tracks different, the SfM filters 32 of 32 at the last count printed, SfMExpanding
+  announcing the ranking. No tile different in any run.
+- 41 views with every new step off against the same as shipped: the same bytes but ExportImages' `sfm.abc` and the
+  nodes that do not repeat themselves, as on the GTX 1080 Ti; the depth maps `740e2c05…` in all three runs.
+
+The 10a-10g HIP bundle (`build/gate-10`) never ran and is superseded. The RX 6750 XT also measured the GPU
+matcher's `knn2_dot4q` against `knn2_u8` (docs/07, last section): 1.9x on the kernels, the matches byte-identical,
+and it is now RDNA2's default.

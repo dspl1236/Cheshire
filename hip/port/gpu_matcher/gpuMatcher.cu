@@ -12,8 +12,9 @@
 //
 // For 128-byte uint8 descriptors two faster kernels give the same rows and distances, bit for bit:
 // knn2_wmma on RDNA4 (gfx120x: the 8-bit matrix instructions, 9.4x knn2_u8 on the RX 9070) and
-// knn2_dot4q on NVIDIA sm_61+ (2.0x on the GTX 1080 Ti); everything else keeps knn2_u8 until it is
-// measured. CHESHIRE_MATCHER_KERNEL=u8|sliced|dot4q|wmma picks one; the log line names the choice.
+// knn2_dot4q on NVIDIA sm_61+ (2.0x on the GTX 1080 Ti) and RDNA2 (gfx103x: 1.9x on the RX 6750 XT);
+// everything else keeps knn2_u8 until it is measured. CHESHIRE_MATCHER_KERNEL=u8|sliced|dot4q|wmma
+// picks one; the log line names the choice.
 #include "gpuMatcher.hpp"
 #include <cuda_runtime.h>
 #include <aliceVision/depthMap/cuda/hip/cheshire/devalloc.h>  // cheshire: bridge on both backends
@@ -260,7 +261,8 @@ __device__ __forceinline__ void carryWindow(int& p0, int& p1, int& i0, int& i1, 
 // knn2_dot4q: Q queries per thread, so every shared-memory read of a database word feeds Q dot4, one per
 // query, instead of one. On Pascal a warp's broadcast read costs about what the 32 dp4a it feeds for one
 // query cost, so knn2_u8 is bound by those reads: Q = 2 in blocks of 128 is 2.03x knn2_u8 on the GTX
-// 1080 Ti (cuda_matcher.cu). On the RX 9070 it is 1.13x (blocks of 256); RDNA1/2 are unmeasured.
+// 1080 Ti (cuda_matcher.cu). On the RX 9070 it is 1.13x (blocks of 256), on the RX 6750 XT (RDNA2,
+// gfx1031) 1.9x in FeatureMatching's own profile (41 views: kernels 13.46 s to 7.05 s); RDNA1/3 are unmeasured.
 template<int Q>
 __global__ void knn2_dot4q(const unsigned int* __restrict__ db, const unsigned int* __restrict__ dbNorm, int rows,
                            const unsigned int* __restrict__ q, const unsigned int* __restrict__ qNorm, int nbQuery,
@@ -548,12 +550,14 @@ bool available()
     if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1) { logOnce("no GPU device, CPU matcher"); return g_available = false; }
     cudaDeviceProp p{};
     if (cudaGetDeviceProperties(&p, 0) != cudaSuccess) { logOnce("cannot query device 0, CPU matcher"); return g_available = false; }
-    // The uint8 kernel: the matrix instructions on gfx120x, the dp4a kernel on NVIDIA sm_61+, knn2_u8 on the
-    // cards the new kernels are unmeasured on. CHESHIRE_MATCHER_KERNEL=u8|sliced|dot4q|wmma overrides it (wmma
-    // only where the device has gfx120x code); CHESHIRE_MATCHER_SLICED=1 is the older switch for "sliced".
+    // The uint8 kernel: the matrix instructions on gfx120x, the dot4 kernel on NVIDIA sm_61+ and on RDNA2
+    // (gfx103x, measured on gfx1031; the family shares its ISA), knn2_u8 on the cards the new kernels are
+    // unmeasured on. CHESHIRE_MATCHER_KERNEL=u8|sliced|dot4q|wmma overrides it (wmma only where the device has
+    // gfx120x code); CHESHIRE_MATCHER_SLICED=1 is the older switch for "sliced".
 #if defined(__HIP_PLATFORM_AMD__)
     const bool gfx120 = std::strncmp(p.gcnArchName, "gfx120", 6) == 0;
-    g_u8Kernel = gfx120 ? kWmma : kU8;
+    const bool gfx103 = std::strncmp(p.gcnArchName, "gfx103", 6) == 0;
+    g_u8Kernel = gfx120 ? kWmma : gfx103 ? kDot4q : kU8;
 #else
     const bool gfx120 = false;
     g_u8Kernel = (p.major * 10 + p.minor >= 61) ? kDot4q : kU8;

@@ -818,7 +818,8 @@ Photogrammetry, USD, 5r/5s and the ranking ties on SfmBundle and ExpansionPolicy
 Not released yet.
 
 - **The matcher kernels** (`docs/07-gpu-matcher.md`, last section): `knn2_wmma` on RDNA4, `knn2_dot4q` on NVIDIA
-  (308252d, a4d0a79).
+  (308252d, a4d0a79) and, measured 2026-10-05 on the RX 6750 XT (1.9x on the kernels), on RDNA2. RDNA1 and RDNA3
+  keep `knn2_u8` until measured.
 - **Steps 10a-10g, done 2026-10-04** (`docs/04-validation.md`, "After 0.4.0: what the False Door's logs showed"):
   exact host-side fixes found in a False Door job run from the NVMe drive. FeatureMatching's GPU search and
   geometric filter at the same time (10a); the regions loaded on every core, the descriptors in one read (10b); a
