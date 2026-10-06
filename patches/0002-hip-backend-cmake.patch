@@ -1086,7 +1086,7 @@ index 0564791..c569f56 100644
  }
  
 diff --git a/src/aliceVision/depthMap/Sgm.hpp b/src/aliceVision/depthMap/Sgm.hpp
-index 83552da..a85ddb4 100644
+index 83552da..ff4f28d 100644
 --- a/src/aliceVision/depthMap/Sgm.hpp
 +++ b/src/aliceVision/depthMap/Sgm.hpp
 @@ -147,6 +147,23 @@ class Sgm
@@ -1107,7 +1107,7 @@ index 83552da..a85ddb4 100644
 +        ~CheshireEvent()
 +        {
 +            if (event)
-+                cudaEventDestroy(event);
++                (void)cudaEventDestroy(event);  // nothing to do about a failure in a destructor
 +        }
 +    } _cheshireDepthsCopied;
  };

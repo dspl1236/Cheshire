@@ -4668,5 +4668,13 @@ on the event: one tile ahead, for the device. The chunk is bound by the GPU's st
 **Exact:** on the RX 9070 (Windows, a flat test package of the development install), Meshroom 2025.1 mini6:
 `verifyexp` 14 of 14 and `verify` 8 of 8 with every verdict met, `tiles` and `coarse` 8 of 8 with the T camera and
 depth list checks on; the depth maps of all four are the 10a-10i builds' (`839b89c2…`, `7c5369fc…`, `2b82a5aa…`,
-`0b8241ff…`). The gate requires 10j's announcement in every DepthMap log. Linux and the CUDA build: below, after the
-push.
+`0b8241ff…`). The gate requires 10j's announcement in every DepthMap log.
+
+**Linux HIP**, house-pc's RX 6750 XT, a bundle of 766a166 (`build/gate-10j`, sha256 `e912696e…`, built in WSL from the
+0.4.0 release tree; `build/gate-10j/gate10j-hip.sh`): Meshroom 2025.1 mini6 `base`, `experimental`, `verifyexp` and
+`verify` ok, and `tiles` and `coarse` with the checks on, every depth map digest the 10a-10i HIP gate's on this card;
+41 views `experimental` with 10j (14 of 14, 596 s) and with `CHESHIRE_DEPTHMAP_TILE_OVERLAP=0` (606 s; 13 of 14, 10j's
+announcement absent by design) compared node by node: the 82 depth and similarity maps identical (`740e2c05…`, as in
+the 10a-10i gate), every other file as before but ExportImages' `sfm.abc` and the nodes that do not repeat
+themselves. **Compiled:** Windows HIP and Linux HIP and CUDA at 766a166 (the CUDA tree 11 of 11 steps, the two
+changed device files among them). The CUDA build has not run 10j: no NVIDIA card is in reach, as in 0.4.0.

@@ -3268,7 +3268,7 @@ STEP10J_SGM_HPP = [
         ~CheshireEvent()
         {
             if (event)
-                cudaEventDestroy(event);
+                (void)cudaEventDestroy(event);  // nothing to do about a failure in a destructor
         }
     } _cheshireDepthsCopied;
 """),
