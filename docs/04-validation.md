@@ -4678,3 +4678,39 @@ announcement absent by design) compared node by node: the 82 depth and similarit
 the 10a-10i gate), every other file as before but ExportImages' `sfm.abc` and the nodes that do not repeat
 themselves. **Compiled:** Windows HIP and Linux HIP and CUDA at 766a166 (the CUDA tree 11 of 11 steps, the two
 changed device files among them). The CUDA build has not run 10j: no NVIDIA card is in reach, as in 0.4.0.
+
+## AliceVision develop f2447d4: the submodule moved (2026-10-06)
+
+The submodule moved from `develop` 2cb1a39 (2026-08-28) to f2447d4, the merge of #2179 (2026-10-06), 41 commits and
+13 merges later: the project's two fixes, #2181 (UVAtlas sorts camera candidates by area) and #2179 (Mesher reads the
+neighbour-inversion count as an int); Ceres 2.3 support (`DynamicCostFunctionToFunctor` from Ceres when it has one;
+the builds have Ceres 2.2 and keep the local copy); lemon as the `LEMON::lemon` target, which both dependency trees
+already export (1.3.2); `/D__SSE2__` for MSVC on x64 (clang defines it already, so only the Windows CUDA build's MSVC
+host code sees a change); the radial4 and fisheye1 Jacobians and the SO3 logarithm at an exact half turn; a sensor
+database entry; Windows, Docker and Python packaging changes. The patched tree at 2cb1a39 was stashed in the submodule
+(and its diff kept as `build/av-2cb1a39-worktree.diff`), f2447d4 checked out clean, and the generator run on it:
+- step 4u went: upstream now does what it did (`docs/11-meshing-cpu.md`), so `CHESHIRE_INVERT_OLD` and its per-round
+  log lines went with it;
+- step 7f's anchor in `src/aliceVision/sfm/CMakeLists.txt` now includes upstream's new `LEMON::lemon` line;
+- every other step applied as it was. Of the 83 files upstream changed, five are files the generator patches (the
+  three CMake files, `Mesher.cpp`, `UVAtlas.cpp`), and only those two anchors moved.
+
+**The same bytes as before, on the RX 9070** (the development install, against the references of 10a-10j):
+
+| what | result |
+|---|---|
+| FeatureMatching, 41 views and the engine bay (`fmbench.py`) | `64397675…` and `f063ea6d…`, as `v10-2` |
+| the legacy SfM, 41 views and the engine bay (`sfmbench.py`) | `801d1fb7…`/`361ddd5c…` and `814ae0d5…`/`af98cde3…`, as `s9j` |
+| the new chain's TracksBuilding, RelativePoseEstimating, SfMBootStrapping, SfMExpanding, both sets | every file as `10i-on-1` |
+| the False Door's DepthMap chunk 0 | its 96 maps as with 10j |
+| mini6 `verifyexp`, `verify`, `tiles`, `coarse` (a flat test package) | 14/14, 8/8, 8/8, 8/8, depth maps as before |
+
+The chunk took 104.9-105.3 s; the 10j package replayed beside it took 105.0-107.1 s (the 97.6-98.7 s of the 10j
+section were measured the day before: the machine, not the change).
+
+**Texturing changes, as #2181 intends.** The mini6 `verify` run's Texturing replayed twice with the 10j package and
+twice with the new build: `texturedMesh.obj` is the same bytes within each pair and differs between them (`0fdab85e…`
+against `a2507536…`; 270,994 UV vertices against 270,476, and 65 % of the faces with other UVs, since the charts are
+packed as a whole). The atlases differ from run to run in both builds, as they always have (GPU float atomics). Texture
+digests from before this move do not carry over.
+Linux HIP and CUDA and the Windows CUDA build: below, after the push.

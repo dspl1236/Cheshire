@@ -1257,10 +1257,11 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   submodule (2cb1a39): 13 merges, the others Ceres 2.3 support (a version-conditional `DynamicCostFunctionToFunctor`),
   Windows and Docker build changes, Python packaging, and three math fixes (the radial4 and fisheye1 Jacobians, the
   SO3 logarithm at a half turn). They touch five files the generator patches: `CMakeLists.txt`, `src/CMakeLists.txt`,
-  `src/aliceVision/sfm/CMakeLists.txt`, `Mesher.cpp` and `UVAtlas.cpp`. When the submodule moves: #2181 changes
-  Texturing's output (Cheshire left that bug alone, docs/10, so texture digests will move), and #2179 replaces step
-  4u (drop it and `CHESHIRE_INVERT_OLD`, or its anchor stops the generator). The fork stays for draft #2194
-  (`dspl1236:dev/sfmQualityPipeline`). Issue #2182 and popsift#193 have no maintainer reply yet.
+  `src/aliceVision/sfm/CMakeLists.txt`, `Mesher.cpp` and `UVAtlas.cpp`. **The submodule moved to f2447d4 the same
+  day** (docs/04, "AliceVision develop f2447d4"): step 4u and `CHESHIRE_INVERT_OLD` dropped, step 7f's anchor follows
+  upstream's `LEMON::lemon` line, every output on the test sets the same bytes but Texturing's, which #2181 changes
+  (Cheshire left that bug alone, docs/10). The fork stays for draft #2194 (`dspl1236:dev/sfmQualityPipeline`). Issue
+  #2182 and popsift#193 have no maintainer reply yet.
 - The #2344 SfM fix was posted with a PR offer (`docs/drafts/meshroom-2344-comment.md:93`), and
   nobody has replied.
 - Discussion #2116 (2026-09-26): asked where functional tests should live (see "Functional tests
@@ -1442,8 +1443,8 @@ carries the list and the launcher never read it (Hardware coverage, 0.3.8).
 - `:201`: `=0` turns QR on.
 - `:216`: lists 7 of the 12 configs.
 - Missing: `CHESHIRE_GPU_RESIZE`, `CHESHIRE_GPU_RESIZE_CHECK`, `CHESHIRE_UNDISTORT_MAP`,
-  `CHESHIRE_UNDISTORT_MAP_MB`, `CHESHIRE_PDS_PROFILE`, `CHESHIRE_OBJ_ASSIMP`,
-  `CHESHIRE_INVERT_OLD`, and a note that WSL2 is not a supported runtime.
+  `CHESHIRE_UNDISTORT_MAP_MB`, `CHESHIRE_PDS_PROFILE`, `CHESHIRE_OBJ_ASSIMP`, and a note that WSL2 is
+  not a supported runtime (`CHESHIRE_INVERT_OLD` went with step 4u, 2026-10-06).
 
 ### docs/
 

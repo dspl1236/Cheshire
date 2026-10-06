@@ -216,8 +216,10 @@ per-vertex work rather than anything the GPU would obviously win.
 `Mesher::graphCutPostProcessing` reads the number of 4-neighbour inversion rounds with
 `get<bool>`, while `main_meshing` stores an `int` under that key. Boost's bool translator rejects
 "10", the default is returned and collapses to `true`, so the loop ran once however many rounds
-`--invertTetrahedronBasedOnNeighborsNbIterations` asked for. Apply step 4u reads it as the int it
-is; `CHESHIRE_INVERT_OLD=1` restores upstream's single round.
+`--invertTetrahedronBasedOnNeighborsNbIterations` asked for. Apply step 4u read it as the int it
+is, with `CHESHIRE_INVERT_OLD=1` for upstream's single round. Upstream reads it as an int since
+AliceVision #2179 (merged 2026-10-06), so when the submodule moved to develop f2447d4 that day the
+step, its switch and its per-round log lines were dropped; the rounds run as before.
 
 The pass flips a tetrahedron whose status disagrees with three or four of its neighbours, so extra
 rounds remove isolated spikes and pits that the first round exposes. What it costs and what it

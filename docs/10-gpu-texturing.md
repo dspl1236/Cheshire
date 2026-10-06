@@ -143,8 +143,9 @@ two temporary `pair<int, int>` and **truncates the area to an integer**: project
 
 That is a defect, not a performance question, and correcting it would change which cameras each
 chart keeps and therefore the packing. It is reported rather than patched. Upstream took the fix
-(AliceVision #2181, merged 2026-10-01 for 3.4.0); Cheshire's tree predates it, so its textures
-change when the submodule moves past that merge.
+(AliceVision #2181, merged 2026-10-01 for 3.4.0), and Cheshire's tree has it since the submodule
+moved to develop f2447d4 on 2026-10-06: the charts and the packing changed then (docs/04, "AliceVision
+develop f2447d4"), and texture digests from before do not carry over.
 
 What is left in `createCharts` is 2.44 s in `computeTrisCamsFromPtsCams` and about 2.96 s in a
 12-thread projection loop. Making the per-triangle camera list a reference rather than a copy is in
