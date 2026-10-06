@@ -1251,12 +1251,16 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 
 ### Waiting on maintainers
 
-- **PR #2181 merged 2026-10-01** into `develop` for 3.4.0 (the UVAtlas comparator; issue #2180 closed). PR #2179
-  (the inversion count read as an int, issue #2178) was rebased by the same maintainer that day and put on the
-  3.4.0 milestone; not merged yet. Keep the fork until #2179 closes. When the AliceVision submodule moves past
-  them: #2181 changes Texturing's output (Cheshire left that bug alone, docs/10, so texture digests will move),
-  and #2179 replaces step 4u (drop it and `CHESHIRE_INVERT_OLD`, or its anchor stops the generator). Issue
-  #2182 and popsift#193 have no maintainer reply yet.
+- **PR #2181 merged 2026-10-01** into `develop` for 3.4.0 (the UVAtlas comparator; issue #2180 closed), and **PR
+  #2179 merged 2026-10-06** (the inversion count read as an int; approved and merged by the same maintainer,
+  merge commit f2447d4, 3.4.0 milestone; issue #2178 closed). Both are in `develop`, 41 commits past the pinned
+  submodule (2cb1a39): 13 merges, the others Ceres 2.3 support (a version-conditional `DynamicCostFunctionToFunctor`),
+  Windows and Docker build changes, Python packaging, and three math fixes (the radial4 and fisheye1 Jacobians, the
+  SO3 logarithm at a half turn). They touch five files the generator patches: `CMakeLists.txt`, `src/CMakeLists.txt`,
+  `src/aliceVision/sfm/CMakeLists.txt`, `Mesher.cpp` and `UVAtlas.cpp`. When the submodule moves: #2181 changes
+  Texturing's output (Cheshire left that bug alone, docs/10, so texture digests will move), and #2179 replaces step
+  4u (drop it and `CHESHIRE_INVERT_OLD`, or its anchor stops the generator). The fork stays for draft #2194
+  (`dspl1236:dev/sfmQualityPipeline`). Issue #2182 and popsift#193 have no maintainer reply yet.
 - The #2344 SfM fix was posted with a PR offer (`docs/drafts/meshroom-2344-comment.md:93`), and
   nobody has replied.
 - Discussion #2116 (2026-09-26): asked where functional tests should live (see "Functional tests
