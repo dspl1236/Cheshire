@@ -9,9 +9,21 @@
     // block: 32 columns x 8 depth planes (the kernel's shared reduction assumes blockDim.x <= 64)
     const dim3 blockFused(32, 8, 1);
     const dim3 gridFused(divUp(volDimX, blockFused.x), divUp(volDimZ, blockFused.y), 1);
-    CudaDeviceMemoryPitched<TSimAcc, 2> bestSim_dmp(CudaSize<2>(volDimX, 2));
-    TSimAcc* bestCur  = bestSim_dmp.getBuffer();
-    TSimAcc* bestNext = (TSimAcc*)(((char*)bestSim_dmp.getBuffer()) + bestSim_dmp.getPitch());
+    // cheshire (step 10j): the two rows of column minima in the stream's own buffer (Sgm's axis accumulator, which the
+    // fused pass does not otherwise use, allocated with two rows for this), not in a buffer allocated per pass: freeing
+    // that one (hipFree, cudaFree) waited for the device four times a tile, so no tile's host work ever overlapped the
+    // previous tile's kernels. Both rows are written before they are read, as before. CHESHIRE_DEPTHMAP_TILE_OVERLAP=0
+    // for a buffer per pass.
+    static const bool cheshireKeptBest = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_TILE_OVERLAP", true);
+    CudaDeviceMemoryPitched<TSimAcc, 2> bestSim_dmp;
+    CudaDeviceMemoryPitched<TSimAcc, 2>* bestSimPtr = &inout_volAxisAcc_dmp;
+    if (!cheshireKeptBest || inout_volAxisAcc_dmp.getSize().x() < volDimX || inout_volAxisAcc_dmp.getSize().y() < 2)
+    {
+        bestSim_dmp.allocate(CudaSize<2>(volDimX, 2));
+        bestSimPtr = &bestSim_dmp;
+    }
+    TSimAcc* bestCur  = bestSimPtr->getBuffer();
+    TSimAcc* bestNext = (TSimAcc*)(((char*)bestSimPtr->getBuffer()) + bestSimPtr->getPitch());
 
     CHESHIRE_PROF_BEGIN();  // profiling: whole pass (one sync before, one after)
     // first XZ plane (Y=0): copied and reduced once, exactly as before

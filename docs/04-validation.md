@@ -4630,3 +4630,43 @@ sha256 `91658083…`, code objects for gfx900 to gfx1201) through the same scrip
 The 10a-10g HIP bundle (`build/gate-10`) never ran and is superseded. The RX 6750 XT also measured the GPU
 matcher's `knn2_dot4q` against `knn2_u8` (docs/07, last section): 1.9x on the kernels, the matches byte-identical,
 and it is now RDNA2's default.
+
+## After 0.4.0: depth map tiles without a wait for the device (step 10j, 2026-10-05)
+
+With 10h a False Door DepthMap chunk waited on the GPU, but the GPU still idled between tiles. Chunk 0's log (10h, no
+stage syncs) showed the host blocked twice in every tile: inside "SGM Optimizing volume" (17.1-17.8 s per chunk) and
+inside "Color optimize depth/sim map" (58.8-61.4 s), each about as long as the device work queued before it. Two
+calls waited for the device:
+- each of SGM's four aggregation passes per tile allocated a two-row buffer for its column minima and freed it at
+  the end, and the free (`hipFree`, through the memory bridge) waits for the device;
+- the colour optimisation created two texture objects per call and destroyed them at the end, and
+  `hipDestroyTextureObject` waits for the device on HIP.
+
+So the host prepared a tile only after the device had finished the previous one, and the next tile's host work (its
+depth list, its launches, about 0.04-0.05 s) never overlapped the device's. Now the fused pass keeps its column
+minima in the stream's own buffer (Sgm's axis accumulator, which the fused pass did not use, allocated with the
+second row it needs; `hip/port/sgm_fused/loop.cu.txt`), and the colour optimisation's textures are created once per
+buffer and kept (the buffers are the Refine's own, one per stream; a texture is keyed by device, address, size and
+pitch). The host can then run ahead, so the one page-locked buffer refilled per tile, the SGM depth list
+(`_depths_hmh`, one per stream), now waits on an event for its previous copy before it is refilled. Nothing else on
+the host is reused across tiles before the batch's synchronisation: the depth and similarity maps come back into
+per-tile buffers read after it, and the device cache is read-only while the tiles run. The memory bridge places a
+buffer once, at allocation, and never moves it, so a kept texture stays valid. `CHESHIRE_DEPTHMAP_TILE_OVERLAP=0`
+for the waits as before.
+
+| False Door DepthMap chunk 0, replays alternating | whole chunk |
+|---|---|
+| `CHESHIRE_DEPTHMAP_TILE_OVERLAP=0` | 101.5, 102.0, 102.0 s |
+| 10j | 97.6, 98.1, 98.7, 98.4 s |
+
+3.5 % less. Its 96 depth and similarity maps are the same bytes in all seven runs. With 10j the log's waits inside
+the stages are gone (0.5 s after "SGM Optimizing volume." in all), and the host waits at the start of a tile's SGM,
+on the event: one tile ahead, for the device. The chunk is bound by the GPU's stages (about 80 s), its startup (about
+10 s) and its batches' image loading: 9.5 s per chunk, 6.1 s of it decoding, while the device idles between batches
+(roadmap).
+
+**Exact:** on the RX 9070 (Windows, a flat test package of the development install), Meshroom 2025.1 mini6:
+`verifyexp` 14 of 14 and `verify` 8 of 8 with every verdict met, `tiles` and `coarse` 8 of 8 with the T camera and
+depth list checks on; the depth maps of all four are the 10a-10i builds' (`839b89c2…`, `7c5369fc…`, `2b82a5aa…`,
+`0b8241ff…`). The gate requires 10j's announcement in every DepthMap log. Linux and the CUDA build: below, after the
+push.

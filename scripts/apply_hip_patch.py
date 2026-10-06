@@ -3246,6 +3246,126 @@ bool ExpansionPolicyLegacy::process(const sfmData::SfMData & sfmData, const trac
 """),
 ]
 
+# 10j: a depth map tile's GPU work without a wait for the device on the host. Freeing the fused SGM pass's buffer
+# (hipFree, four times a tile) and destroying the colour optimisation's textures (hipDestroyTextureObject) each waited
+# for the device, so no tile's host work overlapped the previous tile's kernels. The fused pass now uses the stream's
+# own buffer (hip/port/sgm_fused/loop.cu.txt; Sgm's axis accumulator gets the second row it needs), the textures are
+# kept per buffer, and the one page-locked buffer refilled per tile waits on an event for its previous copy.
+STEP10J_SGM_HPP = [
+    ("    cudaStream_t _stream;                                       //< stream for gpu execution\n",
+     r"""    cudaStream_t _stream;                                       //< stream for gpu execution
+
+    // cheshire (step 10j): recorded after each copy out of _depths_hmh; the next tile on this stream waits for it
+    // before refilling the page-locked buffer, since the host now runs ahead of the device (a copy of an Sgm gets
+    // its own event)
+    struct CheshireEvent
+    {
+        cudaEvent_t event = nullptr;
+        bool recorded = false;
+        CheshireEvent() = default;
+        CheshireEvent(const CheshireEvent&) {}
+        CheshireEvent& operator=(const CheshireEvent&) { return *this; }
+        ~CheshireEvent()
+        {
+            if (event)
+                cudaEventDestroy(event);
+        }
+    } _cheshireDepthsCopied;
+"""),
+]
+
+STEP10J_SGM = [
+    ("Sgm::Sgm(const mvsUtils::MultiViewParams& mp,\n",
+     r"""// cheshire (step 10j): a depth map tile's GPU work no longer makes the host wait for the device - the fused SGM passes
+// keep their column minima in the stream's own buffer and the colour optimisation keeps its textures - so the host
+// prepares the next tile (its depth list, its launches) while the device still runs this one. The one page-locked
+// buffer refilled per tile waits on an event for its previous copy. CHESHIRE_DEPTHMAP_TILE_OVERLAP=0 for the waits.
+static bool cheshireTileOverlap()
+{
+    static const bool v = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_TILE_OVERLAP", true);
+    static const bool said = []() {
+        if (v)
+        {
+            ALICEVISION_LOG_INFO("cheshire: depth map tiles overlap: the host prepares the next tile while the device runs "
+                                 "this one (CHESHIRE_DEPTHMAP_TILE_OVERLAP=0 for a wait per tile)");
+        }
+        return true;
+    }();
+    (void)said;
+    return v;
+}
+
+Sgm::Sgm(const mvsUtils::MultiViewParams& mp,
+"""),
+    ("        _volumeAxisAcc_dmp.allocate(CudaSize<2>(maxTileSide, 1));\n",
+     "        _volumeAxisAcc_dmp.allocate(CudaSize<2>(maxTileSide, 2));  // cheshire (step 10j): a second row, the fused pass's column minima\n"),
+    ("    // copy rc depth data in page-locked host memory\n",
+     r"""    // cheshire (step 10j): the previous copy out of this buffer done before it is refilled (the host runs ahead)
+    if (cheshireTileOverlap() && _cheshireDepthsCopied.recorded)
+        CHECK_CUDA_RETURN_ERROR(cudaEventSynchronize(_cheshireDepthsCopied.event));
+
+    // copy rc depth data in page-locked host memory
+"""),
+    ("    _depths_dmp.copyFrom(_depths_hmh, _stream);\n",
+     r"""    _depths_dmp.copyFrom(_depths_hmh, _stream);
+    if (cheshireTileOverlap())  // cheshire (step 10j)
+    {
+        if (!_cheshireDepthsCopied.event)
+            CHECK_CUDA_RETURN_ERROR(cudaEventCreate(&_cheshireDepthsCopied.event));
+        CHECK_CUDA_RETURN_ERROR(cudaEventRecord(_cheshireDepthsCopied.event, _stream));
+        _cheshireDepthsCopied.recorded = true;
+    }
+"""),
+]
+
+STEP10J_DDSM = [
+    ("#include <utility>\n",
+     "#include <utility>\n#include <map>  // cheshire: step 10j\n#include <memory>\n#include <mutex>\n#include <tuple>\n"),
+    ("__host__ void cuda_depthSimMapOptimizeGradientDescent(",
+     r"""// cheshire (step 10j): the colour optimisation's two textures created once per buffer and kept, where each call created
+// and destroyed them: HIP's hipDestroyTextureObject waits for the device, so every tile's colour optimisation did. The
+// buffers are the Refine's own, one per stream, for the whole estimation. A texture is keyed by device, address, size
+// and pitch: a buffer allocated later at the same place with the same shape reads through the same descriptor, one of
+// another shape gets its own. The same descriptor over the same memory: the same values.
+// CHESHIRE_DEPTHMAP_TILE_OVERLAP=0 for a texture per call.
+static bool cheshireKeptTextures()
+{
+    static const bool v = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_TILE_OVERLAP", true);
+    return v;
+}
+
+static cudaTextureObject_t cheshireKeptTexture(CudaDeviceMemoryPitched<float, 2>& buffer)
+{
+    static std::mutex m;
+    static std::map<std::tuple<int, const void*, size_t, size_t, size_t>, CudaTexture<float, false, false>*> kept;
+    int device = 0;
+    CHECK_CUDA_RETURN_ERROR(cudaGetDevice(&device));
+    const auto key = std::make_tuple(device, static_cast<const void*>(buffer.getBuffer()), buffer.getSize().x(), buffer.getSize().y(),
+                                     buffer.getPitch());
+    std::lock_guard<std::mutex> lock(m);
+    auto it = kept.find(key);
+    if (it == kept.end())
+        it = kept.emplace(key, new CudaTexture<float, false, false>(buffer)).first;  // never destroyed: that waits for the device
+    return it->second->textureObj;
+}
+
+__host__ void cuda_depthSimMapOptimizeGradientDescent("""),
+    ("""    CudaTexture<float, false, false> imgVarianceTex(inout_imgVariance_dmp); // neighbor interpolation, without normalized coordinates
+    CudaTexture<float, false, false> depthTex(inout_tmpOptDepthMap_dmp);    // neighbor interpolation, without normalized coordinates
+""", """    // cheshire (step 10j): the kept textures (above), or one per call as upstream with CHESHIRE_DEPTHMAP_TILE_OVERLAP=0
+    std::unique_ptr<CudaTexture<float, false, false>> cheshireImgVarianceTex, cheshireDepthTex;
+    if (!cheshireKeptTextures())
+    {
+        cheshireImgVarianceTex.reset(new CudaTexture<float, false, false>(inout_imgVariance_dmp)); // neighbor interpolation, without normalized coordinates
+        cheshireDepthTex.reset(new CudaTexture<float, false, false>(inout_tmpOptDepthMap_dmp));    // neighbor interpolation, without normalized coordinates
+    }
+    const cudaTextureObject_t imgVarianceTexObj = cheshireImgVarianceTex ? cheshireImgVarianceTex->textureObj : cheshireKeptTexture(inout_imgVariance_dmp);
+    const cudaTextureObject_t depthTexObj = cheshireDepthTex ? cheshireDepthTex->textureObj : cheshireKeptTexture(inout_tmpOptDepthMap_dmp);
+"""),
+    ("            imgVarianceTex.textureObj,\n            depthTex.textureObj,\n",
+     "            imgVarianceTexObj,  // cheshire (step 10j)\n            depthTexObj,\n"),
+]
+
 # 10g: the image cache's "oldest" slot by load order, not by clock() - whose millisecond ties evicted read-ahead images
 # before their use, so texturing decoded most images twice in most passes
 STEP10G_CACHE_HPP = [
@@ -3392,6 +3512,8 @@ TRACKED = [
     "src/aliceVision/depthMap/DepthMapEstimator.hpp",  # 10h
     "src/aliceVision/depthMap/SgmDepthList.cpp",  # 10h
     "src/aliceVision/sfm/pipeline/expanding/ExpansionPolicyLegacy.cpp",  # 10i
+    "src/aliceVision/depthMap/Sgm.hpp",  # 10j
+    "src/aliceVision/depthMap/cuda/planeSweeping/deviceDepthSimilarityMap.cu",  # 10j
 ]
 
 
@@ -8694,6 +8816,21 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                 sys.exit("an anchor of the next-best-views ranking not found once in ExpansionPolicyLegacy.cpp (10i)")
             t = t.replace(old, new, 1)
     f10i.write_text(t, encoding="utf-8", newline="")
+
+    # 10j (after 0.4.0). A depth map tile without a wait for the device on the host: the fused SGM pass's column minima in
+    #     the stream's own buffer (hip/port/sgm_fused/loop.cu.txt, applied in 1d; Sgm's axis accumulator gets a second
+    #     row), the colour optimisation's textures kept per buffer, and an event before _depths_hmh is refilled.
+    #     CHESHIRE_DEPTHMAP_TILE_OVERLAP=0. After 1g (Sgm.cpp's stage syncs) and before 6q (the env.h includes).
+    for f10j, steps10j in ((AV / "src/aliceVision/depthMap/Sgm.hpp", STEP10J_SGM_HPP),
+                           (AV / "src/aliceVision/depthMap/Sgm.cpp", STEP10J_SGM),
+                           (AV / "src/aliceVision/depthMap/cuda/planeSweeping/deviceDepthSimilarityMap.cu", STEP10J_DDSM)):
+        t = f10j.read_text(encoding="utf-8")
+        if "step 10j" not in t:
+            for old, new in steps10j:
+                if t.count(old) != 1:
+                    sys.exit(f"an anchor of the tiles' overlap not found once in {f10j.name} (10j)")
+                t = t.replace(old, new, 1)
+        f10j.write_text(t, encoding="utf-8", newline="")
 
     # 10g (after 0.4.0). The image cache evicts by load order instead of clock(), whose millisecond ties made the
     #     texturing read-ahead evict images before their use (most False Door passes decoded each image twice).

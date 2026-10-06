@@ -834,6 +834,10 @@ Not released yet.
   camera and again for each T camera; the same depths. False Door DepthMap: chunk 0 237.6 s in the run (288.4 s
   replayed) to 108-114 s, the same maps; the whole node replayed, 4,257 s of chunk time in the run to 2,247 s. The
   chunks are now bound by the GPU's work.
+- **Step 10j, done 2026-10-05** (same doc, "After 0.4.0: depth map tiles without a wait for the device"): the host
+  waited for the device twice a tile (a per-pass buffer's free in SGM, the colour optimisation's texture teardown on
+  HIP); with the stream's own buffer, kept textures and an event on the depth list's upload buffer, the host prepares
+  the next tile while the device runs this one. False Door chunk 0: 101.5-102.0 s to 97.6-98.7 s, the same maps.
 - **Step 10i, done 2026-10-05** (same doc, "After 0.4.0: SfMExpanding's next views in a total order"): why the False
   Door's SfMExpanding did not repeat itself (found 2026-10-04). Each round's views were ranked by score alone with
   `std::sort` after a parallel loop, so tied scores at the round's cutoff went in the threads' order; ties now go by
@@ -843,13 +847,10 @@ Not released yet.
 Next:
 - **DepthMap's GPU stages**, now that a chunk waits on them (10h): the refine-and-fuse stage first, the largest
   under the stage syncs (`CHESHIRE_PROFILE_SGM=1`); exact or not at all, as the rest.
-- **DepthMap's tiles one after another.** Each tile gets a stream, but the host waits for the device twice a tile
-  (inside "SGM Optimizing volume" and "Color optimize depth/sim map", each about as long as the stages before it),
-  so a tile's host work (about 0.05 s with 10h) never overlaps the previous tile's GPU work. A guess to check first:
-  the texture objects those functions create and destroy per call (`cuda_depthSimMapOptimizeGradientDescent`'s
-  `imgVarianceTex` and `depthTex`), if HIP's destroy waits for the device. Kept with the stream's buffers instead,
-  chunk 0 would be bound by the GPU's 80 s and its startup rather than 108-114 s.
-- **A release gate** with the matcher kernels and 10a-10i, when the user decides.
+- **DepthMap's batches one after another.** Each batch's images are decoded and uploaded after the previous batch's
+  tiles have finished, while the device idles: 9.5 s of False Door chunk 0's 98 s with 10j (6.1 s of it decoding).
+  Decoded and uploaded during the previous batch's tiles instead, within the planner's VRAM budget for images.
+- **A release gate** with the matcher kernels and 10a-10j, when the user decides.
 - **Smaller host costs in the same logs:** `MultiViewParams` reads every image's header one at a time (884 EXR
   headers, about 3-4 s of every DepthMap and DepthMapFilter process); Meshing's "Create visibilities" (64 s).
 - **The reference patch is not cacheable exactly.** `volume_computeSimilarity_kernel` samples the R camera on a
