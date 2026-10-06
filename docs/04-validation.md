@@ -4713,4 +4713,11 @@ twice with the new build: `texturedMesh.obj` is the same bytes within each pair 
 against `a2507536…`; 270,994 UV vertices against 270,476, and 65 % of the faces with other UVs, since the charts are
 packed as a whole). The atlases differ from run to run in both builds, as they always have (GPU float atomics). Texture
 digests from before this move do not carry over.
-Linux HIP and CUDA and the Windows CUDA build: below, after the push.
+
+**Linux HIP**, house-pc's RX 6750 XT, a bundle of 0b6ed91 built in WSL from the 0.4.0 release tree
+(`build/gate-avbump`, sha256 `0f98dfa7…`; WSL's submodule reset clean first, `build/wsl-avbump.lf.sh`), through
+`build/gate-avbump/gate-avbump-hip.sh`: Meshroom 2025.1 mini6 `base`, `experimental`, `fastransacexp`, `verifyexp`
+and `verify`, `tiles` and `coarse` with the checks on, 41 views `experimental`, and Meshroom 2023.3 mini6 `base`, all
+ok, every depth map digest the earlier gates' on this card (`26fc558e…`, `65d76194…`, `c6b62275…`, `f7e813fc…`,
+`014df5da…`, `740e2c05…`, `c4e51fa5…`). **Compiled:** Linux CUDA 538 of 538 and Windows CUDA 830 of 830 steps, from
+the moved tree.
