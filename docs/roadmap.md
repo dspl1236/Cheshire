@@ -859,6 +859,13 @@ What it carries:
 - **Linux CUDA, 2026-10-06** (the 10k section): house-pc's GTX 1080 Ti ran 10j, 10k and the AliceVision move for the
   first time, every depth map the 10a-10i CUDA gate's, everything since 0.4.0 off against on identical node by node.
 
+## 0.4.2
+
+**Released 2026-10-07** (tag v0.4.2 at c36602a; GitHub release 406219990, Forgejo 137): 11a-11c, DepthMap's GPU stages
+without double precision, exactly. The False Door's DepthMap chunks 1,878 s to 1,297 s, all 1,652 maps the same
+bytes; gates on the RX 9070, RX 6750 XT and GTX 1080 Ti, the Windows CUDA zip on its smoke test (docs/04, "The 0.4.2
+release round").
+
 ## After 0.4.1
 
 **Release plan (decided 2026-10-07):** finish the engine and the packaging over the next few releases, then the hardware
