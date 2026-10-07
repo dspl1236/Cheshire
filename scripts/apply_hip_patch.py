@@ -3826,6 +3826,133 @@ STEP10C_BUILDING = [
      "    track::cheshireWriteTracksSidecar(tracksFilename);  // cheshire (step 10c): the binary copy its readers take\n"),
 ]
 
+STEP11A_COLOR = [
+    ("namespace aliceVision {\nnamespace depthMap {\n\n// color Euclidean distance\n",
+     r"""#ifdef CHESHIRE_HIP
+// cheshire (step 11a): norm3df's own pieces in the ROCm device libraries (OCML)
+extern "C" __device__ float __ocml_len3_f32(float, float, float);
+extern "C" __device__ float __ocml_fmuladd_f32(float, float, float);
+extern "C" __device__ float __ocml_ldexp_f32(float, int);
+#endif
+
+namespace aliceVision {
+namespace depthMap {
+
+// cheshire (step 11a): the colour distances without double precision. HIP's norm3df is OCML's __ocml_len3_f32: it sorts
+// |x|, |y|, |z| by their bits, takes the largest's frexp exponent e through a double (a conversion and a frexp, so that a
+// denormal gets its true exponent), scales the three by 2^-e, sums their squares with two fmuladds, takes the square root
+// and scales it back by 2^e. The conversion and the frexp are FP64 instructions, which RDNA runs at a fraction of the
+// single-precision rate, and a refine sample measures two colour distances (CostYKfromLab, once per camera).
+// cheshireLen3 is the same function with one change: when the largest magnitude is a normal float, its frexp exponent is
+// its biased exponent minus 126, read from the bits - the same integer, so the same scaling, sums, root and result. When
+// all three are zeros the same steps give +0, the library's result, so zeros - a patch's centre pixel against itself,
+// flat image regions - stay on this path; a denormal, infinite or NaN largest magnitude calls __ocml_len3_f32 itself.
+// The library's own fmuladd and ldexp, so both lower the same way on every target. hip/tests/len3 compares the two bit
+// for bit (17.2 G inputs: colour differences, any bit pattern, denormal and tiny largest magnitudes, zeros among colour
+// differences - no difference) and times them (3.4x on an RX 9070). CHESHIRE_DEPTHMAP_LEN3=0 for norm3df
+// (cheshireLen3Configure, deviceSimilarityVolume.cu, clears the flag); CUDA builds keep norm3df.
+#ifdef CHESHIRE_HIP
+__constant__ int cheshireLen3On_d = 1;
+
+__device__ __forceinline__ float cheshireLen3(float x, float y, float z)
+{
+    const unsigned ua = __float_as_uint(fabsf(x));
+    const unsigned ub = __float_as_uint(fabsf(y));
+    const unsigned uc = __float_as_uint(fabsf(z));
+    const unsigned m1 = max(ua, ub);
+    const unsigned n1 = min(ua, ub);
+    const unsigned a = max(m1, uc);
+    const unsigned n2 = min(m1, uc);
+    const unsigned b = max(n1, n2);
+    const unsigned c = min(n1, n2);
+    const unsigned biased = a >> 23;  // the sign bit is clear
+    if ((biased == 0u && a != 0u) || biased == 255u)  // denormal largest magnitude, or inf / NaN: the library's own path
+        return __ocml_len3_f32(x, y, z);
+    const int e = int(biased) - 126;  // frexp's exponent of a normal float (all zeros: any e gives +0)
+    const float as = __ocml_ldexp_f32(__uint_as_float(a), -e);
+    const float bs = __ocml_ldexp_f32(__uint_as_float(b), -e);
+    const float cs = __ocml_ldexp_f32(__uint_as_float(c), -e);
+    const float t = __ocml_fmuladd_f32(as, as, __ocml_fmuladd_f32(bs, bs, cs * cs));
+    return __ocml_ldexp_f32(__builtin_amdgcn_sqrtf(t), e);
+}
+
+__device__ __forceinline__ float cheshireNorm3(float x, float y, float z)
+{
+    return cheshireLen3On_d ? cheshireLen3(x, y, z) : norm3df(x, y, z);
+}
+#else
+__device__ __forceinline__ float cheshireNorm3(float x, float y, float z) { return norm3df(x, y, z); }
+#endif
+
+// color Euclidean distance
+"""),
+    ("__device__ inline float euclideanDist3(const float3 x1, const float3 x2)\n{\n"
+     "    // return sqrtf((x1.x - x2.x) * (x1.x - x2.x) + (x1.y - x2.y) * (x1.y - x2.y) + (x1.z - x2.z) * (x1.z - x2.z));\n"
+     "    return norm3df(x1.x - x2.x, x1.y - x2.y, x1.z - x2.z);\n",
+     "__device__ inline float euclideanDist3(const float3 x1, const float3 x2)\n{\n"
+     "    // return sqrtf((x1.x - x2.x) * (x1.x - x2.x) + (x1.y - x2.y) * (x1.y - x2.y) + (x1.z - x2.z) * (x1.z - x2.z));\n"
+     "    return cheshireNorm3(x1.x - x2.x, x1.y - x2.y, x1.z - x2.z);  // cheshire (step 11a): norm3df's result, above\n"),
+    ("__device__ inline float euclideanDist3(const float4 x1, const float4 x2)\n{\n"
+     "    // return sqrtf((x1.x - x2.x) * (x1.x - x2.x) + (x1.y - x2.y) * (x1.y - x2.y) + (x1.z - x2.z) * (x1.z - x2.z));\n"
+     "    return norm3df(x1.x - x2.x, x1.y - x2.y, x1.z - x2.z);\n",
+     "__device__ inline float euclideanDist3(const float4 x1, const float4 x2)\n{\n"
+     "    // return sqrtf((x1.x - x2.x) * (x1.x - x2.x) + (x1.y - x2.y) * (x1.y - x2.y) + (x1.z - x2.z) * (x1.z - x2.z));\n"
+     "    return cheshireNorm3(x1.x - x2.x, x1.y - x2.y, x1.z - x2.z);  // cheshire (step 11a): norm3df's result, above\n"),
+]
+
+STEP11A_DSV = [
+    ("#include <map>\n", "#include <map>\n#include <mutex>  // cheshire: step 11a\n#include <set>\n"),
+    ("__host__ void cuda_volumeInitialize(CudaDeviceMemoryPitched<TSim, 3>& inout_volume_dmp, TSim value, cudaStream_t stream)\n",
+     r"""// cheshire (step 11a): CHESHIRE_DEPTHMAP_LEN3 for the colour distances (device/color.cuh), read and announced once.
+// Off, each device's cheshireLen3On_d is cleared once, before the first kernel that measures a colour distance on it:
+// the launchers of the similarity volume, of its refinement and of the SGM aggregation call this first. The clear is
+// hipMemcpyToSymbol itself, which resolves the symbol on the current device - not the shim's cudaMemcpyToSymbol, whose
+// address cache is per symbol.
+static void cheshireLen3Configure()
+{
+#ifdef CHESHIRE_HIP
+    static const bool on = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_LEN3", true);
+    static std::once_flag announced;
+    std::call_once(announced, [] {
+        if (on)
+            ALICEVISION_LOG_INFO("cheshire: depth map colour distances in single precision (exact: norm3df's own steps without"
+                                 " its double-precision exponent; CHESHIRE_DEPTHMAP_LEN3=0 for norm3df)");
+        else
+            ALICEVISION_LOG_INFO("cheshire: depth map colour distances by norm3df (CHESHIRE_DEPTHMAP_LEN3=0)");
+    });
+    if (on)
+        return;
+    static std::mutex clearedMutex;
+    static std::set<int> cleared;
+    int device = 0;
+    cudaError_t err = cudaGetDevice(&device);
+    THROW_ON_CUDA_ERROR(err, "Failed to get the current device");
+    const std::lock_guard<std::mutex> lock(clearedMutex);
+    if (cleared.insert(device).second)
+    {
+        const int off = 0;
+        err = hipMemcpyToSymbol(HIP_SYMBOL(cheshireLen3On_d), &off, sizeof(off), 0, hipMemcpyHostToDevice);
+        THROW_ON_CUDA_ERROR(err, "Failed to clear the colour distances' switch");
+    }
+#else
+    static std::once_flag announced;
+    std::call_once(announced, [] { ALICEVISION_LOG_INFO("cheshire: depth map colour distances by CUDA's norm3df"); });
+#endif
+}
+
+__host__ void cuda_volumeInitialize(CudaDeviceMemoryPitched<TSim, 3>& inout_volume_dmp, TSim value, cudaStream_t stream)
+"""),
+    ("    const dim3 block = getMaxPotentialBlockSize(volume_computeSimilarity_kernel);\n",
+     "    cheshireLen3Configure();  // cheshire (step 11a)\n"
+     "    const dim3 block = getMaxPotentialBlockSize(volume_computeSimilarity_kernel);\n"),
+    ("    const dim3 block = getMaxPotentialBlockSize(volume_refineSimilarity_kernel);\n",
+     "    cheshireLen3Configure();  // cheshire (step 11a)\n"
+     "    const dim3 block = getMaxPotentialBlockSize(volume_refineSimilarity_kernel);\n"),
+    ("    CudaSize<3> volDim = in_volSim_dmp.getSize();\n",
+     "    cheshireLen3Configure();  // cheshire (step 11a)\n"
+     "    CudaSize<3> volDim = in_volSim_dmp.getSize();\n"),
+]
+
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
     if new in text:
@@ -3937,6 +4064,7 @@ TRACKED = [
     "src/aliceVision/sfm/pipeline/expanding/ExpansionPolicyLegacy.cpp",  # 10i
     "src/aliceVision/depthMap/Sgm.hpp",  # 10j
     "src/aliceVision/depthMap/cuda/planeSweeping/deviceDepthSimilarityMap.cu",  # 10j
+    "src/aliceVision/depthMap/cuda/device/color.cuh",  # 11a
 ]
 
 
@@ -9236,6 +9364,21 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                     sys.exit(f"an anchor of the batches' overlap not found once in {f10k.name} (10k)")
                 t = t.replace(old, new, 1)
         f10k.write_text(t, encoding="utf-8", newline="")
+
+    # 11a (after 0.4.1). DepthMap's colour distances without double precision: euclideanDist3 calls cheshireLen3, HIP's
+    #     norm3df (OCML's len3) with the largest magnitude's frexp exponent read from its bits where the library converts
+    #     it to a double for it - the same integer for every normal float, so the same result (hip/tests/len3). Two FP64
+    #     instructions fewer per colour distance, two distances per refine sample. HIP only; CHESHIRE_DEPTHMAP_LEN3=0.
+    #     Before 6q (the env.h includes).
+    for f11a, steps11a in ((AV / "src/aliceVision/depthMap/cuda/device/color.cuh", STEP11A_COLOR),
+                           (AV / "src/aliceVision/depthMap/cuda/planeSweeping/deviceSimilarityVolume.cu", STEP11A_DSV)):
+        t = f11a.read_text(encoding="utf-8")
+        if "step 11a" not in t:
+            for old, new in steps11a:
+                if t.count(old) != 1:
+                    sys.exit(f"an anchor of the colour distances not found once in {f11a.name} (11a)")
+                t = t.replace(old, new, 1)
+        f11a.write_text(t, encoding="utf-8", newline="")
 
     # 10g (after 0.4.0). The image cache evicts by load order instead of clock(), whose millisecond ties made the
     #     texturing read-ahead evict images before their use (most False Door passes decoded each image twice).

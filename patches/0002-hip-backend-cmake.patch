@@ -1433,6 +1433,91 @@ index db401e5..0c54e7f 100644
  };
  
  inline std::ostream& operator<<(std::ostream& os, const Tile& tile)
+diff --git a/src/aliceVision/depthMap/cuda/device/color.cuh b/src/aliceVision/depthMap/cuda/device/color.cuh
+index 03ca0e9..8d1f814 100644
+--- a/src/aliceVision/depthMap/cuda/device/color.cuh
++++ b/src/aliceVision/depthMap/cuda/device/color.cuh
+@@ -14,9 +14,62 @@
+ // for the T camera, image alpha should be at least 0.4f (masking)
+ #define ALICEVISION_DEPTHMAP_TC_MIN_ALPHA (255.f * 0.4f) // texture range (0, 255)
+ 
++#ifdef CHESHIRE_HIP
++// cheshire (step 11a): norm3df's own pieces in the ROCm device libraries (OCML)
++extern "C" __device__ float __ocml_len3_f32(float, float, float);
++extern "C" __device__ float __ocml_fmuladd_f32(float, float, float);
++extern "C" __device__ float __ocml_ldexp_f32(float, int);
++#endif
++
+ namespace aliceVision {
+ namespace depthMap {
+ 
++// cheshire (step 11a): the colour distances without double precision. HIP's norm3df is OCML's __ocml_len3_f32: it sorts
++// |x|, |y|, |z| by their bits, takes the largest's frexp exponent e through a double (a conversion and a frexp, so that a
++// denormal gets its true exponent), scales the three by 2^-e, sums their squares with two fmuladds, takes the square root
++// and scales it back by 2^e. The conversion and the frexp are FP64 instructions, which RDNA runs at a fraction of the
++// single-precision rate, and a refine sample measures two colour distances (CostYKfromLab, once per camera).
++// cheshireLen3 is the same function with one change: when the largest magnitude is a normal float, its frexp exponent is
++// its biased exponent minus 126, read from the bits - the same integer, so the same scaling, sums, root and result. When
++// all three are zeros the same steps give +0, the library's result, so zeros - a patch's centre pixel against itself,
++// flat image regions - stay on this path; a denormal, infinite or NaN largest magnitude calls __ocml_len3_f32 itself.
++// The library's own fmuladd and ldexp, so both lower the same way on every target. hip/tests/len3 compares the two bit
++// for bit (17.2 G inputs: colour differences, any bit pattern, denormal and tiny largest magnitudes, zeros among colour
++// differences - no difference) and times them (3.4x on an RX 9070). CHESHIRE_DEPTHMAP_LEN3=0 for norm3df
++// (cheshireLen3Configure, deviceSimilarityVolume.cu, clears the flag); CUDA builds keep norm3df.
++#ifdef CHESHIRE_HIP
++__constant__ int cheshireLen3On_d = 1;
++
++__device__ __forceinline__ float cheshireLen3(float x, float y, float z)
++{
++    const unsigned ua = __float_as_uint(fabsf(x));
++    const unsigned ub = __float_as_uint(fabsf(y));
++    const unsigned uc = __float_as_uint(fabsf(z));
++    const unsigned m1 = max(ua, ub);
++    const unsigned n1 = min(ua, ub);
++    const unsigned a = max(m1, uc);
++    const unsigned n2 = min(m1, uc);
++    const unsigned b = max(n1, n2);
++    const unsigned c = min(n1, n2);
++    const unsigned biased = a >> 23;  // the sign bit is clear
++    if ((biased == 0u && a != 0u) || biased == 255u)  // denormal largest magnitude, or inf / NaN: the library's own path
++        return __ocml_len3_f32(x, y, z);
++    const int e = int(biased) - 126;  // frexp's exponent of a normal float (all zeros: any e gives +0)
++    const float as = __ocml_ldexp_f32(__uint_as_float(a), -e);
++    const float bs = __ocml_ldexp_f32(__uint_as_float(b), -e);
++    const float cs = __ocml_ldexp_f32(__uint_as_float(c), -e);
++    const float t = __ocml_fmuladd_f32(as, as, __ocml_fmuladd_f32(bs, bs, cs * cs));
++    return __ocml_ldexp_f32(__builtin_amdgcn_sqrtf(t), e);
++}
++
++__device__ __forceinline__ float cheshireNorm3(float x, float y, float z)
++{
++    return cheshireLen3On_d ? cheshireLen3(x, y, z) : norm3df(x, y, z);
++}
++#else
++__device__ __forceinline__ float cheshireNorm3(float x, float y, float z) { return norm3df(x, y, z); }
++#endif
++
+ // color Euclidean distance
+ 
+ /**
+@@ -28,7 +81,7 @@ namespace depthMap {
+ __device__ inline float euclideanDist3(const float3 x1, const float3 x2)
+ {
+     // return sqrtf((x1.x - x2.x) * (x1.x - x2.x) + (x1.y - x2.y) * (x1.y - x2.y) + (x1.z - x2.z) * (x1.z - x2.z));
+-    return norm3df(x1.x - x2.x, x1.y - x2.y, x1.z - x2.z);
++    return cheshireNorm3(x1.x - x2.x, x1.y - x2.y, x1.z - x2.z);  // cheshire (step 11a): norm3df's result, above
+ }
+ 
+ /**
+@@ -40,7 +93,7 @@ __device__ inline float euclideanDist3(const float3 x1, const float3 x2)
+ __device__ inline float euclideanDist3(const float4 x1, const float4 x2)
+ {
+     // return sqrtf((x1.x - x2.x) * (x1.x - x2.x) + (x1.y - x2.y) * (x1.y - x2.y) + (x1.z - x2.z) * (x1.z - x2.z));
+-    return norm3df(x1.x - x2.x, x1.y - x2.y, x1.z - x2.z);
++    return cheshireNorm3(x1.x - x2.x, x1.y - x2.y, x1.z - x2.z);  // cheshire (step 11a): norm3df's result, above
+ }
+ 
+ // color conversion utils
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h b/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h
 new file mode 100644
 index 0000000..6ba23ae
@@ -5182,10 +5267,10 @@ index 1d9cc92..4f7f94a 100644
              roi);
      }
 diff --git a/src/aliceVision/depthMap/cuda/planeSweeping/deviceSimilarityVolume.cu b/src/aliceVision/depthMap/cuda/planeSweeping/deviceSimilarityVolume.cu
-index 117850f..0351d3d 100644
+index 117850f..72e6935 100644
 --- a/src/aliceVision/depthMap/cuda/planeSweeping/deviceSimilarityVolume.cu
 +++ b/src/aliceVision/depthMap/cuda/planeSweeping/deviceSimilarityVolume.cu
-@@ -4,7 +4,11 @@
+@@ -4,12 +4,18 @@
  // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
@@ -5197,7 +5282,14 @@ index 117850f..0351d3d 100644
  #include "deviceSimilarityVolumeKernels.cuh"
  
  #include <aliceVision/depthMap/cuda/host/divUp.hpp>
-@@ -47,7 +51,21 @@ __host__ dim3 getMaxPotentialBlockSize(T kernelFuction)
+ 
+ #include <map>
++#include <mutex>  // cheshire: step 11a
++#include <set>
+ 
+ namespace aliceVision {
+ namespace depthMap {
+@@ -47,13 +53,64 @@ __host__ dim3 getMaxPotentialBlockSize(T kernelFuction)
  
      if(recommendedBlockSize > 32)
      {
@@ -5220,7 +5312,66 @@ index 117850f..0351d3d 100644
          return recommendedBlock;
      }
  
-@@ -259,6 +277,18 @@ extern void cuda_volumeRefineSimilarity(CudaDeviceMemoryPitched<TSimRefine, 3>&
+     return defaultBlock;
+ }
+ 
++// cheshire (step 11a): CHESHIRE_DEPTHMAP_LEN3 for the colour distances (device/color.cuh), read and announced once.
++// Off, each device's cheshireLen3On_d is cleared once, before the first kernel that measures a colour distance on it:
++// the launchers of the similarity volume, of its refinement and of the SGM aggregation call this first. The clear is
++// hipMemcpyToSymbol itself, which resolves the symbol on the current device - not the shim's cudaMemcpyToSymbol, whose
++// address cache is per symbol.
++static void cheshireLen3Configure()
++{
++#ifdef CHESHIRE_HIP
++    static const bool on = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_LEN3", true);
++    static std::once_flag announced;
++    std::call_once(announced, [] {
++        if (on)
++            ALICEVISION_LOG_INFO("cheshire: depth map colour distances in single precision (exact: norm3df's own steps without"
++                                 " its double-precision exponent; CHESHIRE_DEPTHMAP_LEN3=0 for norm3df)");
++        else
++            ALICEVISION_LOG_INFO("cheshire: depth map colour distances by norm3df (CHESHIRE_DEPTHMAP_LEN3=0)");
++    });
++    if (on)
++        return;
++    static std::mutex clearedMutex;
++    static std::set<int> cleared;
++    int device = 0;
++    cudaError_t err = cudaGetDevice(&device);
++    THROW_ON_CUDA_ERROR(err, "Failed to get the current device");
++    const std::lock_guard<std::mutex> lock(clearedMutex);
++    if (cleared.insert(device).second)
++    {
++        const int off = 0;
++        err = hipMemcpyToSymbol(HIP_SYMBOL(cheshireLen3On_d), &off, sizeof(off), 0, hipMemcpyHostToDevice);
++        THROW_ON_CUDA_ERROR(err, "Failed to clear the colour distances' switch");
++    }
++#else
++    static std::once_flag announced;
++    std::call_once(announced, [] { ALICEVISION_LOG_INFO("cheshire: depth map colour distances by CUDA's norm3df"); });
++#endif
++}
++
+ __host__ void cuda_volumeInitialize(CudaDeviceMemoryPitched<TSim, 3>& inout_volume_dmp, TSim value, cudaStream_t stream)
+ {
+     // get input/output volume dimensions
+@@ -170,6 +227,7 @@ __host__ void cuda_volumeComputeSimilarity(CudaDeviceMemoryPitched<TSim, 3>& out
+     const CudaSize<2> tcLevelDim = tcDeviceMipmapImage.getDimensions(sgmParams.scale);
+ 
+     // kernel launch parameters
++    cheshireLen3Configure();  // cheshire (step 11a)
+     const dim3 block = getMaxPotentialBlockSize(volume_computeSimilarity_kernel);
+     const dim3 grid(divUp(roi.width(), block.x), divUp(roi.height(), block.y), depthRange.size());
+ 
+@@ -223,6 +281,7 @@ extern void cuda_volumeRefineSimilarity(CudaDeviceMemoryPitched<TSimRefine, 3>&
+     const CudaSize<2> tcLevelDim = tcDeviceMipmapImage.getDimensions(refineParams.scale);
+ 
+     // kernel launch parameters
++    cheshireLen3Configure();  // cheshire (step 11a)
+     const dim3 block = getMaxPotentialBlockSize(volume_refineSimilarity_kernel);
+     const dim3 grid(divUp(roi.width(), block.x), divUp(roi.height(), block.y), depthRange.size());
+ 
+@@ -259,6 +318,18 @@ extern void cuda_volumeRefineSimilarity(CudaDeviceMemoryPitched<TSimRefine, 3>&
  }
  
  
@@ -5239,7 +5390,15 @@ index 117850f..0351d3d 100644
  __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_volAgr_dmp,
                                         CudaDeviceMemoryPitched<TSimAcc, 2>& inout_volSliceAccA_dmp,
                                         CudaDeviceMemoryPitched<TSimAcc, 2>& inout_volSliceAccB_dmp,
-@@ -298,6 +328,79 @@ __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_vol
+@@ -275,6 +346,7 @@ __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_vol
+                                        const ROI& roi,
+                                        cudaStream_t stream)
+ {
++    cheshireLen3Configure();  // cheshire (step 11a)
+     CudaSize<3> volDim = in_volSim_dmp.getSize();
+     volDim[2] = lastDepthIndex; // override volume depth, use rc depth list last index
+ 
+@@ -298,6 +370,79 @@ __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_vol
      const dim3 blockVolSlide(blockSizeL, 1, 1);
      const dim3 gridVolSlide(divUp(volDimX, blockVolSlide.x), volDimZ, 1);
  
@@ -5319,7 +5478,7 @@ index 117850f..0351d3d 100644
      CudaDeviceMemoryPitched<TSimAcc, 2>* xzSliceForY_dmpPtr   = &inout_volSliceAccA_dmp; // Y slice
      CudaDeviceMemoryPitched<TSimAcc, 2>* xzSliceForYm1_dmpPtr = &inout_volSliceAccB_dmp; // Y-1 slice
      CudaDeviceMemoryPitched<TSimAcc, 2>* bestSimInYm1_dmpPtr  = &inout_volAxisAcc_dmp;   // best sim score along the Y axis for each Z value
-@@ -368,6 +471,7 @@ __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_vol
+@@ -368,6 +513,7 @@ __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_vol
  
          std::swap(xzSliceForYm1_dmpPtr, xzSliceForY_dmpPtr);
      }

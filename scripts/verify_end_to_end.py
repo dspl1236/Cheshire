@@ -59,7 +59,10 @@ GPU_MARKERS = {
                           r"cheshire: depth map tiles overlap",
                           r"cheshire: depth map batches overlap",
                           r"cheshire: image headers read on every core",
-                          r"cheshire: depth map tiles' T cameras for \d+ cameras in \S+ s on every core"],
+                          r"cheshire: depth map tiles' T cameras for \d+ cameras in \S+ s on every core",
+                          # after 0.4.1: the colour distances without double precision (step 11a), HIP only; a CUDA
+                          # package says it keeps CUDA's norm3df
+                          r"cheshire: depth map colour distances (in single precision|by CUDA's norm3df)"],
     "DepthMapFilter":    [r"depth map filter: group votes on",
                           r"depth map filter cache: cap \d+ MB"],
     # 0.3.2: every port announces on both paths, so the three that were silent on success
