@@ -871,8 +871,13 @@ Next:
   - the refinement's patch loop, about 125 VALU instructions per sample, is near its exact floor for the arithmetic it
     does (each colour distance about 23); what is left is its structure;
   - the proximity weight's square root is already one pseudo-scalar `v_s_sqrt_f32` on gfx12: nothing to gain there;
-  - wave64 on RDNA3/4 for dual issue, the same arithmetic per lane if no kernel depends on the wave's width (a runtime
-    switch would need both builds of the kernels).
+  - **wave64, scoped 2026-10-07 and dropped for RDNA4.** No DepthMap device code depends on the wave's width (the one
+    wave-level helper, the mipmap emulation's uniformity check, works at either), and the TU compiles with
+    `-mwavefrontsize64` (the patch kernels at 12 waves of 64 per SIMD against 16 of 32). On the RX 9070 a False Door
+    chunk ran the same with either build (wave32 56.8, 58.5, 58.6 s; wave64 57.3, 57.4, 58.6 s), the 96 maps identical.
+    A runtime switch would need two whole builds of the device code: clang refuses a per-kernel
+    `target("wavefrontsize64")` because every inlined device function, HIP's own `threadIdx` accessors included,
+    would need it too. Worth measuring once on RDNA3 (gfx11), whose dual-issue rules differ; nothing to do on RDNA4.
 - **What a DepthMap chunk still does with the device idle** (10k): its first batch's load (2.6 s), each later batch's
   upload (3 s a chunk; uploading during the previous batch's tiles needs device-cache slots the batch does not use and
   a stream of its own), 2.8 s of startup.
