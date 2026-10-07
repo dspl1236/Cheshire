@@ -848,6 +848,11 @@ Not released yet.
   next batch's images decoded while the device runs the batch's tiles; the images' headers (MultiViewParams, so every
   program that reads them) and the tiles' T cameras on every core. False Door chunk 0: 98.4-102.0 s to 83.7-85.2 s,
   the same maps; house-pc's 41 views (RX 6750 XT, Linux): DepthMap 134.9 s to 115.5 s, the same maps.
+- **The False Door end to end with all of it, 2026-10-06** (same doc, "the False Door end to end with everything
+  since"): 10,913 s (0.4.0 with `knn2_wmma`) and 7,969 s (10a-10g) to 5,253 s, DepthMap 5,587 s to 1,733 s; the job
+  repeats itself through SfMExpanding (10i's bytes inside a whole job).
+- **Linux CUDA, 2026-10-06** (the 10k section): house-pc's GTX 1080 Ti ran 10j, 10k and the AliceVision move for the
+  first time, every depth map the 10a-10i CUDA gate's, everything since 0.4.0 off against on identical node by node.
 
 Next:
 - **DepthMap's GPU stages**, now that a chunk waits on them (10h): the refine-and-fuse stage first, the largest
@@ -855,7 +860,11 @@ Next:
 - **What a DepthMap chunk still does with the device idle** (10k): its first batch's load (2.6 s), each later batch's
   upload (3 s a chunk; uploading during the previous batch's tiles needs device-cache slots the batch does not use and
   a stream of its own), 2.8 s of startup.
-- **A release gate** with the matcher kernels and 10a-10k, when the user decides.
+- **The 0.4.1 release round**, 2026-10-06/07 (the user: "Do as needed"; docs/04, "The 0.4.1 release round"): packages
+  built at e7bee63, the Linux HIP one again at 4d7a6ca after the architecture-flag finding (the Linux scripts now
+  `TARGET_ARCHITECTURE=none -DUSE_SSE2=ON`, 353 of 353 files the gated bundle's); the Windows AMD gate 28 of 28 on the RX
+  9070 with 0.4.0's depth maps; the Linux packages the gated builds; the Windows CUDA zip's CPU smoke test as in 0.4.0.
+  Notes docs/releases/0.4.1.md (uncommitted). Publishing waits for the user's OK.
 - **Smaller host costs in the same logs:** Meshing's "Create visibilities" (64 s).
 - **The reference patch is not cacheable exactly.** `volume_computeSimilarity_kernel` samples the R camera on a
   3D patch built per depth (epipolar-aligned axes); its pixel positions agree across depths only in exact

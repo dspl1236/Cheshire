@@ -4677,7 +4677,8 @@ depth list checks on; the depth maps of all four are the 10a-10i builds' (`839b8
 announcement absent by design) compared node by node: the 82 depth and similarity maps identical (`740e2c05…`, as in
 the 10a-10i gate), every other file as before but ExportImages' `sfm.abc` and the nodes that do not repeat
 themselves. **Compiled:** Windows HIP and Linux HIP and CUDA at 766a166 (the CUDA tree 11 of 11 steps, the two
-changed device files among them). The CUDA build has not run 10j: no NVIDIA card is in reach, as in 0.4.0.
+changed device files among them). The CUDA build had not run 10j then (no NVIDIA card in reach); it has since, with
+10k and the AliceVision move, on house-pc's GTX 1080 Ti (the 10k section, "Linux CUDA").
 
 ## AliceVision develop f2447d4: the submodule moved (2026-10-06)
 
@@ -4685,9 +4686,11 @@ The submodule moved from `develop` 2cb1a39 (2026-08-28) to f2447d4, the merge of
 13 merges later: the project's two fixes, #2181 (UVAtlas sorts camera candidates by area) and #2179 (Mesher reads the
 neighbour-inversion count as an int); Ceres 2.3 support (`DynamicCostFunctionToFunctor` from Ceres when it has one;
 the builds have Ceres 2.2 and keep the local copy); lemon as the `LEMON::lemon` target, which both dependency trees
-already export (1.3.2); `/D__SSE2__` for MSVC on x64 (clang defines it already, so only the Windows CUDA build's MSVC
-host code sees a change); the radial4 and fisheye1 Jacobians and the SO3 logarithm at an exact half turn; a sensor
-database entry; Windows, Docker and Python packaging changes. The patched tree at 2cb1a39 was stashed in the submodule
+already export (1.3.2); `/D__SSE2__` for MSVC on x64, only where `USE_SSE2` is set (no Windows build sets it: they
+configure `TARGET_ARCHITECTURE=none`, and the Windows CUDA build's `build.ninja` has no `/D__SSE2__`); the radial4 and
+fisheye1 Jacobians and the SO3 logarithm at an exact half turn; OptimizeForArchitecture re-applying its flags on
+every cmake run, which reached the Linux builds (the 0.4.1 release round, below); a sensor database entry; Windows,
+Docker and Python packaging changes. The patched tree at 2cb1a39 was stashed in the submodule
 (and its diff kept as `build/av-2cb1a39-worktree.diff`), f2447d4 checked out clean, and the generator run on it:
 - step 4u went: upstream now does what it did (`docs/11-meshing-cpu.md`), so `CHESHIRE_INVERT_OLD` and its per-round
   log lines went with it;
@@ -4779,5 +4782,105 @@ sha256 `e8ae787c…`; `build/gate-10k/gate10k-hip.sh`): Meshroom 2025.1 mini6 `b
 s, the T cameras 0.33 s on the i3's four threads) and with the three switches off (601 s; DepthMap 134.9 s, the T
 cameras 1.36 s; 13 of 14, 10k's announcements absent by design): the depth maps identical (`740e2c05…`), the node 14 %
 shorter as on the RX 9070. **Compiled:** Linux CUDA 444 of 444 and Windows CUDA 182 of 182 steps (incremental builds,
-both changed files among them; MSVC takes the OpenMP loops). The CUDA build has not run 10k: no NVIDIA card is in
-reach.
+both changed files among them; MSVC takes the OpenMP loops).
+
+**Linux CUDA**, house-pc's GTX 1080 Ti after the user's card swap, a bundle of e7bee63 built in WSL from the 0.4.0
+release CUDA tree (`build/gate-cuda10k`, sha256 `25984447…`; `build/gate-cuda10k/gatecuda10k.sh`): the first CUDA
+runtime of 10j, 10k and the AliceVision move. Meshroom 2025.1 mini6 `base`, `experimental`, `fastransacexp`,
+`verifyexp` and `verify`, `tiles` and `coarse` with the checks on, and Meshroom 2023.3 mini6 `base`, all ok, every
+depth map digest the 10a-10i CUDA gate's on this card (`8ed1fc38…`, `d99c1127…`, `e70c2b1f…`, `250ee179…`,
+`84e0e1f7…`, `fc7dae17…`). 41 views `experimental` three times: with the self-checks on (646 s, 14 of 14), with every
+step since 0.4.0 off and the matcher on `knn2_u8` (676 s; 10 of 14, the steps' announcements absent by design), and as
+shipped (636 s, 14 of 14), all three with the depth maps `19c5b1ff…` (the 10a-10i gate's). Off against shipped, node
+by node (`cmp10.py`): every file identical, FeatureMatching's matches with `knn2_u8` and `knn2_dot4q` included, but
+ExportImages' `sfm.abc`, which records the run's folder; Meshing, MeshFiltering and Texturing are not compared, as they
+do not repeat themselves.
+
+## After 0.4.0: the False Door end to end with everything since (2026-10-06)
+
+The same job as the two runs above, with the development build at e7bee63: the matcher kernels, steps 10a-10k and
+AliceVision develop f2447d4. A flat test package of the development install with its bundled HIP runtime moved aside
+(`C:\cheshire-fd-test\run-fd-v10k.cmd`), the 884 photos, the cache and the outputs on C:, Meshroom 2025.1 with
+`fastransacexp`. The harness: `ok`, 14 of 14 ports, one mesh, 52 textures, 5,269 s.
+
+| node | 0.4.0 + `knn2_wmma` (2026-10-03) | 10a-10g (2026-10-04) | now |
+|---|---|---|---|
+| FeatureExtraction | 557 s | 556 s | 575 s |
+| FeatureMatching (45 chunks) | 181 s | 136 s | 121 s |
+| TracksBuilding | 19 s | 31 s | 28 s |
+| RelativePoseEstimating (36 chunks) | 373 s | 156 s | 150 s |
+| SfMExpanding | 741 s | 451 s | 492 s |
+| ExportImages | 304 s | 301 s | 320 s |
+| DepthMap (19 chunks) | 5,587 s | 4,278 s | 1,733 s |
+| DepthMapFilter (37 chunks) | 336 s | 339 s | 249 s |
+| Meshing | 215 s | 217 s | 218 s |
+| MeshFiltering | 78 s | 88 s | 87 s |
+| Texturing | 2,480 s (51 atlases) | 1,379 s (53) | 1,245 s (52) |
+| the other nodes | 42 s | 37 s | 35 s |
+| whole job | 10,913 s | 7,969 s | 5,253 s |
+
+DepthMap is 10e's startup, 10h's depth lists, 10j's tiles and 10k's batches together, 3.2 times shorter than in 0.4.0;
+DepthMapFilter's 87 s are 10k's headers read in parallel, about 2.4 s in each of its 37 chunks. TracksBuilding's few
+seconds more are 10c's binary copy of the tracks file, which RelativePoseEstimating's chunks then read.
+
+**It repeats itself through SfMExpanding.** Against the 10a-10g run: FeatureExtraction's 1,768 files, ImageMatching's,
+FeatureMatching's 45, TracksBuilding's and SfMBootStrapping's are the same bytes; RelativePoseEstimating's 5,629 pairs
+are the same set (its chunks write them in their threads' order, as upstream's do); and SfMExpanding gives
+`cameras.sfm` `4429a859…` and `sfmExpanded.abc` `72d34017…`, the three replays' of 10i's section, now inside a whole
+job. Everything after SfMExpanding differs from the 10a-10g run, whose SfMExpanding was one of the runs that did not
+repeat themselves.
+
+## The 0.4.1 release round (2026-10-06/07)
+
+All four packages were built at e7bee63 (`build/chain-041.cmd`) in 49 minutes: the Windows AMD bundle's two rocm7.2 and
+nine hip6.2 targets, the Windows CUDA zip, and the Linux HIP and CUDA packages in WSL. The packers' checks pass, and by
+hand: each of the Windows AMD bundle's 11 targets carries its seven libraries, each `aliceVision_matching.dll` carries
+`knn2_wmma`, `knn2_dot4q` and `knn2_u8` (the card picks one at run time), and `gpu/<family>/UNTESTED` lists gfx1010,
+gfx1030 and gfx1032-gfx1036 (hip6.2) and gfx11-generic (rocm7.2).
+
+**The Linux builds and the architecture flags.** Each Linux package was compared file by file with the bundle its card
+had gated (`tarcmp.py`). The CUDA tarball matched in 338 of 339 files, the other being PopSIFT, which the release
+recipe rebuilds and nvcc never builds byte for byte the same (its temporary file names reach the symbols). The HIP
+tarball matched in 211 of 353. The cause is in AliceVision f2447d4: OptimizeForArchitecture now adds its compiler
+flags on every cmake run. Before it they were added only on the configure that computed them, and the build's own
+cmake run, the second, dropped them; so `TARGET_ARCHITECTURE=core` built the x86-64 baseline in practice, with the
+switches it had cached, `USE_SSE2` and so `ALICEVISION_HAVE_SSE=1` (the SSE descriptor distances in
+`feature/metric.hpp`, VLFeat's SSE2 code). The HIP recipe configures a fresh tree each time, so its first build after
+the move was the first to get `-march=core2`, SSE3 and core2 tuning: 3,454 SSE3-only instructions in
+`libaliceVision_multiview` alone, against none in 0.4.0's and the gated bundle's. The incremental CUDA tree kept its
+old cache and was unaffected.
+
+The Linux scripts now configure `-DTARGET_ARCHITECTURE=none -DUSE_SSE2=ON` (b1b1405, 4d7a6ca), which is what every Linux
+release has been: `none` alone turned the SSE paths off as well (319 of 353 files). The HIP package rebuilt fresh at
+4d7a6ca matches the gated 10k bundle in 353 of 353 files, so it is the build that card ran. The Linux CUDA package is
+the gated bundle itself (`build/gate-cuda10k`, built at e7bee63 in the release CUDA tree). The Windows builds were
+never affected: they configure `none`, and have `ALICEVISION_HAVE_SSE=0` as they always had.
+
+**The gate.** The Windows AMD zip as built, on the RX 9070 (`build/gate-041/windows-amd.sh`): Meshroom 2025.1 mini6 in all
+19 configurations, 41 views in five, Meshroom 2023.3 mini6 in four. The Linux packages are the gated builds themselves
+(above): the RX 6750 XT's 10k gate (nine runs, and 41 views with 10k on and off) and the GTX 1080 Ti's post-0.4.0 CUDA
+gate (eleven runs, and 41 views with everything since 0.4.0 off and on, identical node by node), both in the 10k
+section.
+
+| package | hardware | 2025.1: mini6 | 2025.1: 41 views | 2023.3: mini6 |
+|---|---|---|---|---|
+| Windows AMD | RX 9070 (rocm7.2 gfx12-generic payload) | 19/19 | base 332 s, verify 721 s, experimental 308 s, fastransacexp 282 s, verifyexp 721 s | 4/4 |
+| Linux AMD | RX 6750 XT (house-pc; the 10k gate's bundle, the same files) | 7/7 | experimental 576 s | 1/1 |
+| Linux CUDA | GTX 1080 Ti (house-pc; the shipped file) | 7/7 | experimental 636 s, three runs | 1/1 |
+| Windows CUDA | not run on an NVIDIA card (below) | | | |
+
+Every run passed. On the RX 9070 every configuration's depth maps are 0.4.0's gate's on the same card, byte for byte,
+except `cpufallback`'s, whose digest has changed with every release since 0.3.6. The 41-view times are 0.4.0's less
+13-18 % (base 388 to 332 s, experimental 359 to 308 s, verifyexp 858 to 721 s).
+
+**Windows CUDA**, still without a test box (bench-pc), got 0.4.0's smoke test: its eight new-pipeline programs ran the
+41-view Photogrammetry Experimental command lines of this gate on the RX 9070 box, from the zip alone (its `bin` and
+Windows on the PATH). All finished. TracksBuilding's file is the AMD zip's byte for byte; SfMExpanding placed all 41
+cameras within 0.0028 % of the scene's radius of the AMD zip's reconstruction (rotations within 0.0028 degrees), as in
+0.4.0; the rest differs at the rounding of MSVC's floating-point code against clang's. A first attempt replayed the
+nightly's command lines, whose SfMBootStrapping writes `bootstrap.usda`: it stops with 0x80000003, the known USD gap of
+both Windows zips, which Meshroom 2025.1's templates never meet. The replay wrote into the gate's `experimental` cache
+(its command lines name that folder), after the gate had recorded the run; the AMD outputs it was compared with are
+the `verifyexp` run's, the same pipeline with the same depth maps.
+
+Not run on a card in this release: the Windows hip6.2 payloads (RDNA1 and RDNA2 under Windows), whose test box is down.
