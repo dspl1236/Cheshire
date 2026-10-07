@@ -813,9 +813,14 @@ Left for the pivot proper: the submodule moved to the Meshroom release that make
 Photogrammetry, USD, 5r/5s and the ranking ties on SfmBundle and ExpansionPolicyLegacy, and a harness whose
 `base` runs the new chain.
 
-## After 0.4.0
+## 0.4.1
 
-Not released yet.
+**Released 2026-10-07 as v0.4.1**: the same output in half the time, the 884-photo False Door 10,930 s to 5,269 s
+(notes docs/releases/0.4.1.md; docs/04, "The 0.4.1 release round"). Tag v0.4.1 at b6f1484; the Windows packages and
+the Linux CUDA package built at e7bee63, the Linux HIP package at 4d7a6ca, the same sources with the Linux scripts'
+architecture setting restored (`TARGET_ARCHITECTURE=none -DUSE_SSE2=ON`: AliceVision f2447d4 began applying the
+`core` flags the Linux builds had always lost). GitHub release 405731505 (v0.4.0 marked superseded), Forgejo 129.
+What it carries:
 
 - **The matcher kernels** (`docs/07-gpu-matcher.md`, last section): `knn2_wmma` on RDNA4, `knn2_dot4q` on NVIDIA
   (308252d, a4d0a79) and, measured 2026-10-05 on the RX 6750 XT (1.9x on the kernels), on RDNA2. RDNA1 and RDNA3
@@ -854,17 +859,16 @@ Not released yet.
 - **Linux CUDA, 2026-10-06** (the 10k section): house-pc's GTX 1080 Ti ran 10j, 10k and the AliceVision move for the
   first time, every depth map the 10a-10i CUDA gate's, everything since 0.4.0 off against on identical node by node.
 
+## After 0.4.1
+
 Next:
 - **DepthMap's GPU stages**, now that a chunk waits on them (10h): the refine-and-fuse stage first, the largest
   under the stage syncs (`CHESHIRE_PROFILE_SGM=1`); exact or not at all, as the rest.
 - **What a DepthMap chunk still does with the device idle** (10k): its first batch's load (2.6 s), each later batch's
   upload (3 s a chunk; uploading during the previous batch's tiles needs device-cache slots the batch does not use and
   a stream of its own), 2.8 s of startup.
-- **The 0.4.1 release round**, 2026-10-06/07 (the user: "Do as needed"; docs/04, "The 0.4.1 release round"): packages
-  built at e7bee63, the Linux HIP one again at 4d7a6ca after the architecture-flag finding (the Linux scripts now
-  `TARGET_ARCHITECTURE=none -DUSE_SSE2=ON`, 353 of 353 files the gated bundle's); the Windows AMD gate 28 of 28 on the RX
-  9070 with 0.4.0's depth maps; the Linux packages the gated builds; the Windows CUDA zip's CPU smoke test as in 0.4.0.
-  Notes docs/releases/0.4.1.md (uncommitted). Publishing waits for the user's OK.
+- **The Windows CUDA zip and the Windows hip6.2 payloads on hardware**, when bench-pc is back: neither has run on a
+  card since 0.3.9 and 0.4.0 respectively.
 - **Smaller host costs in the same logs:** Meshing's "Create visibilities" (64 s).
 - **The reference patch is not cacheable exactly.** `volume_computeSimilarity_kernel` samples the R camera on a
   3D patch built per depth (epipolar-aligned axes); its pixel positions agree across depths only in exact
