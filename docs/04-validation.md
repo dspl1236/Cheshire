@@ -5030,3 +5030,44 @@ at 72 s here. With the stage syncs the colour optimisation is now 5.0 s of the c
 CUDA (the two CUDA files that include the changed headers, and the library). Linux CUDA compiled 11b at d14bef0
 (444 of 444). In WSL at 60a4318, Linux CUDA 444 of 444 and Linux HIP 444 of 444, bundled with 11a-11c for
 house-pc's RX 6750 XT when it is back in the box (`build/gate-11c`, sha256 `85149398…`). Not yet run on Linux.
+
+## The 0.4.2 release round (2026-10-07)
+
+**The False Door's whole DepthMap node, 0.4.1 against 0.4.2.** All 19 chunks of the False Door's DepthMap node
+(Photogrammetry Experimental Fast Ransac on Meshroom 2025.1, the 10a-10g run's command lines) ran twice on the RX 9070,
+alternating chunk by chunk: the 0.4.1 release package (its gfx12-generic base, the bundled HIP runtime set aside) and
+the development build with 11a-11c at 60a4318. The chunks took 1,878 s with 0.4.1 and 1,297 s with 0.4.2, 31 % less;
+each of the 18 chunks with cameras was 26-35 % shorter (the 19th has none). All 1,652 depth and similarity maps (826 views) are the same bytes in both.
+
+**The packages.** All four were built at 0aa4f5f (`build/chain-042.cmd`) in 46 minutes; the packers' checks pass. The
+Linux HIP tarball, built fresh, matches the bundle of 60a4318 built for house-pc (`build/gate-11c`) in all 353 of its
+files, so the architecture setting of 0.4.1's round holds.
+
+**The gates.**
+
+| package | hardware | 2025.1: mini6 | 2025.1: 41 views | 2023.3: mini6 |
+|---|---|---|---|---|
+| Windows AMD | RX 9070 (the zip as built, rocm7.2 gfx12-generic payload) | 19/19 | base 313 s, verify 721 s, experimental 288 s, fastransacexp 258 s, verifyexp 748 s | 4/4 |
+| Linux CUDA | GTX 1080 Ti (house-pc; the released tarball) | 7/7 | experimental 631 s | 1/1 |
+| Linux AMD | RX 6750 XT (house-pc; the released tarball) | 7/7 | experimental 566 s, and 586 s with 11a-11c off | 1/1 |
+| Windows CUDA | not run on an NVIDIA card (below) | | | |
+
+On the RX 9070 every configuration's depth maps are 0.4.1's gate's on the same card, byte for byte, except
+`cpufallback`'s, whose digest has changed with every release since 0.3.6. The 41-view times are 0.4.1's less 5.7-8.5 %
+where DepthMap is a large share (base 332 to 313 s, experimental 308 to 288 s, fastransacexp 282 to 258 s); the
+verify runs are their self-checks. On the GTX 1080 Ti every depth map digest is the 10k CUDA gate's (`8ed1fc38…`,
+`d99c1127…`, `e70c2b1f…`, `250ee179…`, `84e0e1f7…`, 41 views `19c5b1ff…`, 2023.3 `fc7dae17…`), and every DepthMap
+log carries the CUDA builds' three announcements that they keep NVIDIA's functions.
+On the RX 6750 XT every depth map digest is the 10k HIP gate's (`26fc558e…`, `65d76194…`, `c6b62275…`, `f7e813fc…`,
+`014df5da…`, 41 views `740e2c05…`, 2023.3 `c4e51fa5…`): the first runtime of 11a-11c on Linux, with ROCm 7.2.0's device
+libraries, and every DepthMap log announces all three. 41 views with `CHESHIRE_DEPTHMAP_LEN3=0`,
+`CHESHIRE_DEPTHMAP_RCP=0` and `CHESHIRE_DEPTHMAP_ACOS=0` gave the same depth maps (`740e2c05…`; 13 of 14 ports, the three
+announcements absent by design), 586 s against 566 s.
+
+**Windows CUDA**, still without a test box, got 0.4.1's smoke test, set up so that it cannot write into the gate's cache
+(0.4.1's replay did): the 41-view Photogrammetry Experimental cache's SfM-chain nodes copied with their command lines
+rewritten to the copy (`build/nightly-cmp/mk_g42.py`), and the zip's eight new-pipeline programs run on it from its own
+`bin` and Windows alone (`replay_cudapkg042.py`). All finished; TracksBuilding's file is the AMD zip's byte for byte, and
+SfMExpanding placed all 41 cameras within 0.0028 % of the scene's radius of the AMD zip's reconstruction (rotations
+within 0.0028 degrees), as in 0.4.0 and 0.4.1; the rest differs at the rounding of MSVC's floating-point code against
+clang's.
