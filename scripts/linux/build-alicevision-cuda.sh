@@ -68,6 +68,8 @@ CHESHIRE_SKIP_PATCH_EXPORT=1 python3 "$ROOT/scripts/apply_hip_patch.py"
 
 mkdir -p "$AV_BUILD"
 cd "$AV_BUILD"
+# TARGET_ARCHITECTURE=none: the x86-64 baseline every Linux release has shipped; see build-alicevision.sh (AliceVision
+# f2447d4 re-applies OptimizeForArchitecture's flags on every cmake run, where `core` used to lose them).
 cmake "$AV_DEV" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$AV_DEPS;$CUDA" \
@@ -82,7 +84,7 @@ cmake "$AV_DEV" -G Ninja \
   -DALICEVISION_USE_OPENCV=OFF -DALICEVISION_USE_ONNX=OFF -DALICEVISION_USE_ONNX_GPU=OFF \
   -DALICEVISION_USE_USD=OFF -DALICEVISION_USE_ALEMBIC=ON -DALICEVISION_BUILD_LIDAR=OFF \
   -DALICEVISION_BUILD_TESTS=OFF -DALICEVISION_BUILD_DOC=OFF -DALICEVISION_BUILD_SWIG_BINDING=OFF \
-  -DMINIGLOG=ON -DTARGET_ARCHITECTURE=core \
+  -DMINIGLOG=ON -DTARGET_ARCHITECTURE=none \
   ${CHESHIRE_CMAKE_EXTRA:-}
 
 echo "=== what the configure decided"

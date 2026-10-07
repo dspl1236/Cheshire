@@ -55,6 +55,10 @@ CHESHIRE_SKIP_PATCH_EXPORT=1 python3 "$ROOT/scripts/apply_hip_patch.py"
 
 mkdir -p "$AV_BUILD"
 cd "$AV_BUILD"
+# TARGET_ARCHITECTURE=none: the x86-64 baseline, the code every Linux release has shipped. Until AliceVision f2447d4
+# OptimizeForArchitecture added its flags only on the configure that computed them, and this script's second cmake run
+# (the build's) dropped them, so `core` built the baseline in practice. f2447d4 re-applies them on every run, and `core`
+# would now mean -march=core2 with SSE3 and core2 tuning: every binary different, none of it gated (2026-10-07, docs/04).
 cmake "$AV_DEV" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$AV_DEPS;$ROCM" \
@@ -69,7 +73,7 @@ cmake "$AV_DEV" -G Ninja \
   -DALICEVISION_USE_OPENCV=OFF -DALICEVISION_USE_ONNX=OFF -DALICEVISION_USE_ONNX_GPU=OFF \
   -DALICEVISION_USE_USD=OFF -DALICEVISION_USE_ALEMBIC=ON -DALICEVISION_BUILD_LIDAR=OFF \
   -DALICEVISION_BUILD_TESTS=OFF -DALICEVISION_BUILD_DOC=OFF -DALICEVISION_BUILD_SWIG_BINDING=OFF \
-  -DMINIGLOG=ON -DTARGET_ARCHITECTURE=core \
+  -DMINIGLOG=ON -DTARGET_ARCHITECTURE=none \
   ${CHESHIRE_CMAKE_EXTRA:-}
 # Assert the cache took the PopSift we named, not one it found. A cache configured earlier for
 # the CUDA backend keeps PopSift_DIR=/opt/popsift-cuda, and find_package keeps it when the named
