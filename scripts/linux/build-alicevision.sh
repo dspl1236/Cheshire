@@ -55,10 +55,12 @@ CHESHIRE_SKIP_PATCH_EXPORT=1 python3 "$ROOT/scripts/apply_hip_patch.py"
 
 mkdir -p "$AV_BUILD"
 cd "$AV_BUILD"
-# TARGET_ARCHITECTURE=none: the x86-64 baseline, the code every Linux release has shipped. Until AliceVision f2447d4
-# OptimizeForArchitecture added its flags only on the configure that computed them, and this script's second cmake run
-# (the build's) dropped them, so `core` built the baseline in practice. f2447d4 re-applies them on every run, and `core`
-# would now mean -march=core2 with SSE3 and core2 tuning: every binary different, none of it gated (2026-10-07, docs/04).
+# TARGET_ARCHITECTURE=none with USE_SSE2=ON: what every Linux release has shipped. With `core`, OptimizeForArchitecture
+# cached USE_SSE2 (so ALICEVISION_HAVE_SSE=1: the SSE descriptor distances in feature/metric.hpp and VLFeat's SSE2 code)
+# and added its -march=core2 flags only on the configure that computed them; this script's second cmake run (the
+# build's) dropped them, so the code was the x86-64 baseline with AliceVision's SSE paths. AliceVision f2447d4 re-applies
+# the flags on every run: `core` would now mean -march=core2 with SSE3 and core2 tuning, every binary different and none
+# of it gated, and `none` alone would turn the SSE paths off (2026-10-07, docs/04).
 cmake "$AV_DEV" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$AV_DEPS;$ROCM" \
@@ -73,7 +75,7 @@ cmake "$AV_DEV" -G Ninja \
   -DALICEVISION_USE_OPENCV=OFF -DALICEVISION_USE_ONNX=OFF -DALICEVISION_USE_ONNX_GPU=OFF \
   -DALICEVISION_USE_USD=OFF -DALICEVISION_USE_ALEMBIC=ON -DALICEVISION_BUILD_LIDAR=OFF \
   -DALICEVISION_BUILD_TESTS=OFF -DALICEVISION_BUILD_DOC=OFF -DALICEVISION_BUILD_SWIG_BINDING=OFF \
-  -DMINIGLOG=ON -DTARGET_ARCHITECTURE=none \
+  -DMINIGLOG=ON -DTARGET_ARCHITECTURE=none -DUSE_SSE2=ON \
   ${CHESHIRE_CMAKE_EXTRA:-}
 # Assert the cache took the PopSift we named, not one it found. A cache configured earlier for
 # the CUDA backend keeps PopSift_DIR=/opt/popsift-cuda, and find_package keeps it when the named
