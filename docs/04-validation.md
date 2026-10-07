@@ -4884,3 +4884,103 @@ both Windows zips, which Meshroom 2025.1's templates never meet. The replay wrot
 the `verifyexp` run's, the same pipeline with the same depth maps.
 
 Not run on a card in this release: the Windows hip6.2 payloads (RDNA1 and RDNA2 under Windows), whose test box is down.
+
+## After 0.4.1: the colour distances without double precision (step 11a, 2026-10-07)
+
+With 10k a False Door DepthMap chunk is mostly its twelve batches' tiles on the GPU (75 s of 84 s). The largest part
+is the refine kernel (`volume_refineSimilarity_kernel`: for each pixel, each of 31 depths around its SGM depth and each
+T camera, a 7 x 7 patch NCC). It is bound by its arithmetic: 65 VGPRs, all 16 waves a SIMD holds, no spills, about 180
+instructions per patch sample. Four of those instructions are double precision. Every sample weighs its colour
+difference from the patch's centre in both cameras (`CostYKfromLab`), and `euclideanDist3` takes that distance with
+`norm3df`, which on HIP is OCML's `__ocml_len3_f32`. It sorts |x|, |y|, |z| by their bits, converts the largest to a
+double for its `frexp` exponent e (`v_cvt_f64_f32`, `v_frexp_exp_i32_f64`, so that a denormal gets its true exponent),
+scales the three by 2^-e, sums their squares with two `fmuladd`s, takes the square root and scales it back. RDNA runs
+FP64 at a fraction of the single-precision rate. SGM's similarity volume and its aggregation take colour distances the
+same way.
+
+For a normal float the `frexp` exponent is its biased exponent minus 126: the same integer, read from the bits.
+`cheshireLen3` (`device/color.cuh`) is the library's function with that one change. It is built from the library's own
+`fmuladd` and `ldexp` and the same square root, so it gives the same scaling, sums, root and result. Three zeros (a
+patch's centre against itself, flat regions) give +0 through the same steps, as in the library. A denormal, infinite or
+NaN largest magnitude calls `__ocml_len3_f32` itself. The library function is the same in all three device libraries
+the packages are built with: ROCm 7.2.1 (Windows), 6.2 (the hip6.2 payloads) and 7.2.0 (Linux), compared in their IR.
+
+`hip/tests/len3` compares the two bit for bit on 17.2 G inputs of four kinds: colour differences, any bit pattern,
+denormal and tiny largest magnitudes, and zeros among colour differences. It finds no difference. On the RX 9070
+`cheshireLen3` makes 358 G calls a second against the library's 104 G. The refine kernel now needs 59 VGPRs.
+
+The step is HIP only: CUDA's `norm3df` is NVIDIA's own, and a CUDA build announces that it keeps it.
+`CHESHIRE_DEPTHMAP_LEN3=0` restores `norm3df`.
+
+| False Door DepthMap chunk 0, replays alternating (RX 9070) | whole chunk |
+|---|---|
+| the 0.4.1 release package | 88.0, 88.3 s |
+| `CHESHIRE_DEPTHMAP_LEN3=0` | 87.8, 88.2, 87.7, 87.5 s |
+| 11a | 67.7, 66.9, 67.3, 66.9 s |
+
+That is 23 % less per chunk. The 96 depth and similarity maps are the same bytes in all ten runs, and the same as 10j's,
+10k's and the AliceVision move's. The 0.4.1 package is 10k's build. It ran 3-4 s slower than 10k's runs of the day
+before; the switch's off runs match it, so the switch costs nothing when off.
+
+**Exact:** on the RX 9070 (Windows, a flat test package of the development install), Meshroom 2025.1 mini6:
+`verifyexp` 14 of 14 and `verify` 8 of 8 with every verdict met, and `tiles` and `coarse` 8 of 8 with the T camera and
+depth list checks on. The depth maps of all four are those since 10a-10i (`839b89c2…`, `7c5369fc…`, `2b82a5aa…`,
+`0b8241ff…`). The gate requires 11a's announcement in every DepthMap log; on a CUDA package it is the one saying
+`norm3df` stays.
+
+**Compiled:** Windows HIP (the development tree, gfx12-generic, ROCm 7.2.1), the hip6.2 tree's depth map library
+(gfx1031, ROCm 6.2) and Windows CUDA (the three changed CUDA files and the library); in WSL at f52243e, Linux CUDA 444
+of 444 steps and Linux HIP 444 of 444, bundled for house-pc's RX 6750 XT when it is back in the box (`build/gate-11a`,
+sha256 `c25940e0…`). Not yet run on Linux.
+
+## After 0.4.1: the patch samples' projections with an exact reciprocal (step 11b, 2026-10-07)
+
+After 11a the refine kernel's patch loop is about 130 VALU instructions per sample, and 22 of them are its two
+projections' divisions. `project3DPoint` takes `__fdividef(1.0f, p.z)`, which HIP compiles as a correctly rounded
+division: `v_div_scale` twice, `v_rcp_f32`, five FMAs, `v_div_fmas` and `v_div_fixup`. Every sample projects its point
+into both cameras, so there are two per sample.
+
+`cheshireRcp` (`device/matrix.cuh`) is Markstein's correction of the hardware reciprocal: y = `v_rcp_f32`(z),
+r = fma(-z, y, 1), y' = fma(y, r, y). For any y within one ulp of 1/z, y' is the correctly rounded 1/z, the division's
+result. The one exception is a z whose significand is all ones. There the y half an ulp below 1/z makes y + y·r land
+exactly on a midpoint, and the tie rounds to even, on the wrong side. That significand takes the division itself, and
+so does every z outside [2^-126, 2^126): zero, denormals, reciprocals that would be denormal, inf and NaN. One
+combined test (two compares, which NaN fails, and the significand's bits) keeps it to one branch.
+
+`hip/tests/rcp` checks it in two parts:
+- **for any card:** every significand of z in [1, 2) and every float y within three steps of RN(1/z), against the
+  division, with y's distance from 1/z computed exactly. Every y within one ulp gives the division's result except at
+  the all-ones significand, and the nearest y that does not is 1.5 ulp away. The FMAs are IEEE operations, and scaling
+  z by a power of two scales y, r and y' with it, so this holds on any card whose `v_rcp_f32` is within one ulp. AMD's
+  documentation gives it a worst-case error of one ulp, as LLVM's AMDGPU backend notes;
+- **on this card:** the function as shipped on all 2^32 bit patterns on the RX 9070, with no difference. There it has
+  1.47x the division's throughput.
+
+Only the six per-sample projections of the two patch NCCs use it. Every other `project3DPoint` is upstream's.
+`CHESHIRE_DEPTHMAP_RCP=0` restores the division. CUDA keeps `project3DPoint`, whose `__fdividef` is NVIDIA's own
+fast division, and a CUDA build announces that.
+
+| False Door DepthMap chunk 0, replays alternating (RX 9070) | whole chunk |
+|---|---|
+| `CHESHIRE_DEPTHMAP_RCP=0` (11a alone) | 66.8, 67.1, 67.1 s |
+| 11a and 11b | 65.4, 65.5, 65.4 s |
+
+That is 2.5 % less, with the 96 maps identical in all six runs. With the stage syncs (`CHESHIRE_PROFILE_SGM=1`, a 70.6 s
+run) the chunk's GPU stages are now:
+
+| stage | per chunk |
+|---|---|
+| refinement | 31.8 s |
+| colour optimisation | 13.7 s |
+| SGM similarity volume | 8.5 s |
+| SGM aggregation | 4.8 s |
+
+Fully serialised launches (`AMD_SERIALIZE_KERNEL=3`, which `scripts/profile_log.py` suggests) are no measure here: they
+made the chunk 124 s and SGM's aggregation, many small launches, 56 s. The colour optimisation computes two
+double-precision `acos` per pixel and iteration (upstream's `angleBetwABandAC`) and runs at the card's FP64 rate.
+
+**Exact:** the same gate as 11a's on the RX 9070, with the same four depth map digests (`839b89c2…`, `7c5369fc…`,
+`2b82a5aa…`, `0b8241ff…`). The gate requires 11b's announcement in every DepthMap log.
+
+**Compiled:** Windows HIP (the development tree), the hip6.2 tree's depth map library (gfx1031, ROCm 6.2) and Windows
+CUDA (the two CUDA files that include the changed headers, and the library); Linux at the next round in WSL.

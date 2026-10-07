@@ -862,8 +862,19 @@ What it carries:
 ## After 0.4.1
 
 Next:
-- **DepthMap's GPU stages**, now that a chunk waits on them (10h): the refine-and-fuse stage first, the largest
-  under the stage syncs (`CHESHIRE_PROFILE_SGM=1`); exact or not at all, as the rest.
+- **DepthMap's GPU stages**, now that a chunk waits on them (10h); exact or not at all, as the rest. **Done
+  2026-10-07:** 11a, the colour distances without double precision (`norm3df`'s frexp read from the bits; 23 % off a
+  False Door chunk), and 11b, the patch samples' projections with Markstein's exact reciprocal (2.5 % more), docs/04.
+  The chunk's GPU stages are now the refinement 31.8 s, the colour optimisation 13.7 s, SGM's similarity 8.5 s and its
+  aggregation 4.8 s. Next:
+  - **11c, the colour optimisation's double-precision `acos`** (upstream's `angleBetwABandAC`, two per pixel and
+    iteration, 130 FP64 instructions in `optimize_depthSimMap_kernel`, which runs at the card's FP64 rate): a
+    float-float `acos` from IEEE operations only, so the same on every card, returning only when every value within a
+    wide margin of its estimate rounds to the same float, upstream's double path otherwise; checked against the double
+    path on every float input;
+  - the proximity weight's square root is already one pseudo-scalar `v_s_sqrt_f32` on gfx12: nothing to gain there;
+  - wave64 on RDNA3/4 for dual issue, the same arithmetic per lane if no kernel depends on the wave's width (a runtime
+    switch would need both builds of the kernels).
 - **What a DepthMap chunk still does with the device idle** (10k): its first batch's load (2.6 s), each later batch's
   upload (3 s a chunk; uploading during the previous batch's tiles needs device-cache slots the batch does not use and
   a stream of its own), 2.8 s of startup.

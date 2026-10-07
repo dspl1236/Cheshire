@@ -62,7 +62,9 @@ GPU_MARKERS = {
                           r"cheshire: depth map tiles' T cameras for \d+ cameras in \S+ s on every core",
                           # after 0.4.1: the colour distances without double precision (step 11a), HIP only; a CUDA
                           # package says it keeps CUDA's norm3df
-                          r"cheshire: depth map colour distances (in single precision|by CUDA's norm3df)"],
+                          r"cheshire: depth map colour distances (in single precision|by CUDA's norm3df)",
+                          # and the patch samples' projections with an exact reciprocal (11b), HIP only likewise
+                          r"cheshire: depth map projections' reciprocals by (the corrected hardware reciprocal|CUDA's __fdividef)"],
     "DepthMapFilter":    [r"depth map filter: group votes on",
                           r"depth map filter cache: cap \d+ MB"],
     # 0.3.2: every port announces on both paths, so the three that were silent on success

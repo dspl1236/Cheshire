@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Turn an aliceVision_depthMapEstimation log (run with AMD_SERIALIZE_KERNEL=3 / HIP_LAUNCH_BLOCKING=1
-or CUDA_LAUNCH_BLOCKING=1 so launches are synchronous) into a per-stage time breakdown.
+"""Turn an aliceVision_depthMapEstimation log into a per-stage time breakdown. Run it with CHESHIRE_PROFILE_SGM=1,
+which synchronises the stream at the end of each stage, so a stage's log span is its own GPU work. Fully synchronous
+launches (AMD_SERIALIZE_KERNEL=3 / HIP_LAUNCH_BLOCKING=1 / CUDA_LAUNCH_BLOCKING=1) inflate the stages made of many small
+launches: on a False Door chunk they made SGM's aggregation 56 s against 4.8 s (docs/04, step 11b).
 usage: profile_log.py <log> [<log2> ...]"""
 import re, sys, collections, datetime as dt
 pat = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\.(\d{6})\]\[(\w+)\] (?:\((rc: \d+, tile: \d+/\d+)\) )?(.*)$")

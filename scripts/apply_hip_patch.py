@@ -3953,6 +3953,111 @@ __host__ void cuda_volumeInitialize(CudaDeviceMemoryPitched<TSim, 3>& inout_volu
      "    CudaSize<3> volDim = in_volSim_dmp.getSize();\n"),
 ]
 
+STEP11B_MATRIX = [
+    ("    float3 p = M3x4mulV3(M3x4, V);\n    const float pzInv =  __fdividef(1.0f, p.z);\n"
+     "    return make_float2(p.x * pzInv, p.y * pzInv);\n}\n",
+     r"""    float3 p = M3x4mulV3(M3x4, V);
+    const float pzInv =  __fdividef(1.0f, p.z);
+    return make_float2(p.x * pzInv, p.y * pzInv);
+}
+
+// cheshire (step 11b): the patch samples' projections with an exact reciprocal. On HIP __fdividef(1.0f, z) is a
+// correctly rounded division (HIP divides correctly rounded by default): v_div_scale twice, v_rcp_f32, five FMAs,
+// v_div_fmas and v_div_fixup, eleven instructions, and every patch sample projects its point into both cameras.
+// cheshireRcp is Markstein's correction of the hardware reciprocal: y = v_rcp_f32(z), r = fma(-z, y, 1), fma(y, r, y).
+// For any y within one ulp of 1/z it gives the correctly rounded 1/z - the division's result - except when z's
+// significand is all ones, where the y half an ulp below makes a tie that rounds to even on the wrong side. That
+// significand, and every z outside [2^-126, 2^126) (zero, denormal, a denormal reciprocal, inf, NaN), take the
+// division itself. AMD documents v_rcp_f32 as accurate to one ulp. hip/tests/rcp checks the correction for every
+// significand and every y within one ulp (the nearest wrong one is 1.5 ulp away), and the function on all 2^32 bit
+// patterns on the card (an RX 9070: no difference); 1.47x the division's throughput there. CHESHIRE_DEPTHMAP_RCP=0 for
+// the division (cheshireRcpConfigure, deviceSimilarityVolume.cu, clears the flag); CUDA builds keep project3DPoint.
+#ifdef CHESHIRE_HIP
+__constant__ int cheshireRcpOn_d = 1;
+
+__device__ __forceinline__ float cheshireRcp(float z)
+{
+    const float az = fabsf(z);
+    if ((az >= 0x1p-126f) & (az < 0x1p126f) & ((__float_as_uint(z) & 0x7fffffu) != 0x7fffffu))  // one branch, NaN fails
+    {
+        const float y = __builtin_amdgcn_rcpf(z);
+        const float r = fmaf(-z, y, 1.0f);
+        return fmaf(y, r, y);
+    }
+    return __fdividef(1.0f, z);
+}
+
+__device__ inline float2 cheshireProject3DPoint(const float* M3x4, const float3& V)
+{
+    if (!cheshireRcpOn_d)
+        return project3DPoint(M3x4, V);
+    const float3 p = M3x4mulV3(M3x4, V);
+    const float pzInv = cheshireRcp(p.z);
+    return make_float2(p.x * pzInv, p.y * pzInv);
+}
+#else
+__device__ inline float2 cheshireProject3DPoint(const float* M3x4, const float3& V) { return project3DPoint(M3x4, V); }
+#endif
+"""),
+]
+
+# the patch samples' projections, three pairs (compNCCby3DptsYK and both loops of its custom patch pattern variant)
+STEP11B_PATCH_ALL = [
+    ("project3DPoint(rcDeviceCamParams.P, p);", "cheshireProject3DPoint(rcDeviceCamParams.P, p);  // cheshire (step 11b)"),
+    ("project3DPoint(tcDeviceCamParams.P, p);", "cheshireProject3DPoint(tcDeviceCamParams.P, p);  // cheshire (step 11b)"),
+]
+
+STEP11B_DSV = [
+    ("__host__ void cuda_volumeInitialize(CudaDeviceMemoryPitched<TSim, 3>& inout_volume_dmp, TSim value, cudaStream_t stream)\n",
+     r"""// cheshire (step 11b): CHESHIRE_DEPTHMAP_RCP for the patch samples' projections (device/matrix.cuh), as 11a's switch:
+// read and announced once; off, each device's cheshireRcpOn_d is cleared once, before the similarity volume's or its
+// refinement's first kernel on it.
+static void cheshireRcpConfigure()
+{
+#ifdef CHESHIRE_HIP
+    static const bool on = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_RCP", true);
+    static std::once_flag announced;
+    std::call_once(announced, [] {
+        if (on)
+            ALICEVISION_LOG_INFO("cheshire: depth map projections' reciprocals by the corrected hardware reciprocal (exact: the"
+                                 " division's result; CHESHIRE_DEPTHMAP_RCP=0 for the division)");
+        else
+            ALICEVISION_LOG_INFO("cheshire: depth map projections' reciprocals by the division (CHESHIRE_DEPTHMAP_RCP=0)");
+    });
+    if (on)
+        return;
+    static std::mutex clearedMutex;
+    static std::set<int> cleared;
+    int device = 0;
+    cudaError_t err = cudaGetDevice(&device);
+    THROW_ON_CUDA_ERROR(err, "Failed to get the current device");
+    const std::lock_guard<std::mutex> lock(clearedMutex);
+    if (cleared.insert(device).second)
+    {
+        const int off = 0;
+        err = hipMemcpyToSymbol(HIP_SYMBOL(cheshireRcpOn_d), &off, sizeof(off), 0, hipMemcpyHostToDevice);
+        THROW_ON_CUDA_ERROR(err, "Failed to clear the projections' switch");
+    }
+#else
+    static std::once_flag announced;
+    std::call_once(announced, [] { ALICEVISION_LOG_INFO("cheshire: depth map projections' reciprocals by CUDA's __fdividef"); });
+#endif
+}
+
+__host__ void cuda_volumeInitialize(CudaDeviceMemoryPitched<TSim, 3>& inout_volume_dmp, TSim value, cudaStream_t stream)
+"""),
+    ("    cheshireLen3Configure();  // cheshire (step 11a)\n"
+     "    const dim3 block = getMaxPotentialBlockSize(volume_computeSimilarity_kernel);\n",
+     "    cheshireLen3Configure();  // cheshire (step 11a)\n"
+     "    cheshireRcpConfigure();  // cheshire (step 11b)\n"
+     "    const dim3 block = getMaxPotentialBlockSize(volume_computeSimilarity_kernel);\n"),
+    ("    cheshireLen3Configure();  // cheshire (step 11a)\n"
+     "    const dim3 block = getMaxPotentialBlockSize(volume_refineSimilarity_kernel);\n",
+     "    cheshireLen3Configure();  // cheshire (step 11a)\n"
+     "    cheshireRcpConfigure();  // cheshire (step 11b)\n"
+     "    const dim3 block = getMaxPotentialBlockSize(volume_refineSimilarity_kernel);\n"),
+]
+
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
     if new in text:
@@ -4065,6 +4170,8 @@ TRACKED = [
     "src/aliceVision/depthMap/Sgm.hpp",  # 10j
     "src/aliceVision/depthMap/cuda/planeSweeping/deviceDepthSimilarityMap.cu",  # 10j
     "src/aliceVision/depthMap/cuda/device/color.cuh",  # 11a
+    "src/aliceVision/depthMap/cuda/device/matrix.cuh",  # 11b
+    "src/aliceVision/depthMap/cuda/device/Patch.cuh",  # 11b
 ]
 
 
@@ -9379,6 +9486,28 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                     sys.exit(f"an anchor of the colour distances not found once in {f11a.name} (11a)")
                 t = t.replace(old, new, 1)
         f11a.write_text(t, encoding="utf-8", newline="")
+
+    # 11b (after 0.4.1). The patch samples' projections with an exact reciprocal: Markstein's correction of v_rcp_f32,
+    #     the correctly rounded 1/z for every z in [2^-126, 2^126) but the all-ones significand, which take the division
+    #     (hip/tests/rcp). The six per-sample project3DPoint calls of the two patch NCCs (Patch.cuh), the others unchanged.
+    #     HIP only; CHESHIRE_DEPTHMAP_RCP=0. After 11a (its launcher lines are the anchors), before 6q.
+    for f11b, steps11b in ((AV / "src/aliceVision/depthMap/cuda/device/matrix.cuh", STEP11B_MATRIX),
+                           (AV / "src/aliceVision/depthMap/cuda/planeSweeping/deviceSimilarityVolume.cu", STEP11B_DSV)):
+        t = f11b.read_text(encoding="utf-8")
+        if "step 11b" not in t:
+            for old, new in steps11b:
+                if t.count(old) != 1:
+                    sys.exit(f"an anchor of the projections' reciprocals not found once in {f11b.name} (11b)")
+                t = t.replace(old, new, 1)
+        f11b.write_text(t, encoding="utf-8", newline="")
+    f11b = AV / "src/aliceVision/depthMap/cuda/device/Patch.cuh"
+    t = f11b.read_text(encoding="utf-8")
+    if "step 11b" not in t:
+        for old, new in STEP11B_PATCH_ALL:
+            if t.count(old) != 3:
+                sys.exit("the patch samples' projections not found three times in Patch.cuh (11b)")
+            t = t.replace(old, new)
+    f11b.write_text(t, encoding="utf-8", newline="")
 
     # 10g (after 0.4.0). The image cache evicts by load order instead of clock(), whose millisecond ties made the
     #     texturing read-ahead evict images before their use (most False Door passes decoded each image twice).

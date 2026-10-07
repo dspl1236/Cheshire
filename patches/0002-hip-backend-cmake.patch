@@ -1433,6 +1433,43 @@ index db401e5..0c54e7f 100644
  };
  
  inline std::ostream& operator<<(std::ostream& os, const Tile& tile)
+diff --git a/src/aliceVision/depthMap/cuda/device/Patch.cuh b/src/aliceVision/depthMap/cuda/device/Patch.cuh
+index c3554dc..4d43e9c 100644
+--- a/src/aliceVision/depthMap/cuda/device/Patch.cuh
++++ b/src/aliceVision/depthMap/cuda/device/Patch.cuh
+@@ -534,8 +534,8 @@ __device__ inline float compNCCby3DptsYK(const DeviceCameraParams& rcDeviceCamPa
+             const float3 p = patch.p + patch.x * float(patch.d * float(xp)) + patch.y * float(patch.d * float(yp));
+ 
+             // get R and T image 2d coordinates from 3d point
+-            const float2 rpc = project3DPoint(rcDeviceCamParams.P, p);
+-            const float2 tpc = project3DPoint(tcDeviceCamParams.P, p);
++            const float2 rpc = cheshireProject3DPoint(rcDeviceCamParams.P, p);  // cheshire (step 11b)
++            const float2 tpc = cheshireProject3DPoint(tcDeviceCamParams.P, p);  // cheshire (step 11b)
+ 
+             // get R and T image color (CIELAB) from 2d coordinates
+             const float4 rcPatchCoordColor = tex2DLod<float4>(rcMipmapImage_tex, (rpc.x + 0.5f) * rcInvLevelWidth, (rpc.y + 0.5f) * rcInvLevelHeight, rcMipmapLevel);
+@@ -680,8 +680,8 @@ __device__ inline float compNCCby3DptsYK_customPatchPattern(const DeviceCameraPa
+                 const float3 p = patch.p + patch.x * float(patch.d * relativeCoord.x) + patch.y * float(patch.d * relativeCoord.y);
+ 
+                 // get R and T image 2d coordinates from 3d point
+-                const float2 rpc = project3DPoint(rcDeviceCamParams.P, p);
+-                const float2 tpc = project3DPoint(tcDeviceCamParams.P, p);
++                const float2 rpc = cheshireProject3DPoint(rcDeviceCamParams.P, p);  // cheshire (step 11b)
++                const float2 tpc = cheshireProject3DPoint(tcDeviceCamParams.P, p);  // cheshire (step 11b)
+ 
+                 // get R and T image color (CIELAB) from 2d coordinates
+                 const float4 rcPatchCoordColor = tex2DLod<float4>(rcMipmapImage_tex, (rpc.x + 0.5f) * rcInvLevelWidth, (rpc.y + 0.5f) * rcInvLevelHeight, rcMipmapLevel + subpart.level);
+@@ -706,8 +706,8 @@ __device__ inline float compNCCby3DptsYK_customPatchPattern(const DeviceCameraPa
+                     const float3 p = patch.p + patch.x * float(patch.d * float(xp) * subpart.downscale) + patch.y * float(patch.d * float(yp) * subpart.downscale);
+ 
+                     // get R and T image 2d coordinates from 3d point
+-                    const float2 rpc = project3DPoint(rcDeviceCamParams.P, p);
+-                    const float2 tpc = project3DPoint(tcDeviceCamParams.P, p);
++                    const float2 rpc = cheshireProject3DPoint(rcDeviceCamParams.P, p);  // cheshire (step 11b)
++                    const float2 tpc = cheshireProject3DPoint(tcDeviceCamParams.P, p);  // cheshire (step 11b)
+ 
+                     // get R and T image color (CIELAB) from 2d coordinates
+                     const float4 rcPatchCoordColor = tex2DLod<float4>(rcMipmapImage_tex, (rpc.x + 0.5f) * rcInvLevelWidth, (rpc.y + 0.5f) * rcInvLevelHeight, rcMipmapLevel + subpart.level);
 diff --git a/src/aliceVision/depthMap/cuda/device/color.cuh b/src/aliceVision/depthMap/cuda/device/color.cuh
 index 03ca0e9..8d1f814 100644
 --- a/src/aliceVision/depthMap/cuda/device/color.cuh
@@ -1518,6 +1555,55 @@ index 03ca0e9..8d1f814 100644
  }
  
  // color conversion utils
+diff --git a/src/aliceVision/depthMap/cuda/device/matrix.cuh b/src/aliceVision/depthMap/cuda/device/matrix.cuh
+index 9b9229c..239610e 100644
+--- a/src/aliceVision/depthMap/cuda/device/matrix.cuh
++++ b/src/aliceVision/depthMap/cuda/device/matrix.cuh
+@@ -125,6 +125,44 @@ __device__ inline float2 project3DPoint(const float* M3x4, const float3& V)
+     return make_float2(p.x * pzInv, p.y * pzInv);
+ }
+ 
++// cheshire (step 11b): the patch samples' projections with an exact reciprocal. On HIP __fdividef(1.0f, z) is a
++// correctly rounded division (HIP divides correctly rounded by default): v_div_scale twice, v_rcp_f32, five FMAs,
++// v_div_fmas and v_div_fixup, eleven instructions, and every patch sample projects its point into both cameras.
++// cheshireRcp is Markstein's correction of the hardware reciprocal: y = v_rcp_f32(z), r = fma(-z, y, 1), fma(y, r, y).
++// For any y within one ulp of 1/z it gives the correctly rounded 1/z - the division's result - except when z's
++// significand is all ones, where the y half an ulp below makes a tie that rounds to even on the wrong side. That
++// significand, and every z outside [2^-126, 2^126) (zero, denormal, a denormal reciprocal, inf, NaN), take the
++// division itself. AMD documents v_rcp_f32 as accurate to one ulp. hip/tests/rcp checks the correction for every
++// significand and every y within one ulp (the nearest wrong one is 1.5 ulp away), and the function on all 2^32 bit
++// patterns on the card (an RX 9070: no difference); 1.47x the division's throughput there. CHESHIRE_DEPTHMAP_RCP=0 for
++// the division (cheshireRcpConfigure, deviceSimilarityVolume.cu, clears the flag); CUDA builds keep project3DPoint.
++#ifdef CHESHIRE_HIP
++__constant__ int cheshireRcpOn_d = 1;
++
++__device__ __forceinline__ float cheshireRcp(float z)
++{
++    const float az = fabsf(z);
++    if ((az >= 0x1p-126f) & (az < 0x1p126f) & ((__float_as_uint(z) & 0x7fffffu) != 0x7fffffu))  // one branch, NaN fails
++    {
++        const float y = __builtin_amdgcn_rcpf(z);
++        const float r = fmaf(-z, y, 1.0f);
++        return fmaf(y, r, y);
++    }
++    return __fdividef(1.0f, z);
++}
++
++__device__ inline float2 cheshireProject3DPoint(const float* M3x4, const float3& V)
++{
++    if (!cheshireRcpOn_d)
++        return project3DPoint(M3x4, V);
++    const float3 p = M3x4mulV3(M3x4, V);
++    const float pzInv = cheshireRcp(p.z);
++    return make_float2(p.x * pzInv, p.y * pzInv);
++}
++#else
++__device__ inline float2 cheshireProject3DPoint(const float* M3x4, const float3& V) { return project3DPoint(M3x4, V); }
++#endif
++
+ __device__ inline void M3x3mulM3x3(float* O3x3, const float* A3x3, const float* B3x3)
+ {
+     O3x3[0] = A3x3[0] * B3x3[0] + A3x3[3] * B3x3[1] + A3x3[6] * B3x3[2];
 diff --git a/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h b/src/aliceVision/depthMap/cuda/hip/cheshire/bridge.h
 new file mode 100644
 index 0000000..6ba23ae
@@ -5267,7 +5353,7 @@ index 1d9cc92..4f7f94a 100644
              roi);
      }
 diff --git a/src/aliceVision/depthMap/cuda/planeSweeping/deviceSimilarityVolume.cu b/src/aliceVision/depthMap/cuda/planeSweeping/deviceSimilarityVolume.cu
-index 117850f..72e6935 100644
+index 117850f..a9575bd 100644
 --- a/src/aliceVision/depthMap/cuda/planeSweeping/deviceSimilarityVolume.cu
 +++ b/src/aliceVision/depthMap/cuda/planeSweeping/deviceSimilarityVolume.cu
 @@ -4,12 +4,18 @@
@@ -5289,7 +5375,7 @@ index 117850f..72e6935 100644
  
  namespace aliceVision {
  namespace depthMap {
-@@ -47,13 +53,64 @@ __host__ dim3 getMaxPotentialBlockSize(T kernelFuction)
+@@ -47,13 +53,99 @@ __host__ dim3 getMaxPotentialBlockSize(T kernelFuction)
  
      if(recommendedBlockSize > 32)
      {
@@ -5352,26 +5438,63 @@ index 117850f..72e6935 100644
 +#endif
 +}
 +
++// cheshire (step 11b): CHESHIRE_DEPTHMAP_RCP for the patch samples' projections (device/matrix.cuh), as 11a's switch:
++// read and announced once; off, each device's cheshireRcpOn_d is cleared once, before the similarity volume's or its
++// refinement's first kernel on it.
++static void cheshireRcpConfigure()
++{
++#ifdef CHESHIRE_HIP
++    static const bool on = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_RCP", true);
++    static std::once_flag announced;
++    std::call_once(announced, [] {
++        if (on)
++            ALICEVISION_LOG_INFO("cheshire: depth map projections' reciprocals by the corrected hardware reciprocal (exact: the"
++                                 " division's result; CHESHIRE_DEPTHMAP_RCP=0 for the division)");
++        else
++            ALICEVISION_LOG_INFO("cheshire: depth map projections' reciprocals by the division (CHESHIRE_DEPTHMAP_RCP=0)");
++    });
++    if (on)
++        return;
++    static std::mutex clearedMutex;
++    static std::set<int> cleared;
++    int device = 0;
++    cudaError_t err = cudaGetDevice(&device);
++    THROW_ON_CUDA_ERROR(err, "Failed to get the current device");
++    const std::lock_guard<std::mutex> lock(clearedMutex);
++    if (cleared.insert(device).second)
++    {
++        const int off = 0;
++        err = hipMemcpyToSymbol(HIP_SYMBOL(cheshireRcpOn_d), &off, sizeof(off), 0, hipMemcpyHostToDevice);
++        THROW_ON_CUDA_ERROR(err, "Failed to clear the projections' switch");
++    }
++#else
++    static std::once_flag announced;
++    std::call_once(announced, [] { ALICEVISION_LOG_INFO("cheshire: depth map projections' reciprocals by CUDA's __fdividef"); });
++#endif
++}
++
  __host__ void cuda_volumeInitialize(CudaDeviceMemoryPitched<TSim, 3>& inout_volume_dmp, TSim value, cudaStream_t stream)
  {
      // get input/output volume dimensions
-@@ -170,6 +227,7 @@ __host__ void cuda_volumeComputeSimilarity(CudaDeviceMemoryPitched<TSim, 3>& out
+@@ -170,6 +262,8 @@ __host__ void cuda_volumeComputeSimilarity(CudaDeviceMemoryPitched<TSim, 3>& out
      const CudaSize<2> tcLevelDim = tcDeviceMipmapImage.getDimensions(sgmParams.scale);
  
      // kernel launch parameters
 +    cheshireLen3Configure();  // cheshire (step 11a)
++    cheshireRcpConfigure();  // cheshire (step 11b)
      const dim3 block = getMaxPotentialBlockSize(volume_computeSimilarity_kernel);
      const dim3 grid(divUp(roi.width(), block.x), divUp(roi.height(), block.y), depthRange.size());
  
-@@ -223,6 +281,7 @@ extern void cuda_volumeRefineSimilarity(CudaDeviceMemoryPitched<TSimRefine, 3>&
+@@ -223,6 +317,8 @@ extern void cuda_volumeRefineSimilarity(CudaDeviceMemoryPitched<TSimRefine, 3>&
      const CudaSize<2> tcLevelDim = tcDeviceMipmapImage.getDimensions(refineParams.scale);
  
      // kernel launch parameters
 +    cheshireLen3Configure();  // cheshire (step 11a)
++    cheshireRcpConfigure();  // cheshire (step 11b)
      const dim3 block = getMaxPotentialBlockSize(volume_refineSimilarity_kernel);
      const dim3 grid(divUp(roi.width(), block.x), divUp(roi.height(), block.y), depthRange.size());
  
-@@ -259,6 +318,18 @@ extern void cuda_volumeRefineSimilarity(CudaDeviceMemoryPitched<TSimRefine, 3>&
+@@ -259,6 +355,18 @@ extern void cuda_volumeRefineSimilarity(CudaDeviceMemoryPitched<TSimRefine, 3>&
  }
  
  
@@ -5390,7 +5513,7 @@ index 117850f..72e6935 100644
  __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_volAgr_dmp,
                                         CudaDeviceMemoryPitched<TSimAcc, 2>& inout_volSliceAccA_dmp,
                                         CudaDeviceMemoryPitched<TSimAcc, 2>& inout_volSliceAccB_dmp,
-@@ -275,6 +346,7 @@ __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_vol
+@@ -275,6 +383,7 @@ __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_vol
                                         const ROI& roi,
                                         cudaStream_t stream)
  {
@@ -5398,7 +5521,7 @@ index 117850f..72e6935 100644
      CudaSize<3> volDim = in_volSim_dmp.getSize();
      volDim[2] = lastDepthIndex; // override volume depth, use rc depth list last index
  
-@@ -298,6 +370,79 @@ __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_vol
+@@ -298,6 +407,79 @@ __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_vol
      const dim3 blockVolSlide(blockSizeL, 1, 1);
      const dim3 gridVolSlide(divUp(volDimX, blockVolSlide.x), volDimZ, 1);
  
@@ -5478,7 +5601,7 @@ index 117850f..72e6935 100644
      CudaDeviceMemoryPitched<TSimAcc, 2>* xzSliceForY_dmpPtr   = &inout_volSliceAccA_dmp; // Y slice
      CudaDeviceMemoryPitched<TSimAcc, 2>* xzSliceForYm1_dmpPtr = &inout_volSliceAccB_dmp; // Y-1 slice
      CudaDeviceMemoryPitched<TSimAcc, 2>* bestSimInYm1_dmpPtr  = &inout_volAxisAcc_dmp;   // best sim score along the Y axis for each Z value
-@@ -368,6 +513,7 @@ __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_vol
+@@ -368,6 +550,7 @@ __host__ void cuda_volumeAggregatePath(CudaDeviceMemoryPitched<TSim, 3>& out_vol
  
          std::swap(xzSliceForYm1_dmpPtr, xzSliceForY_dmpPtr);
      }
