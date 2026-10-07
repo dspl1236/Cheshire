@@ -861,6 +861,20 @@ What it carries:
 
 ## After 0.4.1
 
+**Release plan (decided 2026-10-07):** finish the engine and the packaging over the next few releases, then the hardware
+coverage on the finished packages, then the long stock-against-Cheshire benchmarks (NVIDIA, the same card, small and
+large sets).
+- **0.4.2:** 11a-11c, DepthMap's GPU stages (below).
+- **0.4.3, the engine's last items:** DepthMap's device-idle gaps (each later batch's upload during the previous
+  batch's tiles, the first batch's load and the startup), Meshing's "Create visibilities" (64 s on the False Door),
+  the matcher's transfers (batched per search).
+- **0.4.4, packaging I:** Linux generic code objects (the 19 hand-listed targets to the family generics, Vega
+  explicit) and PopSIFT from generic code objects (the host-side divide that exits 0xC0000094, and a CPU SIFT
+  fallback guard), so future RDNA chips run without a rebuild ("Packaging and platforms" below).
+- **0.5.0, packaging II:** x86-64 ISA tiers chosen by CPUID (FMA contraction controlled, so every tier gives the same
+  bytes) and older-glibc Linux bundles from a jammy or bookworm container.
+- **Then:** "Hardware coverage" below.
+
 Next:
 - **DepthMap's GPU stages**, now that a chunk waits on them (10h); exact or not at all, as the rest. **Done
   2026-10-07:** 11a, the colour distances without double precision (`norm3df`'s frexp read from the bits; 23 % off a
