@@ -4984,3 +4984,48 @@ double-precision `acos` per pixel and iteration (upstream's `angleBetwABandAC`) 
 
 **Compiled:** Windows HIP (the development tree), the hip6.2 tree's depth map library (gfx1031, ROCm 6.2) and Windows
 CUDA (the two CUDA files that include the changed headers, and the library); Linux at the next round in WSL.
+
+## After 0.4.1: the colour optimisation's angles without double precision (step 11c, 2026-10-07)
+
+After 11b the colour optimisation was 13.7 s of a False Door chunk, and it ran at the card's FP64 rate. In each of its
+iterations, every pixel weighs its depth against two angles to its neighbours (`getCellSmoothStepEnergy`), and upstream's
+`angleBetwABandAC` returns each as `float(fabs(acos(double(x))) / (CUDART_PI / 180.0))`. That is OCML's double `acos`
+and a correctly rounded double division, about 65 FP64 instructions each. The kernel had 130 FP64 instructions.
+
+`cheshireAngleDegreesFast` (`device/matrix.cuh`) computes acos(x)·180/π in float-float arithmetic from IEEE operations
+only: adds, multiplies, FMAs, a correctly rounded `sqrtf` and a correctly rounded division. It uses no hardware
+approximation, so it gives the same bits on every card. It evaluates OCML's own asin polynomial, with the double
+coefficients split into float pairs: asin(s) = s + s·z·P(z), with
+- (s, z) = (x, x²) for |x| < 0.5, where acos = π/2 - asin(x);
+- (√t, t), t = (1 - |x|)/2, otherwise, where acos = 2·asin(s), or π - 2·asin(s) for negative x.
+
+Both run on one path, without a branch. P's terms from z^6 on are summed in float, the rest in float-float.
+
+The estimate g = g.hi + g.lo is used as g.hi only when every value within 2^-40·g.hi of it rounds to g.hi. x = -1 and 1
+give 180 and +0, the values OCML's special cases make of them. Otherwise, and for |x| > 1 and NaN, upstream's double
+path runs.
+
+`hip/tests/acos` runs all 2^32 bit patterns through both on the RX 9070 and finds no difference. The estimate's largest
+error against the double reference is 2^-43.5, 11 times inside the margin. The double path ran for 9,262 of the 2.13 G
+inputs in (-1, 1), about 4 in a million. Across cards, a card's double reference is within a few double ulps of the
+true value (OpenCL bounds a double `acos` by 4 ulp), so two cards' references differ by under 2^-49. A g.hi that is
+used is therefore the reference's float on every card. On this card the function makes 47 G angles a second against
+upstream's 5.0-6.0 G. The kernel keeps 16 waves per SIMD (53 VGPRs). `CHESHIRE_DEPTHMAP_ACOS=0` restores the double
+path alone. CUDA keeps it and announces so.
+
+| False Door DepthMap chunk 0, replays alternating (RX 9070) | whole chunk |
+|---|---|
+| `CHESHIRE_DEPTHMAP_ACOS=0` (11a and 11b) | 71.6, 72.3, 72.0 s |
+| 11a, 11b and 11c | 62.6, 63.1, 63.4 s |
+
+That is 12 % less, with the 96 maps identical in all seven runs (the profiled one included). The box was busier than
+in the 11a and 11b rounds, with a game open, so compare within the table: the same configuration as 11b's 65.4 s ran
+at 72 s here. With the stage syncs the colour optimisation is now 5.0 s of the chunk (13.7 s before). The refinement
+(34.3 s here), SGM's similarity (9.7 s) and its aggregation (5.7 s) are what remain.
+
+**Exact:** the same gate as 11a's on the RX 9070, with the same four depth map digests (`839b89c2…`, `7c5369fc…`,
+`2b82a5aa…`, `0b8241ff…`). The gate requires 11c's announcement in every DepthMap log.
+
+**Compiled:** Windows HIP (the development tree), the hip6.2 tree's depth map library (gfx1031, ROCm 6.2) and Windows
+CUDA (the two CUDA files that include the changed headers, and the library). Linux CUDA compiled 11b at d14bef0
+(444 of 444); the Linux builds of 11c follow in WSL.

@@ -4058,6 +4058,165 @@ __host__ void cuda_volumeInitialize(CudaDeviceMemoryPitched<TSim, 3>& inout_volu
      "    const dim3 block = getMaxPotentialBlockSize(volume_refineSimilarity_kernel);\n"),
 ]
 
+STEP11C_MATRIX = [
+    ("__device__ inline float angleBetwABandAC(const float3& A, const float3& B, const float3& C)\n",
+     r"""// cheshire (step 11c): the colour optimisation's angles without double precision. angleBetwABandAC returns
+// float(fabs(acos(double(x))) / (CUDART_PI / 180.0)): OCML's double acos and a correctly rounded double division, about
+// 65 FP64 instructions, twice per pixel and iteration of the colour optimisation, which ran at the card's FP64 rate.
+// cheshireAngleDegreesFast computes acos(x) * 180/pi in float-float arithmetic from IEEE operations only (adds,
+// multiplies, FMAs, a correctly rounded sqrtf and division): no hardware approximation, so the same bits on every card.
+// It evaluates OCML's own asin polynomial (its double coefficients split into float pairs): asin(s) = s + s z P(z), with
+// (s, z) = (x, x^2) for |x| < 0.5, where acos = pi/2 - asin(x), and (sqrt(t), t), t = (1 - |x|)/2, otherwise, where
+// acos = 2 asin(s) or pi - 2 asin(s); one path for both, no branch. P's terms from z^6 on are summed in float, the rest
+// in float-float. The estimate g = g.hi + g.lo is used as g.hi only when every value within 2^-40 g.hi of it rounds to
+// g.hi; x = -1 and 1 give 180 and +0, the values OCML's special cases make of them; otherwise - and for |x| > 1 and NaN -
+// upstream's double path runs. hip/tests/acos runs all 2^32 bit patterns through both on the card (an RX 9070): no
+// difference; the estimate's largest error against the double reference is 2^-43.5, and the double path ran for 4 in a
+// million inputs within (-1, 1). A card's double reference is within a few double ulps of the true value (OpenCL bounds
+// a double acos by 4), so two cards' differ by under 2^-49: a g.hi used is the reference's float on every card.
+// CHESHIRE_DEPTHMAP_ACOS=0 for the double path (cheshireAcosConfigure, deviceDepthSimilarityMap.cu, clears the flag);
+// CUDA builds keep it.
+#ifdef CHESHIRE_HIP
+__constant__ int cheshireAcosOn_d = 1;
+
+struct CheshireFF
+{
+    float hi, lo;
+};
+
+__device__ __forceinline__ CheshireFF cheshireFFTwoSum(float a, float b)
+{
+#pragma clang fp contract(off)
+    const float s = a + b;
+    const float bb = s - a;
+    return {s, (a - (s - bb)) + (b - bb)};
+}
+
+__device__ __forceinline__ CheshireFF cheshireFFQuickSum(float a, float b)  // |a| >= |b|, or a == 0
+{
+#pragma clang fp contract(off)
+    const float s = a + b;
+    return {s, b - (s - a)};
+}
+
+__device__ __forceinline__ CheshireFF cheshireFFAdd(CheshireFF a, CheshireFF b)
+{
+#pragma clang fp contract(off)
+    const CheshireFF s = cheshireFFTwoSum(a.hi, b.hi);
+    return cheshireFFQuickSum(s.hi, s.lo + (a.lo + b.lo));
+}
+
+__device__ __forceinline__ CheshireFF cheshireFFMul(CheshireFF a, CheshireFF b)
+{
+#pragma clang fp contract(off)
+    const float p = a.hi * b.hi;
+    return cheshireFFQuickSum(p, fmaf(a.lo, b.hi, fmaf(a.hi, b.lo, fmaf(a.hi, b.hi, -p))));
+}
+
+// true, and the degrees in out, when every value within the margin of the float-float estimate rounds to the same float
+__device__ __forceinline__ bool cheshireAngleDegreesFast(float x, float& out, CheshireFF* estimate = nullptr)
+{
+#pragma clang fp contract(off)
+    const float ax = fabsf(x);
+    const bool wide = ax >= 0.5f;
+    const float t = (1.0f - ax) * 0.5f;  // exact for |x| in [0.5, 1]
+    const float sh = sqrtf(t);           // correctly rounded (HIP's default)
+    const float sl = sh > 0.0f ? fmaf(-sh, sh, t) / (sh + sh) : 0.0f;
+    const float x2 = x * x;
+    const CheshireFF z = wide ? CheshireFF{t, 0.0f} : CheshireFF{x2, fmaf(x, x, -x2)};
+    const CheshireFF s = wide ? CheshireFF{sh, sl} : CheshireFF{x, 0.0f};
+    // OCML's polynomial for asin(s) = s + s z P(z), z in [0, 1/4]: c11 .. c6 in float, c5 .. c0 in float-float
+    float q = fmaf(z.hi, 0x1.05985ap-5f, -0x1.0a5a38p-6f);
+    q = fmaf(z.hi, q, 0x1.405214p-6f);
+    q = fmaf(z.hi, q, 0x1.ab3a0ap-8f);
+    q = fmaf(z.hi, q, 0x1.8ed60ap-7f);
+    q = fmaf(z.hi, q, 0x1.c6fa84p-7f);
+    CheshireFF p = cheshireFFAdd({0x1.1c6c12p-6f, -0x1.c46692p-31f}, cheshireFFMul(z, {q, 0.0f}));
+    p = cheshireFFAdd({0x1.6e89f0p-6f, 0x1.415b5ap-31f}, cheshireFFMul(z, p));
+    p = cheshireFFAdd({0x1.f1c72cp-6f, 0x1.9a2590p-32f}, cheshireFFMul(z, p));
+    p = cheshireFFAdd({0x1.6db6dcp-5f, -0x1.7c6368p-30f}, cheshireFFMul(z, p));
+    p = cheshireFFAdd({0x1.333334p-4f, -0x1.992054p-29f}, cheshireFFMul(z, p));
+    p = cheshireFFAdd({0x1.555556p-3f, -0x1.555590p-28f}, cheshireFFMul(z, p));
+    const CheshireFF a = cheshireFFAdd(s, cheshireFFMul(s, cheshireFFMul(z, p)));
+    // acos: pi/2 - asin(x) near 0; 2 asin(s) for x >= 0.5; pi - 2 asin(s) for x <= -0.5
+    const CheshireFF base = wide ? (x > 0.0f ? CheshireFF{0.0f, 0.0f} : CheshireFF{0x1.921fb6p+1f, -0x1.777a5cp-24f})
+                                : CheshireFF{0x1.921fb6p+0f, -0x1.777a5cp-25f};
+    const float m = wide ? (x > 0.0f ? 2.0f : -2.0f) : -1.0f;
+    const CheshireFF r = cheshireFFAdd(base, {m * a.hi, m * a.lo});
+    const CheshireFF g = cheshireFFMul(r, {0x1.ca5dc2p+5f, -0x1.670f82p-21f});  // 180 / pi
+    if (estimate)
+        *estimate = g;
+    // the float g.hi stands for every value in (g.hi - below, g.hi + half): half an ulp each way, a quarter below a power
+    // of two
+    const float half = __uint_as_float(__float_as_uint(g.hi) & 0x7f800000u) * 0x1p-24f;
+    const float below = (__float_as_uint(g.hi) & 0x7fffffu) == 0u ? 0.5f * half : half;
+    const float margin = g.hi * 0x1p-40f;
+    // x = -1 and 1: OCML returns pi (its double) and 0 for them, so the reference is 180 and +0 on every card
+    out = x == -1.0f ? 180.0f : (x == 1.0f ? 0.0f : g.hi);
+    return ((ax < 1.0f) & (g.lo + margin < half) & (g.lo - margin > -below)) | (ax == 1.0f);
+}
+#endif
+
+__device__ inline float angleBetwABandAC(const float3& A, const float3& B, const float3& C)
+"""),
+    ("    const double x = double(V1.x * V2.x + V1.y * V2.y + V1.z * V2.z);\n",
+     "#ifdef CHESHIRE_HIP\n"
+     "    // cheshire (step 11c): the degrees without double precision where they are certain (above)\n"
+     "    const float cheshireCos = V1.x * V2.x + V1.y * V2.y + V1.z * V2.z;\n"
+     "    float cheshireDegrees;\n"
+     "    if (cheshireAcosOn_d && cheshireAngleDegreesFast(cheshireCos, cheshireDegrees))\n"
+     "        return cheshireDegrees;\n"
+     "    const double x = double(cheshireCos);\n"
+     "#else\n"
+     "    const double x = double(V1.x * V2.x + V1.y * V2.y + V1.z * V2.z);\n"
+     "#endif\n"),
+]
+
+STEP11C_DDSM = [
+    ("#include <tuple>\n", "#include <tuple>\n#include <set>  // cheshire: step 11c\n"),
+    ("__host__ void cuda_depthSimMapCopyDepthOnly(CudaDeviceMemoryPitched<float2, 2>& out_depthSimMap_dmp,\n",
+     r"""// cheshire (step 11c): CHESHIRE_DEPTHMAP_ACOS for the colour optimisation's angles (device/matrix.cuh), as 11a's
+// switch: read and announced once; off, each device's cheshireAcosOn_d is cleared once, before its first colour
+// optimisation.
+static void cheshireAcosConfigure()
+{
+#ifdef CHESHIRE_HIP
+    static const bool on = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_ACOS", true);
+    static std::once_flag announced;
+    std::call_once(announced, [] {
+        if (on)
+            ALICEVISION_LOG_INFO("cheshire: depth map colour optimisation's angles in float-float (exact: the double path's"
+                                 " float, which runs where a float is not certain; CHESHIRE_DEPTHMAP_ACOS=0 for it alone)");
+        else
+            ALICEVISION_LOG_INFO("cheshire: depth map colour optimisation's angles in double precision (CHESHIRE_DEPTHMAP_ACOS=0)");
+    });
+    if (on)
+        return;
+    static std::mutex clearedMutex;
+    static std::set<int> cleared;
+    int device = 0;
+    cudaError_t err = cudaGetDevice(&device);
+    THROW_ON_CUDA_ERROR(err, "Failed to get the current device");
+    const std::lock_guard<std::mutex> lock(clearedMutex);
+    if (cleared.insert(device).second)
+    {
+        const int off = 0;
+        err = hipMemcpyToSymbol(HIP_SYMBOL(cheshireAcosOn_d), &off, sizeof(off), 0, hipMemcpyHostToDevice);
+        THROW_ON_CUDA_ERROR(err, "Failed to clear the angles' switch");
+    }
+#else
+    static std::once_flag announced;
+    std::call_once(announced, [] { ALICEVISION_LOG_INFO("cheshire: depth map colour optimisation's angles in CUDA's double precision"); });
+#endif
+}
+
+__host__ void cuda_depthSimMapCopyDepthOnly(CudaDeviceMemoryPitched<float2, 2>& out_depthSimMap_dmp,
+"""),
+    ("    out_optimizeDepthSimMap_dmp.copyFrom(in_sgmDepthPixSizeMap_dmp, stream);\n",
+     "    cheshireAcosConfigure();  // cheshire (step 11c)\n"
+     "    out_optimizeDepthSimMap_dmp.copyFrom(in_sgmDepthPixSizeMap_dmp, stream);\n"),
+]
+
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
     if new in text:
@@ -9508,6 +9667,20 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                 sys.exit("the patch samples' projections not found three times in Patch.cuh (11b)")
             t = t.replace(old, new)
     f11b.write_text(t, encoding="utf-8", newline="")
+
+    # 11c (after 0.4.1). The colour optimisation's angles without double precision: angleBetwABandAC's acos in
+    #     float-float from IEEE operations only, used where every value within 2^-40 of the estimate rounds to the same
+    #     float, upstream's double path otherwise (hip/tests/acos: all 2^32 inputs). HIP only; CHESHIRE_DEPTHMAP_ACOS=0.
+    #     After 10j (its includes are the anchor) and 11b (matrix.cuh), before 6q.
+    for f11c, steps11c in ((AV / "src/aliceVision/depthMap/cuda/device/matrix.cuh", STEP11C_MATRIX),
+                           (AV / "src/aliceVision/depthMap/cuda/planeSweeping/deviceDepthSimilarityMap.cu", STEP11C_DDSM)):
+        t = f11c.read_text(encoding="utf-8")
+        if "step 11c" not in t:
+            for old, new in steps11c:
+                if t.count(old) != 1:
+                    sys.exit(f"an anchor of the colour optimisation's angles not found once in {f11c.name} (11c)")
+                t = t.replace(old, new, 1)
+        f11c.write_text(t, encoding="utf-8", newline="")
 
     # 10g (after 0.4.0). The image cache evicts by load order instead of clock(), whose millisecond ties made the
     #     texturing read-ahead evict images before their use (most False Door passes decoded each image twice).

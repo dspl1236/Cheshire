@@ -865,13 +865,11 @@ Next:
 - **DepthMap's GPU stages**, now that a chunk waits on them (10h); exact or not at all, as the rest. **Done
   2026-10-07:** 11a, the colour distances without double precision (`norm3df`'s frexp read from the bits; 23 % off a
   False Door chunk), and 11b, the patch samples' projections with Markstein's exact reciprocal (2.5 % more), docs/04.
-  The chunk's GPU stages are now the refinement 31.8 s, the colour optimisation 13.7 s, SGM's similarity 8.5 s and its
-  aggregation 4.8 s. Next:
-  - **11c, the colour optimisation's double-precision `acos`** (upstream's `angleBetwABandAC`, two per pixel and
-    iteration, 130 FP64 instructions in `optimize_depthSimMap_kernel`, which runs at the card's FP64 rate): a
-    float-float `acos` from IEEE operations only, so the same on every card, returning only when every value within a
-    wide margin of its estimate rounds to the same float, upstream's double path otherwise; checked against the double
-    path on every float input;
+  Then 11c, the colour optimisation's angles in float-float with upstream's double path where a float is not certain
+  (12 % more; that stage 13.7 s to 5.0 s). The chunk's GPU stages are now the refinement (about 32 s), SGM's similarity
+  (about 9 s) and its aggregation (about 5 s), with the colour optimisation at 5 s. Next:
+  - the refinement's patch loop, about 125 VALU instructions per sample, is near its exact floor for the arithmetic it
+    does (each colour distance about 23); what is left is its structure;
   - the proximity weight's square root is already one pseudo-scalar `v_s_sqrt_f32` on gfx12: nothing to gain there;
   - wave64 on RDNA3/4 for dual issue, the same arithmetic per lane if no kernel depends on the wave's width (a runtime
     switch would need both builds of the kernels).
