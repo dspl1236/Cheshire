@@ -843,16 +843,20 @@ Not released yet.
   `std::sort` after a parallel loop, so tied scores at the round's cutoff went in the threads' order; ties now go by
   view id, as 5n made the legacy engine's. Three False Door runs the same bytes; 41 views and the engine bay
   unchanged.
+- **Step 10k, done 2026-10-06** (same doc, "After 0.4.0: a depth map batch's loads and writes while the device
+  works"): a batch's maps written on their own thread (from a second set of the tiles' page-locked results) and the
+  next batch's images decoded while the device runs the batch's tiles; the images' headers (MultiViewParams, so every
+  program that reads them) and the tiles' T cameras on every core. False Door chunk 0: 98.4-102.0 s to 83.7-85.2 s,
+  the same maps.
 
 Next:
 - **DepthMap's GPU stages**, now that a chunk waits on them (10h): the refine-and-fuse stage first, the largest
   under the stage syncs (`CHESHIRE_PROFILE_SGM=1`); exact or not at all, as the rest.
-- **DepthMap's batches one after another.** Each batch's images are decoded and uploaded after the previous batch's
-  tiles have finished, while the device idles: 9.5 s of False Door chunk 0's 98 s with 10j (6.1 s of it decoding).
-  Decoded and uploaded during the previous batch's tiles instead, within the planner's VRAM budget for images.
-- **A release gate** with the matcher kernels and 10a-10j, when the user decides.
-- **Smaller host costs in the same logs:** `MultiViewParams` reads every image's header one at a time (884 EXR
-  headers, about 3-4 s of every DepthMap and DepthMapFilter process); Meshing's "Create visibilities" (64 s).
+- **What a DepthMap chunk still does with the device idle** (10k): its first batch's load (2.6 s), each later batch's
+  upload (3 s a chunk; uploading during the previous batch's tiles needs device-cache slots the batch does not use and
+  a stream of its own), 2.8 s of startup.
+- **A release gate** with the matcher kernels and 10a-10k, when the user decides.
+- **Smaller host costs in the same logs:** Meshing's "Create visibilities" (64 s).
 - **The reference patch is not cacheable exactly.** `volume_computeSimilarity_kernel` samples the R camera on a
   3D patch built per depth (epipolar-aligned axes); its pixel positions agree across depths only in exact
   arithmetic, and bilinear sampling sees the rounding. It stays with "Texture-window caching" under DepthMap below.

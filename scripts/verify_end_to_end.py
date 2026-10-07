@@ -50,12 +50,16 @@ GPU_MARKERS = {
                           r"7-point nullspace: (SVD \(default|Householder QR \(CHESHIRE_QR_NULLSPACE=1\))",
                           r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far",
                           r"cheshire: GPU search and geometric filter overlapped"],
-    # after 0.4.0: the T cameras (step 10e) and the tiles' depth lists (10h) from each camera's own landmarks, and the
-    # tiles overlapping, no wait for the device per tile (10j); host code, so required in the fallback run too
+    # after 0.4.0: the T cameras (step 10e) and the tiles' depth lists (10h) from each camera's own landmarks, the
+    # tiles overlapping, no wait for the device per tile (10j), and the batches overlapping, with the images' headers
+    # and the tiles' T cameras on every core (10k); host code, so required in the fallback run too
     "DepthMap":          [r"Number of GPU devices",
                           r"cheshire: depth map T cameras from each camera's own landmarks",
                           r"cheshire: depth map depth lists from each camera's own landmarks",
-                          r"cheshire: depth map tiles overlap"],
+                          r"cheshire: depth map tiles overlap",
+                          r"cheshire: depth map batches overlap",
+                          r"cheshire: image headers read on every core",
+                          r"cheshire: depth map tiles' T cameras for \d+ cameras in \S+ s on every core"],
     "DepthMapFilter":    [r"depth map filter: group votes on",
                           r"depth map filter cache: cap \d+ MB"],
     # 0.3.2: every port announces on both paths, so the three that were silent on success

@@ -4721,3 +4721,52 @@ and `verify`, `tiles` and `coarse` with the checks on, 41 views `experimental`, 
 ok, every depth map digest the earlier gates' on this card (`26fc558e…`, `65d76194…`, `c6b62275…`, `f7e813fc…`,
 `014df5da…`, `740e2c05…`, `c4e51fa5…`). **Compiled:** Linux CUDA 538 of 538 and Windows CUDA 830 of 830 steps, from
 the moved tree.
+
+## After 0.4.0: a depth map batch's loads and writes while the device works (step 10k, 2026-10-06)
+
+With 10j a False Door chunk was the GPU's stages (about 80 s), its startup and the gaps between its twelve batches. The
+log and the maps' file times show the gaps. After a batch's last tile the host waited for the device, then wrote the
+batch's four maps (0.64 s: each camera's eight tiles merged, then two EXRs), then decoded and uploaded the next batch's
+images that the device did not hold (0.05-1.5 s, 6.1 s of decoding in all), and only then started the next batch's
+tiles. The device was idle through both, about 1.5 s of every 7-8 s batch. Before the first batch, the process read
+the 884 images' headers one at a time (4.1-4.3 s, 12.4 s from a cold disk) and chose the 48 cameras' and their 384
+tiles' T cameras one camera at a time (2.0 s).
+
+Now:
+- **the maps are written on their own thread** while the next batch loads and runs, from a second set of the tiles'
+  page-locked results (another 256 MB at these settings: 32 tiles of 1024 x 1024 depth and similarity). The previous
+  batch's writes finish before the next batch's tiles refill their set;
+- **the next batch's images are decoded while the device runs this batch's tiles**: the ones the device does not hold,
+  the start of the next load's list, as many as the image cache's 16 slots, on every core but one, into the image
+  cache, which nothing reads between a batch's upload and the next batch's load. That load waits for them, finds them
+  in the cache and uploads them in the same order as before, so the device cache evicts the same images;
+- **the images' headers are read on every core** before MultiViewParams' per-camera loop, which then runs as it was, in
+  camera order, on what was read: the same values and logs, and a read error raised at the camera that had it. Every
+  program that builds its MultiViewParams from the images gets this: DepthMap, DepthMapFilter, Meshing, Texturing;
+- **the tiles' T cameras are chosen on every core**, one list of tiles per camera, the lists appended in the cameras'
+  order. A tile's Refine T cameras are its SGM ones when both stages ask for as many (4 and 4, Meshroom's defaults):
+  the same call on the same arguments.
+
+`CHESHIRE_DEPTHMAP_BATCH_OVERLAP=0`, `CHESHIRE_IMAGES_METADATA_PARALLEL=0` and `CHESHIRE_DEPTHMAP_TILES_PARALLEL=0`
+restore each part.
+
+| False Door DepthMap chunk 0, replays alternating (RX 9070) | headers | T cameras | whole chunk |
+|---|---|---|---|
+| all three off (as 10j) | 4.1-4.3 s | 1.97 s | 102.0, 98.4, 98.5 s |
+| the headers | 0.54 s | 1.98 s | 95.1 s |
+| the headers and the batches | 0.54 s (1.3 s in the first run) | 1.98 s | 89.3, 86.4, 85.8, 85.6 s |
+| 10k | 0.54 s | 0.21 s | 85.2, 83.7 s |
+
+About 14 % less per chunk. Every batch after the first now uploads only (0.05-0.65 s of load, no decoding). The 96 depth
+and similarity maps are the same bytes in all ten runs, and the same as 10j's and the AliceVision move's. What a chunk
+still does with the device idle, in the 83.7 s run: 2.8 s of startup before the first batch (the SfM data 0.9 s, the
+headers 0.5 s, the landmark lists 0.3 s, the T cameras 0.2 s, the device's buffers 0.5 s), the first batch's load
+(2.6 s, 1.6 s of it decoding), each later batch's upload (3 s in all) and the last batch's writes (0.6 s); the other
+75 s are the twelve batches' tiles.
+
+**Exact:** on the RX 9070 (Windows, a flat test package of the development install), Meshroom 2025.1 mini6:
+`verifyexp` 14 of 14 and `verify` 8 of 8 with every verdict met, `tiles` and `coarse` 8 of 8 with the T camera and
+depth list checks on (144 of 144 and 6 of 6 tiles' T cameras as upstream's walks: the parallel lists and the shared
+Refine T cameras), the depth maps of all four as since 10a-10i (`839b89c2…`, `7c5369fc…`, `2b82a5aa…`, `0b8241ff…`).
+The gate requires the three announcements (the batches, the headers, the tiles' T cameras) in every DepthMap log.
+Linux HIP and the CUDA builds: below, after the push.

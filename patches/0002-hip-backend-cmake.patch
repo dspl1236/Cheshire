@@ -450,10 +450,10 @@ index 25b80d4..84dba54 100644
          aliceVision_gpu
          aliceVision_sfmData
 diff --git a/src/aliceVision/depthMap/DepthMapEstimator.cpp b/src/aliceVision/depthMap/DepthMapEstimator.cpp
-index 187e8f5..6f688e3 100644
+index 187e8f5..2cbb61c 100644
 --- a/src/aliceVision/depthMap/DepthMapEstimator.cpp
 +++ b/src/aliceVision/depthMap/DepthMapEstimator.cpp
-@@ -4,7 +4,13 @@
+@@ -4,7 +4,16 @@
  // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
@@ -464,10 +464,13 @@ index 187e8f5..6f688e3 100644
 +#include <algorithm>
 +#include <atomic>  // cheshire: step 10h
 +#include <chrono>
++#include <exception>  // cheshire: step 10k
++#include <future>
++#include <mutex>
  
  #include <aliceVision/system/Logger.hpp>
  #include <aliceVision/system/Timer.hpp>
-@@ -19,6 +25,11 @@
+@@ -19,6 +28,11 @@
  #include <aliceVision/depthMap/cuda/host/utils.hpp>
  #include <aliceVision/depthMap/cuda/host/patchPattern.hpp>
  #include <aliceVision/depthMap/cuda/host/DeviceCache.hpp>
@@ -479,7 +482,7 @@ index 187e8f5..6f688e3 100644
  #include <aliceVision/depthMap/cuda/host/DeviceStreamManager.hpp>
  #include <aliceVision/depthMap/cuda/planeSweeping/deviceDepthSimilarityMap.hpp>
  
-@@ -109,6 +120,68 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
+@@ -109,6 +123,68 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
      const double rcMinCostMB = rcCamsCostMB + tileCostMB;
      const double rcMaxCostMB = rcCamsCostMB + nbTilesPerCamera * tileCostMB;
  
@@ -548,7 +551,7 @@ index 187e8f5..6f688e3 100644
      // available device memory
      double deviceMemoryMB;
      {
-@@ -126,6 +199,7 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
+@@ -126,6 +202,7 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
          const double remainingMemoryMB = deviceMemoryMB - (nbSimultaneousFullRc * rcMaxCostMB);
          nbRemainingTiles = static_cast<int>(std::max(0.0, remainingMemoryMB - rcCamsCostMB) / tileCostMB);
      }
@@ -556,7 +559,7 @@ index 187e8f5..6f688e3 100644
  
      // check that we do not need more constant camera parameters than the ones in device constant memory
      if (ALICEVISION_DEVICE_MAX_CONSTANT_CAMERA_PARAM_SETS < ((nbSimultaneousFullRc + ((nbRemainingTiles > 0) ? 1 : 0)) * rcCamParams))
-@@ -170,6 +244,66 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
+@@ -170,6 +247,74 @@ int DepthMapEstimator::getNbSimultaneousTiles() const
      return out_nbSimultaneousTiles;
  }
  
@@ -620,13 +623,22 @@ index 187e8f5..6f688e3 100644
 +    }
 +}
 +
++// cheshire (step 10k): the tiles' T cameras on every core, and a tile's Refine T cameras from its SGM ones when both
++// stages ask for as many (getTilesList). CHESHIRE_DEPTHMAP_TILES_PARALLEL=0 for one camera at a time and both calls.
++static bool cheshireTilesParallel()
++{
++    static const bool v = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_TILES_PARALLEL", true);
++    return v;
++}
++
  void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<Tile>& tiles) const
  {
      const int nbTilesPerCamera = _tileRoiList.size();
-@@ -180,10 +314,17 @@ void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<T
+@@ -180,10 +325,32 @@ void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<T
      // reserve memory
      tiles.reserve(cams.size() * nbTilesPerCamera);
  
+-    for (int rc : cams)
 +    // cheshire (step 10e): each camera's landmarks listed once, kept by the estimator for the tiles' depth lists (10h).
 +    // Once per estimator: with more than one GPU, computeOnMultiGPUs runs compute(), and so this, on several threads.
 +    if (cheshireTCamsLists() || cheshireDepthListLists())
@@ -634,15 +646,30 @@ index 187e8f5..6f688e3 100644
 +    const mvsUtils::MultiViewParams::CheshireLandmarksPerCamera* const cheshireAll = _cheshirePerCamera.empty() ? nullptr : &_cheshirePerCamera;
 +    const mvsUtils::MultiViewParams::CheshireLandmarksPerCamera* const cheshireLists = cheshireTCamsLists() ? cheshireAll : nullptr;
 +
-     for (int rc : cams)
++    // cheshire (step 10k): the cameras on every core, each camera's tiles in a list of its own and the lists appended in the
++    // cameras' order: the same tiles in the same order, since a camera's T cameras depend on that camera alone. A tile's
++    // Refine T cameras are its SGM ones when both stages ask for as many: the same call on the same arguments. Upstream
++    // ran it camera after camera, 2.0 s of every False Door chunk with the device idle.
++    const bool cheshireParallel = cheshireTilesParallel();
++    const auto cheshireT0 = std::chrono::steady_clock::now();
++    const int cheshireNbCams = static_cast<int>(cams.size());
++    std::vector<std::vector<Tile>> cheshireCamTiles(cams.size());
++    std::exception_ptr cheshireError;  // the first failure, raised after the loop (an exception may not leave an OpenMP loop)
++    std::mutex cheshireErrorMutex;
++#pragma omp parallel for schedule(dynamic) if (cheshireParallel)
++    for (int cheshireCam = 0; cheshireCam < cheshireNbCams; ++cheshireCam)
++    try
      {
++        const int rc = cams[cheshireCam];
++        std::vector<Tile>& cheshireTiles = cheshireCamTiles[cheshireCam];
++
          // get R camera Tcs list
 -        const std::vector<int> tCams = _mp.findNearestCamsFromLandmarks(rc, _depthMapParams.maxTCams).getDataWritable();
 +        const std::vector<int> tCams = _mp.findNearestCamsFromLandmarks(rc, _depthMapParams.maxTCams, cheshireLists).getDataWritable();
  
          // get R camera ROI
          const ROI rcImageRoi(Range(0, _mp.getWidth(rc)), Range(0, _mp.getHeight(rc)));
-@@ -196,6 +337,7 @@ void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<T
+@@ -196,6 +363,7 @@ void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<T
              t.nbTiles = nbTilesPerCamera;
              t.rc = rc;
              t.roi = intersect(_tileRoiList.at(i), rcImageRoi);
@@ -650,7 +677,7 @@ index 187e8f5..6f688e3 100644
  
              if (t.roi.isEmpty())
              {
-@@ -204,10 +346,10 @@ void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<T
+@@ -204,10 +372,12 @@ void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<T
              else if (_depthMapParams.chooseTCamsPerTile)
              {
                  // find nearest T cameras per tile
@@ -659,14 +686,33 @@ index 187e8f5..6f688e3 100644
  
                  if (_depthMapParams.useRefine)
 -                    t.refineTCams = _mp.findTileNearestCams(rc, _refineParams.maxTCamsPerTile, tCams, t.roi);
-+                    t.refineTCams = _mp.findTileNearestCams(rc, _refineParams.maxTCamsPerTile, tCams, t.roi, cheshireLists);  // cheshire (step 10e)
++                    t.refineTCams = (cheshireParallel && _refineParams.maxTCamsPerTile == _sgmParams.maxTCamsPerTile)
++                                      ? t.sgmTCams  // cheshire (step 10k): the same call
++                                      : _mp.findTileNearestCams(rc, _refineParams.maxTCamsPerTile, tCams, t.roi, cheshireLists);  // cheshire (step 10e)
              }
              else
              {
-@@ -219,6 +361,35 @@ void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<T
-             tiles.push_back(t);
-         }
-     }
+@@ -216,11 +386,99 @@ void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<T
+                 t.refineTCams = tCams;
+             }
+ 
+-            tiles.push_back(t);
++            cheshireTiles.push_back(t);
++        }
++    }
++    catch (...)
++    {
++        std::lock_guard<std::mutex> lock(cheshireErrorMutex);
++        if (!cheshireError)
++            cheshireError = std::current_exception();
++    }
++    if (cheshireError)
++        std::rethrow_exception(cheshireError);
++    for (const std::vector<Tile>& cheshireTiles : cheshireCamTiles)  // cheshire (step 10k): in the cameras' order
++        tiles.insert(tiles.end(), cheshireTiles.begin(), cheshireTiles.end());
++    ALICEVISION_LOG_INFO("cheshire: depth map tiles' T cameras for " << cams.size() << " cameras in "
++                         << std::chrono::duration<double>(std::chrono::steady_clock::now() - cheshireT0).count() << " s"
++                         << (cheshireParallel ? " on every core" : " (CHESHIRE_DEPTHMAP_TILES_PARALLEL=0)"));
 +
 +    // cheshire (step 10e): CHESHIRE_DEPTHMAP_TCAMS_CHECK=1 - every tile's T cameras again by upstream's walks
 +    if (cheshireLists && ::cheshire::env::flag("CHESHIRE_DEPTHMAP_TCAMS_CHECK"))
@@ -692,14 +738,62 @@ index 187e8f5..6f688e3 100644
 +                refineTCams = tCams;
 +            }
 +            same += (sgmTCams == t.sgmTCams && refineTCams == t.refineTCams) ? 1 : 0;
-+        }
+         }
 +        ALICEVISION_LOG_INFO("cheshire: depth map T cameras check: " << same << " of " << tiles.size()
 +                             << " tiles identical to upstream's walks over every landmark");
-+    }
+     }
  }
  
++// cheshire (step 10k): the batches overlap. A batch's depth and similarity maps are written on their own thread while the
++// next batch loads and runs, from a second set of the tiles' page-locked results, and the next batch's images that are not
++// on the device are decoded into the image cache while the device runs this batch's tiles: nothing reads that cache
++// between a batch's upload and the next batch's load, which waits for the decodes and finds the images there. Upstream did
++// each in turn with the device idle, about 1.5 s of every 8 s batch on the False Door. The same images, uploaded in the
++// same order, and the same files. CHESHIRE_DEPTHMAP_BATCH_OVERLAP=0 for one step after another.
++static bool cheshireBatchOverlap()
++{
++    static const bool v = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_BATCH_OVERLAP", true);
++    static const bool said = []() {
++        if (v)
++        {
++            ALICEVISION_LOG_INFO("cheshire: depth map batches overlap: a batch's maps are written and the next batch's images "
++                                 "decoded while the device runs (CHESHIRE_DEPTHMAP_BATCH_OVERLAP=0 for one step after another)");
++        }
++        return true;
++    }();
++    (void)said;
++    return v;
++}
++
++/// cheshire (step 10k): the cameras' images decoded into the image cache, in parallel as the batch's load decodes them;
++/// the first failure is raised after the loop (an exception may not leave an OpenMP loop)
++static void cheshireDecodeImages(mvsUtils::ImagesCache<image::Image<image::RGBAfColor>>& ic, const std::vector<int>& cams, int threads)
++{
++    std::exception_ptr error;
++    std::mutex errorMutex;
++    const int nbCams = static_cast<int>(cams.size());
++#pragma omp parallel for schedule(dynamic) num_threads(threads)
++    for (int k = 0; k < nbCams; ++k)
++    {
++        try
++        {
++            ic.refreshImage_sync(cams[k]);
++        }
++        catch (...)
++        {
++            std::lock_guard<std::mutex> lock(errorMutex);
++            if (!error)
++                error = std::current_exception();
++        }
++    }
++    if (error)
++        std::rethrow_exception(error);
++}
++
  void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
-@@ -230,6 +401,15 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+ {
+     // set the device to use for GPU executions
+@@ -230,6 +488,15 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
      // initialize RAM image cache
      // note: maybe move it as class member in order to share it across multiple GPUs
      mvsUtils::ImagesCache<image::Image<image::RGBAfColor>> ic(_mp, image::EImageColorSpace::LINEAR);
@@ -715,7 +809,71 @@ index 187e8f5..6f688e3 100644
  
      // build tile list order by R camera
      std::vector<Tile> tiles;
-@@ -331,6 +511,114 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -295,11 +562,15 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+                 refinePerStream.emplace_back(_mp, _tileParams, _refineParams, deviceStreamManager.getStream(i));
+     }
+ 
++    // cheshire (step 10k): two sets of a batch's tile results when the batches overlap, one written while the next batch
++    // fills the other (see cheshireBatchOverlap)
++    const int cheshireSets = (cheshireBatchOverlap() && static_cast<int>(tiles.size()) > nbTilesPerBatch) ? 2 : 1;
++
+     // allocate final deth/similarity map tile list in host memory
+-    std::vector<std::vector<CudaHostMemoryHeap<float2, 2>>> depthSimMapTilePerCam(nbRcPerBatch);
+-    std::vector<std::vector<std::pair<float, float>>> depthMinMaxTilePerCam(nbRcPerBatch);
++    std::vector<std::vector<CudaHostMemoryHeap<float2, 2>>> depthSimMapTilePerCam(nbRcPerBatch * cheshireSets);
++    std::vector<std::vector<std::pair<float, float>>> depthMinMaxTilePerCam(nbRcPerBatch * cheshireSets);
+ 
+-    for (int i = 0; i < nbRcPerBatch; ++i)
++    for (int i = 0; i < nbRcPerBatch * cheshireSets; ++i)
+     {
+         auto& depthSimMapTiles = depthSimMapTilePerCam.at(i);
+         auto& depthMinMaxTiles = depthMinMaxTilePerCam.at(i);
+@@ -324,6 +595,44 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+     const int minMipmapDownscale = std::min(_refineParams.scale, _sgmParams.scale);
+     const int maxMipmapDownscale = std::max(_refineParams.scale, _sgmParams.scale) * std::pow(2, 6);  // we add 6 downscale levels
+ 
++    // cheshire (step 10k): a batch's cameras in device-insertion order - R, then its SGM and Refine T cameras, per tile -
++    // the list the batch's load walks and the one the previous batch decodes ahead from
++    const auto cheshireBatchCams = [&](int batch) {
++        std::vector<int> batchCams;
++        std::vector<char> seen(_mp.ncams, 0);
++        auto add = [&](int cam) {
++            if (!seen[cam])
++            {
++                seen[cam] = 1;
++                batchCams.push_back(cam);
++            }
++        };
++        const int first = batch * nbTilesPerBatch;
++        const int last = std::min((batch + 1) * nbTilesPerBatch, static_cast<int>(tiles.size()));
++        for (int i = first; i < last; ++i)
++        {
++            const Tile& tile = tiles.at(i);
++            add(tile.rc);
++            for (const int tc : tile.sgmTCams)
++                add(tc);
++            if (_depthMapParams.useRefine)
++                for (const int tc : tile.refineTCams)
++                    add(tc);
++        }
++        return batchCams;
++    };
++#if defined(CHESHIRE_HIP)
++    // with CheshireEXR (6m) the load decodes on the device, not into the image cache
++    const bool cheshireDecodeAhead = cheshireSets > 1 && !(ic.isFullResolution() && cheshireDeviceExrEnabled());
++#else
++    const bool cheshireDecodeAhead = cheshireSets > 1;
++#endif
++    const int cheshireHostSlots = std::max(1, ic.getCacheSize());
++    const int cheshireDecodeThreads = std::max(1, omp_get_max_threads() - 1);  // one core left to the tiles' host work
++    int cheshireDecodedAhead = 0;       // the next batch's images decoded ahead
++    std::future<void> cheshireDecodes;  // those decodes, waited for by the next batch's load
++    std::future<void> cheshireWrites;   // a batch's maps, waited for before the next batch's are written
++
+     // compute each batch of R cameras
+     for (int b = 0; b < nbBatches; ++b)
+     {
+@@ -331,6 +640,99 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          const int firstTileIndex = b * nbTilesPerBatch;
          const int lastTileIndex = std::min((b + 1) * nbTilesPerBatch, static_cast<int>(tiles.size()));
  
@@ -729,27 +887,12 @@ index 187e8f5..6f688e3 100644
 +        // batch and the device receives only what it lacks. The results do not depend on any of
 +        // this (caches only), and the maps are checked bit-identical.
 +        {
-+            std::vector<int> batchCams;  // device-insertion order: R, then its SGM and Refine T cameras, per tile
-+            {
-+                std::vector<char> seen(_mp.ncams, 0);
-+                auto add = [&](int cam) {
-+                    if (!seen[cam])
-+                    {
-+                        seen[cam] = 1;
-+                        batchCams.push_back(cam);
-+                    }
-+                };
-+                for (int i = firstTileIndex; i < lastTileIndex; ++i)
-+                {
-+                    const Tile& tile = tiles.at(i);
-+                    add(tile.rc);
-+                    for (const int tc : tile.sgmTCams)
-+                        add(tc);
-+                    if (_depthMapParams.useRefine)
-+                        for (const int tc : tile.refineTCams)
-+                            add(tc);
-+                }
-+            }
++            // cheshire (step 10k): the images the previous batch decoded ahead are in the image cache before it is read
++            if (cheshireDecodes.valid())
++                cheshireDecodes.get();
++            const int cheshireAhead = cheshireDecodedAhead;
++            cheshireDecodedAhead = 0;
++            const std::vector<int> batchCams = cheshireBatchCams(b);  // device-insertion order: R, then its SGM and Refine T cameras, per tile
 +            std::vector<int> newCams;
 +            int nbResident = 0;
 +            for (const int cam : batchCams)
@@ -816,7 +959,7 @@ index 187e8f5..6f688e3 100644
 +            ALICEVISION_LOG_INFO("cheshire: depth map batch " << (b + 1) << "/" << nbBatches << ": " << batchCams.size() << " cameras, " << newCams.size()
 +                                                              << " decoded and uploaded (" << nbResident << " already on the device), decode " << decodeSeconds
 +                                                              << " s, load " << std::chrono::duration<double>(std::chrono::steady_clock::now() - tLoad0).count()
-+                                                              << " s");
++                                                              << " s" << (cheshireAhead > 0 ? "; " + std::to_string(cheshireAhead) + " of those decoded during the previous batch's tiles" : std::string()));  // cheshire (step 10k)
 +#if defined(CHESHIRE_HIP)
 +            if (exrLoader)
 +                ALICEVISION_LOG_INFO("cheshire: depth map batch " << (b + 1) << "/" << nbBatches << ": " << exrLoader->decoded()
@@ -830,7 +973,28 @@ index 187e8f5..6f688e3 100644
          // load tile R and corresponding T cameras in device cache
          for (int i = firstTileIndex; i < lastTileIndex; ++i)
          {
-@@ -375,7 +663,10 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -371,11 +773,31 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+         // wait for camera loading in device cache
+         cudaDeviceSynchronize();
+ 
++        // cheshire (step 10k): the next batch's images that are not on the device - the start of its load's list, as many
++        // as the image cache holds - decoded now, while the device runs this batch's tiles (see cheshireBatchOverlap)
++        if (cheshireDecodeAhead && b + 1 < nbBatches)
++        {
++            std::vector<int> next;
++            for (const int cam : cheshireBatchCams(b + 1))
++            {
++                if (!deviceCache.hasMipmapImage(cam))
++                    next.push_back(cam);
++            }
++            if (static_cast<int>(next.size()) > cheshireHostSlots)
++                next.resize(cheshireHostSlots);
++            cheshireDecodedAhead = static_cast<int>(next.size());
++            if (!next.empty())  // a failure is raised where the next load waits
++                cheshireDecodes = std::async(std::launch::async, [&ic, next, cheshireDecodeThreads]() { cheshireDecodeImages(ic, next, cheshireDecodeThreads); });
++        }
++
+         // compute each batch tile
          for (int i = firstTileIndex; i < lastTileIndex; ++i)
          {
              Tile& tile = tiles.at(i);
@@ -838,11 +1002,11 @@ index 187e8f5..6f688e3 100644
 +            // cheshire: the slot by position in the batch. Upstream used tile.rc % nbRcPerBatch, which
 +            // needs the batch's cameras to be consecutive indices; in tour order (5u) they are not,
 +            // and two cameras of a batch could share a slot.
-+            const int batchCamIndex = (i / nbTilesPerCamera) % nbRcPerBatch;
++            const int batchCamIndex = (b % cheshireSets) * nbRcPerBatch + (i / nbTilesPerCamera) % nbRcPerBatch;  // cheshire (step 10k): this batch's set
              const int streamIndex = tile.id % nbStreams;
  
              // do not compute empty ROI
-@@ -399,6 +690,20 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -399,6 +821,20 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
              // compute the R camera depth list
              sgmDepthList.computeListRc();
  
@@ -863,7 +1027,7 @@ index 187e8f5..6f688e3 100644
              // check number of depths
              if (sgmDepthList.getDepths().empty())  // no depth found
              {
-@@ -446,18 +751,22 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -446,31 +882,50 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          // wait for tiles batch computation
          cudaDeviceSynchronize();
  
@@ -885,14 +1049,53 @@ index 187e8f5..6f688e3 100644
  
          // write depth/sim map result
 -        for (int c = firstRc; c <= lastRc; ++c)
-+        for (int camPos = firstCamPos; camPos <= lastCamPos; ++camPos)
-         {
+-        {
 -            const int batchCamIndex = c % nbRcPerBatch;
-+            const int c = tiles.at(camPos * nbTilesPerCamera).rc;
-+            const int batchCamIndex = camPos % nbRcPerBatch;
+-
+-            if (_depthMapParams.useRefine)
+-                writeDepthSimMapFromTileList(
+-                  c, _mp, _tileParams, _tileRoiList, depthSimMapTilePerCam.at(batchCamIndex), _refineParams.scale, _refineParams.stepXY);
+-            else
+-                writeDepthSimMapFromTileList(
+-                  c, _mp, _tileParams, _tileRoiList, depthSimMapTilePerCam.at(batchCamIndex), _sgmParams.scale, _sgmParams.stepXY);
++        // cheshire (step 10k): from this batch's set, on their own thread when the batches overlap; the previous batch's
++        // maps are written first, since the next batch's tiles fill their set
++        const int cheshireSet = b % cheshireSets;
++        auto cheshireWriteBatch = [&, firstCamPos, lastCamPos, cheshireSet]() {
++            for (int camPos = firstCamPos; camPos <= lastCamPos; ++camPos)
++            {
++                const int c = tiles.at(camPos * nbTilesPerCamera).rc;
++                const int batchCamIndex = cheshireSet * nbRcPerBatch + camPos % nbRcPerBatch;
  
-             if (_depthMapParams.useRefine)
-                 writeDepthSimMapFromTileList(
+-            if (_depthMapParams.exportTilePattern)
+-                exportDepthSimMapTilePatternObj(c, _mp, _tileRoiList, depthMinMaxTilePerCam.at(batchCamIndex));
+-        }
++                if (_depthMapParams.useRefine)
++                    writeDepthSimMapFromTileList(
++                      c, _mp, _tileParams, _tileRoiList, depthSimMapTilePerCam.at(batchCamIndex), _refineParams.scale, _refineParams.stepXY);
++                else
++                    writeDepthSimMapFromTileList(
++                      c, _mp, _tileParams, _tileRoiList, depthSimMapTilePerCam.at(batchCamIndex), _sgmParams.scale, _sgmParams.stepXY);
++
++                if (_depthMapParams.exportTilePattern)
++                    exportDepthSimMapTilePatternObj(c, _mp, _tileRoiList, depthMinMaxTilePerCam.at(batchCamIndex));
++            }
++        };
++        if (cheshireWrites.valid())
++            cheshireWrites.get();
++        if (cheshireSets > 1)
++            cheshireWrites = std::async(std::launch::async, cheshireWriteBatch);
++        else
++            cheshireWriteBatch();
+     }
+ 
++    // cheshire (step 10k): the last batch's maps written
++    if (cheshireWrites.valid())
++        cheshireWrites.get();
++
+     // merge intermediate results tiles if needed and desired
+     if (tiles.size() > cams.size())
+     {
 diff --git a/src/aliceVision/depthMap/DepthMapEstimator.hpp b/src/aliceVision/depthMap/DepthMapEstimator.hpp
 index 25dfc8e..968a505 100644
 --- a/src/aliceVision/depthMap/DepthMapEstimator.hpp
@@ -9647,7 +9850,7 @@ index 8849153..d9877f8 100644
      ~ImagesCache() = default;
  
 diff --git a/src/aliceVision/mvsUtils/MultiViewParams.cpp b/src/aliceVision/mvsUtils/MultiViewParams.cpp
-index 6a8da9f..def44f0 100644
+index 6a8da9f..0f49831 100644
 --- a/src/aliceVision/mvsUtils/MultiViewParams.cpp
 +++ b/src/aliceVision/mvsUtils/MultiViewParams.cpp
 @@ -4,6 +4,7 @@
@@ -9658,7 +9861,17 @@ index 6a8da9f..def44f0 100644
  #include "MultiViewParams.hpp"
  
  #include <aliceVision/sfmData/SfMData.hpp>
-@@ -36,6 +37,13 @@ namespace mvsUtils {
+@@ -27,6 +28,9 @@
+ #include <boost/algorithm/string/classification.hpp>
+ #include <boost/lexical_cast.hpp>
+ 
++#include <aliceVision/alicevision_omp.hpp>  // cheshire: step 10k
++
++#include <exception>
+ #include <filesystem>
+ #include <iostream>
+ #include <set>
+@@ -36,6 +40,31 @@ namespace mvsUtils {
  
  namespace fs = std::filesystem;
  
@@ -9669,10 +9882,28 @@ index 6a8da9f..def44f0 100644
 +    return v;
 +}
 +
++// cheshire (step 10k): the images' headers read on every core before the loop that uses them - upstream read them one at
++// a time in that loop, 4.4 s of every depth map process on the False Door's 884 views (12 s from a cold disk) - and the
++// loop run as it was, in camera order, on what was read: the same values, the same logs, an error raised at the camera
++// that had it. CHESHIRE_IMAGES_METADATA_PARALLEL=0 for the reads in the loop.
++static bool cheshireMetadataParallel()
++{
++    static const bool v = ::cheshire::env::flag("CHESHIRE_IMAGES_METADATA_PARALLEL", true);
++    static const bool said = []() {
++        if (v)
++        {
++            ALICEVISION_LOG_INFO("cheshire: image headers read on every core (CHESHIRE_IMAGES_METADATA_PARALLEL=0 for one at a time)");
++        }
++        return true;
++    }();
++    (void)said;
++    return v;
++}
++
  MultiViewParams::MultiViewParams(const sfmData::SfMData& sfmData,
                                   const std::string& imagesFolder,
                                   const std::string& depthMapsFolder,
-@@ -56,6 +64,8 @@ MultiViewParams::MultiViewParams(const sfmData::SfMData& sfmData,
+@@ -56,6 +85,8 @@ MultiViewParams::MultiViewParams(const sfmData::SfMData& sfmData,
      {
          std::set<std::pair<int, int>> dimensions;  // for print only
          int i = 0;
@@ -9681,7 +9912,7 @@ index 6a8da9f..def44f0 100644
          for (const auto& viewPair : sfmData.getViews())
          {
              const sfmData::View& view = *(viewPair.second.get());
-@@ -85,7 +95,35 @@ MultiViewParams::MultiViewParams(const sfmData::SfMData& sfmData,
+@@ -85,7 +116,35 @@ MultiViewParams::MultiViewParams(const sfmData::SfMData& sfmData,
              else if (_imagesFolder != "/" && !_imagesFolder.empty() && fs::is_directory(_imagesFolder) && !fs::is_empty(_imagesFolder))
              {
                  // find folder file extension
@@ -9718,7 +9949,81 @@ index 6a8da9f..def44f0 100644
                      return (path.stem() == std::to_string(view.getViewId()) && (image::isSupportedUndistortFormat(path.extension().string())));
                  });
  
-@@ -519,6 +557,43 @@ void MultiViewParams::decomposeProjectionMatrix(Point3d& Co,
+@@ -120,6 +179,42 @@ MultiViewParams::MultiViewParams(const sfmData::SfMData& sfmData,
+     // Resize internal structures
+     resizeCams(getNbCameras());
+ 
++    // cheshire (step 10k): every camera's header first, on every core (see cheshireMetadataParallel)
++    struct CheshireHeader
++    {
++        bool exists = false;
++        oiio::ParamValueList metadata;
++        int width = 0;
++        int height = 0;
++        std::exception_ptr error;  // raised where the loop below reads this camera
++    };
++    std::vector<CheshireHeader> cheshireHeaders;
++    if (cheshireMetadataParallel() && getNbCameras() > 1)
++    {
++        cheshireHeaders.resize(getNbCameras());
++#pragma omp parallel for schedule(dynamic)
++        for (int i = 0; i < getNbCameras(); ++i)
++        {
++            CheshireHeader& header = cheshireHeaders[i];
++            try
++            {
++                const std::string& path = _imagesParams.at(i).path;
++                header.exists = utils::exists(path);
++                if (header.exists)
++                {
++                    header.metadata = image::readImageMetadata(path);
++                    const auto scaleIt = header.metadata.find("AliceVision:downscale");
++                    if (!(scaleIt != header.metadata.end() && scaleIt->type() == oiio::TypeDesc::INT))
++                        image::readImageSize(path, header.width, header.height);  // the loop's fallback for the scale
++                }
++            }
++            catch (...)
++            {
++                header.error = std::current_exception();
++            }
++        }
++    }
++
+     for (int i = 0; i < getNbCameras(); ++i)
+     {
+         const ImageParams& imgParams = _imagesParams.at(i);
+@@ -128,10 +223,13 @@ MultiViewParams::MultiViewParams(const sfmData::SfMData& sfmData,
+         oiio::ParamValueList::const_iterator scaleIt = metadata.end();
+         oiio::ParamValueList::const_iterator pIt = metadata.end();
+ 
+-        const bool fileExists = utils::exists(imgParams.path);
++        CheshireHeader* const cheshireHeader = cheshireHeaders.empty() ? nullptr : &cheshireHeaders[i];  // cheshire (step 10k)
++        if (cheshireHeader && cheshireHeader->error)
++            std::rethrow_exception(cheshireHeader->error);
++        const bool fileExists = cheshireHeader ? cheshireHeader->exists : utils::exists(imgParams.path);
+         if (fileExists)
+         {
+-            metadata = image::readImageMetadata(imgParams.path);
++            metadata = cheshireHeader ? std::move(cheshireHeader->metadata) : image::readImageMetadata(imgParams.path);
+             scaleIt = metadata.find("AliceVision:downscale");
+             pIt = metadata.find("AliceVision:P");
+         }
+@@ -146,7 +244,13 @@ MultiViewParams::MultiViewParams(const sfmData::SfMData& sfmData,
+         {
+             // use image dimension
+             int w, h;
+-            image::readImageSize(imgParams.path, w, h);
++            if (cheshireHeader)  // cheshire (step 10k): read above
++            {
++                w = cheshireHeader->width;
++                h = cheshireHeader->height;
++            }
++            else
++                image::readImageSize(imgParams.path, w, h);
+             const int widthScale = imgParams.width / w;
+             const int heightScale = imgParams.height / h;
+ 
+@@ -519,6 +623,43 @@ void MultiViewParams::decomposeProjectionMatrix(Point3d& Co,
  }
  
  StaticVector<int> MultiViewParams::findNearestCamsFromLandmarks(int rc, int nbNearestCams) const
@@ -9762,7 +10067,7 @@ index 6a8da9f..def44f0 100644
  {
      StaticVector<int> out;
      std::vector<SortedId> ids;
-@@ -532,13 +607,12 @@ StaticVector<int> MultiViewParams::findNearestCamsFromLandmarks(int rc, int nbNe
+@@ -532,13 +673,12 @@ StaticVector<int> MultiViewParams::findNearestCamsFromLandmarks(int rc, int nbNe
      const geometry::Pose3 pose = _sfmData.getPose(view).getTransform();
      const camera::IntrinsicBase* intrinsicPtr = _sfmData.getIntrinsicPtr(view.getIntrinsicId());
  
@@ -9779,7 +10084,7 @@ index 6a8da9f..def44f0 100644
  
          for (const auto& observationPair : observations)
          {
-@@ -560,7 +634,7 @@ StaticVector<int> MultiViewParams::findNearestCamsFromLandmarks(int rc, int nbNe
+@@ -560,7 +700,7 @@ StaticVector<int> MultiViewParams::findNearestCamsFromLandmarks(int rc, int nbNe
              const int tc = getIndexFromViewId(otherViewId);
              ++ids.at(tc).value;
          }
@@ -9788,7 +10093,7 @@ index 6a8da9f..def44f0 100644
  
      qsort(&ids[0], ids.size(), sizeof(SortedId), qsortCompareSortedIdDesc);
  
-@@ -582,6 +656,12 @@ StaticVector<int> MultiViewParams::findNearestCamsFromLandmarks(int rc, int nbNe
+@@ -582,6 +722,12 @@ StaticVector<int> MultiViewParams::findNearestCamsFromLandmarks(int rc, int nbNe
  }
  
  std::vector<int> MultiViewParams::findTileNearestCams(int rc, int nbNearestCams, const std::vector<int>& tCams, const ROI& roi) const
@@ -9801,7 +10106,7 @@ index 6a8da9f..def44f0 100644
  {
      auto plateauFunction = [](int a, int b, int c, int d, int x) {
          if (x > a && x <= b)
-@@ -608,19 +688,18 @@ std::vector<int> MultiViewParams::findTileNearestCams(int rc, int nbNearestCams,
+@@ -608,19 +754,18 @@ std::vector<int> MultiViewParams::findTileNearestCams(int rc, int nbNearestCams,
  
      const ROI fullsizeRoi = upscaleROI(roi, getProcessDownscale());  // landmark observations are in the full-size image coordinate system
  
@@ -9825,7 +10130,7 @@ index 6a8da9f..def44f0 100644
  
          for (const auto& observationPair : observations)
          {
-@@ -645,7 +724,7 @@ std::vector<int> MultiViewParams::findTileNearestCams(int rc, int nbNearestCams,
+@@ -645,7 +790,7 @@ std::vector<int> MultiViewParams::findTileNearestCams(int rc, int nbNearestCams,
  
              tcScore[tc] += plateauFunction(1, 10, 50, 150, angle);
          }
