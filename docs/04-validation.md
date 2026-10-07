@@ -5028,4 +5028,5 @@ at 72 s here. With the stage syncs the colour optimisation is now 5.0 s of the c
 
 **Compiled:** Windows HIP (the development tree), the hip6.2 tree's depth map library (gfx1031, ROCm 6.2) and Windows
 CUDA (the two CUDA files that include the changed headers, and the library). Linux CUDA compiled 11b at d14bef0
-(444 of 444); the Linux builds of 11c follow in WSL.
+(444 of 444). In WSL at 60a4318, Linux CUDA 444 of 444 and Linux HIP 444 of 444, bundled with 11a-11c for
+house-pc's RX 6750 XT when it is back in the box (`build/gate-11c`, sha256 `85149398…`). Not yet run on Linux.
