@@ -847,7 +847,7 @@ Not released yet.
   works"): a batch's maps written on their own thread (from a second set of the tiles' page-locked results) and the
   next batch's images decoded while the device runs the batch's tiles; the images' headers (MultiViewParams, so every
   program that reads them) and the tiles' T cameras on every core. False Door chunk 0: 98.4-102.0 s to 83.7-85.2 s,
-  the same maps.
+  the same maps; house-pc's 41 views (RX 6750 XT, Linux): DepthMap 134.9 s to 115.5 s, the same maps.
 
 Next:
 - **DepthMap's GPU stages**, now that a chunk waits on them (10h): the refine-and-fuse stage first, the largest

@@ -4742,7 +4742,8 @@ Now:
   in the cache and uploads them in the same order as before, so the device cache evicts the same images;
 - **the images' headers are read on every core** before MultiViewParams' per-camera loop, which then runs as it was, in
   camera order, on what was read: the same values and logs, and a read error raised at the camera that had it. Every
-  program that builds its MultiViewParams from the images gets this: DepthMap, DepthMapFilter, Meshing, Texturing;
+  program that builds a MultiViewParams gets this: DepthMap and Texturing read the images' headers, DepthMapFilter and
+  Meshing the depth maps';
 - **the tiles' T cameras are chosen on every core**, one list of tiles per camera, the lists appended in the cameras'
   order. A tile's Refine T cameras are its SGM ones when both stages ask for as many (4 and 4, Meshroom's defaults):
   the same call on the same arguments.
@@ -4769,4 +4770,14 @@ headers 0.5 s, the landmark lists 0.3 s, the T cameras 0.2 s, the device's buffe
 depth list checks on (144 of 144 and 6 of 6 tiles' T cameras as upstream's walks: the parallel lists and the shared
 Refine T cameras), the depth maps of all four as since 10a-10i (`839b89c2…`, `7c5369fc…`, `2b82a5aa…`, `0b8241ff…`).
 The gate requires the three announcements (the batches, the headers, the tiles' T cameras) in every DepthMap log.
-Linux HIP and the CUDA builds: below, after the push.
+
+**Linux HIP**, house-pc's RX 6750 XT, a bundle of e27f9ad built in WSL from the 0.4.0 release tree (`build/gate-10k`,
+sha256 `e8ae787c…`; `build/gate-10k/gate10k-hip.sh`): Meshroom 2025.1 mini6 `base`, `experimental`, `fastransacexp`,
+`verifyexp` and `verify`, `tiles` and `coarse` with the checks on, 41 views `experimental`, and Meshroom 2023.3 mini6
+`base`, all ok, every depth map digest the AliceVision move's on this card (`26fc558e…`, `65d76194…`, `c6b62275…`,
+`f7e813fc…`, `014df5da…`, `740e2c05…`, `c4e51fa5…`). 41 views `experimental` with 10k (576 s; its DepthMap node 115.5
+s, the T cameras 0.33 s on the i3's four threads) and with the three switches off (601 s; DepthMap 134.9 s, the T
+cameras 1.36 s; 13 of 14, 10k's announcements absent by design): the depth maps identical (`740e2c05…`), the node 14 %
+shorter as on the RX 9070. **Compiled:** Linux CUDA 444 of 444 and Windows CUDA 182 of 182 steps (incremental builds,
+both changed files among them; MSVC takes the OpenMP loops). The CUDA build has not run 10k: no NVIDIA card is in
+reach.
