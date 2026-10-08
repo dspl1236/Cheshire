@@ -10409,8 +10409,9 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                 t = t.replace(old, new, 1)
         f12b.write_text(t, encoding="utf-8", newline="")
 
-    # 12c (after 0.4.2). A batch's load uploads each image of a group as soon as it is decoded, in the group's order,
-    #     while the rest of the group decodes (the first batch's 24 images on a False Door chunk). HIP only;
+    # 12c (after 0.4.2). A batch's load uploads each image of a group as soon as it is decoded, in the order they
+    #     finish, while the rest of the group decodes, each file on its worker's thread (the first batch's 24 images on
+    #     a False Door chunk). HIP only;
     #     CHESHIRE_DEPTHMAP_LOAD_PIPELINE=0. After 12b, before 6q.
     f12c = AV / "src/aliceVision/depthMap/DepthMapEstimator.cpp"
     t = f12c.read_text(encoding="utf-8")
