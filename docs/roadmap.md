@@ -895,7 +895,12 @@ large sets).
     uploaded in the order they finish (`CHESHIRE_DEPTHMAP_LOAD_PIPELINE=0`). The first batch's load 2.30 s to 1.93 s
     (decode 1.55 s); a False Door chunk 52.3 to 52.8 s off, 51.6 to 52.1 s on, the 96 maps identical. A window across
     groups would hide the rest, but the image cache reuses an evicted image's buffer in place, so an upload could read
-    a buffer a later decode is writing: not done.
+    a buffer a later decode is writing: not done. On house-pc's RX 6750 XT every depth map of mini6 and the 41 views
+    the 0.4.2 gate's with 12a-12c on and all three off; the Windows and Linux CUDA builds compile.
+  - **The matcher's transfers would save nothing** (measured, dropped). FeatureMatching overlaps the GPU search with
+    the CPU geometric filter (`CHESHIRE_FM_OVERLAP`), and on the False Door every one of its 45 chunks waits on the
+    filter: 86 s of searches inside 99 s of filtering (128 s of chunk time). The query upload and result downloads
+    (about 0.5 ms a search) are hidden already.
   - **Meshing's visibility passes are not FP64-bound** (dead end). Their time is the GPU kd-tree walk, 3.07 G queries a
     pass (35 + 27 s). A float-filtered walk (`hip/tests/knnfilter`: float distances with a proven bound, the double
     metric only where the float cannot decide) gives the double walk's answers on all 32 M queries of a dump and needs
