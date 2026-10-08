@@ -874,7 +874,19 @@ large sets).
 - **0.4.2:** 11a-11c, DepthMap's GPU stages (below).
 - **0.4.3, the engine's last items:** DepthMap's device-idle gaps (each later batch's upload during the previous
   batch's tiles, the first batch's load and the startup), Meshing's "Create visibilities" (64 s on the False Door),
-  the matcher's transfers (batched per search).
+  the matcher's transfers (batched per search). Measured 2026-10-08:
+  - **DepthMap's idle time per False Door chunk** (56.6 s, warm): startup 2.8 s (SfM 1.2, headers 0.6, lists 0.5,
+    device buffers 0.5), the first batch's load 2.6 s (decode about 2 s), the later batches' uploads 3.0 s, the last
+    batch's writes 0.6 s. An upload is about 45 ms an image: the 324 MB float image copied from pageable memory
+    (25 ms; 11.5 ms from pinned, `hip/tests/xfer`), then the mipmap build. The upload path waits for the whole device
+    (two `cudaDeviceSynchronize`, the per-image buffer free, the per-level texture teardown), so it cannot overlap the
+    tiles as written: the overlap needs a stream of its own, those waits gone, and spare device-cache slots.
+  - **Meshing's visibility passes are not FP64-bound** (dead end). Their time is the GPU kd-tree walk, 3.07 G queries a
+    pass (35 + 27 s). A float-filtered walk (`hip/tests/knnfilter`: float distances with a proven bound, the double
+    metric only where the float cannot decide) gives the double walk's answers on all 32 M queries of a dump and needs
+    the double metric for only 18 % of the leaf points, yet is no faster: the walk is latency-bound (about 40 nodes and
+    18 points per query, scattered), as 6s's layout already suggested. The host backprojection
+    (`CHESHIRE_GPU_VIS_BACKPROJECT=0`) is slower on this box too (42 + 36 s against 38 + 27 s).
 - **0.4.4, packaging I:** Linux generic code objects (the 19 hand-listed targets to the family generics, Vega
   explicit) and PopSIFT from generic code objects (the host-side divide that exits 0xC0000094, and a CPU SIFT
   fallback guard), so future RDNA chips run without a rebuild ("Packaging and platforms" below).
