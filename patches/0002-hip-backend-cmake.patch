@@ -8991,19 +8991,20 @@ index 00d1c75..2553f56 100644
              {
                  case BRUTE_FORCE_L2:
 diff --git a/src/aliceVision/matchingImageCollection/GeometricFilter.hpp b/src/aliceVision/matchingImageCollection/GeometricFilter.hpp
-index ecd698a..cc937d2 100644
+index ecd698a..901cd3f 100644
 --- a/src/aliceVision/matchingImageCollection/GeometricFilter.hpp
 +++ b/src/aliceVision/matchingImageCollection/GeometricFilter.hpp
-@@ -8,6 +8,8 @@
+@@ -8,6 +8,9 @@
  #pragma once
  
  #include <aliceVision/config.hpp>
 +#include <aliceVision/robustEstimation/ACRansac.hpp>  // cheshire: step 8d
 +#include <aliceVision/multiview/relativePose/FundamentalError.hpp>  // cheshire: step 8e
++#include <aliceVision/multiview/relativePose/Fundamental7PSolver.hpp>  // cheshire: step 13a
  #include <aliceVision/feature/PointFeature.hpp>
  #include <aliceVision/feature/RegionsPerView.hpp>
  #include <aliceVision/matching/MatchesCollections.hpp>
-@@ -25,6 +27,38 @@ namespace matchingImageCollection {
+@@ -25,6 +28,38 @@ namespace matchingImageCollection {
  
  using namespace aliceVision::matching;
  
@@ -9042,7 +9043,7 @@ index ecd698a..cc937d2 100644
  /**
   * @brief Perform robust model estimation (with optional guided_matching)
   * or all the pairs and regions correspondences contained in the putativeMatches set.
-@@ -66,18 +100,9 @@ void robustModelEstimation(PairwiseMatches& out_geometricMatches,
+@@ -66,18 +101,9 @@ void robustModelEstimation(PairwiseMatches& out_geometricMatches,
          // apply the geometric filter (robust model estimation)
          {
              MatchesPerDescType inliers;
@@ -9063,21 +9064,23 @@ index ecd698a..cc937d2 100644
  #pragma omp critical
                  {
                      out_geometricMatches.emplace(currentPair, std::move(inliers));
-@@ -86,6 +111,8 @@ void robustModelEstimation(PairwiseMatches& out_geometricMatches,
+@@ -86,6 +112,9 @@ void robustModelEstimation(PairwiseMatches& out_geometricMatches,
          }
          ++progressDisplay;
      }
 +    robustEstimation::cheshireAcrBoundReport();  // cheshire (step 8d): CHESHIRE_ACR_BOUND_CHECK's count
 +    multiview::relativePose::cheshireEpipolarReport();  // cheshire (step 8e): CHESHIRE_ACR_RESIDUALS_CHECK's count
++    multiview::relativePose::Fundamental7PSolver::cheshireSolve4Report();  // cheshire (step 13a): CHESHIRE_ACR_SVD_LANES_CHECK's count
  }
  
  /**
-@@ -154,6 +181,8 @@ void robustModelEstimation(PairwiseGeometricInfo& out_geometricInfos,
+@@ -154,6 +183,9 @@ void robustModelEstimation(PairwiseGeometricInfo& out_geometricInfos,
          }
          ++progressDisplay;
      }
 +    robustEstimation::cheshireAcrBoundReport();  // cheshire (step 8d): CHESHIRE_ACR_BOUND_CHECK's count
 +    multiview::relativePose::cheshireEpipolarReport();  // cheshire (step 8e): CHESHIRE_ACR_RESIDUALS_CHECK's count
++    multiview::relativePose::Fundamental7PSolver::cheshireSolve4Report();  // cheshire (step 13a): CHESHIRE_ACR_SVD_LANES_CHECK's count
  }
  
  /**
@@ -10438,7 +10441,7 @@ index 54a051c..73aae06 100644
      };
  
 diff --git a/src/aliceVision/multiview/RelativePoseKernel.hpp b/src/aliceVision/multiview/RelativePoseKernel.hpp
-index c0a3ab3..b540338 100644
+index c0a3ab3..6260b13 100644
 --- a/src/aliceVision/multiview/RelativePoseKernel.hpp
 +++ b/src/aliceVision/multiview/RelativePoseKernel.hpp
 @@ -12,10 +12,46 @@
@@ -10488,7 +10491,7 @@ index c0a3ab3..b540338 100644
  /**
   * @brief Two view Kernel adapter for the A contrario (AC) model estimator.
   *        With unknown intrinsic.
-@@ -79,6 +115,17 @@ class RelativePoseKernel : public robustEstimation::PointFittingRansacKernel<Sol
+@@ -79,6 +115,44 @@ class RelativePoseKernel : public robustEstimation::PointFittingRansacKernel<Sol
          model.setMatrix(H);
      }
  
@@ -10503,10 +10506,37 @@ index c0a3ab3..b540338 100644
 +                             PFRansacKernel::PFKernel::_x2, errors);
 +    }
 +
++    // cheshire (step 13a): fit() for up to four samples at once where the solver solves them together
++    // (Fundamental7PSolver::cheshireSolve4, the same models in the same order); ACRANSAC draws samples ahead to use it
++    bool cheshireFitBatchOn() const
++    {
++        if constexpr (requires { SolverT_::cheshireSolve4On(); })
++            return SolverT_::cheshireSolve4On();
++        else
++            return false;
++    }
++    void cheshireFitBatch(const std::vector<std::size_t>* samples, int n, std::vector<ModelT_>* models) const
++    {
++        if constexpr (requires { SolverT_::cheshireSolve4On(); })
++        {
++            Mat x1[4], x2[4];  // PointFittingKernel::fit's subsets
++            const Mat* p1[4];
++            const Mat* p2[4];
++            for (int l = 0; l < n; ++l)
++            {
++                x1[l] = buildSubsetMatrix(PFRansacKernel::PFKernel::_x1, samples[l]);
++                x2[l] = buildSubsetMatrix(PFRansacKernel::PFKernel::_x2, samples[l]);
++                p1[l] = &x1[l];
++                p2[l] = &x2[l];
++            }
++            PFRansacKernel::PFKernel::_kernelSolver.cheshireSolve4(p1, p2, n, models);
++        }
++    }
++
      double logalpha0() const override { return _logalpha0; }
      double errorVectorDimension() const override { return (_pointToLine) ? 1.0 : 2.0; }
      Mat3 normalizer1() const override { return _N1; }
-@@ -155,6 +202,22 @@ class RelativePoseKernel_K : public robustEstimation::PointFittingRansacKernel<S
+@@ -155,6 +229,22 @@ class RelativePoseKernel_K : public robustEstimation::PointFittingRansacKernel<S
          return _errorEstimator.error(modelF, PFRansacKernel::PFKernel::_x1.col(sample), PFRansacKernel::PFKernel::_x2.col(sample));
      }
  
@@ -10597,10 +10627,10 @@ index f94703f..c17e007 100644
      return svd.matrixV().topRightCorner<9, 4>();
  }
 diff --git a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
-index 298c9d2..9b31e8f 100644
+index 298c9d2..4268267 100644
 --- a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
 +++ b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
-@@ -6,8 +6,11 @@
+@@ -6,14 +6,31 @@
  // v. 2.0. If a copy of the MPL was not distributed with this file,
  // You can obtain one at https://mozilla.org/MPL/2.0/.
  
@@ -10611,8 +10641,28 @@ index 298c9d2..9b31e8f 100644
 +#include <cstdio>   // cheshire: the announce line
  #include <aliceVision/multiview/epipolarEquation.hpp>
  #include <aliceVision/numeric/algebra.hpp>
++#include <aliceVision/numeric/cheshireJacobiSvd9.hpp>  // cheshire: step 13a
  namespace aliceVision {
-@@ -37,8 +40,20 @@ void Fundamental7PSolver::solve(const Mat& x1, const Mat& x2, std::vector<robust
+ namespace multiview {
+ namespace relativePose {
+ 
++// cheshire: CHESHIRE_QR_NULLSPACE, announced once per process on both paths (docs/04 marker rule); step 13a moved it out of
++// solve() so that cheshireSolve4On() announces it too
++static bool cheshireQrNullspaceOn()
++{
++    static const bool qr = ::cheshire::env::flag("CHESHIRE_QR_NULLSPACE");
++    static const bool announced = []() {
++        std::fprintf(stderr, qr ? "[cheshire] 7-point nullspace: Householder QR (CHESHIRE_QR_NULLSPACE=1)\n"
++                                : "[cheshire] 7-point nullspace: SVD (default; CHESHIRE_QR_NULLSPACE=1 for QR)\n");
++        return true; }();
++    (void)announced;
++    return qr;
++}
++
+ void Fundamental7PSolver::solve(const Mat& x1, const Mat& x2, std::vector<robustEstimation::Mat3Model>& models) const
+ {
+     assert(2 == x1.rows());
+@@ -37,8 +54,15 @@ void Fundamental7PSolver::solve(const Mat& x1, const Mat& x2, std::vector<robust
          // Eigen::JacobiSVD<Mat9> svdA(A);
          // ALICEVISION_LOG_DEBUG("Its singular values are:\n" << svdA.singularValues());
  
@@ -10622,12 +10672,7 @@ index 298c9d2..9b31e8f 100644
 +        // exactly two-dimensional - a Householder QR of the transpose gives a basis for it
 +        // without an iterative SVD. A different basis of the same nullspace spans the same
 +        // pencil, so det(F1 + a*F2) = 0 has the same solutions to rounding.
-+        static const bool cheshireQrNullspace = ::cheshire::env::flag("CHESHIRE_QR_NULLSPACE");
-+        static const bool cheshireQrAnnounced = []() {  // once per process, both paths (docs/04 marker rule)
-+            std::fprintf(stderr, cheshireQrNullspace ? "[cheshire] 7-point nullspace: Householder QR (CHESHIRE_QR_NULLSPACE=1)\n"
-+                                                     : "[cheshire] 7-point nullspace: SVD (default; CHESHIRE_QR_NULLSPACE=1 for QR)\n");
-+            return true; }();
-+        (void)cheshireQrAnnounced;
++        const bool cheshireQrNullspace = cheshireQrNullspaceOn();  // cheshire (step 13a): the announcement moved out
 +        if (cheshireQrNullspace)
 +            Nullspace2RankDeficient(A, f1, f2);
 +        else
@@ -10635,6 +10680,92 @@ index 298c9d2..9b31e8f 100644
  
          // @fixme here there is a potential error, we should check that the size of
          // null(A) is 2. Otherwise we have a family of possible solutions for the
+@@ -85,6 +109,61 @@ void Fundamental7PSolver::solve(const Mat& x1, const Mat& x2, std::vector<robust
+         models.emplace_back(F1 + roots[kk] * F2);
+ }
+ 
++// cheshire (step 13a): see Fundamental7PSolver.hpp
++bool Fundamental7PSolver::cheshireSolve4On()
++{
++    static const bool on = !cheshireQrNullspaceOn() && cheshireSvdLanesOn();
++    return on;
++}
++
++void Fundamental7PSolver::cheshireSolve4Report() { cheshireSvdLanes::report(); }
++
++void Fundamental7PSolver::cheshireSolve4(const Mat* const* x1s, const Mat* const* x2s, int count, std::vector<robustEstimation::Mat3Model>* modelsOut) const
++{
++    Mat9 A[4];
++    const Mat9* pA[4];
++    for (int lane = 0; lane < count; ++lane)
++    {
++        assert(x1s[lane]->cols() == 7 && x2s[lane]->cols() == 7);
++        A[lane] = Mat::Zero(9, 9);  // solve()'s minimal case
++        encodeEpipolarEquation(*x1s[lane], *x2s[lane], &A[lane]);
++        pA[lane] = &A[lane];
++    }
++    Vec9 f1s[4], f2s[4];
++    cheshireNullspace2Lanes(pA, count, f1s, f2s);
++    for (int lane = 0; lane < count; ++lane)
++    {
++        Vec9 f1 = f1s[lane];
++        Vec9 f2 = f2s[lane];
++        std::vector<robustEstimation::Mat3Model>& models = modelsOut[lane];
++        // solve()'s statements from here (they name doubles a to r, hence lane and count)
++        Mat3 F1 = Map<RMat3>(f1.data());
++        Mat3 F2 = Map<RMat3>(f2.data());
++
++        // use the condition det(F) = 0 to determine F.
++        // in other words, solve: det(F1 + a*F2) = 0 for a.
++        const double a = F1(0, 0), j = F2(0, 0), b = F1(0, 1), k = F2(0, 1), c = F1(0, 2), l = F2(0, 2), d = F1(1, 0), m = F2(1, 0), e = F1(1, 1),
++                     n = F2(1, 1), f = F1(1, 2), o = F2(1, 2), g = F1(2, 0), p = F2(2, 0), h = F1(2, 1), q = F2(2, 1), i = F1(2, 2), r = F2(2, 2);
++
++        // run fundamental_7point_coeffs.py to get the below coefficients.
++        // the coefficients are in ascending powers of alpha, i.e. P[N]*x^N.
++        const double P[4] = {a * e * i + b * f * g + c * d * h - a * f * h - b * d * i - c * e * g,
++                             a * e * r + a * i * n + b * f * p + b * g * o + c * d * q + c * h * m + d * h * l + e * i * j + f * g * k - a * f * q -
++                               a * h * o - b * d * r - b * i * m - c * e * p - c * g * n - d * i * k - e * g * l - f * h * j,
++                             a * n * r + b * o * p + c * m * q + d * l * q + e * j * r + f * k * p + g * k * o + h * l * m + i * j * n - a * o * q -
++                               b * m * r - c * n * p - d * k * r - e * l * p - f * j * q - g * l * n - h * j * o - i * k * m,
++                             j * n * r + k * o * p + l * m * q - j * o * q - k * m * r - l * n * p};
++
++        // solve for the roots of P[3]*x^3 + P[2]*x^2 + P[1]*x + P[0] = 0.
++        double roots[3];
++        const int nbRoots = SolveCubicPolynomial(P, roots);
++
++        // build the fundamental matrix for each solution.
++        for (int kk = 0; kk < nbRoots; ++kk)
++            models.emplace_back(F1 + roots[kk] * F2);
++    }
++}
++
+ void Fundamental7PSphericalSolver::solve(const Mat& x1, const Mat& x2, std::vector<robustEstimation::Mat3Model>& models) const
+ {
+     assert(3 == x1.rows());
+diff --git a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.hpp b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.hpp
+index 90eebf0..1dce6ec 100644
+--- a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.hpp
++++ b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.hpp
+@@ -56,6 +56,19 @@ class Fundamental7PSolver : public robustEstimation::ISolver<robustEstimation::M
+     {
+         throw std::logic_error("Fundamental7PSolver does not support problem solving with weights.");
+     }
++
++    /**
++     * @brief cheshire (step 13a): solve() for n <= 4 minimal samples (seven correspondences each) at once: their
++     * nullspaces through cheshireNullspace2Lanes (Eigen's SVD in AVX2 lanes, the same bits), the rest per sample as
++     * solve() does it. The same models, in the same order, in models[0 .. n-1] (appended).
++     */
++    void cheshireSolve4(const Mat* const* x1, const Mat* const* x2, int n, std::vector<robustEstimation::Mat3Model>* models) const;
++
++    /// cheshire (step 13a): whether cheshireSolve4 runs (the lanes on, CHESHIRE_QR_NULLSPACE off)
++    static bool cheshireSolve4On();
++
++    /// cheshire (step 13a): CHESHIRE_ACR_SVD_LANES_CHECK's count, printed by this library, where the fits are counted
++    static void cheshireSolve4Report();
+ };
+ 
+ class Fundamental7PSphericalSolver : public robustEstimation::ISolver<robustEstimation::Mat3Model>
 diff --git a/src/aliceVision/multiview/relativePose/FundamentalError.hpp b/src/aliceVision/multiview/relativePose/FundamentalError.hpp
 index 0d627fb..f7b7e26 100644
 --- a/src/aliceVision/multiview/relativePose/FundamentalError.hpp
@@ -11485,7 +11616,7 @@ index b2047a8..e7542af 100644
  inline double Nullspace2(const TMat& A, TVec1& x1, TVec2& x2)
  {
 diff --git a/src/aliceVision/robustEstimation/ACRansac.hpp b/src/aliceVision/robustEstimation/ACRansac.hpp
-index bb91d4e..842379d 100644
+index bb91d4e..3e93a09 100644
 --- a/src/aliceVision/robustEstimation/ACRansac.hpp
 +++ b/src/aliceVision/robustEstimation/ACRansac.hpp
 @@ -8,10 +8,16 @@
@@ -11823,7 +11954,87 @@ index bb91d4e..842379d 100644
  
      // Output parameters
      double minNFA = std::numeric_limits<double>::infinity();
-@@ -215,20 +489,52 @@ std::pair<double, double> ACRANSAC(const Kernel& kernel,
+@@ -183,17 +457,78 @@ std::pair<double, double> ACRANSAC(const Kernel& kernel,
+ 
+     bool bACRansacMode = (precision == std::numeric_limits<double>::infinity());
+ 
++    // cheshire (step 13a): with a kernel that fits several samples at once (the 7-point fundamental's, Eigen's SVD in
++    // AVX2 lanes), the next iterations' samples are drawn ahead, four at a time, as those iterations would draw them,
++    // and fitted together. Only the sampling mode and the pool (vec_index) change what an iteration draws; when either
++    // changes, or the loop ends, with samples drawn ahead and not used, the generator is put back where the last used one
++    // left it (its state before the batch, then the used draws again). Every iteration gets the sample and the models
++    // it would have had, and the generator ends in the same state. CHESHIRE_ACR_SVD_LANES=0 for one at a time.
++    constexpr bool cheshireBatchable = requires(const Kernel& k, const std::vector<std::size_t>* s, std::vector<typename Kernel::ModelT>* m) {
++        k.cheshireFitBatchOn();
++        k.cheshireFitBatch(s, 4, m);
++    };
++    bool cheshireBatch = false;
++    if constexpr (cheshireBatchable)
++        cheshireBatch = kernel.cheshireFitBatchOn();
++    std::vector<std::size_t> cheshireSamples[4];
++    std::vector<typename Kernel::ModelT> cheshireModels[4];
++    int cheshireDrawn = 0, cheshireUsed = 0;
++    bool cheshireDrawMode = false;
++    std::mt19937 cheshireRngBefore;
++    const auto cheshireDraw = [&](bool acMode, std::vector<std::size_t>& sample) {
++        if (acMode)
++            uniformSample(randomNumberGenerator, sizeSample, vec_index, sample);
++        else
++            uniformSample(randomNumberGenerator, sizeSample, nData, sample);
++    };
++    const auto cheshireRewind = [&]() {  // forget the samples drawn ahead and not used
++        if (cheshireUsed < cheshireDrawn)
++        {
++            randomNumberGenerator = cheshireRngBefore;
++            std::vector<std::size_t> again(sizeSample);
++            for (int j = 0; j < cheshireUsed; ++j)
++                cheshireDraw(cheshireDrawMode, again);
++        }
++        cheshireDrawn = cheshireUsed;
++    };
++
+     // Main estimation loop.
+     for (std::size_t iter = 0; iter < nIter; ++iter)
+     {
+         std::vector<std::size_t> vec_sample(sizeSample);  // Sample indices
++        std::vector<typename Kernel::ModelT> vec_models;  // Up to max_models solutions
++        if constexpr (cheshireBatchable)
++        {
++            if (cheshireBatch)
++            {
++                if (cheshireUsed == cheshireDrawn)
++                {
++                    cheshireRngBefore = randomNumberGenerator;
++                    cheshireDrawMode = bACRansacMode;
++                    cheshireDrawn = static_cast<int>(std::min<std::size_t>(4, nIter - iter));
++                    cheshireUsed = 0;
++                    for (int j = 0; j < cheshireDrawn; ++j)
++                    {
++                        cheshireSamples[j].assign(sizeSample, 0);
++                        cheshireDraw(cheshireDrawMode, cheshireSamples[j]);
++                        cheshireModels[j].clear();
++                    }
++                    kernel.cheshireFitBatch(cheshireSamples, cheshireDrawn, cheshireModels);
++                }
++                vec_sample = cheshireSamples[cheshireUsed];
++                vec_models = std::move(cheshireModels[cheshireUsed]);
++                ++cheshireUsed;
++            }
++        }
++        if (!cheshireBatch)
++        {
+         if (bACRansacMode)
+             uniformSample(randomNumberGenerator, sizeSample, vec_index, vec_sample);  // Get random sample
+         else
+             uniformSample(randomNumberGenerator, sizeSample, nData, vec_sample);  // Get random sample
+ 
+-        std::vector<typename Kernel::ModelT> vec_models;  // Up to max_models solutions
+         kernel.fit(vec_sample, vec_models);
++        }
+ 
+         // Evaluate models
+         bool better = false;
+@@ -215,20 +550,52 @@ std::pair<double, double> ACRANSAC(const Kernel& kernel,
              }
              if (bACRansacMode)
              {
@@ -11884,6 +12095,35 @@ index bb91d4e..842379d 100644
                      better = true;
                      minNFA = best.first;
                      vec_inliers.resize(best.second);
+@@ -245,6 +612,9 @@ std::pair<double, double> ACRANSAC(const Kernel& kernel,
+             }  // if(bACRansacMode)
+         }      // for(size_t k...
+ 
++        if (cheshireBatch && bACRansacMode != cheshireDrawMode)  // cheshire (step 13a): the next draws take the other mode
++            cheshireRewind();
++
+         // Early exit test -> no meaningful model found after nIterReserve*2 iterations
+         if (!bACRansacMode && iter > nIterReserve * 2)
+             break;
+@@ -261,6 +631,8 @@ std::pair<double, double> ACRANSAC(const Kernel& kernel,
+             else
+             {
+                 // ACRANSAC optimization: draw samples among best set of inliers so far
++                if (cheshireBatch)
++                    cheshireRewind();  // cheshire (step 13a): before the pool changes
+                 vec_index = vec_inliers;
+                 if (nIterReserve)
+                 {
+@@ -271,6 +643,9 @@ std::pair<double, double> ACRANSAC(const Kernel& kernel,
+         }
+     }
+ 
++    if (cheshireBatch)
++        cheshireRewind();  // cheshire (step 13a): the generator as the last iteration left it
++
+     if (minNFA >= 0)
+         vec_inliers.clear();
+ 
 diff --git a/src/aliceVision/robustEstimation/NACRansac.hpp b/src/aliceVision/robustEstimation/NACRansac.hpp
 index 9fb779d..a28e852 100644
 --- a/src/aliceVision/robustEstimation/NACRansac.hpp

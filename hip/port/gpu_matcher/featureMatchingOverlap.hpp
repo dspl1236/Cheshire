@@ -188,6 +188,7 @@ void cheshireSearchAndFilter(matching::PairwiseMatches& out_putatives,
     }
     robustEstimation::cheshireAcrBoundReport();          // as robustModelEstimation reports (steps 8d, 8e)
     multiview::relativePose::cheshireEpipolarReport();
+    multiview::relativePose::Fundamental7PSolver::cheshireSolve4Report();  // step 13a
     const double totalSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     ALICEVISION_LOG_INFO("cheshire: GPU search and geometric filter overlapped (CHESHIRE_FM_OVERLAP=0 for one after the other): "
                          << slots.size() << " pairs, searched in " << searchSeconds << " s, filtered by " << totalSeconds << " s");
