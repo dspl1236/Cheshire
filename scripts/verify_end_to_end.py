@@ -70,7 +70,9 @@ GPU_MARKERS = {
                           # the image uploads on a stream of their own (12a) and during the previous batch's tiles (12b),
                           # HIP only likewise
                           r"cheshire: depth map image uploads (on a stream of their own|as upstream \(CUDA\))",
-                          r"cheshire: depth map images (of the next batch uploaded during this batch's tiles|uploaded at their batch's load \(CUDA\))"],
+                          r"cheshire: depth map images (of the next batch uploaded during this batch's tiles|uploaded at their batch's load \(CUDA\))",
+                          # a load's uploads during its group's decode (12c), HIP only likewise
+                          r"cheshire: depth map batch loads upload (each image as soon as it is decoded|a group after its decode \(CUDA\))"],
     "DepthMapFilter":    [r"depth map filter: group votes on",
                           r"depth map filter cache: cap \d+ MB"],
     # 0.3.2: every port announces on both paths, so the three that were silent on success

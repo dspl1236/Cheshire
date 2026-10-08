@@ -4690,6 +4690,124 @@ static void cheshireDecodeImages("""),
 """),
 ]
 
+# 12c: a batch's load uploads each image as soon as it is decoded, while the rest of its group decodes
+STEP12C_DME = [
+    ("#include <mutex>\n", "#include <mutex>\n#include <condition_variable>  // cheshire: step 12c\n#include <aliceVision/image/cheshireExr.hpp>  // cheshire: step 12c\n"),
+    ("void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)\n",
+     r"""// cheshire (step 12c): CHESHIRE_DEPTHMAP_LOAD_PIPELINE (default on; HIP): a batch's load uploads each image of a group as
+// soon as it is decoded, while the rest of the group decodes, where it uploaded the group after the whole group's decode.
+// Announced once.
+static bool cheshireLoadPipelineOn()
+{
+#if defined(CHESHIRE_HIP)
+    static const bool on = [] {
+        const bool v = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_LOAD_PIPELINE", true);
+        if (v)
+            ALICEVISION_LOG_INFO("cheshire: depth map batch loads upload each image as soon as it is decoded "
+                                 "(CHESHIRE_DEPTHMAP_LOAD_PIPELINE=0 for a group after its decode)");
+        else
+            ALICEVISION_LOG_INFO("cheshire: depth map batch loads upload a group after its decode (CHESHIRE_DEPTHMAP_LOAD_PIPELINE=0)");
+        return v;
+    }();
+    return on;
+#else
+    static const bool announced = [] {
+        ALICEVISION_LOG_INFO("cheshire: depth map batch loads upload a group after its decode (CUDA)");
+        return true;
+    }();
+    (void)announced;
+    return false;
+#endif
+}
+
+#if defined(CHESHIRE_HIP)
+// cheshire (step 12c): one group of a batch's load (no larger than the image cache, so no decode evicts an image of the
+// group): the decodes on a thread of their own, each file decoded on its worker's thread (the shared pool would finish
+// them all together), and each image uploaded by this thread as soon as it is decoded, the lowest index first. The
+// device cache receives the group's images in the order they decode (upstream: the group's order), so its slots and
+// its LRU order may differ; neither changes a map. Returns the decodes' wall time. A decode's failure is raised once the
+// decodes are done, after the images decoded before it were uploaded; the run stops there either way.
+static double cheshireDecodeAndUploadGroup(mvsUtils::ImagesCache<image::Image<image::RGBAfColor>>& ic, DeviceCache& deviceCache,
+                                           const std::vector<int>& cams, int minDownscale, int maxDownscale, const mvsUtils::MultiViewParams& mp)
+{
+    const int n = static_cast<int>(cams.size());
+    std::vector<char> state(static_cast<std::size_t>(n), 0);  // 0 decoding, 1 decoded, 2 failed, 3 uploaded
+    std::mutex m;
+    std::condition_variable cv;
+    std::exception_ptr error;
+    double decodeSeconds = 0.0;
+    const int threads = std::max(1, omp_get_max_threads() - 1);  // one core left to this thread's uploads
+    std::future<void> decodes = std::async(std::launch::async, [&]() {
+        const auto t0 = std::chrono::steady_clock::now();
+#pragma omp parallel for schedule(dynamic) num_threads(threads)
+        for (int k = 0; k < n; ++k)
+        {
+            char s = 1;
+            try
+            {
+                const image::ConcurrentLoadScope own;  // each file on its own thread: the pool would finish them all together
+                ic.refreshImage_sync(cams[k]);
+            }
+            catch (...)
+            {
+                s = 2;
+                std::lock_guard<std::mutex> lock(m);
+                if (!error)
+                    error = std::current_exception();
+            }
+            {
+                std::lock_guard<std::mutex> lock(m);
+                state[k] = s;
+            }
+            cv.notify_all();
+        }
+        decodeSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    });
+    for (int uploaded = 0; uploaded < n; ++uploaded)
+    {
+        int next = -1;  // the first decoded image not uploaded yet
+        {
+            std::unique_lock<std::mutex> lock(m);
+            cv.wait(lock, [&]() {
+                for (int k = 0; k < n; ++k)
+                {
+                    if (state[k] == 2)
+                        return true;
+                    if (state[k] == 1 && next < 0)
+                        next = k;
+                }
+                return next >= 0;
+            });
+            if (next < 0)
+                break;  // a decode failed
+            state[next] = 3;  // uploaded
+        }
+        deviceCache.addMipmapImage(cams[next], minDownscale, maxDownscale, ic, mp);
+    }
+    decodes.get();
+    if (error)
+        std::rethrow_exception(error);
+    return decodeSeconds;
+}
+#endif
+
+void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+"""),
+    ("    cheshirePrefetchOn();  // cheshire (step 12b): announced before the first batch\n",
+     "    cheshirePrefetchOn();  // cheshire (step 12b): announced before the first batch\n"
+     "    cheshireLoadPipelineOn();  // cheshire (step 12c)\n"),
+    ("                const auto tDecode0 = std::chrono::steady_clock::now();\n",
+     "                const auto tDecode0 = std::chrono::steady_clock::now();\n"
+     "#if defined(CHESHIRE_HIP)\n"
+     "                if (!exrLoader && cheshireLoadPipelineOn())  // cheshire (step 12c): uploads during the group's decode\n"
+     "                {\n"
+     "                    decodeSeconds += cheshireDecodeAndUploadGroup(ic, deviceCache, std::vector<int>(newCams.begin() + g, newCams.begin() + g + nbGroup),\n"
+     "                                                                  minMipmapDownscale, maxMipmapDownscale, _mp);\n"
+     "                    continue;\n"
+     "                }\n"
+     "#endif\n"),
+]
+
 STEP12A_DC_CPP = [
     ("#include <aliceVision/system/Logger.hpp>\n", "#include <aliceVision/system/Logger.hpp>\n#include <mutex>  // cheshire: step 12a\n#include <vector>\n"),
     ("        mipmaps.push_back(std::make_unique<DeviceMipmapImage>());\n    }\n}\n",
@@ -10290,6 +10408,18 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                     sys.exit(f"an anchor of the uploads during the tiles not found once in {f12b.name} (12b)")
                 t = t.replace(old, new, 1)
         f12b.write_text(t, encoding="utf-8", newline="")
+
+    # 12c (after 0.4.2). A batch's load uploads each image of a group as soon as it is decoded, in the group's order,
+    #     while the rest of the group decodes (the first batch's 24 images on a False Door chunk). HIP only;
+    #     CHESHIRE_DEPTHMAP_LOAD_PIPELINE=0. After 12b, before 6q.
+    f12c = AV / "src/aliceVision/depthMap/DepthMapEstimator.cpp"
+    t = f12c.read_text(encoding="utf-8")
+    if "step 12c" not in t:
+        for old, new in STEP12C_DME:
+            if t.count(old) != 1:
+                sys.exit("an anchor of the pipelined loads not found once in DepthMapEstimator.cpp (12c)")
+            t = t.replace(old, new, 1)
+    f12c.write_text(t, encoding="utf-8", newline="")
 
     # 10g (after 0.4.0). The image cache evicts by load order instead of clock(), whose millisecond ties made the
     #     texturing read-ahead evict images before their use (most False Door passes decoded each image twice).
