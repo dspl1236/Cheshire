@@ -881,6 +881,14 @@ large sets).
     (25 ms; 11.5 ms from pinned, `hip/tests/xfer`), then the mipmap build. The upload path waits for the whole device
     (two `cudaDeviceSynchronize`, the per-image buffer free, the per-level texture teardown), so it cannot overlap the
     tiles as written: the overlap needs a stream of its own, those waits gone, and spare device-cache slots.
+  - **Done 2026-10-08, 12a and 12b.** 12a: the uploads on a stream of their own, each device-cache slot refilled in
+    place (its array, texture and level textures kept; a slot's first image allocated without a wait; the full-resolution
+    image, the downscale and the level buffers kept per device), `CHESHIRE_DEPTHMAP_UPLOAD_STREAM=0` for upstream's. 12b:
+    after each tile is queued, once the images decoded ahead (10k) are in the host cache, one of the next batch's images
+    uploaded into the slot the cache's next insertion would take, when that slot holds no camera of this batch or the
+    next (`CHESHIRE_DEPTHMAP_PREFETCH=0`). HIP only (CUDA's uploads do not wait on frees). A False Door chunk: 54.85 s
+    with both off, 53.5 s with 12a, 52.05 and 52.36 s with both (58 of the chunk's images uploaded during the tiles; the
+    later batches' loads from 1.2 s to 0.1 s), the 96 maps identical in every run.
   - **Meshing's visibility passes are not FP64-bound** (dead end). Their time is the GPU kd-tree walk, 3.07 G queries a
     pass (35 + 27 s). A float-filtered walk (`hip/tests/knnfilter`: float distances with a proven bound, the double
     metric only where the float cannot decide) gives the double walk's answers on all 32 M queries of a dump and needs
@@ -911,9 +919,8 @@ Next:
     A runtime switch would need two whole builds of the device code: clang refuses a per-kernel
     `target("wavefrontsize64")` because every inlined device function, HIP's own `threadIdx` accessors included,
     would need it too. Worth measuring once on RDNA3 (gfx11), whose dual-issue rules differ; nothing to do on RDNA4.
-- **What a DepthMap chunk still does with the device idle** (10k): its first batch's load (2.6 s), each later batch's
-  upload (3 s a chunk; uploading during the previous batch's tiles needs device-cache slots the batch does not use and
-  a stream of its own), 2.8 s of startup.
+- **What a DepthMap chunk still does with the device idle** (10k): its first batch's load (2.5 s), 2.8 s of startup.
+  The later batches' uploads overlap the tiles since 12a and 12b.
 - **The Windows CUDA zip and the Windows hip6.2 payloads on hardware**, when bench-pc is back: neither has run on a
   card since 0.3.9 and 0.4.0 respectively.
 - **Smaller host costs in the same logs:** Meshing's "Create visibilities" (64 s).

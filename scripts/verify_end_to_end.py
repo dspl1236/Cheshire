@@ -66,7 +66,11 @@ GPU_MARKERS = {
                           # and the patch samples' projections with an exact reciprocal (11b), HIP only likewise
                           r"cheshire: depth map projections' reciprocals by (the corrected hardware reciprocal|CUDA's __fdividef)",
                           # and the colour optimisation's angles in float-float (11c), HIP only likewise
-                          r"cheshire: depth map colour optimisation's angles in (float-float|CUDA's double precision)"],
+                          r"cheshire: depth map colour optimisation's angles in (float-float|CUDA's double precision)",
+                          # the image uploads on a stream of their own (12a) and during the previous batch's tiles (12b),
+                          # HIP only likewise
+                          r"cheshire: depth map image uploads (on a stream of their own|as upstream \(CUDA\))",
+                          r"cheshire: depth map images (of the next batch uploaded during this batch's tiles|uploaded at their batch's load \(CUDA\))"],
     "DepthMapFilter":    [r"depth map filter: group votes on",
                           r"depth map filter cache: cap \d+ MB"],
     # 0.3.2: every port announces on both paths, so the three that were silent on success

@@ -200,6 +200,12 @@ inline hipError_t memcpy2DToArray(hipArray_t dst, size_t wOffset, size_t hOffset
         return hipMemcpy2D(static_cast<char*>(l->dev) + hOffset * l->pitch + wOffset, l->pitch, src, spitch, width, height, kind);
     return hipMemcpy2DToArray(dst, wOffset, hOffset, src, spitch, width, height, kind);
 }
+// the same on a stream (step 12a: the depth map's uploads queue on a stream of their own)
+inline hipError_t memcpy2DToArrayAsync(hipArray_t dst, size_t wOffset, size_t hOffset, const void* src, size_t spitch, size_t width, size_t height, hipMemcpyKind kind, hipStream_t stream) {
+    if (Level* l = linearLevel(dst))
+        return hipMemcpy2DAsync(static_cast<char*>(l->dev) + hOffset * l->pitch + wOffset, l->pitch, src, spitch, width, height, kind, stream);
+    return hipMemcpy2DToArrayAsync(dst, wOffset, hOffset, src, spitch, width, height, kind, stream);
+}
 inline hipError_t memcpy3D(const hipMemcpy3DParms* p) {
     if (p->dstArray) {
         if (Level* l = linearLevel(p->dstArray)) {

@@ -4217,6 +4217,569 @@ __host__ void cuda_depthSimMapCopyDepthOnly(CudaDeviceMemoryPitched<float2, 2>& 
      "    out_optimizeDepthSimMap_dmp.copyFrom(in_sgmDepthPixSizeMap_dmp, stream);\n"),
 ]
 
+# 12a: the depth map's image uploads on a stream of their own, refilled in place (no allocation, free or device-wide wait)
+STEP12A_MA_HPP = [
+    ("/**\n * @brief Create a debug flat image (of all levels) from a given CUDA mipmapped array texture object.\n",
+     r"""#ifdef CHESHIRE_HIP
+/**
+ * @brief cheshire (step 12a): one texture per level 0 .. levels - 2 of a mipmapped array, each the texture
+ * cuda_createMipmappedArrayFromImage creates for the previous level while it builds the next, kept with the array.
+ */
+extern void cuda_cheshireCreateLevelTextures(const cudaMipmappedArray_t in_mipmappedArray, const unsigned int levels,
+                                             cudaTextureObject_t* out_levelTex);
+
+/**
+ * @brief cheshire (step 12a): cuda_createMipmappedArrayFromImage's level-0 copy and level builds into an existing mipmapped
+ * array of the same size, on a stream, with the array's kept level textures and kept level buffers (level l's size at
+ * levelBuf[l - 1]): the same kernel and copies, without an allocation, a free or a device-wide wait. The caller
+ * synchronises the stream.
+ */
+extern void cuda_cheshireFillMipmappedArrayAsync(const cudaMipmappedArray_t mipmappedArray,
+                                                 const CudaDeviceMemoryPitched<CudaRGBA, 2>& in_img_dmp,
+                                                 const unsigned int levels,
+                                                 const cudaTextureObject_t* levelTex,
+                                                 CudaDeviceMemoryPitched<CudaRGBA, 2>* const* levelBuf,
+                                                 cudaStream_t stream);
+
+/**
+ * @brief cheshire (step 12a): cuda_createMipmappedArrayFromImage's allocation alone (the array of a slot's first image,
+ * counted in the bridge the same way), for cuda_cheshireFillMipmappedArrayAsync to fill.
+ */
+extern void cuda_cheshireAllocateMipmappedArray(cudaMipmappedArray_t* out_mipmappedArrayPtr, size_t width, size_t height, const unsigned int levels);
+#endif
+
+/**
+ * @brief Create a debug flat image (of all levels) from a given CUDA mipmapped array texture object.
+"""),
+]
+
+STEP12A_MA_CU = [
+    ("__host__ void cuda_createMipmappedArrayDebugFlatImage(CudaDeviceMemoryPitched<CudaRGBA, 2>& out_flatImage_dmp,\n",
+     r"""#ifdef CHESHIRE_HIP
+// cheshire (step 12a): see deviceMipmappedArray.hpp. The texture descriptor is cuda_createMipmappedArrayFromImage's
+// previousLevel_tex; created once per array, as long as the array lives (DeviceMipmapImage), where that function creates
+// and destroys one per level per image (and HIP's texture teardown waits for the whole device).
+__host__ void cuda_cheshireCreateLevelTextures(const cudaMipmappedArray_t in_mipmappedArray, const unsigned int levels,
+                                               cudaTextureObject_t* out_levelTex)
+{
+    for (unsigned int l = 0; l + 1 < levels; ++l)
+    {
+        cudaArray_t levelArray;
+        CHECK_CUDA_RETURN_ERROR(cudaGetMipmappedArrayLevel(&levelArray, in_mipmappedArray, l));
+
+        cudaResourceDesc texRes;
+        memset(&texRes, 0, sizeof(cudaResourceDesc));
+        texRes.resType = cudaResourceTypeArray;
+        texRes.res.array.array = levelArray;
+
+        cudaTextureDesc texDescr;
+        memset(&texDescr, 0, sizeof(cudaTextureDesc));
+        texDescr.normalizedCoords = 1;
+        texDescr.filterMode = cudaFilterModeLinear;
+        texDescr.addressMode[0] = cudaAddressModeClamp;
+        texDescr.addressMode[1] = cudaAddressModeClamp;
+        texDescr.addressMode[2] = cudaAddressModeClamp;
+#ifdef ALICEVISION_DEPTHMAP_TEXTURE_USE_UCHAR
+        texDescr.readMode = cudaReadModeNormalizedFloat;
+#else
+        texDescr.readMode = cudaReadModeElementType;
+#endif
+        CHECK_CUDA_RETURN_ERROR(cudaCreateTextureObject(&out_levelTex[l], &texRes, &texDescr, nullptr));
+    }
+}
+
+__host__ void cuda_cheshireFillMipmappedArrayAsync(const cudaMipmappedArray_t mipmappedArray,
+                                                   const CudaDeviceMemoryPitched<CudaRGBA, 2>& in_img_dmp,
+                                                   const unsigned int levels,
+                                                   const cudaTextureObject_t* levelTex,
+                                                   CudaDeviceMemoryPitched<CudaRGBA, 2>* const* levelBuf,
+                                                   cudaStream_t stream)
+{
+    const CudaSize<2>& in_imgSize = in_img_dmp.getSize();
+
+    // level 0: the image (cuda_createMipmappedArrayFromImage's cudaMemcpy3D of the same rows)
+    cudaArray_t level0;
+    CHECK_CUDA_RETURN_ERROR(cudaGetMipmappedArrayLevel(&level0, mipmappedArray, 0));
+    CHECK_CUDA_RETURN_ERROR(cudaMemcpy2DToArrayAsync(level0, 0, 0, in_img_dmp.getBytePtr(), in_img_dmp.getPitch(), in_imgSize.x() * sizeof(CudaRGBA),
+                                                     in_imgSize.y(), cudaMemcpyDeviceToDevice, stream));
+
+    // each level from the previous one: the same kernel into the level's buffer, then into the array
+    size_t width = in_imgSize.x();
+    size_t height = in_imgSize.y();
+    for (size_t l = 1; l < levels; ++l)
+    {
+        width /= 2;
+        height /= 2;
+        CudaDeviceMemoryPitched<CudaRGBA, 2>& level_dmp = *levelBuf[l - 1];
+        const dim3 block(16, 16, 1);
+        const dim3 grid(divUp(width, block.x), divUp(height, block.y), 1);
+        createMipmappedArrayLevelToBuffer_kernel<2 /* radius */><<<grid, block, 0, stream>>>(level_dmp.getBuffer(), level_dmp.getPitch(), levelTex[l - 1],
+                                                                                             (unsigned int)(width), (unsigned int)(height));
+        CHECK_CUDA_ERROR();
+        cudaArray_t currentLevelArray;
+        CHECK_CUDA_RETURN_ERROR(cudaGetMipmappedArrayLevel(&currentLevelArray, mipmappedArray, l));
+        CHECK_CUDA_RETURN_ERROR(cudaMemcpy2DToArrayAsync(currentLevelArray, 0, 0, level_dmp.getBytePtr(), level_dmp.getPitch(), width * sizeof(CudaRGBA),
+                                                         height, cudaMemcpyDeviceToDevice, stream));
+    }
+}
+
+__host__ void cuda_cheshireAllocateMipmappedArray(cudaMipmappedArray_t* out_mipmappedArrayPtr, size_t width, size_t height, const unsigned int levels)
+{
+    const cudaExtent imgSize = make_cudaExtent(width, height, 0);
+#ifdef ALICEVISION_DEPTHMAP_TEXTURE_USE_HALF
+    const cudaChannelFormatDesc desc = cudaCreateChannelDescHalf4();
+#else
+    const cudaChannelFormatDesc desc = cudaCreateChannelDesc<CudaRGBA>();
+#endif
+    CHECK_CUDA_RETURN_ERROR(cudaMallocMipmappedArray(out_mipmappedArrayPtr, &desc, imgSize, levels));
+#if !defined(CHESHIRE_EMULATE_MIPMAP)
+    {
+        size_t bytes = 0, w = width, h = height;
+        for (unsigned l = 0; l < levels; ++l)
+        {
+            bytes += w * h * sizeof(CudaRGBA);
+            w = w > 1 ? w / 2 : 1;
+            h = h > 1 ? h / 2 : 1;
+        }
+        cheshire::bridge::noteExternal(*out_mipmappedArrayPtr, bytes, cheshire::bridge::Class::Image);
+    }
+#endif
+}
+#endif
+
+__host__ void cuda_createMipmappedArrayDebugFlatImage(CudaDeviceMemoryPitched<CudaRGBA, 2>& out_flatImage_dmp,
+"""),
+]
+
+STEP12A_DMI_HPP = [
+    ("namespace aliceVision {\nnamespace depthMap {\n\n/**\n * @class Device mipmap image\n",
+     r"""namespace aliceVision {
+namespace depthMap {
+
+#ifdef CHESHIRE_HIP
+// cheshire (step 12a): CHESHIRE_DEPTHMAP_UPLOAD_STREAM (default on): the depth map's image uploads on a stream of their own,
+// each cache slot refilled in place (DeviceCache.cpp); read once
+inline bool cheshireUploadStreamOn()
+{
+    static const bool on = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_UPLOAD_STREAM", true);
+    return on;
+}
+#endif
+
+/**
+ * @class Device mipmap image
+"""),
+    ("    /**\n     * @brief Get the corresponding mipmap image level of the given downscale\n",
+     r"""#ifdef CHESHIRE_HIP
+    /**
+     * @brief cheshire (step 12a): can cheshireRefill take an image of this size at these downscales? Its array and texture
+     * have that size and levels, and its level textures were kept (level 0 at the image's own scale, minDownscale 1).
+     */
+    bool cheshireCanRefill(size_t width, size_t height, int minDownscale, int maxDownscale) const;
+
+    /**
+     * @brief cheshire (step 12a): can the slot take an image of this size at these downscales by cheshireRefill, either
+     * now or after cheshireAllocate (a slot without an array yet)?
+     */
+    bool cheshireCanTake(size_t width, size_t height, int minDownscale, int maxDownscale) const;
+
+    /**
+     * @brief cheshire (step 12a): for a slot's first image, the array, its texture and its level textures that
+     * fillFromDevice() would make, unfilled, for cheshireRefill; false (nothing done) when the slot has an array already
+     * or cheshireRefill cannot take these downscales.
+     */
+    bool cheshireAllocate(size_t width, size_t height, int minDownscale, int maxDownscale);
+
+    /**
+     * @brief cheshire (step 12a): fillFromDevice() of an image of the array's size, into the same array and texture, on a
+     * stream: the colour conversion in place, then cuda_cheshireFillMipmappedArrayAsync with the kept level textures and
+     * the caller's level buffers. The caller synchronises the stream.
+     */
+    void cheshireRefill(CudaDeviceMemoryPitched<CudaRGBA, 2>& inout_img_dmp, cudaStream_t stream, CudaDeviceMemoryPitched<CudaRGBA, 2>* const* levelBuf);
+
+    unsigned int cheshireLevels() const { return _levels; }
+#endif
+
+    /**
+     * @brief Get the corresponding mipmap image level of the given downscale
+"""),
+    ("    size_t _height = 0;                              //< original image buffer height (no downscale)\n",
+     "    size_t _height = 0;                              //< original image buffer height (no downscale)\n"
+     "#ifdef CHESHIRE_HIP\n"
+     "    std::vector<cudaTextureObject_t> _cheshireLevelTex;  //< cheshire (step 12a): levels 0 .. _levels - 2, kept with the array\n"
+     "    void cheshireMakeLevelTextures();\n"
+     "    void cheshireDropLevelTextures() noexcept;\n"
+     "#endif\n"),
+    ("#include <memory>  // cheshire (step 6d)\n", "#include <memory>  // cheshire (step 6d)\n#include <vector>  // cheshire (step 12a)\n"),
+]
+
+STEP12A_DMI_CPP = [
+    ("    // free mipmapped array\n    if (_mipmappedArray != nullptr)\n        {\n",
+     "#ifdef CHESHIRE_HIP\n    cheshireDropLevelTextures();  // cheshire (step 12a)\n#endif\n"
+     "    // free mipmapped array\n    if (_mipmappedArray != nullptr)\n        {\n"),
+    ("    // destroy previous mipmapped array\n    if (_mipmappedArray != nullptr)\n        {\n",
+     "#ifdef CHESHIRE_HIP\n    cheshireDropLevelTextures();  // cheshire (step 12a)\n#endif\n"
+     "    // destroy previous mipmapped array\n    if (_mipmappedArray != nullptr)\n        {\n"),
+    ("    if (_mipmappedArray != nullptr)\n    {\n        cheshire::bridge::forgetExternal(_mipmappedArray);\n",
+     "#ifdef CHESHIRE_HIP\n    cheshireDropLevelTextures();  // cheshire (step 12a)\n#endif\n"
+     "    if (_mipmappedArray != nullptr)\n    {\n        cheshire::bridge::forgetExternal(_mipmappedArray);\n"),
+    ("float DeviceMipmapImage::getLevel(unsigned int downscale) const\n",
+     r"""#ifdef CHESHIRE_HIP
+// cheshire (step 12a): the level textures kept with the array, for cheshireRefill; made only when the uploads use them
+void DeviceMipmapImage::cheshireMakeLevelTextures()
+{
+    if (!cheshireUploadStreamOn() || _levels < 2)
+        return;
+    _cheshireLevelTex.assign(_levels - 1, 0);
+    cuda_cheshireCreateLevelTextures(_mipmappedArray, _levels, _cheshireLevelTex.data());
+}
+
+void DeviceMipmapImage::cheshireDropLevelTextures() noexcept
+{
+    for (cudaTextureObject_t t : _cheshireLevelTex)
+        if (t != 0)
+            CHECK_CUDA_RETURN_ERROR_NOEXCEPT(cudaDestroyTextureObject(t));
+    _cheshireLevelTex.clear();
+}
+
+bool DeviceMipmapImage::cheshireCanRefill(size_t width, size_t height, int minDownscale, int maxDownscale) const
+{
+    return _mipmappedArray != nullptr && _textureObject != 0 && _levels >= 2 && _cheshireLevelTex.size() + 1 == _levels && minDownscale == 1 &&
+           _minDownscale == unsigned(minDownscale) && _maxDownscale == unsigned(maxDownscale) && _width == width && _height == height &&
+           _levels == unsigned(log2(maxDownscale / minDownscale) + 1);
+}
+
+bool DeviceMipmapImage::cheshireCanTake(size_t width, size_t height, int minDownscale, int maxDownscale) const
+{
+    if (_mipmappedArray != nullptr)
+        return cheshireCanRefill(width, height, minDownscale, maxDownscale);
+    return _textureObject == 0 && cheshireUploadStreamOn() && minDownscale == 1 && unsigned(log2(maxDownscale / minDownscale) + 1) >= 2;
+}
+
+bool DeviceMipmapImage::cheshireAllocate(size_t width, size_t height, int minDownscale, int maxDownscale)
+{
+    if (_mipmappedArray != nullptr || !cheshireCanTake(width, height, minDownscale, maxDownscale))
+        return false;
+    // fillFromDevice()'s members and allocations, without its image
+    _minDownscale = minDownscale;
+    _maxDownscale = maxDownscale;
+    _width = width;
+    _height = height;
+    _levels = log2(maxDownscale / minDownscale) + 1;
+    cuda_cheshireAllocateMipmappedArray(&_mipmappedArray, _width, _height, _levels);
+    cuda_createMipmappedArrayTexture(&_textureObject, _mipmappedArray, _levels);  // with its level textures:
+    cheshireMakeLevelTextures();
+    return true;
+}
+
+void DeviceMipmapImage::cheshireRefill(CudaDeviceMemoryPitched<CudaRGBA, 2>& inout_img_dmp, cudaStream_t stream,
+                                       CudaDeviceMemoryPitched<CudaRGBA, 2>* const* levelBuf)
+{
+    // fillFromDevice() with minDownscale 1 is the colour conversion in place, then the array built from the image: the
+    // same two steps into the kept array, whose texture object stays valid
+    cuda_rgb2lab(inout_img_dmp, stream);
+    cuda_cheshireFillMipmappedArrayAsync(_mipmappedArray, inout_img_dmp, _levels, _cheshireLevelTex.data(), levelBuf, stream);
+}
+#endif
+
+float DeviceMipmapImage::getLevel(unsigned int downscale) const
+"""),
+]
+
+STEP12A_DC_HPP = [
+    ("        std::vector<std::unique_ptr<DeviceMipmapImage>> mipmaps;  //< cached device mipmap images\n",
+     r"""        std::vector<std::unique_ptr<DeviceMipmapImage>> mipmaps;  //< cached device mipmap images
+#ifdef CHESHIRE_HIP
+        // cheshire (step 12a): the uploads' own stream and kept buffers (DeviceCache::addMipmapImage); destroyed before
+        // the mipmaps
+        struct CheshireUpload
+        {
+            cudaStream_t stream = nullptr;
+            std::unique_ptr<CudaDeviceMemoryPitched<float4, 2>> fullRes;
+            std::unique_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>> down;
+            std::vector<std::unique_ptr<CudaDeviceMemoryPitched<CudaRGBA, 2>>> levels;
+            ~CheshireUpload();
+        };
+        CheshireUpload cheshireUpload;
+#endif
+"""),
+    ("    // private methods\n",
+     "    // private methods\n"
+     "#ifdef CHESHIRE_HIP\n"
+     "    // cheshire (step 12a): refill a slot in place on the uploads' stream; false (nothing done) when it cannot (DeviceCache.cpp)\n"
+     "    bool cheshireRefillSlot(SingleDeviceCache& dc, int slotId, const image::Image<image::RGBAfColor>& img, int s, int minDownscale, int maxDownscale);\n"
+     "#endif\n"),
+]
+
+# 12b: the next batch's images uploaded during this batch's tiles, into slots the batch does not use
+STEP12B_LRU = [
+    ("    inline void clear()\n",
+     r"""    // cheshire (step 12b): the cell insert() would take for a value not in the set and the value it would replace there
+    // (-1 for an empty cell), without inserting; false for a set of size 0
+    inline bool cheshirePeekVictim(int& position, T& victim) const
+    {
+        if (_max_size == 0)
+            return false;
+        if (int(_cache.size()) < _max_size)
+        {
+            position = int(_cache.size());
+            victim = -1;
+            return true;
+        }
+        victim = _cache.front();
+        position = int(std::find(_owner.begin(), _owner.end(), victim) - _owner.begin());
+        return true;
+    }
+
+    inline void clear()
+"""),
+]
+
+STEP12B_DC_HPP = [
+    ("    const int requestCameraParamsId(int camId, int downscale, const mvsUtils::MultiViewParams& mp);\n",
+     r"""    const int requestCameraParamsId(int camId, int downscale, const mvsUtils::MultiViewParams& mp);
+
+#ifdef CHESHIRE_HIP
+    /**
+     * @brief cheshire (step 12b): upload a camera's mipmap image ahead of its batch, into the slot the next insertion
+     * would take, refilled in place on the uploads' stream (step 12a), when that slot holds no camera of inUse.
+     * @return 1 uploaded; 0 already on the device; -1 refused, nothing changed (the slot holds a camera in use, or cannot
+     * be refilled in place)
+     */
+    int cheshirePrefetchMipmapImage(int camId,
+                                    int minDownscale,
+                                    int maxDownscale,
+                                    mvsUtils::ImagesCache<image::Image<image::RGBAfColor>>& imageCache,
+                                    const mvsUtils::MultiViewParams& mp,
+                                    const std::vector<int>& inUse);
+#endif
+"""),
+]
+
+STEP12B_DC_CPP = [
+    ("#include <mutex>  // cheshire: step 12a\n", "#include <mutex>  // cheshire: step 12a\n#include <algorithm>  // cheshire: step 12b\n"),
+    ("void DeviceCache::addMipmapImage(int camId,\n",
+     r"""#ifdef CHESHIRE_HIP
+// cheshire (step 12b): see DeviceCache.hpp. The slot is the one insert() would take: an empty one while the cache fills,
+// then the least recently used, refused when it holds a camera of the running batch (inUse), whose kernels may still read
+// it. Every check happens before the insertion, so a refusal changes nothing.
+int DeviceCache::cheshirePrefetchMipmapImage(int camId,
+                                             int minDownscale,
+                                             int maxDownscale,
+                                             mvsUtils::ImagesCache<image::Image<image::RGBAfColor>>& imageCache,
+                                             const mvsUtils::MultiViewParams& mp,
+                                             const std::vector<int>& inUse)
+{
+    SingleDeviceCache& dc = getCurrentDeviceCache();
+    if (dc.mipmapCache.getIndex(camId) >= 0)
+        return 0;
+    static const bool downscaleCheck = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK");
+    if (!cheshireUploadStreamOn() || downscaleCheck || !imageCache.isFullResolution() || mp.getProcessDownscale() <= 1)
+        return -1;  // the in-place refill is the device downscale's path (steps 6d, 12a)
+    int victimSlot = -1, victimCam = -1;
+    if (!dc.mipmapCache.cheshirePeekVictim(victimSlot, victimCam))
+        return -1;
+    if (std::find(inUse.begin(), inUse.end(), victimCam) != inUse.end())
+        return -1;
+    mvsUtils::ImagesCache<image::Image<image::RGBAfColor>>::ImgSharedPtr img = imageCache.getImg_sync(camId);
+    const int s = mp.getProcessDownscale();
+    if (!dc.mipmaps.at(victimSlot)->cheshireCanTake(img->width() / s, img->height() / s, minDownscale, maxDownscale))
+        return -1;
+    int slot = -1;
+    dc.mipmapCache.insert(camId, &slot);
+    if (slot != victimSlot)
+        ALICEVISION_THROW_ERROR("cheshire: the device cache's prefetch took slot " << slot << ", not " << victimSlot);
+    if (!cheshireRefillSlot(dc, slot, *img, s, minDownscale, maxDownscale))
+        ALICEVISION_THROW_ERROR("cheshire: a prefetched device cache slot could not be refilled");
+    return 1;
+}
+#endif
+
+void DeviceCache::addMipmapImage(int camId,
+"""),
+]
+
+STEP12B_DME = [
+    ("static void cheshireDecodeImages(",
+     r"""// cheshire (step 12b): CHESHIRE_DEPTHMAP_PREFETCH (default on; HIP, with step 12a's upload stream): the next batch's images
+// uploaded during this batch's tiles (DeviceCache::cheshirePrefetchMipmapImage), announced once
+static bool cheshirePrefetchOn()
+{
+#if defined(CHESHIRE_HIP)
+    static const bool on = [] {
+        const bool v = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_PREFETCH", true) && cheshireUploadStreamOn();
+        if (v)
+            ALICEVISION_LOG_INFO("cheshire: depth map images of the next batch uploaded during this batch's tiles, into slots it does not use "
+                                 "(CHESHIRE_DEPTHMAP_PREFETCH=0 for at their batch's load)");
+        else
+            ALICEVISION_LOG_INFO("cheshire: depth map images uploaded at their batch's load (CHESHIRE_DEPTHMAP_PREFETCH=0 or CHESHIRE_DEPTHMAP_UPLOAD_STREAM=0)");
+        return v;
+    }();
+    return on;
+#else
+    static const bool announced = [] {
+        ALICEVISION_LOG_INFO("cheshire: depth map images uploaded at their batch's load (CUDA)");
+        return true;
+    }();
+    (void)announced;
+    return false;
+#endif
+}
+
+static void cheshireDecodeImages("""),
+    ("    deviceCache.build(nbMipmapImagesPerBatch, nbCamerasParamsPerBatch);\n",
+     "    deviceCache.build(nbMipmapImagesPerBatch, nbCamerasParamsPerBatch);\n"
+     "    cheshirePrefetchOn();  // cheshire (step 12b): announced before the first batch\n"),
+    ("    std::future<void> cheshireDecodes;  // those decodes, waited for by the next batch's load\n",
+     "    std::future<void> cheshireDecodes;  // those decodes, waited for by the next batch's load\n"
+     "    std::vector<int> cheshirePrefetchList;  // cheshire (step 12b): the next batch's images decoded ahead, to upload during the tiles\n"
+     "    std::size_t cheshirePrefetchPos = 0;\n"
+     "    int cheshirePrefetched = 0;           // uploaded during the previous batch's tiles\n"),
+    ("            const int cheshireAhead = cheshireDecodedAhead;\n            cheshireDecodedAhead = 0;\n",
+     "            const int cheshireAhead = cheshireDecodedAhead;\n            cheshireDecodedAhead = 0;\n"
+     "            if (cheshirePrefetched > 0)  // cheshire (step 12b)\n"
+     "                ALICEVISION_LOG_INFO(\"cheshire: depth map batch \" << (b + 1) << \"/\" << nbBatches << \": \" << cheshirePrefetched\n"
+     "                                                                  << \" images uploaded during the previous batch's tiles\");\n"
+     "            cheshirePrefetched = 0;\n"
+     "            cheshirePrefetchList.clear();\n"
+     "            cheshirePrefetchPos = 0;\n"),
+    ("            cheshireDecodedAhead = static_cast<int>(next.size());\n",
+     "            cheshireDecodedAhead = static_cast<int>(next.size());\n"
+     "            cheshirePrefetchList = next;  // cheshire (step 12b): uploaded during this batch's tiles once decoded\n"
+     "            cheshirePrefetchPos = 0;\n"),
+    ("        // compute each batch tile\n",
+     "        std::vector<int> cheshireBatchInUse;  // cheshire (step 12b): this batch's and the next one's cameras, which a prefetch must not evict\n"
+     "        // compute each batch tile\n"),
+    ("                // copy Sgm depth/similarity map from device to host\n"
+     "                tileDepthSimMap_hmh.copyFrom(sgm.getDeviceDepthSimMap(), deviceStreamManager.getStream(streamIndex));\n"
+     "            }\n"
+     "        }\n",
+     r"""                // copy Sgm depth/similarity map from device to host
+                tileDepthSimMap_hmh.copyFrom(sgm.getDeviceDepthSimMap(), deviceStreamManager.getStream(streamIndex));
+            }
+
+            // cheshire (step 12b): one of the next batch's images uploaded while the device runs this tile, once the images
+            // decoded ahead (step 10k) are in the image cache, into a slot no camera of this batch holds; the rest at the
+            // next batch's load. The next batch finds them on the device; the maps are the same.
+            if (cheshirePrefetchPos < cheshirePrefetchList.size() && cheshirePrefetchOn())
+            {
+                if (cheshireDecodes.valid() && cheshireDecodes.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+                    cheshireDecodes.get();  // a decode's failure is raised here, as at the next batch's load
+                if (!cheshireDecodes.valid())
+                {
+                    if (cheshireBatchInUse.empty())
+                    {
+                        cheshireBatchInUse = cheshireBatchCams(b);
+                        const std::vector<int> nextCams = cheshireBatchCams(b + 1);  // nor one the next batch keeps
+                        cheshireBatchInUse.insert(cheshireBatchInUse.end(), nextCams.begin(), nextCams.end());
+                    }
+                    const int r = deviceCache.cheshirePrefetchMipmapImage(cheshirePrefetchList[cheshirePrefetchPos], minMipmapDownscale, maxMipmapDownscale, ic,
+                                                                         _mp, cheshireBatchInUse);
+                    if (r < 0)
+                        cheshirePrefetchPos = cheshirePrefetchList.size();  // refused: the rest at the next batch's load
+                    else
+                    {
+                        cheshirePrefetched += r;
+                        ++cheshirePrefetchPos;
+                    }
+                }
+            }
+        }
+"""),
+]
+
+STEP12A_DC_CPP = [
+    ("#include <aliceVision/system/Logger.hpp>\n", "#include <aliceVision/system/Logger.hpp>\n#include <mutex>  // cheshire: step 12a\n#include <vector>\n"),
+    ("        mipmaps.push_back(std::make_unique<DeviceMipmapImage>());\n    }\n}\n",
+     r"""        mipmaps.push_back(std::make_unique<DeviceMipmapImage>());
+    }
+    // cheshire (step 12a): announced once
+    static std::once_flag cheshireUploadAnnounced;
+    std::call_once(cheshireUploadAnnounced, [] {
+#ifdef CHESHIRE_HIP
+        if (cheshireUploadStreamOn())
+            ALICEVISION_LOG_INFO("cheshire: depth map image uploads on a stream of their own, each cache slot refilled in place "
+                                 "(CHESHIRE_DEPTHMAP_UPLOAD_STREAM=0 for upstream's)");
+        else
+            ALICEVISION_LOG_INFO("cheshire: depth map image uploads as upstream (CHESHIRE_DEPTHMAP_UPLOAD_STREAM=0)");
+#else
+        ALICEVISION_LOG_INFO("cheshire: depth map image uploads as upstream (CUDA)");
+#endif
+    });
+}
+
+#ifdef CHESHIRE_HIP
+DeviceCache::SingleDeviceCache::CheshireUpload::~CheshireUpload()
+{
+    if (stream != nullptr)
+    {
+        CHECK_CUDA_RETURN_ERROR_NOEXCEPT(cudaStreamSynchronize(stream));
+        CHECK_CUDA_RETURN_ERROR_NOEXCEPT(cudaStreamDestroy(stream));
+    }
+}
+#endif
+"""),
+    ("        const int s = mp.getProcessDownscale();\n        auto down_dmpPtr = ",
+     "        const int s = mp.getProcessDownscale();\n"
+     "        if (cheshireRefillSlot(currentDeviceCache, deviceMipmapId, *img, s, minDownscale, maxDownscale))  // cheshire (step 12a)\n"
+     "            return;\n"
+     "        auto down_dmpPtr = "),
+    ("void DeviceCache::addMipmapImage(int camId,\n",
+     r"""#ifdef CHESHIRE_HIP
+// cheshire (step 12a): a slot that already holds an image of this size is refilled in place, on the uploads' own stream: the
+// full-resolution floats copied into a kept buffer, the same downscale kernel into a kept buffer (cheshireDownscale.cu,
+// step 6m's device-input form), then the slot's colour conversion and level builds into its kept array, texture and
+// level textures. Upstream allocated the image and the array, built each level through a texture made and destroyed for
+// it, freed it all, and waited for the whole device between steps; on HIP a free and a texture's teardown wait for the
+// device too. The same kernels on the same data: the same levels. A slot's first image gets its array, texture and level
+// textures first (DeviceMipmapImage::cheshireAllocate, an allocation without a wait). False (nothing done) for a new size,
+// CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK=1 and CHESHIRE_DEPTHMAP_UPLOAD_STREAM=0, which take upstream's path.
+bool DeviceCache::cheshireRefillSlot(SingleDeviceCache& dc, int slotId, const image::Image<image::RGBAfColor>& img, int s, int minDownscale,
+                                     int maxDownscale)
+{
+    DeviceMipmapImage& slot = *(dc.mipmaps.at(slotId));
+    const std::size_t dw = img.width() / s, dh = img.height() / s;
+    static const bool downscaleCheck = ::cheshire::env::flag("CHESHIRE_DEPTHMAP_DEVICE_DOWNSCALE_CHECK");
+    if (!cheshireUploadStreamOn() || downscaleCheck || !slot.cheshireCanTake(dw, dh, minDownscale, maxDownscale))
+        return false;
+    slot.cheshireAllocate(dw, dh, minDownscale, maxDownscale);  // a slot's first image
+    if (!slot.cheshireCanRefill(dw, dh, minDownscale, maxDownscale))
+        ALICEVISION_THROW_ERROR("cheshire: a device cache slot could not be allocated for its refill");
+    auto& up = dc.cheshireUpload;
+    if (up.stream == nullptr)
+        CHECK_CUDA_RETURN_ERROR(hipStreamCreateWithFlags(&up.stream, hipStreamNonBlocking));
+    const CudaSize<2> fullSize(img.width(), img.height()), downSize(dw, dh);
+    if (!up.fullRes || up.fullRes->getSize() != fullSize)
+        up.fullRes = std::make_unique<CudaDeviceMemoryPitched<float4, 2>>(fullSize);
+    if (!up.down || up.down->getSize() != downSize)
+        up.down = std::make_unique<CudaDeviceMemoryPitched<CudaRGBA, 2>>(downSize);
+    const unsigned int levels = slot.cheshireLevels();
+    up.levels.resize(levels - 1);
+    std::vector<CudaDeviceMemoryPitched<CudaRGBA, 2>*> levelBuf(levels - 1);
+    std::size_t lw = dw, lh = dh;
+    for (unsigned int l = 1; l < levels; ++l)
+    {
+        lw /= 2;
+        lh /= 2;
+        auto& b = up.levels[l - 1];
+        if (!b || b->getSize() != CudaSize<2>(lw, lh))
+            b = std::make_unique<CudaDeviceMemoryPitched<CudaRGBA, 2>>(CudaSize<2>(lw, lh));
+        levelBuf[l - 1] = b.get();
+    }
+    const std::size_t rowBytes = std::size_t(img.width()) * 4 * sizeof(float);
+    CHECK_CUDA_RETURN_ERROR(cudaMemcpy2DAsync(up.fullRes->getBuffer(), up.fullRes->getPitch(), img.data(), rowBytes, rowBytes, img.height(),
+                                              cudaMemcpyHostToDevice, up.stream));
+    cuda_cheshireDownscaleDeviceToCudaRGBA(up.fullRes->getBuffer(), up.fullRes->getPitch(), int(img.width()), int(img.height()), *up.down, up.stream);
+    slot.cheshireRefill(*up.down, up.stream, levelBuf.data());
+    CHECK_CUDA_RETURN_ERROR(cudaStreamSynchronize(up.stream));
+    return true;
+}
+#endif
+
+void DeviceCache::addMipmapImage(int camId,
+"""),
+]
+
 def patch(path: Path, anchor: str, new: str, *, after: bool = True, once_marker: str = MARK) -> None:
     text = path.read_text(encoding="utf-8")
     if new in text:
@@ -4331,6 +4894,8 @@ TRACKED = [
     "src/aliceVision/depthMap/cuda/device/color.cuh",  # 11a
     "src/aliceVision/depthMap/cuda/device/matrix.cuh",  # 11b
     "src/aliceVision/depthMap/cuda/device/Patch.cuh",  # 11b
+    "src/aliceVision/depthMap/cuda/imageProcessing/deviceMipmappedArray.hpp",  # 12a
+    "src/aliceVision/depthMap/cuda/host/LRUCache.hpp",  # 12b
 ]
 
 
@@ -9681,6 +10246,48 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                     sys.exit(f"an anchor of the colour optimisation's angles not found once in {f11c.name} (11c)")
                 t = t.replace(old, new, 1)
         f11c.write_text(t, encoding="utf-8", newline="")
+
+    # 12a (after 0.4.2). The depth map's image uploads on a stream of their own: a cache slot that already holds an image
+    #     of the size is refilled in place (kept array, texture, level textures and buffers; the same kernels and copies on
+    #     a non-blocking stream), without upstream's allocations, frees, per-level texture teardowns and device-wide waits,
+    #     which on HIP all wait for the whole device. The enabler of 12b (uploads during the previous batch's tiles). HIP
+    #     only; CHESHIRE_DEPTHMAP_UPLOAD_STREAM=0. After 6d (the device downscale, DeviceCache.cpp's anchor), before 6q.
+    cu12a = AV / "src/aliceVision/depthMap/cuda"
+    for f12a, steps12a in ((cu12a / "imageProcessing/deviceMipmappedArray.hpp", STEP12A_MA_HPP),
+                           (cu12a / "imageProcessing/deviceMipmappedArray.cu", STEP12A_MA_CU),
+                           (cu12a / "host/DeviceMipmapImage.hpp", STEP12A_DMI_HPP),
+                           (cu12a / "host/DeviceMipmapImage.cpp", STEP12A_DMI_CPP),
+                           (cu12a / "host/DeviceCache.hpp", STEP12A_DC_HPP),
+                           (cu12a / "host/DeviceCache.cpp", STEP12A_DC_CPP)):
+        t = f12a.read_text(encoding="utf-8")
+        if "step 12a" not in t:
+            for old, new in steps12a:
+                if t.count(old) != 1:
+                    sys.exit(f"an anchor of the uploads' stream not found once in {f12a.name} (12a)")
+                t = t.replace(old, new, 1)
+            if f12a.name == "DeviceMipmapImage.cpp":
+                # the level textures are made with the array, in fill() and fillFromDevice()
+                mk = "    cuda_createMipmappedArrayTexture(&_textureObject, _mipmappedArray, _levels);\n"
+                if t.count(mk) != 2:
+                    sys.exit("the texture creations of fill() and fillFromDevice() not found twice in DeviceMipmapImage.cpp (12a)")
+                t = t.replace(mk, mk + "#ifdef CHESHIRE_HIP\n    cheshireMakeLevelTextures();  // cheshire (step 12a)\n#endif\n")
+        f12a.write_text(t, encoding="utf-8", newline="")
+
+    # 12b (after 0.4.2). The next batch's images uploaded during this batch's tiles: after each tile is queued, once the
+    #     images decoded ahead (10k) are in the image cache, one is uploaded into the slot the device cache's next insertion
+    #     would take, when that slot holds no camera of the running batch and can be refilled in place (12a). The next
+    #     batch finds them on the device. HIP only; CHESHIRE_DEPTHMAP_PREFETCH=0. After 10k and 12a, before 6q.
+    for f12b, steps12b in ((cu12a / "host/LRUCache.hpp", STEP12B_LRU),
+                           (cu12a / "host/DeviceCache.hpp", STEP12B_DC_HPP),
+                           (cu12a / "host/DeviceCache.cpp", STEP12B_DC_CPP),
+                           (AV / "src/aliceVision/depthMap/DepthMapEstimator.cpp", STEP12B_DME)):
+        t = f12b.read_text(encoding="utf-8")
+        if "step 12b" not in t:
+            for old, new in steps12b:
+                if t.count(old) != 1:
+                    sys.exit(f"an anchor of the uploads during the tiles not found once in {f12b.name} (12b)")
+                t = t.replace(old, new, 1)
+        f12b.write_text(t, encoding="utf-8", newline="")
 
     # 10g (after 0.4.0). The image cache evicts by load order instead of clock(), whose millisecond ties made the
     #     texturing read-ahead evict images before their use (most False Door passes decoded each image twice).
