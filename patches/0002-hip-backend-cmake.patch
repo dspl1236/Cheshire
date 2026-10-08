@@ -450,7 +450,7 @@ index 25b80d4..84dba54 100644
          aliceVision_gpu
          aliceVision_sfmData
 diff --git a/src/aliceVision/depthMap/DepthMapEstimator.cpp b/src/aliceVision/depthMap/DepthMapEstimator.cpp
-index 187e8f5..397ee28 100644
+index 187e8f5..1dfabda 100644
 --- a/src/aliceVision/depthMap/DepthMapEstimator.cpp
 +++ b/src/aliceVision/depthMap/DepthMapEstimator.cpp
 @@ -4,7 +4,16 @@
@@ -1072,7 +1072,7 @@ index 187e8f5..397ee28 100644
              // check number of depths
              if (sgmDepthList.getDepths().empty())  // no depth found
              {
-@@ -441,36 +915,82 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -441,36 +915,84 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
                  // copy Sgm depth/similarity map from device to host
                  tileDepthSimMap_hmh.copyFrom(sgm.getDeviceDepthSimMap(), deviceStreamManager.getStream(streamIndex));
              }
@@ -1080,6 +1080,7 @@ index 187e8f5..397ee28 100644
 +            // cheshire (step 12b): one of the next batch's images uploaded while the device runs this tile, once the images
 +            // decoded ahead (step 10k) are in the image cache, into a slot no camera of this batch holds; the rest at the
 +            // next batch's load. The next batch finds them on the device; the maps are the same.
++#if defined(CHESHIRE_HIP)
 +            if (cheshirePrefetchPos < cheshirePrefetchList.size() && cheshirePrefetchOn())
 +            {
 +                if (cheshireDecodes.valid() && cheshireDecodes.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
@@ -1103,6 +1104,7 @@ index 187e8f5..397ee28 100644
 +                    }
 +                }
 +            }
++#endif
          }
  
          // wait for tiles batch computation

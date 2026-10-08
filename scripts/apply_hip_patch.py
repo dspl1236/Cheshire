@@ -4661,6 +4661,7 @@ static void cheshireDecodeImages("""),
             // cheshire (step 12b): one of the next batch's images uploaded while the device runs this tile, once the images
             // decoded ahead (step 10k) are in the image cache, into a slot no camera of this batch holds; the rest at the
             // next batch's load. The next batch finds them on the device; the maps are the same.
+#if defined(CHESHIRE_HIP)
             if (cheshirePrefetchPos < cheshirePrefetchList.size() && cheshirePrefetchOn())
             {
                 if (cheshireDecodes.valid() && cheshireDecodes.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
@@ -4684,6 +4685,7 @@ static void cheshireDecodeImages("""),
                     }
                 }
             }
+#endif
         }
 """),
 ]
