@@ -63,12 +63,14 @@ cd "$AV_BUILD"
 # build's) dropped them, so the code was the x86-64 baseline with AliceVision's SSE paths. AliceVision f2447d4 re-applies
 # the flags on every run: `core` would now mean -march=core2 with SSE3 and core2 tuning, every binary different and none
 # of it gated, and `none` alone would turn the SSE paths off (2026-10-07, docs/04).
+# The bundle's library search takes the PopSift install first: an older libpopsift.so left in $AV_DEPS/lib shadowed it
+# (0.4.4's first bundle shipped 15 chips' PopSIFT while the install had 21).
 cmake "$AV_DEV" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$AV_DEPS;$ROCM" \
   -DCMAKE_INSTALL_PREFIX="$AV_INSTALL" \
   -DALICEVISION_BUNDLE_PREFIX="$AV_BUNDLE" \
-  "-DALICEVISION_BUNDLE_SEARCH_LIBS_PATHS=$AV_DEPS/lib;$ROCM/lib;$ROCM/lib/llvm/lib;$POPSIFT_INSTALL/lib" \
+  "-DALICEVISION_BUNDLE_SEARCH_LIBS_PATHS=$POPSIFT_INSTALL/lib;$AV_DEPS/lib;$ROCM/lib;$ROCM/lib/llvm/lib" \
   -DCMAKE_HIP_COMPILER="$ROCM/lib/llvm/bin/clang++" \
   -DCMAKE_HIP_ARCHITECTURES="$ARCHS" \
   -DALICEVISION_USE_CUDA=OFF -DALICEVISION_USE_HIP=ON -DALICEVISION_USE_SYCL=OFF \
