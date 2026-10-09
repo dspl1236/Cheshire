@@ -2,17 +2,18 @@
 # Cheshire Linux: build AliceVision with the HIP depth-map backend against the superbuild
 # dependencies (scripts/linux/build-deps.sh) and ROCm in /opt/rocm.
 # Usage: scripts/linux/build-alicevision.sh [configure|build|install|bundle] [gfx list]
-#   gfx list default (0.4.4): one generic code object per RDNA family - gfx10-1-generic (RDNA1: gfx1010-1013),
-#   gfx10-3-generic (RDNA2: gfx1030-1036, the APUs included), gfx11-generic (RDNA3: gfx1100-1103, gfx1150-1153),
-#   gfx12-generic (RDNA4) - so a chip of those families that ships later runs without a rebuild, and Vega explicit
-#   (gfx900/906, wave64, which no generic covers; untested: the ROCm 7.2 runtime may refuse them the way it refuses
-#   Polaris). Through 0.4.3 the list named 19 chips (git history). The GPU SIFT library keeps its own per-chip list
-#   (build-popsift.sh): PopSIFT does not run from a generic code object yet (docs/16).
+#   gfx list default (0.4.4): one generic code object for each family that can still gain chips - gfx10-3-generic
+#   (RDNA2: gfx1030-1036, the APUs included), gfx11-generic (RDNA3: gfx1100-1103, gfx1150-1153), gfx12-generic (RDNA4)
+#   - so a chip of those families that ships later runs without a rebuild. RDNA1 by name (gfx1010/1011/1012): no new
+#   chip will join it, and gfx10-1-generic cannot promise the dot product gfx1011/1012 have (the matcher's dot4u8 needs
+#   dot7-insts, which gfx1010 lacks). Vega explicit (gfx900/906, wave64; untested: the ROCm 7.2 runtime may refuse them
+#   the way it refuses Polaris). Through 0.4.3 the list named 19 chips (git history). The GPU SIFT library keeps its
+#   own per-chip list (build-popsift.sh): PopSIFT does not run from a generic code object (docs/16).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 AV_DEV="$ROOT/third_party/aliceVision"
 STEP="${1:-install}"
-ARCHS="${2:-gfx900;gfx906;gfx10-1-generic;gfx10-3-generic;gfx11-generic;gfx12-generic}"
+ARCHS="${2:-gfx900;gfx906;gfx1010;gfx1011;gfx1012;gfx10-3-generic;gfx11-generic;gfx12-generic}"
 ROCM="${ROCM_PATH:-/opt/rocm}"
 # exported because apply_hip_patch.py's GPU SIFT step reads $ENV{ROCM_PATH} from CMake to put
 # ROCm's headers and runtime on aliceVision_feature, which the popsift describer needs.
