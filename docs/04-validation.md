@@ -5198,3 +5198,46 @@ new-pipeline programs run on it from its own `bin` and Windows alone (`replay_cu
 TracksBuilding's files are the AMD zip's byte for byte, and SfMExpanding placed all 41 cameras within 0.0028 % of the
 scene's radius of the AMD zip's reconstruction (rotations within 0.0028 degrees), as in 0.4.0-0.4.2. The rest differs
 at the rounding of MSVC's floating-point code against clang's.
+
+## After 0.4.3: the 7-point fits four at a time (step 13a, 2026-10-09)
+
+After 8d and 8e (0.3.8) the geometric filter's time was the fit: `Nullspace2`, an Eigen `JacobiSVD<Mat9>` with the full
+V for every 7-point sample, about three quarters of the filter. A Jacobi sweep's 2x2 steps are a chain of divisions
+and square roots, about 150 cycles each and about 300 steps a fit, so the fit is latency-bound: a scalar replica of
+Eigen's statements, or one with packed rotations, is only 1.06-1.15x Eigen (`hip/tests/jacobi/jacobibench.cpp`).
+
+`cheshireJacobiSvd9.hpp` (hip/port/acr_lanes) runs four fits at once in the four lanes of AVX2 packets: one chain of
+packet divisions and square roots serves four samples. Every lane runs Eigen 3.4.1's operations for a real square 9x9
+matrix (`JacobiSVD::compute`, `real_2x2_jacobi_svd`, `makeJacobi`, the rotations' product, `apply_rotation_in_the_plane`
+with its early return on the identity), all IEEE operations that AVX2 rounds per lane as the scalar unit does.
+Branches become masks and blends, and a lane whose sweep rotated nothing stops as Eigen's loop does. Where the
+compiler contracts Eigen's scalar `a * b + c * d` (clang-cl with /arch:AVX2 does, into fma(a, b, c * d), the left
+product first) the lanes use that fma; where it does not (GCC), they do not, with contraction held off inside the lanes
+themselves. A probe in the solver's own translation unit decides. A self-test on first use compares fixed inputs with
+Eigen and keeps Eigen if a bit differs; the lanes also need AVX2 and FMA at run time (the Linux bundles target core2
+and reach them through `target("avx2,fma")`).
+
+AC-RANSAC draws the next iterations' samples four ahead and fits them together (`Fundamental7PSolver::cheshireSolve4`,
+`RelativePoseKernel::cheshireFitBatch`). What an iteration draws depends only on the sampling mode and the pool
+(`vec_index`). When either changes, or the loop ends, with samples drawn and not used, the generator is put back where
+the last used draw left it: its state before the batch, then the used draws again. Every iteration gets the sample and
+models it would have had, and the generator ends in the same state.
+
+`CHESHIRE_ACR_SVD_LANES=0` fits one at a time through Eigen; `CHESHIRE_ACR_SVD_LANES_CHECK=1` runs Eigen beside every
+lane and prints "7-point four-lane SVD check: N of N fits identical to Eigen's" (the gate requires it under its
+self-check configurations).
+
+**Exact:** the harness on 200,000-400,000 systems per seed (degenerate, scaled, zero and non-finite inputs among them),
+0 different. The whole False Door FeatureMatching with the check: 43,647,986 of 43,647,986 fits identical, and the
+match file is 0.3.9's reference (`ebffcb37…`) in every run. The step gate on the RX 9070 (mini6 base, verify, blast,
+cpufallback; 41 views verify) and on house-pc (GCC's build on a Haswell Xeon: mini6 base and verify, 41 views
+experimental and verify) gave the 0.4.3 gates' depth maps, and every check came out N of N.
+
+| the False Door's FeatureMatching (884 views, 25,292 pairs, maxIteration 2048), RX 9070 box, alternating | wall |
+|---|---|
+| `CHESHIRE_ACR_SVD_LANES=0` | 90.5, 79.7 s |
+| 13a | 70.8, 71.1 s |
+
+The filter now ends when the GPU search does (65.5 and 66.1 s each), so the node is bound by the search on this box.
+The search itself got shorter too (about 75 to 66 s): its driving thread competes less with the filter's threads for the
+CPU. On house-pc the 41 views (experimental) took 506 s against the 0.4.3 gate's 566 s.

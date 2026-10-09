@@ -872,8 +872,8 @@ release round").
 coverage on the finished packages, then the long stock-against-Cheshire benchmarks (NVIDIA, the same card, small and
 large sets).
 - **0.4.2:** 11a-11c, DepthMap's GPU stages (below).
-- **0.4.3, the engine's last items** (released 2026-10-09 with 12a-12c, docs/releases/0.4.3.md; the geometric filter's four-lane fit, 13a, is on the
-  `step-13a` branch for the next release): DepthMap's device-idle gaps (each later batch's upload during the previous
+- **0.4.3, the engine's last items** (released 2026-10-09 with 12a-12c, docs/releases/0.4.3.md; the geometric
+  filter's four-lane fit, 13a, merged on main after it): DepthMap's device-idle gaps (each later batch's upload during the previous
   batch's tiles, the first batch's load and the startup), Meshing's "Create visibilities" (64 s on the False Door),
   the matcher's transfers (batched per search). Measured 2026-10-08:
   - **DepthMap's idle time per False Door chunk** (56.6 s, warm): startup 2.8 s (SfM 1.2, headers 0.6, lists 0.5,
@@ -909,7 +909,16 @@ large sets).
   - **The matcher's transfers would save nothing** (measured, dropped). FeatureMatching overlaps the GPU search with
     the CPU geometric filter (`CHESHIRE_FM_OVERLAP`), and on the False Door every one of its 45 chunks waits on the
     filter: 86 s of searches inside 99 s of filtering (128 s of chunk time). The query upload and result downloads
-    (about 0.5 ms a search) are hidden already.
+    (about 0.5 ms a search) are hidden already. **Reopened by 13a (below):** with the filter faster, the search is the
+    critical path again on the RX 9070.
+- **After 0.4.3, done 2026-10-09: 13a, the 7-point fits four at a time** (docs/04, "After 0.4.3"). The geometric
+  filter's fit, `JacobiSVD<Mat9>` for each sample's nullspace (three quarters of the filter), runs four samples at once
+  in AVX2 lanes, each lane Eigen 3.4.1's IEEE operations (fma exactly where the compiler contracts Eigen's statements,
+  probed at startup). AC-RANSAC draws its samples four ahead and rewinds the generator when the sampling changes.
+  `CHESHIRE_ACR_SVD_LANES=0`. The whole False Door FeatureMatching (25,292 pairs) 90.5 and 79.7 s off against 70.8 and
+  71.1 s on, the match file the same; 43.6 M fits checked against Eigen, all identical. On house-pc (GCC, Haswell) the
+  41 views 566 s to 506 s, the depth maps the 0.4.3 gate's. FeatureMatching is now search-bound on the RX 9070: the
+  search thread is next (the transfers, and its share of the CPU against the filter's threads).
   - **Meshing's visibility passes are not FP64-bound** (dead end). Their time is the GPU kd-tree walk, 3.07 G queries a
     pass (35 + 27 s). A float-filtered walk (`hip/tests/knnfilter`: float distances with a proven bound, the double
     metric only where the float cannot decide) gives the double walk's answers on all 32 M queries of a dump and needs
