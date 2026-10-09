@@ -926,8 +926,12 @@ large sets).
   packaging items.
 - **After 0.4.3, done 2026-10-09: 14b, each pair's search queued one pair ahead** (docs/04): the GPU searches the next
   pair while the host filters this one. The False Door's FeatureMatching 61.8 s to 46.7 s on top of 14a, 85 s to 47 s
-  since 0.4.3, the matches the same. Next on this node: the search thread's share of the CPU against the filter's
-  threads (M3), then the CUDA and Linux checks of 14a-14b, then 0.4.4's packaging items.
+  since 0.4.3, the matches the same. Checked on Windows CUDA and Linux CUDA/HIP (compile) and on house-pc (the depth
+  maps the 0.4.3 gate's, 54,275 sampled queries and 13.2 M fits identical).
+- **M3, the search thread's share of the CPU: measured 2026-10-09 and dropped.** With 14b the two halves are balanced:
+  12 OpenMP threads 46.0 and 43.5 s, 11 threads 43.7 and 43.4 s, 10 threads 44.4 s (the search then ends at 34.7 s, its
+  kernels' floor, and the filter at 39.5 s). FeatureMatching on the False Door sits at the floor of its GPU search (about
+  35 s of kernels) and its CPU filter (about 34-38 s); scheduling cannot move it. Next: 0.4.4's packaging items.
   - **Meshing's visibility passes are not FP64-bound** (dead end). Their time is the GPU kd-tree walk, 3.07 G queries a
     pass (35 + 27 s). A float-filtered walk (`hip/tests/knnfilter`: float distances with a proven bound, the double
     metric only where the float cannot decide) gives the double walk's answers on all 32 M queries of a dump and needs
