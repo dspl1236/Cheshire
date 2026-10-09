@@ -924,6 +924,10 @@ large sets).
   FeatureMatching 70-72 s to 62.5 s on top of 13a, the matches the same. Next on the search side: the result downloads
   (10.5 s of the profile, two copies a search) and the search thread's share of the CPU. Planned for 0.4.4 beside the
   packaging items.
+- **After 0.4.3, done 2026-10-09: 14b, each pair's search queued one pair ahead** (docs/04): the GPU searches the next
+  pair while the host filters this one. The False Door's FeatureMatching 61.8 s to 46.7 s on top of 14a, 85 s to 47 s
+  since 0.4.3, the matches the same. Next on this node: the search thread's share of the CPU against the filter's
+  threads (M3), then the CUDA and Linux checks of 14a-14b, then 0.4.4's packaging items.
   - **Meshing's visibility passes are not FP64-bound** (dead end). Their time is the GPU kd-tree walk, 3.07 G queries a
     pass (35 + 27 s). A float-filtered walk (`hip/tests/knnfilter`: float distances with a proven bound, the double
     metric only where the float cannot decide) gives the double walk's answers on all 32 M queries of a dump and needs

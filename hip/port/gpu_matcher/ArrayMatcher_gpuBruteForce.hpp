@@ -39,6 +39,13 @@ class ArrayMatcher_gpuBruteForce : public ArrayMatcher<Scalar, Metric>
         return true;
     }
 
+    // Cheshire (step 14b): queue the later SearchNeighbours(query, nbQuery, ...) on the GPU now (KnnMatcher::searchAsync)
+    void cheshirePrefetch(const Scalar* query, int nbQuery)
+    {
+        if (nbQuery > 0 && matcher_.rows() >= 2)
+            matcher_.searchAsync(query, nbQuery);
+    }
+
     bool SearchNeighbours(const Scalar* query, int nbQuery, IndMatches* pvec_indices, std::vector<DistanceType>* pvec_distances, size_t NN)
     {
         if (NN != 2 || nbQuery < 1 || matcher_.rows() < 2) return false;

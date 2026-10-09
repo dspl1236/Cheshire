@@ -5272,3 +5272,40 @@ mechanically, and the rename also reached the norms kernel in `build()`'s upload
 Only the switch-off runs took that path. On Windows the GPU's page fault reset the AMD display driver, twice (system log
 LiveKernelEvent 141 at those runs' times). The fix restores the owned buffer there; the switch-off runs and the
 non-overlap run since are clean, with no further driver events.
+
+## After 0.4.3: the next pair's search queued on the GPU (step 14b, 2026-10-09)
+
+After 14a the search thread still left the GPU idle while it downloaded a search's results and ran the host's part of
+`Match` (Lowe's ratio test and two deduplications) before the next search started: about 20 s of the 58 s it spent.
+A download alone cost about 570 microseconds per search under the filter threads' load, against 178 in isolation
+(`hip/tests/xfer/d2h.hip`, which also showed that one copy into pinned memory saves only about 1.4 s over the node).
+
+`KnnMatcher::searchAsync` queues a search on a stream of its own: the kernels (`launchSearch`, the dispatch moved out of
+`search2` unchanged apart from the stream), then the results copied to pinned host memory, then an event. The later
+`search2` with the same queries takes those results instead of searching. FeatureMatching's search loop queues each
+pair's search one pair ahead (`cheshirePrefetch`, a no-op hook in `IRegionsMatcher` that only the GPU matcher's
+`RegionsMatcher` implements), so the GPU searches pair k+1 while the host filters pair k. The same kernels on the same
+data give the same answers. `CHESHIRE_GPU_MATCHER_AHEAD=0` searches one at a time.
+
+The stream, its two slots and their pinned buffers are one pool for the process. The first form gave each matcher its
+own, and the loop makes a matcher per database view: 852 stream creations on the False Door made it 79.7 s against
+63.1 s without it. Each slot remembers the matcher that queued it, and only that matcher takes its result. A matcher
+waits for its queued searches before it is rebuilt or destroyed. Copies the queued kernels read are complete before
+they run: the resident uploads and `build()` synchronize the null stream, since a pageable `cudaMemcpy` may return
+before its transfer lands and a kernel on a non-blocking stream would not wait for it.
+
+| the False Door's FeatureMatching, RX 9070, 13a and 14a on | wall |
+|---|---|
+| `CHESHIRE_GPU_MATCHER_AHEAD=0` | 61.8, 61.9 s |
+| 14b | 46.4, 47.0 s |
+
+The match file is 0.3.9's reference in every run. On the 41 views 2.2 s to 1.9 s, with `CHESHIRE_GPU_MATCHER_CHECK=1`
+53,300 of 53,300 sampled queries identical to upstream's brute force, and 448,443 of 448,443 fits identical to Eigen's.
+With 13a, 14a and 14b the False Door's FeatureMatching takes about 47 s against 0.4.3's 85 s.
+
+**A note on the system log.** During 14a's development Windows Error Reporting logged batches of driver reports
+("LiveKernelEvent 141", and "BlueScreen 0x119 / 0x7e" with identical parameters each time) at 15:44, 15:46 and 16:10.
+The bluescreen reports are September 26 minidumps being re-sent, and the 16:10 batch came during a build that did not
+use the GPU, so these entries are the report queue, not crash times; the System log has no display driver reset. The
+user did see the driver fail once around 15:45, while 14a's broken switch-off runs sent a null pointer to a kernel:
+the likeliest cause, though the log cannot confirm it.

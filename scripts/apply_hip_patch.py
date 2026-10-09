@@ -5073,6 +5073,38 @@ STEP13A_GF = [
 STEP13A_GF_REPORT = ("    multiview::relativePose::cheshireEpipolarReport();  // cheshire (step 8e): CHESHIRE_ACR_RESIDUALS_CHECK's count\n",
                      "    multiview::relativePose::Fundamental7PSolver::cheshireSolve4Report();  // cheshire (step 13a): CHESHIRE_ACR_SVD_LANES_CHECK's count\n")
 
+# 14b: the next pair's search queued on the GPU before this pair's matches are filtered (RegionsMatcher.hpp's hook)
+STEP14B_RM = [
+    ("    virtual bool Match(const float f_dist_ratio, const feature::Regions& query_regions, matching::IndMatches& vec_putative_matches) = 0;\n",
+     """    virtual bool Match(const float f_dist_ratio, const feature::Regions& query_regions, matching::IndMatches& vec_putative_matches) = 0;
+
+    /// cheshire (step 14b): start the search of a later Match(..., query_regions, ...) now, where the matcher can (the GPU
+    /// matcher queues it on its own stream); nothing elsewhere. Match gives the same matches either way.
+    virtual void cheshirePrefetch(const feature::Regions& query_regions) { (void)query_regions; }
+"""),
+    ("    bool Match(const float f_dist_ratio, const feature::Regions& queryregions_, matching::IndMatches& vec_putative_matches)\n",
+     """    void cheshirePrefetch(const feature::Regions& queryregions_) override  // cheshire (step 14b)
+    {
+        if constexpr (requires(ArrayMatcherT& m, const Scalar* q) { m.cheshirePrefetch(q, 1); })
+            matcher_.cheshirePrefetch(reinterpret_cast<const Scalar*>(queryregions_.DescriptorRawData()), static_cast<int>(queryregions_.RegionCount()));
+        else
+            (void)queryregions_;
+    }
+
+    bool Match(const float f_dist_ratio, const feature::Regions& queryregions_, matching::IndMatches& vec_putative_matches)
+"""),
+    ("    bool Match(float distRatio, const feature::Regions& queryRegions, matching::IndMatches& matches) const;\n",
+     """    bool Match(float distRatio, const feature::Regions& queryRegions, matching::IndMatches& matches) const;
+
+    /// cheshire (step 14b): IRegionsMatcher::cheshirePrefetch on this database's matcher
+    void cheshirePrefetch(const feature::Regions& queryRegions) const
+    {
+        if (_regionsMatcher && queryRegions.RegionCount() != 0)
+            _regionsMatcher->cheshirePrefetch(queryRegions);
+    }
+"""),
+]
+
 STEP12A_DC_CPP = [
     ("#include <aliceVision/system/Logger.hpp>\n", "#include <aliceVision/system/Logger.hpp>\n#include <mutex>  // cheshire: step 12a\n#include <vector>\n"),
     ("        mipmaps.push_back(std::make_unique<DeviceMipmapImage>());\n    }\n}\n",
@@ -5206,6 +5238,7 @@ TRACKED = [
     "src/aliceVision/mvsUtils/fileIO.hpp",
     "meshroom/aliceVision/DepthMap.py",
     "src/aliceVision/matching/RegionsMatcher.cpp",
+    "src/aliceVision/matching/RegionsMatcher.hpp",  # 14b
     "src/aliceVision/matching/CMakeLists.txt",
     "src/software/pipeline/main_featureMatching.cpp",
     "src/aliceVision/fuseCut/Fuser.cpp",
@@ -10766,6 +10799,19 @@ void cheshireResidentEnd(void* scope)
 
 """ + a14a, 1)
     f14a.write_text(t, encoding="utf-8", newline="")
+
+    # 14b (after 0.4.3). FeatureMatching's search loop queues the next pair's search on the GPU (KnnMatcher::searchAsync,
+    #     hip/port/gpu_matcher) before this pair's matches are filtered, so the GPU searches while the host runs the ratio
+    #     test and the deduplication. The hook through RegionsMatcher.hpp is a no-op for every other matcher.
+    #     CHESHIRE_GPU_MATCHER_AHEAD=0.
+    f14b = AV / "src/aliceVision/matching/RegionsMatcher.hpp"
+    t = f14b.read_text(encoding="utf-8")
+    if "step 14b" not in t:
+        for old, new in STEP14B_RM:
+            if t.count(old) != 1:
+                sys.exit("an anchor of the queued searches not found once in RegionsMatcher.hpp (14b)")
+            t = t.replace(old, new, 1)
+    f14b.write_text(t, encoding="utf-8", newline="")
 
     # 10g (after 0.4.0). The image cache evicts by load order instead of clock(), whose millisecond ties made the
     #     texturing read-ahead evict images before their use (most False Door passes decoded each image twice).

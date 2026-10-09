@@ -140,11 +140,26 @@ void cheshireSearchAndFilter(matching::PairwiseMatches& out_putatives,
                 else
                 {
                     matching::RegionsDatabaseMatcher matcher(randomNumberGenerator, matcherType, regionsI);
+                    // step 14b: each pair's search queued on the GPU one pair ahead, so the GPU searches the next pair
+                    // while this one's matches go through the ratio test and the deduplication on the host
+                    const auto searchable = [&](std::size_t k) {
+                        const feature::Regions& r = regionsPerView.getRegions(slots[k].pair.second, descType);
+                        return r.RegionCount() != 0 && regionsI.Type_id() == r.Type_id();
+                    };
+                    const auto nextSearchable = [&](std::size_t k) {
+                        while (k < end && !searchable(k))
+                            ++k;
+                        return k;
+                    };
+                    if (const std::size_t first = nextSearchable(begin); first < end)
+                        matcher.cheshirePrefetch(regionsPerView.getRegions(slots[first].pair.second, descType));
                     for (std::size_t k = begin; k < end; ++k)
                     {
                         const feature::Regions& regionsJ = regionsPerView.getRegions(slots[k].pair.second, descType);
                         if (regionsJ.RegionCount() != 0 && regionsI.Type_id() == regionsJ.Type_id())
                         {
+                            if (const std::size_t next = nextSearchable(k + 1); next < end)
+                                matcher.cheshirePrefetch(regionsPerView.getRegions(slots[next].pair.second, descType));
                             matching::IndMatches putatives;
                             matcher.Match(distRatio, regionsJ, putatives);
                             if (!putatives.empty())

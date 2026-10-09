@@ -52,6 +52,8 @@ GPU_MARKERS = {
                           r"7-point fits (four at a time, Eigen's SVD in AVX2 lanes|one at a time, the QR nullspace)",
                           # after 0.4.3: every view's descriptors on the device once for all its searches (14a)
                           r"matcher: descriptors kept on the device across searches",
+                          # and each pair's search queued one pair ahead (14b)
+                          r"matcher: the next pair's search queued while this pair's matches are filtered",
                           r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far",
                           r"cheshire: GPU search and geometric filter overlapped"],
     # after 0.4.0: the T cameras (step 10e) and the tiles' depth lists (10h) from each camera's own landmarks, the

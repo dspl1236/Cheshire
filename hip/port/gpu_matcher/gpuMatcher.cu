@@ -539,6 +539,19 @@ void logOnce(const char* what) {
     std::fprintf(stderr, "[cheshire] matcher: %s\n", what);
 }
 
+// Step 14b: CHESHIRE_GPU_MATCHER_AHEAD (default on): searches queued ahead (KnnMatcher::searchAsync); announced once
+bool asyncEnabled()
+{
+    static const bool on = [] {
+        const bool v = ::cheshire::env::flag("CHESHIRE_GPU_MATCHER_AHEAD", true);
+        std::fprintf(stderr, v ? "[cheshire] matcher: the next pair's search queued while this pair's matches are filtered (exact; "
+                                 "CHESHIRE_GPU_MATCHER_AHEAD=0 for one at a time)\n"
+                               : "[cheshire] matcher: one search at a time (CHESHIRE_GPU_MATCHER_AHEAD=0)\n");
+        return v;
+    }();
+    return on;
+}
+
 // Step 14a: the descriptor arrays kept on the device while a ResidentScope lives (see gpuMatcher.hpp).
 struct ResidentEntry {
     size_t bytes = 0;
@@ -606,6 +619,9 @@ const ResidentEntry* residentGet(const void* host, int rows, int dim, bool isFlo
         else            rowNormsU8<64><<<grid, block>>>((const unsigned int*)e.dev, rows, (unsigned int*)e.norms);
         if (cudaGetLastError() != cudaSuccess) { cheshire::devFree(e.dev); cheshire::devFree(e.norms); ++g_res.refused; return nullptr; }
     }
+    // step 14b: kernels on the matcher's own stream read this copy; the null stream's pageable copy may still be in
+    // flight when cudaMemcpy returns, and the norms kernel is asynchronous
+    if (cudaStreamSynchronize(0) != cudaSuccess) { cheshire::devFree(e.dev); if (e.norms) cheshire::devFree(e.norms); ++g_res.refused; return nullptr; }
     e.lastUse = ++g_res.clock;
     g_res.used += need;
     g_res.peak = std::max(g_res.peak, g_res.used);
@@ -722,6 +738,24 @@ void checkRecord(bool isFloat, long long checked, long long identical, long long
     g_check.distance[f] += distanceDiffers;
 }
 
+// step 14b: the searches queued ahead (KnnMatcher::searchAsync), up to two, on one stream for the process; each slot has
+// its own query copy, norms, results and pinned host copy of the results, and remembers the matcher that queued it
+// (FeatureMatching makes a matcher per database view: a stream and pinned buffers each would cost more than they save).
+// Kept for the process's life. Used by the thread that drives the matchers.
+struct AsyncSlot {
+    const void* owner = nullptr; const void* key = nullptr; int n = 0; bool busy = false;
+    void* out = nullptr; size_t outCap = 0;     // device: [idx 2n | dist 2n], 16 bytes a query
+    void* host = nullptr; size_t hostCap = 0;   // pinned host copy of out
+    void* q = nullptr; size_t qCap = 0;         // queries not resident
+    void* qNorm = nullptr; size_t qNormCap = 0;
+    cudaEvent_t ev = nullptr;
+};
+struct AsyncPool {
+    std::mutex m;
+    cudaStream_t stream = nullptr;
+    AsyncSlot slots[2];
+} g_async;
+
 struct KnnMatcher::Impl {
     void* db = nullptr; size_t dbCap = 0;
     void* dbNorm = nullptr; size_t dbNormCap = 0;   // uint8 path: |row|^2 per database row
@@ -742,9 +776,27 @@ struct KnnMatcher::Impl {
         if (cheshire::devMalloc(p, need) != cudaSuccess) return false;
         *cap = need; return true;
     }
-    ~Impl() { if (db) cheshire::devFree(db); if (dbNorm) cheshire::devFree(dbNorm); if (q) cheshire::devFree(q); if (idx) cheshire::devFree(idx); if (dist) cheshire::devFree(dist);
-              if (pIdx) cheshire::devFree(pIdx); if (pDist) cheshire::devFree(pDist); if (qNorm) cheshire::devFree(qNorm); }
+    ~Impl();  // step 14b: drops this matcher's queued searches first
+    void dropQueued();
+    void doFree() {
+        if (db) cheshire::devFree(db); if (dbNorm) cheshire::devFree(dbNorm); if (q) cheshire::devFree(q); if (idx) cheshire::devFree(idx); if (dist) cheshire::devFree(dist);
+        if (pIdx) cheshire::devFree(pIdx); if (pDist) cheshire::devFree(pDist); if (qNorm) cheshire::devFree(qNorm);
+    }
 };
+
+// step 14b: wait for this matcher's queued searches and free their slots
+void KnnMatcher::Impl::dropQueued()
+{
+    std::lock_guard<std::mutex> g(g_async.m);
+    bool mine = false;
+    for (AsyncSlot& s : g_async.slots)
+        mine = mine || (s.busy && s.owner == this);
+    if (!mine) return;
+    cudaStreamSynchronize(g_async.stream);
+    for (AsyncSlot& s : g_async.slots)
+        if (s.owner == this) { s.busy = false; s.owner = nullptr; }
+}
+KnnMatcher::Impl::~Impl() { dropQueued(); doFree(); }
 
 KnnMatcher::KnnMatcher() : impl_(new Impl) {}
 KnnMatcher::~KnnMatcher() { delete impl_; }
@@ -755,6 +807,7 @@ bool KnnMatcher::build(const void* data, int rows, int dim, bool isFloat)
     Impl& m = *impl_;
     if (rows < 1 || !supportsDim(dim)) { m.rows = 0; return false; }
     ScopedTimer timer(g_profile.buildSec); g_profile.builds++;
+    m.dropQueued();  // step 14b: searches queued against the previous database are dropped
     m.rows = rows; m.dim = dim; m.isFloat = isFloat;
     const size_t bytes = size_t(rows) * m.rowBytes();
     if (const ResidentEntry* e = residentGet(data, rows, dim, isFloat, nullptr)) {  // step 14a
@@ -772,7 +825,66 @@ bool KnnMatcher::build(const void* data, int rows, int dim, bool isFloat)
         if (cudaGetLastError() != cudaSuccess) return false;
     }
     m.dbUse = m.db; m.dbNormUse = m.dbNorm;
-    return true;
+    return cudaStreamSynchronize(0) == cudaSuccess;  // step 14b: queued kernels on the matcher's stream read it
+}
+
+// step 14b: the kernels of one search on stream s: the queries at qDev, their norms at qNormIn (or computed into
+// *qNormScratch), the results into oIdx/oDist; the kernel chosen as before. The sliced kernel's partials are m's own,
+// so it runs on the null stream only.
+static bool launchSearch(KnnMatcher::Impl& m, const void* qDev, const void* qNormIn, int nbQuery, int* oIdx, float* oDist,
+                         void** qNormScratch, size_t* qNormScratchCap, cudaStream_t s)
+{
+    const dim3 block(kQueriesPerBlock), grid((nbQuery + kQueriesPerBlock - 1) / kQueriesPerBlock);
+    if (m.isFloat) {
+        if (m.dim == 128) knn2_f32<128><<<grid, block, 0, s>>>((const float*)m.dbUse, m.rows, (const float*)qDev, nbQuery, oIdx, oDist);
+        else              knn2_f32<64><<<grid, block, 0, s>>>((const float*)m.dbUse, m.rows, (const float*)qDev, nbQuery, oIdx, oDist);
+    } else {
+        int kernel = g_u8Kernel;
+        if (m.dim != 128 && (kernel == kDot4q || kernel == kWmma)) kernel = kU8;
+        if (kernel == kDot4q || kernel == kWmma) {
+            const void* qNormDev = qNormIn;
+            if (!qNormDev) {
+                if (!KnnMatcher::Impl::grow(qNormScratch, qNormScratchCap, size_t(nbQuery) * sizeof(unsigned int))) return false;
+                rowNormsU8<128><<<dim3((nbQuery + 255) / 256), dim3(256), 0, s>>>((const unsigned int*)qDev, nbQuery, (unsigned int*)*qNormScratch);
+                qNormDev = *qNormScratch;
+            }
+#if defined(__HIP_PLATFORM_AMD__)
+            if (kernel == kWmma) {
+                constexpr int perBlock = kWmmaWaves * 16 * kWmmaTiles;
+                knn2_wmma<<<dim3((nbQuery + perBlock - 1) / perBlock), dim3(kWmmaWaves * 32), 0, s>>>(
+                    (const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev,
+                    (const unsigned int*)qNormDev, nbQuery, oIdx, oDist);
+            } else
+#endif
+            {
+#if defined(__HIP_PLATFORM_AMD__)
+                constexpr int threads = 256;   // 1.13x knn2_u8 on the RX 9070; 128 was 1.03x
+#else
+                constexpr int threads = 128;   // 2.03x on the GTX 1080 Ti; 256 was 1.92x
+#endif
+                knn2_dot4q<2><<<dim3((nbQuery + 2 * threads - 1) / (2 * threads)), dim3(threads), 0, s>>>(
+                    (const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev,
+                    (const unsigned int*)qNormDev, nbQuery, oIdx, oDist);
+            }
+        } else if (kernel != kSliced) {
+            if (m.dim == 128) knn2_u8<128><<<grid, block, 0, s>>>((const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev, nbQuery, oIdx, oDist);
+            else              knn2_u8<64><<<grid, block, 0, s>>>((const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev, nbQuery, oIdx, oDist);
+        } else {
+            if (s != 0) return false;  // its partials are m's
+            // sliced: Q queries per thread, the database in slices along y, partials merged after
+            const int slices = (m.rows + kSliceRows - 1) / kSliceRows;
+            const size_t partN = size_t(slices) * nbQuery * 2;
+            if (!KnnMatcher::Impl::grow(&m.pIdx, &m.pIdxCap, partN * sizeof(int))) return false;
+            if (!KnnMatcher::Impl::grow(&m.pDist, &m.pDistCap, partN * sizeof(float))) return false;
+            const int threads = 128;  // x 2 queries = 256 queries per block
+            const dim3 sblock(threads), sgrid((nbQuery + threads * kQ - 1) / (threads * kQ), slices);
+            if (m.dim == 128) knn2_u8_sliced<128, kQ><<<sgrid, sblock, 0, s>>>((const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev, nbQuery, (int*)m.pIdx, (float*)m.pDist);
+            else              knn2_u8_sliced<64, kQ><<<sgrid, sblock, 0, s>>>((const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev, nbQuery, (int*)m.pIdx, (float*)m.pDist);
+            if (cudaGetLastError() != cudaSuccess) return false;
+            merge2<<<grid, block, 0, s>>>((const int*)m.pIdx, (const float*)m.pDist, slices, nbQuery, oIdx, oDist);
+        }
+    }
+    return cudaGetLastError() == cudaSuccess;
 }
 
 bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist)
@@ -780,6 +892,18 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
     Impl& m = *impl_;
     if (m.rows < 2 || nbQuery < 1) return false;
     ScopedTimer timer(g_profile.searchSec); g_profile.searches++; g_profile.queries += size_t(nbQuery);
+    {
+        std::lock_guard<std::mutex> g(g_async.m);
+        for (AsyncSlot& sl : g_async.slots)  // step 14b: queued ahead by this matcher's searchAsync
+            if (sl.busy && sl.owner == &m && sl.key == queries && sl.n == nbQuery) {
+                sl.busy = false; sl.owner = nullptr;
+                if (cudaEventSynchronize(sl.ev) != cudaSuccess) return false;
+                const size_t half = size_t(nbQuery) * 2 * sizeof(int);
+                std::memcpy(idx, sl.host, half);
+                std::memcpy(dist, static_cast<const char*>(sl.host) + half, half);
+                return true;
+            }
+    }
     const size_t qBytes = size_t(nbQuery) * m.rowBytes();
     if (size_t(nbQuery) > m.outCap) {
         if (m.idx) cheshire::devFree(m.idx); if (m.dist) cheshire::devFree(m.dist);
@@ -796,55 +920,7 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
     if (!qe && (!Impl::grow(&m.q, &m.qCap, qBytes) || cudaMemcpy(m.q, queries, qBytes, cudaMemcpyHostToDevice) != cudaSuccess)) return false;
     const void* qDev = qe ? qe->dev : m.q;  // after the grow, which may move m.q
     if (prof) t1 = std::chrono::steady_clock::now();
-    const dim3 block(kQueriesPerBlock), grid((nbQuery + kQueriesPerBlock - 1) / kQueriesPerBlock);
-    if (m.isFloat) {
-        if (m.dim == 128) knn2_f32<128><<<grid, block>>>((const float*)m.dbUse, m.rows, (const float*)qDev, nbQuery, m.idx, m.dist);
-        else              knn2_f32<64><<<grid, block>>>((const float*)m.dbUse, m.rows, (const float*)qDev, nbQuery, m.idx, m.dist);
-    } else {
-        int kernel = g_u8Kernel;
-        if (m.dim != 128 && (kernel == kDot4q || kernel == kWmma)) kernel = kU8;
-        if (kernel == kDot4q || kernel == kWmma) {
-            const void* qNormDev = qe ? qe->norms : nullptr;
-            if (!qNormDev) {
-                if (!Impl::grow(&m.qNorm, &m.qNormCap, size_t(nbQuery) * sizeof(unsigned int))) return false;
-                rowNormsU8<128><<<dim3((nbQuery + 255) / 256), dim3(256)>>>((const unsigned int*)qDev, nbQuery, (unsigned int*)m.qNorm);
-                qNormDev = m.qNorm;
-            }
-#if defined(__HIP_PLATFORM_AMD__)
-            if (kernel == kWmma) {
-                constexpr int perBlock = kWmmaWaves * 16 * kWmmaTiles;
-                knn2_wmma<<<dim3((nbQuery + perBlock - 1) / perBlock), dim3(kWmmaWaves * 32)>>>(
-                    (const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev,
-                    (const unsigned int*)qNormDev, nbQuery, m.idx, m.dist);
-            } else
-#endif
-            {
-#if defined(__HIP_PLATFORM_AMD__)
-                constexpr int threads = 256;   // 1.13x knn2_u8 on the RX 9070; 128 was 1.03x
-#else
-                constexpr int threads = 128;   // 2.03x on the GTX 1080 Ti; 256 was 1.92x
-#endif
-                knn2_dot4q<2><<<dim3((nbQuery + 2 * threads - 1) / (2 * threads)), dim3(threads)>>>(
-                    (const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev,
-                    (const unsigned int*)qNormDev, nbQuery, m.idx, m.dist);
-            }
-        } else if (kernel != kSliced) {
-            if (m.dim == 128) knn2_u8<128><<<grid, block>>>((const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev, nbQuery, m.idx, m.dist);
-            else              knn2_u8<64><<<grid, block>>>((const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev, nbQuery, m.idx, m.dist);
-        } else {
-            // sliced: Q queries per thread, the database in slices along y, partials merged after
-            const int slices = (m.rows + kSliceRows - 1) / kSliceRows;
-            const size_t partN = size_t(slices) * nbQuery * 2;
-            if (!Impl::grow(&m.pIdx, &m.pIdxCap, partN * sizeof(int))) return false;
-            if (!Impl::grow(&m.pDist, &m.pDistCap, partN * sizeof(float))) return false;
-            const int threads = 128;  // x 2 queries = 256 queries per block
-            const dim3 sblock(threads), sgrid((nbQuery + threads * kQ - 1) / (threads * kQ), slices);
-            if (m.dim == 128) knn2_u8_sliced<128, kQ><<<sgrid, sblock>>>((const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev, nbQuery, (int*)m.pIdx, (float*)m.pDist);
-            else              knn2_u8_sliced<64, kQ><<<sgrid, sblock>>>((const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev, nbQuery, (int*)m.pIdx, (float*)m.pDist);
-            if (cudaGetLastError() != cudaSuccess) return false;
-            merge2<<<grid, block>>>((const int*)m.pIdx, (const float*)m.pDist, slices, nbQuery, m.idx, m.dist);
-        }
-    }
+    if (!launchSearch(m, qDev, qe ? qe->norms : nullptr, nbQuery, m.idx, m.dist, &m.qNorm, &m.qNormCap, 0)) return false;
     if (cudaGetLastError() != cudaSuccess) return false;
     if (prof) {
         // profiling only: wait for the kernels so the three phases can be told apart
@@ -856,6 +932,46 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
     if (cudaMemcpy(idx, m.idx, size_t(nbQuery) * 2 * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
     if (cudaMemcpy(dist, m.dist, size_t(nbQuery) * 2 * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
     if (prof) g_profile.downloadSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t2).count();
+    return true;
+}
+
+// step 14b: see gpuMatcher.hpp
+bool KnnMatcher::searchAsync(const void* queries, int nbQuery)
+{
+    Impl& m = *impl_;
+    if (m.rows < 2 || nbQuery < 1 || g_profile.on || !asyncEnabled()) return false;
+    if (!m.isFloat && g_u8Kernel == kSliced) return false;
+    std::lock_guard<std::mutex> g(g_async.m);
+    AsyncSlot* sl = nullptr;
+    for (AsyncSlot& s : g_async.slots) {
+        if (s.busy && s.owner == &m && s.key == queries && s.n == nbQuery) return true;  // queued already
+        if (!s.busy && !sl) sl = &s;
+    }
+    if (!sl) return false;  // two queued: the caller's next search2 runs as before
+    if (!g_async.stream && cudaStreamCreateWithFlags(&g_async.stream, cudaStreamNonBlocking) != cudaSuccess) { g_async.stream = nullptr; return false; }
+    cudaStream_t stream = g_async.stream;
+    if (!sl->ev && cudaEventCreate(&sl->ev) != cudaSuccess) { sl->ev = nullptr; return false; }
+    const size_t outBytes = size_t(nbQuery) * 16;
+    if (!Impl::grow(&sl->out, &sl->outCap, outBytes)) return false;
+    if (outBytes > sl->hostCap) {
+        if (sl->host) cudaFreeHost(sl->host);
+        sl->host = nullptr; sl->hostCap = 0;
+        if (cudaMallocHost(&sl->host, outBytes) != cudaSuccess) { sl->host = nullptr; return false; }
+        sl->hostCap = outBytes;
+    }
+    const ResidentEntry* qe = residentGet(queries, nbQuery, m.dim, m.isFloat, m.dbUse);
+    if (!qe) {
+        const size_t qBytes = size_t(nbQuery) * m.rowBytes();
+        if (!Impl::grow(&sl->q, &sl->qCap, qBytes)) return false;
+        if (cudaMemcpyAsync(sl->q, queries, qBytes, cudaMemcpyHostToDevice, stream) != cudaSuccess) return false;
+    }
+    const void* qDev = qe ? qe->dev : sl->q;  // after the grow, which may move sl->q
+    int* oIdx = static_cast<int*>(sl->out);
+    float* oDist = reinterpret_cast<float*>(static_cast<char*>(sl->out) + size_t(nbQuery) * 2 * sizeof(int));
+    if (!launchSearch(m, qDev, qe ? qe->norms : nullptr, nbQuery, oIdx, oDist, &sl->qNorm, &sl->qNormCap, stream)) return false;
+    if (cudaMemcpyAsync(sl->host, sl->out, outBytes, cudaMemcpyDeviceToHost, stream) != cudaSuccess) return false;
+    if (cudaEventRecord(sl->ev, stream) != cudaSuccess) return false;
+    sl->owner = &m; sl->key = queries; sl->n = nbQuery; sl->busy = true;
     return true;
 }
 

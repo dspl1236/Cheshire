@@ -9023,6 +9023,50 @@ index 00d1c75..914c879 100644
              switch (matcherType)
              {
                  case BRUTE_FORCE_L2:
+diff --git a/src/aliceVision/matching/RegionsMatcher.hpp b/src/aliceVision/matching/RegionsMatcher.hpp
+index 0ed048a..d42893d 100644
+--- a/src/aliceVision/matching/RegionsMatcher.hpp
++++ b/src/aliceVision/matching/RegionsMatcher.hpp
+@@ -72,6 +72,10 @@ class IRegionsMatcher
+      */
+     virtual bool Match(const float f_dist_ratio, const feature::Regions& query_regions, matching::IndMatches& vec_putative_matches) = 0;
+ 
++    /// cheshire (step 14b): start the search of a later Match(..., query_regions, ...) now, where the matcher can (the GPU
++    /// matcher queues it on its own stream); nothing elsewhere. Match gives the same matches either way.
++    virtual void cheshirePrefetch(const feature::Regions& query_regions) { (void)query_regions; }
++
+     const feature::Regions& getDatabaseRegions() const { return regions_; }
+ };
+ 
+@@ -123,6 +127,14 @@ class RegionsMatcher : public IRegionsMatcher
+      * of the database and the query Regions.
+      * @return True if everything went well.
+      */
++    void cheshirePrefetch(const feature::Regions& queryregions_) override  // cheshire (step 14b)
++    {
++        if constexpr (requires(ArrayMatcherT& m, const Scalar* q) { m.cheshirePrefetch(q, 1); })
++            matcher_.cheshirePrefetch(reinterpret_cast<const Scalar*>(queryregions_.DescriptorRawData()), static_cast<int>(queryregions_.RegionCount()));
++        else
++            (void)queryregions_;
++    }
++
+     bool Match(const float f_dist_ratio, const feature::Regions& queryregions_, matching::IndMatches& vec_putative_matches)
+     {
+         const Scalar* queries = reinterpret_cast<const Scalar*>(queryregions_.DescriptorRawData());
+@@ -209,6 +221,13 @@ class RegionsDatabaseMatcher
+      */
+     bool Match(float distRatio, const feature::Regions& queryRegions, matching::IndMatches& matches) const;
+ 
++    /// cheshire (step 14b): IRegionsMatcher::cheshirePrefetch on this database's matcher
++    void cheshirePrefetch(const feature::Regions& queryRegions) const
++    {
++        if (_regionsMatcher && queryRegions.RegionCount() != 0)
++            _regionsMatcher->cheshirePrefetch(queryRegions);
++    }
++
+     const feature::Regions& getDatabaseRegions() const { return _regionsMatcher->getDatabaseRegions(); }
+ 
+   private:
 diff --git a/src/aliceVision/matchingImageCollection/GeometricFilter.hpp b/src/aliceVision/matchingImageCollection/GeometricFilter.hpp
 index ecd698a..901cd3f 100644
 --- a/src/aliceVision/matchingImageCollection/GeometricFilter.hpp

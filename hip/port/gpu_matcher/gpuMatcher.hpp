@@ -65,8 +65,15 @@ class KnnMatcher
     // float). Ties resolve to the lower row index, like a stable CPU scan.
     bool search2(const void* queries, int nbQuery, int* idx, float* dist);
 
+    // Cheshire (step 14b): queue search2(queries, nbQuery) ahead on the matcher's own stream, results copied back to
+    // pinned memory as the GPU finishes; the later search2() with the same queries takes them instead of searching
+    // (two at most queued; false when nothing was queued, and search2 then runs as before). The queries must stay in
+    // place until that search2. The same kernels on the same data: the same answers. CHESHIRE_GPU_MATCHER_AHEAD=0.
+    bool searchAsync(const void* queries, int nbQuery);
+
+    struct Impl;  // opaque; public so the source's helpers can name it
+
   private:
-    struct Impl;
     Impl* impl_;
 };
 
