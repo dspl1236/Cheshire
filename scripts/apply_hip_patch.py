@@ -4822,6 +4822,249 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
      "#endif\n"),
 ]
 
+# 13a: the 7-point fits four at a time
+STEP13A_F7_HPP = [
+    ('        throw std::logic_error("Fundamental7PSolver does not support problem solving with weights.");\n    }\n};\n',
+     r"""        throw std::logic_error("Fundamental7PSolver does not support problem solving with weights.");
+    }
+
+    /**
+     * @brief cheshire (step 13a): solve() for n <= 4 minimal samples (seven correspondences each) at once: their
+     * nullspaces through cheshireNullspace2Lanes (Eigen's SVD in AVX2 lanes, the same bits), the rest per sample as
+     * solve() does it. The same models, in the same order, in models[0 .. n-1] (appended).
+     */
+    void cheshireSolve4(const Mat* const* x1, const Mat* const* x2, int n, std::vector<robustEstimation::Mat3Model>* models) const;
+
+    /// cheshire (step 13a): whether cheshireSolve4 runs (the lanes on, CHESHIRE_QR_NULLSPACE off)
+    static bool cheshireSolve4On();
+
+    /// cheshire (step 13a): CHESHIRE_ACR_SVD_LANES_CHECK's count, printed by this library, where the fits are counted
+    static void cheshireSolve4Report();
+};
+"""),
+]
+
+STEP13A_F7_CPP = [
+    ("#include <aliceVision/numeric/algebra.hpp>\n",
+     "#include <aliceVision/numeric/algebra.hpp>\n#include <aliceVision/numeric/cheshireJacobiSvd9.hpp>  // cheshire: step 13a\n"),
+    # the nullspace's announcement, once per process whichever path fits first (solve, or cheshireSolve4 since 13a)
+    ("void Fundamental7PSolver::solve(const Mat& x1, const Mat& x2, std::vector<robustEstimation::Mat3Model>& models) const\n",
+     r"""// cheshire: CHESHIRE_QR_NULLSPACE, announced once per process on both paths (docs/04 marker rule); step 13a moved it out of
+// solve() so that cheshireSolve4On() announces it too
+static bool cheshireQrNullspaceOn()
+{
+    static const bool qr = ::cheshire::env::flag("CHESHIRE_QR_NULLSPACE");
+    static const bool announced = []() {
+        std::fprintf(stderr, qr ? "[cheshire] 7-point nullspace: Householder QR (CHESHIRE_QR_NULLSPACE=1)\n"
+                                : "[cheshire] 7-point nullspace: SVD (default; CHESHIRE_QR_NULLSPACE=1 for QR)\n");
+        return true; }();
+    (void)announced;
+    return qr;
+}
+
+void Fundamental7PSolver::solve(const Mat& x1, const Mat& x2, std::vector<robustEstimation::Mat3Model>& models) const
+"""),
+    (r"""        static const bool cheshireQrNullspace = ::cheshire::env::flag("CHESHIRE_QR_NULLSPACE");
+        static const bool cheshireQrAnnounced = []() {  // once per process, both paths (docs/04 marker rule)
+            std::fprintf(stderr, cheshireQrNullspace ? "[cheshire] 7-point nullspace: Householder QR (CHESHIRE_QR_NULLSPACE=1)\n"
+                                                     : "[cheshire] 7-point nullspace: SVD (default; CHESHIRE_QR_NULLSPACE=1 for QR)\n");
+            return true; }();
+        (void)cheshireQrAnnounced;
+""",
+     "        const bool cheshireQrNullspace = cheshireQrNullspaceOn();  // cheshire (step 13a): the announcement moved out\n"),
+]
+# cheshireSolve4's definition goes in before Fundamental7PSphericalSolver::solve, its per-sample tail being the text of
+# solve()'s own tail (from "Mat3 F1 = " to the models' emplace_back), so the two compile the same statements.
+STEP13A_F7_SOLVE4_HEAD = r"""// cheshire (step 13a): see Fundamental7PSolver.hpp
+bool Fundamental7PSolver::cheshireSolve4On()
+{
+    static const bool on = !cheshireQrNullspaceOn() && cheshireSvdLanesOn();
+    return on;
+}
+
+void Fundamental7PSolver::cheshireSolve4Report() { cheshireSvdLanes::report(); }
+
+void Fundamental7PSolver::cheshireSolve4(const Mat* const* x1s, const Mat* const* x2s, int count, std::vector<robustEstimation::Mat3Model>* modelsOut) const
+{
+    Mat9 A[4];
+    const Mat9* pA[4];
+    for (int lane = 0; lane < count; ++lane)
+    {
+        assert(x1s[lane]->cols() == 7 && x2s[lane]->cols() == 7);
+        A[lane] = Mat::Zero(9, 9);  // solve()'s minimal case
+        encodeEpipolarEquation(*x1s[lane], *x2s[lane], &A[lane]);
+        pA[lane] = &A[lane];
+    }
+    Vec9 f1s[4], f2s[4];
+    cheshireNullspace2Lanes(pA, count, f1s, f2s);
+    for (int lane = 0; lane < count; ++lane)
+    {
+        Vec9 f1 = f1s[lane];
+        Vec9 f2 = f2s[lane];
+        std::vector<robustEstimation::Mat3Model>& models = modelsOut[lane];
+        // solve()'s statements from here (they name doubles a to r, hence lane and count)
+"""
+STEP13A_F7_SOLVE4_TAIL = "    }\n}\n\n"
+
+STEP13A_RPK = [
+    ("    double logalpha0() const override { return _logalpha0; }\n    double errorVectorDimension() const override { return (_pointToLine) ? 1.0 : 2.0; }\n"
+     "    Mat3 normalizer1() const override { return _N1; }\n",
+     r"""    // cheshire (step 13a): fit() for up to four samples at once where the solver solves them together
+    // (Fundamental7PSolver::cheshireSolve4, the same models in the same order); ACRANSAC draws samples ahead to use it
+    bool cheshireFitBatchOn() const
+    {
+        if constexpr (requires { SolverT_::cheshireSolve4On(); })
+            return SolverT_::cheshireSolve4On();
+        else
+            return false;
+    }
+    void cheshireFitBatch(const std::vector<std::size_t>* samples, int n, std::vector<ModelT_>* models) const
+    {
+        if constexpr (requires { SolverT_::cheshireSolve4On(); })
+        {
+            Mat x1[4], x2[4];  // PointFittingKernel::fit's subsets
+            const Mat* p1[4];
+            const Mat* p2[4];
+            for (int l = 0; l < n; ++l)
+            {
+                x1[l] = buildSubsetMatrix(PFRansacKernel::PFKernel::_x1, samples[l]);
+                x2[l] = buildSubsetMatrix(PFRansacKernel::PFKernel::_x2, samples[l]);
+                p1[l] = &x1[l];
+                p2[l] = &x2[l];
+            }
+            PFRansacKernel::PFKernel::_kernelSolver.cheshireSolve4(p1, p2, n, models);
+        }
+    }
+
+    double logalpha0() const override { return _logalpha0; }
+    double errorVectorDimension() const override { return (_pointToLine) ? 1.0 : 2.0; }
+    Mat3 normalizer1() const override { return _N1; }
+"""),
+]
+
+STEP13A_ACR = [
+    (r"""    bool bACRansacMode = (precision == std::numeric_limits<double>::infinity());
+
+    // Main estimation loop.
+    for (std::size_t iter = 0; iter < nIter; ++iter)
+    {
+        std::vector<std::size_t> vec_sample(sizeSample);  // Sample indices
+        if (bACRansacMode)
+            uniformSample(randomNumberGenerator, sizeSample, vec_index, vec_sample);  // Get random sample
+        else
+            uniformSample(randomNumberGenerator, sizeSample, nData, vec_sample);  // Get random sample
+
+        std::vector<typename Kernel::ModelT> vec_models;  // Up to max_models solutions
+        kernel.fit(vec_sample, vec_models);
+""",
+     r"""    bool bACRansacMode = (precision == std::numeric_limits<double>::infinity());
+
+    // cheshire (step 13a): with a kernel that fits several samples at once (the 7-point fundamental's, Eigen's SVD in
+    // AVX2 lanes), the next iterations' samples are drawn ahead, four at a time, as those iterations would draw them,
+    // and fitted together. Only the sampling mode and the pool (vec_index) change what an iteration draws; when either
+    // changes, or the loop ends, with samples drawn ahead and not used, the generator is put back where the last used one
+    // left it (its state before the batch, then the used draws again). Every iteration gets the sample and the models
+    // it would have had, and the generator ends in the same state. CHESHIRE_ACR_SVD_LANES=0 for one at a time.
+    constexpr bool cheshireBatchable = requires(const Kernel& k, const std::vector<std::size_t>* s, std::vector<typename Kernel::ModelT>* m) {
+        k.cheshireFitBatchOn();
+        k.cheshireFitBatch(s, 4, m);
+    };
+    bool cheshireBatch = false;
+    if constexpr (cheshireBatchable)
+        cheshireBatch = kernel.cheshireFitBatchOn();
+    std::vector<std::size_t> cheshireSamples[4];
+    std::vector<typename Kernel::ModelT> cheshireModels[4];
+    int cheshireDrawn = 0, cheshireUsed = 0;
+    bool cheshireDrawMode = false;
+    std::mt19937 cheshireRngBefore;
+    const auto cheshireDraw = [&](bool acMode, std::vector<std::size_t>& sample) {
+        if (acMode)
+            uniformSample(randomNumberGenerator, sizeSample, vec_index, sample);
+        else
+            uniformSample(randomNumberGenerator, sizeSample, nData, sample);
+    };
+    const auto cheshireRewind = [&]() {  // forget the samples drawn ahead and not used
+        if (cheshireUsed < cheshireDrawn)
+        {
+            randomNumberGenerator = cheshireRngBefore;
+            std::vector<std::size_t> again(sizeSample);
+            for (int j = 0; j < cheshireUsed; ++j)
+                cheshireDraw(cheshireDrawMode, again);
+        }
+        cheshireDrawn = cheshireUsed;
+    };
+
+    // Main estimation loop.
+    for (std::size_t iter = 0; iter < nIter; ++iter)
+    {
+        std::vector<std::size_t> vec_sample(sizeSample);  // Sample indices
+        std::vector<typename Kernel::ModelT> vec_models;  // Up to max_models solutions
+        if constexpr (cheshireBatchable)
+        {
+            if (cheshireBatch)
+            {
+                if (cheshireUsed == cheshireDrawn)
+                {
+                    cheshireRngBefore = randomNumberGenerator;
+                    cheshireDrawMode = bACRansacMode;
+                    cheshireDrawn = static_cast<int>(std::min<std::size_t>(4, nIter - iter));
+                    cheshireUsed = 0;
+                    for (int j = 0; j < cheshireDrawn; ++j)
+                    {
+                        cheshireSamples[j].assign(sizeSample, 0);
+                        cheshireDraw(cheshireDrawMode, cheshireSamples[j]);
+                        cheshireModels[j].clear();
+                    }
+                    kernel.cheshireFitBatch(cheshireSamples, cheshireDrawn, cheshireModels);
+                }
+                vec_sample = cheshireSamples[cheshireUsed];
+                vec_models = std::move(cheshireModels[cheshireUsed]);
+                ++cheshireUsed;
+            }
+        }
+        if (!cheshireBatch)
+        {
+        if (bACRansacMode)
+            uniformSample(randomNumberGenerator, sizeSample, vec_index, vec_sample);  // Get random sample
+        else
+            uniformSample(randomNumberGenerator, sizeSample, nData, vec_sample);  // Get random sample
+
+        kernel.fit(vec_sample, vec_models);
+        }
+"""),
+    (r"""        // Early exit test -> no meaningful model found after nIterReserve*2 iterations
+        if (!bACRansacMode && iter > nIterReserve * 2)
+            break;
+""",
+     r"""        if (cheshireBatch && bACRansacMode != cheshireDrawMode)  // cheshire (step 13a): the next draws take the other mode
+            cheshireRewind();
+
+        // Early exit test -> no meaningful model found after nIterReserve*2 iterations
+        if (!bACRansacMode && iter > nIterReserve * 2)
+            break;
+"""),
+    ("                // ACRANSAC optimization: draw samples among best set of inliers so far\n                vec_index = vec_inliers;\n",
+     "                // ACRANSAC optimization: draw samples among best set of inliers so far\n"
+     "                if (cheshireBatch)\n"
+     "                    cheshireRewind();  // cheshire (step 13a): before the pool changes\n"
+     "                vec_index = vec_inliers;\n"),
+    ("    if (minNFA >= 0)\n        vec_inliers.clear();\n",
+     "    if (cheshireBatch)\n"
+     "        cheshireRewind();  // cheshire (step 13a): the generator as the last iteration left it\n\n"
+     "    if (minNFA >= 0)\n        vec_inliers.clear();\n"),
+]
+
+# the check's count where 8e reports its own (GeometricFilter.hpp's robustModelEstimation)
+STEP13A_GF = [
+    ("#include <aliceVision/multiview/relativePose/FundamentalError.hpp>  // cheshire: step 8e\n",
+     "#include <aliceVision/multiview/relativePose/FundamentalError.hpp>  // cheshire: step 8e\n"
+     "#include <aliceVision/multiview/relativePose/Fundamental7PSolver.hpp>  // cheshire: step 13a\n"),
+]
+# after both of 8e's reports (robustModelEstimation's two loops); the count lives in the solver's library (a Windows DLL
+# has its own copy of a header's statics), so that library reports it
+STEP13A_GF_REPORT = ("    multiview::relativePose::cheshireEpipolarReport();  // cheshire (step 8e): CHESHIRE_ACR_RESIDUALS_CHECK's count\n",
+                     "    multiview::relativePose::Fundamental7PSolver::cheshireSolve4Report();  // cheshire (step 13a): CHESHIRE_ACR_SVD_LANES_CHECK's count\n")
+
 STEP12A_DC_CPP = [
     ("#include <aliceVision/system/Logger.hpp>\n", "#include <aliceVision/system/Logger.hpp>\n#include <mutex>  // cheshire: step 12a\n#include <vector>\n"),
     ("        mipmaps.push_back(std::make_unique<DeviceMipmapImage>());\n    }\n}\n",
@@ -4984,6 +5227,7 @@ TRACKED = [
     "src/aliceVision/image/imageAlgo.cpp",
     "src/aliceVision/numeric/algebra.hpp",
     "src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp",
+    "src/aliceVision/multiview/relativePose/Fundamental7PSolver.hpp",  # 13a
     "src/aliceVision/sfm/bundle/BundleAdjustmentCeres.cpp",
     "src/aliceVision/sfm/bundle/BundleAdjustmentCeres.hpp",
     "src/aliceVision/sfm/CMakeLists.txt",  # step 7f
@@ -10450,6 +10694,38 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                       "        return _camIdMapId[camId] != -1;\n"
                       "    }\n", 1)
     f12c.write_text(t, encoding="utf-8", newline="")
+
+    # 13a (after 0.4.2). The 7-point fits four at a time: Eigen's JacobiSVD<Mat9> in AVX2 lanes, the same bits
+    #     (hip/port/acr_lanes/cheshireJacobiSvd9.hpp; harness hip/tests/jacobi), and AC-RANSAC drawing samples ahead,
+    #     rewinding the generator when the sampling changes. CHESHIRE_ACR_SVD_LANES=0. After 8d, 8e and 9a.
+    shutil.copy2(ROOT / "hip" / "port" / "acr_lanes" / "cheshireJacobiSvd9.hpp", AV / "src/aliceVision/numeric/cheshireJacobiSvd9.hpp")
+    for rel13a, steps13a in (("src/aliceVision/multiview/relativePose/Fundamental7PSolver.hpp", STEP13A_F7_HPP),
+                             ("src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp", STEP13A_F7_CPP),
+                             ("src/aliceVision/multiview/RelativePoseKernel.hpp", STEP13A_RPK),
+                             ("src/aliceVision/robustEstimation/ACRansac.hpp", STEP13A_ACR),
+                             ("src/aliceVision/matchingImageCollection/GeometricFilter.hpp", STEP13A_GF)):
+        f13a = AV / rel13a
+        t = f13a.read_text(encoding="utf-8")
+        if "step 13a" not in t:
+            for old, new in steps13a:
+                if t.count(old) != 1:
+                    sys.exit(f"an anchor of the four-lane 7-point fits not found once in {f13a.name} (13a)")
+                t = t.replace(old, new, 1)
+            if f13a.name == "Fundamental7PSolver.cpp":
+                # cheshireSolve4: after the lanes' nullspaces, solve()'s own per-sample statements, the same text
+                a13 = t.index("    Mat3 F1 = Map<RMat3>(f1.data());\n")
+                e13 = "        models.emplace_back(F1 + roots[kk] * F2);\n"
+                b13 = t.index(e13, a13) + len(e13)
+                tail13 = "".join("    " + line if line.strip() else line for line in t[a13:b13].splitlines(keepends=True))
+                s13 = "void Fundamental7PSphericalSolver::solve("
+                if t.count(s13) != 1:
+                    sys.exit("the spherical solver's solve() not found once in Fundamental7PSolver.cpp (13a)")
+                t = t.replace(s13, STEP13A_F7_SOLVE4_HEAD + tail13 + STEP13A_F7_SOLVE4_TAIL + s13, 1)
+            if f13a.name == "GeometricFilter.hpp":
+                if t.count(STEP13A_GF_REPORT[0]) != 2:
+                    sys.exit("8e's two reports not found in GeometricFilter.hpp (13a)")
+                t = t.replace(STEP13A_GF_REPORT[0], STEP13A_GF_REPORT[0] + STEP13A_GF_REPORT[1])
+        f13a.write_text(t, encoding="utf-8", newline="")
 
     # 10g (after 0.4.0). The image cache evicts by load order instead of clock(), whose millisecond ties made the
     #     texturing read-ahead evict images before their use (most False Door passes decoded each image twice).
