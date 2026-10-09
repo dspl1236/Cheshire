@@ -27,19 +27,14 @@ GPU_DLLS = ['aliceVision_matching.dll', 'popsift.dll', 'aliceVision_fuseCut.dll'
             'aliceVision_sfm_bundle.dll']
 OFFLOAD = re.compile(rb'amdhsa--([0-9a-z:+\-]+)')
 
-# PopSIFT must NOT be built for a generic target. A generic code object makes it exit 0xC0000094
-# (integer divide by zero) on the first photograph, while the identical source built for the chip
-# works - verified gfx1201 against gfx12-generic on an RX 9070. Every other GPU DLL is fine under a
-# generic target: DepthMap, Meshing and Texturing were all checked. So the generic payloads carry a
-# PopSIFT built for the chips that generic covers, which ROCm 7.2 handles as one fat binary (the
-# v0.2.16 rdna3-rdna4 package shipped ten targets in one popsift.dll).
-#
-# Consequence to remember: a future chip in these families runs the generic AliceVision objects but
-# finds no PopSIFT code object, so GPU SIFT will not cover it until this list is extended.
-POPSIFT_FOR_GENERIC = {
-    'gfx11-generic': 'gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153',
-    'gfx12-generic': 'gfx1200;gfx1201',
-}
+# PopSIFT for a target other than the payload's own. Empty since 0.4.4. Through 0.4.3 a generic
+# code object made PopSIFT exit 0xC0000094 on the first photograph, so the generic payloads carried
+# a PopSIFT built for the chips that generic covered (gfx11-generic: gfx1100-1103 and gfx1150-1153,
+# gfx12-generic: gfx1200/1201) and a future chip of those families had no GPU SIFT. The cause was
+# rocThrust in the grid filter, whose kernels are empty in a generic code object; the filter runs on
+# the host now (apply_popsift_patch.py 3f) and a gfx12-generic PopSIFT extracts byte for byte what
+# the gfx1201 one does (docs/16).
+POPSIFT_FOR_GENERIC = {}
 
 FAMILIES = {
     # family:   (tree name, aliceVision build suffix, extra env for the toolchain)
@@ -108,7 +103,7 @@ def main(argv):
         psarch = POPSIFT_FOR_GENERIC.get(target)
         if psarch:
             psenv['CHESHIRE_HIP_ARCHS'] = psarch
-            print(f"    popsift for {psarch} (generic code objects break it)")
+            print(f"    popsift for {psarch}")
         rc = run(['cmd', '/c', str(ROOT / 'scripts' / 'build-popsift.cmd'), tree, 'install'],
                  psenv, logdir / 'popsift.log')
         if rc != 0:

@@ -5122,6 +5122,7 @@ STEP15A_PS_CPP = [
     ("#include <numeric>\n",
      """#include <numeric>
 #include <fstream>   // cheshire: step 15a
+#include <initializer_list>
 #include <iterator>
 #include <string>
 #if defined(__HIP_PLATFORM_AMD__)
@@ -5140,9 +5141,35 @@ STEP15A_PS_CPP = [
 #endif
 """),
     ("ImageDescriber_SIFT_popSIFT::ImageDescriber_SIFT_popSIFT(const SiftParams& params, bool isOriented)\n",
-     """// cheshire (step 15a): see the header. PopSIFT is built for each chip by name: a generic code object makes it exit
-// 0xC0000094 (docs/16), so only the device's own name counts, followed by a character that cannot continue it.
-// CHESHIRE_POPSIFT_ARCH_TEST names another device, to exercise the fallback on a card that has its code object.
+     """// cheshire (step 15a): see the header. The device's own name counts, or the generic target of its family (a PopSIFT
+// with apply_popsift_patch.py 3f runs from one, docs/16), each followed by a character that cannot continue it. The
+// families are LLVM's generic targets; a chip newer than this list matches its family by the name's prefix, and one
+// outside every family needs its own name. CHESHIRE_POPSIFT_ARCH_TEST names another device, to exercise the fallback
+// on a card that has its code object.
+static std::string cheshireGenericOf(const std::string& arch)
+{
+    const auto in = [&](std::initializer_list<const char*> names) {
+        for (const char* n : names)
+            if (arch == n)
+                return true;
+        return false;
+    };
+    const auto starts = [&](const char* p) { return arch.size() == 7 && arch.compare(0, 6, p) == 0; };  // gfxNNNN
+    if (in({"gfx900", "gfx902", "gfx904", "gfx906", "gfx909", "gfx90c"}))
+        return "gfx9-generic";
+    if (starts("gfx101"))
+        return "gfx10-1-generic";
+    if (starts("gfx103"))
+        return "gfx10-3-generic";
+    if (starts("gfx110") || starts("gfx115"))
+        return "gfx11-generic";
+    if (starts("gfx120"))
+        return "gfx12-generic";
+    if (starts("gfx125"))
+        return "gfx12-5-generic";
+    return {};
+}
+
 bool ImageDescriber_SIFT_popSIFT::cheshireUsable()
 {
     static const bool usable = []() {
@@ -5184,16 +5211,28 @@ bool ImageDescriber_SIFT_popSIFT::cheshireUsable()
         }
         std::ifstream f(path, std::ios::binary);
         const std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-        const std::string want = "amdhsa--" + arch;
-        for (std::size_t at = bytes.find(want); at != std::string::npos; at = bytes.find(want, at + 1))
-        {
-            const std::size_t end = at + want.size();
-            const char c = end < bytes.size() ? bytes[end] : '\\0';
-            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || c == '-'))
+        const auto carries = [&](const std::string& target) {
+            const std::string want = "amdhsa--" + target;
+            for (std::size_t at = bytes.find(want); at != std::string::npos; at = bytes.find(want, at + 1))
             {
-                ALICEVISION_LOG_INFO("cheshire: GPU SIFT: PopSIFT carries code for " << arch << " (the CPU path where a card has none)");
-                return true;
+                const std::size_t end = at + want.size();
+                const char c = end < bytes.size() ? bytes[end] : '\\0';
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || c == '-'))
+                    return true;
             }
+            return false;
+        };
+        if (carries(arch))
+        {
+            ALICEVISION_LOG_INFO("cheshire: GPU SIFT: PopSIFT carries code for " << arch << " (the CPU path where a card has none)");
+            return true;
+        }
+        const std::string generic = cheshireGenericOf(arch);
+        if (!generic.empty() && carries(generic))
+        {
+            ALICEVISION_LOG_INFO("cheshire: GPU SIFT: PopSIFT carries code for " << arch << ", its family's " << generic
+                                 << " (the CPU path where a card has none)");
+            return true;
         }
         ALICEVISION_LOG_WARNING("cheshire: GPU SIFT: PopSIFT (" << path << ") carries no code for this card (" << arch
                                 << "): CPU SIFT instead. A PopSIFT built for " << arch << " would run on the GPU.");

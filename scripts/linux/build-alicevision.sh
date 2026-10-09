@@ -7,8 +7,8 @@
 #   - so a chip of those families that ships later runs without a rebuild. RDNA1 by name (gfx1010/1011/1012): no new
 #   chip will join it, and gfx10-1-generic cannot promise the dot product gfx1011/1012 have (the matcher's dot4u8 needs
 #   dot7-insts, which gfx1010 lacks). Vega explicit (gfx900/906, wave64; untested: the ROCm 7.2 runtime may refuse them
-#   the way it refuses Polaris). Through 0.4.3 the list named 19 chips (git history). The GPU SIFT library keeps its
-#   own per-chip list (build-popsift.sh): PopSIFT does not run from a generic code object (docs/16).
+#   the way it refuses Polaris). Through 0.4.3 the list named 19 chips (git history). The GPU SIFT library has its
+#   own list (build-popsift.sh): the same families, without Vega.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 AV_DEV="$ROOT/third_party/aliceVision"

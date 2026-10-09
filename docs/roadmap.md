@@ -938,9 +938,12 @@ large sets).
     the double metric for only 18 % of the leaf points, yet is no faster: the walk is latency-bound (about 40 nodes and
     18 points per query, scattered), as 6s's layout already suggested. The host backprojection
     (`CHESHIRE_GPU_VIS_BACKPROJECT=0`) is slower on this box too (42 + 36 s against 38 + 27 s).
-- **0.4.4, packaging I:** Linux generic code objects (the 19 hand-listed targets to the family generics, Vega
-  explicit) and PopSIFT from generic code objects (the host-side divide that exits 0xC0000094, and a CPU SIFT
-  fallback guard), so future RDNA chips run without a rebuild ("Packaging and platforms" below).
+- **0.4.4, packaging I, done 2026-10-09** (docs/04, "0.4.4 packaging I"): the Linux bundle's 19 hand-listed targets
+  to gfx900/906, RDNA1 by name and the gfx10-3/11/12 generics (house-pc's gate: every depth map the 0.4.3 gate's);
+  15a, CPU SIFT where the loaded PopSIFT has no code object for the card; 15b, PopSIFT from generic code objects. The
+  0xC0000094 since v0.2.17 was rocThrust in PopSIFT's grid filter, whose kernels are empty under a generic target; the
+  filter runs on the host now, its features byte for byte upstream's on the 41 views and the False Door. Future RDNA2-4
+  chips get GPU SIFT along with the rest. Next: the 0.4.4 release round.
 - **0.5.0, packaging II:** x86-64 ISA tiers chosen by CPUID (FMA contraction controlled, so every tier gives the same
   bytes) and older-glibc Linux bundles from a jammy or bookworm container.
 - **Then:** "Hardware coverage" below.
@@ -1247,15 +1250,16 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 
 ## Packaging and platforms
 
-- **Linux generic code objects** (M). The Linux bundle lists 19 targets by hand
-  (`scripts/linux/build-alicevision.sh:14`). Collapse them to six, keep Vega explicit (wave64), and
-  keep PopSIFT per chip.
-- **GPU SIFT for Linux APUs, and a real fallback for Vega** (S). `scripts/linux/build-popsift.sh:18`
-  omits gfx1035/1036. On Vega, PopSIFT init most likely throws instead of falling back
-  (`popsift/common/debug_macros.h:156-161`).
-- **PopSIFT from generic code objects** (M). A gfx12-generic PopSIFT exits 0xC0000094
-  (`docs/16-bundling.md:166-189`), so a future RDNA3/4 chip likely fails. Find the host-side divide
-  and add a vlfeat fallback guard meanwhile.
+- **Linux generic code objects** (M). **Done 2026-10-09 (docs/04, "0.4.4 packaging I")**: gfx900/906,
+  gfx1010-1012 by name (`gfx10-1-generic` lacks the matcher's dot product) and the gfx10-3/11/12 generics.
+- **GPU SIFT for Linux APUs, and a real fallback for Vega** (S). **Done 2026-10-09**: the RDNA2 APUs through
+  `gfx10-3-generic`, and step 15a takes CPU SIFT on any card the loaded PopSIFT has no code object for, Vega
+  included.
+- **PopSIFT from generic code objects** (M). **Done 2026-10-09 (step 15b, docs/16)**: rocThrust's kernels are
+  empty under a generic target, so the grid filter divided by zero; it runs on the host now, byte for byte.
+- **CPU SIFT in a stable order** (S). Upstream's VLFeat path adds keypoints in OpenMP arrival order
+  (`SIFT.cpp:374-401`) and sorts them unstably, so CPU SIFT (`--forceCpuExtraction`, or 15a's fallback) gives
+  different features each run. A stable order, as the GPU path's `CHESHIRE_SIFT_SORT`, would make it repeat.
 - **`CHESHIRE_POPSIFT` defaults OFF in the HIP build scripts** (S). **Done 2026-09-27 (docs/04
   "0.3.6: tooling debts")**: auto in both HIP build scripts, and both HIP packagers refuse a feature
   library that does not link PopSift.

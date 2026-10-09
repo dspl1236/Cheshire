@@ -74,11 +74,12 @@ def offload_targets(path: Path) -> set:
 def carries_target(name: str, target: str, tgts: set) -> bool:
     """Does this binary carry the code object the payload claims?
 
-    Normally that means the target itself. popsift.dll is the exception: a generic code object
-    makes PopSIFT exit 0xC0000094 on the first photograph, so generic payloads deliberately carry a
-    PopSIFT built for the CHIPS that generic covers (docs/16). Accept that, but only when every
-    target it carries really is a chip of the same family - so a gfx11 PopSIFT in a gfx12 payload is
-    still caught.
+    That means the target itself. popsift.dll may instead carry the CHIPS a generic target covers:
+    through 0.4.3 a generic code object made PopSIFT exit 0xC0000094 on the first photograph, so the
+    generic payloads carried a PopSIFT built for that family's chips (docs/16). Since 0.4.4 PopSIFT
+    runs from the generic itself (apply_popsift_patch.py 3f) and build_targets.py builds it so; the
+    chip list stays accepted, but only when every target it carries really is a chip of the same
+    family - so a gfx11 PopSIFT in a gfx12 payload is still caught.
     """
     if target in tgts:
         return True

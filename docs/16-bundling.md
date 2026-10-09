@@ -166,9 +166,10 @@ which writes the list itself from 0.3.8.)
 Two of these were already shipping unflagged: v0.2.16 released gfx1030 and gfx1032 packages that
 have never run on an RX 6800 or an RX 6600. Marking them is more honest than the status quo.
 
-## PopSIFT will not run from a generic code object
+## PopSIFT from a generic code object: the divide by zero (v0.2.17 to 0.4.3)
 
-Found after v0.2.17 shipped, which is the point of writing it down.
+Found after v0.2.17 shipped, which is the point of writing it down. Root-caused and fixed in 0.4.4
+(the cause, below the history).
 
 `aliceVision_featureExtraction --describerTypes sift` exits **0xC0000094**, integer divide by zero,
 on the first photograph when `popsift.dll` is built for `gfx12-generic`. The identical source built
@@ -205,6 +206,48 @@ has to cover every stage that has one, whether or not that stage was touched.
 
 It surfaced by accident, while chasing an unrelated timing discrepancy that happened to need `sift`
 features - the first time anything had asked the bundle for them.
+
+### The cause: rocThrust in the grid filter (0.4.4)
+
+`hip/tests/popsift_generic/divide_probe.cpp` drives PopSIFT directly with a vectored exception
+handler that names the faulting module and walks the stack. With PopSIFT's default configuration
+the generic build runs through, with the same 9,076 features as the gfx1201 one. With AliceVision's
+grid filter (`setFilterMaxExtrema`, `LargestScaleFirst`) it faults in PopSIFT's own host code:
+
+    FAULT 0xc0000094 ... popsift.dll+0xd30c  popsift::Pyramid::extrema_filter_grid
+      popsift::Pyramid::orientation <- PopSift::extractDownloadLoop
+
+The divide is `( ext_total - max ) / ct` in `s_filtergrid.cu`, where `ct` counts the grid cells over
+the limit. It is 0 only if the per-cell counts are all 0, and they were: every device step of the
+filter is rocThrust, and none of its kernels ran. rocPRIM launches a `trampoline_kernel` chosen
+from the card's name on the host (`host_target_arch`: gfx1201), and its body runs only
+`if constexpr(Arch == device_target_arch())`. `device_target_arch()` reads
+`__amdgcn_processor__`, which is `gfx12-generic` in a generic code object and maps to `unknown`, so
+the gfx1201 instance compiles to an empty kernel. Nothing reports an error; the filter reads zeros.
+A card rocPRIM's table does not name (the RX 6750 XT's gfx1031, say) resolves to `unknown` on both
+sides and would have run. It is the same host/device split that broke step 6t's first build, with
+hipCUB's radix sort, and the reason no Cheshire port uses rocPRIM's device algorithms.
+
+The fix, `apply_popsift_patch.py` 3f, runs the filter on the host. Its device steps handle at most a
+few hundred thousand integers per image: download each octave's initial extrema, take each one's cell
+and scale, sort stably by cell then scale (rocPRIM's merge and radix sorts are stable, so
+`std::stable_sort` gives the same order), count the entries per cell, apply the clamp upstream already
+computed on the host, mark the dropped extrema, compact the survivors' offsets and upload them.
+`CHESHIRE_POPSIFT_HOST_FILTER=0` keeps the rocThrust path. FeatureExtraction on the RX 9070 (41
+views of the monstree set, 82 .feat/.desc files, one digest over all of them):
+
+| popsift.dll | filter | result |
+|---|---|---|
+| gfx1201 | rocThrust (upstream) | `a75bb2db91de0e72`, 25.8 s |
+| gfx1201 | host | `a75bb2db91de0e72`, 25.4 s |
+| gfx12-generic | host | `a75bb2db91de0e72`, 25.5 s |
+| gfx12-generic | rocThrust (upstream) | exit 0xC0000094 |
+
+So since 0.4.4 PopSIFT is built for the same targets as everything else. On Windows, the ROCm 7.2
+generic payloads carry a generic PopSIFT (`build_targets.py`). On Linux, `build-popsift.sh` builds
+gfx1010-1013 by name plus `gfx10-3-generic`, `gfx11-generic` and `gfx12-generic`, where it used to name 21
+chips. A chip that ships later in one of those families gets GPU SIFT along with the rest. Step 15a's
+guard accepts the card's own name or its family's generic target.
 
 ## Fleet results (v0.2.17)
 

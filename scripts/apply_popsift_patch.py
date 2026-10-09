@@ -243,6 +243,134 @@ def main() -> None:
     # 3e. the descriptor normalisation's race (the function above; the CUDA builds take it too)
     fix_normalize_race()
 
+    # 3f. The grid filter on the host, and why PopSIFT would not run from a generic code object (0.4.4,
+    #     docs/16). The filter's device steps are rocThrust, and rocPRIM launches a trampoline kernel picked
+    #     by the card's name (host_target_arch: gfx1201) whose body runs only
+    #     `if constexpr(Arch == device_target_arch())`. Compiled for gfx12-generic, __amdgcn_processor__ is
+    #     "gfx12-generic", device_target_arch() is unknown, and every rocThrust kernel compiles to nothing:
+    #     no error, the counts stay zero, no cell is over the limit, and the host divides by that count
+    #     (`/ ct`) - the 0xC0000094 of every generic PopSIFT so far. The steps are a few hundred thousand
+    #     integers at most, so they move to the host: download each octave's initial extrema, the cell and
+    #     scale extraction, the stable sort by cell and scale (rocPRIM's merge and radix sorts are stable,
+    #     so std::stable_sort is the same order), the per-cell counts, the clamp the original already
+    #     computed on the host, the disabled extrema and the compaction, then upload the flags and offsets.
+    #     The result is byte for byte rocThrust's on a per-chip build. CHESHIRE_POPSIFT_HOST_FILTER=0 keeps
+    #     the rocThrust path.
+    t = filt.read_text(encoding="utf-8")
+    if "CHESHIRE_POPSIFT_HOST_FILTER" not in t:
+        old_head = ("    const int slots = conf.getFilterGridSize();" + NL
+                    + NL
+                    + "    thrust::device_vector<int>   octave_index( ext_total );" + NL)
+        if t.count(old_head) != 1:
+            sys.exit("extrema_filter_grid's head not found once in s_filtergrid.cu")
+        host = r"""    const int slots = conf.getFilterGridSize();
+
+    // cheshire: the filter on the host; see scripts/apply_popsift_patch.py 3f. rocThrust's kernels are
+    // empty in a generic code object. CHESHIRE_POPSIFT_HOST_FILTER=0 runs upstream's rocThrust path below.
+    const char* cheshire_host = getenv( "CHESHIRE_POPSIFT_HOST_FILTER" );
+    if( !( cheshire_host && cheshire_host[0] == '0' ) )
+    {
+        const int n = slots * slots;
+        cudaDeviceSynchronize( );
+
+        // octave and index of every initial extremum, octave by octave, and its cell and scale
+        std::vector<InitialExtremum> dat[MAX_OCTAVES];
+        std::vector<int>   oct_v;   oct_v.reserve( ext_total );
+        std::vector<int>   idx_v;   idx_v.reserve( ext_total );
+        std::vector<int>   cell_v;  cell_v.reserve( ext_total );
+        std::vector<float> scale_v; scale_v.reserve( ext_total );
+        for( int o=0; o<MAX_OCTAVES; o++ ) {
+            const int ocount = hct.ext_ct[o];
+            if( ocount > 0 ) {
+                dat[o].resize( ocount );
+                cudaMemcpy( dat[o].data(), dobuf_shadow.i_ext_dat[o], ocount * sizeof(InitialExtremum), cudaMemcpyDeviceToHost );
+                for( int i=0; i<ocount; i++ ) {
+                    oct_v.push_back( o );
+                    idx_v.push_back( i );
+                    cell_v.push_back( dat[o][i].cell );
+                    scale_v.push_back( ldexpf( dat[o][i].sigma, o ) );  // sigma * 2^octave, exact as powf's
+                }
+            }
+        }
+        const int total = (int)oct_v.size();
+
+        // sorted by cell, then by scale as configured; stable, as rocPRIM's merge and radix sorts are
+        std::vector<int> perm( total );
+        for( int k=0; k<total; k++ ) perm[k] = k;
+        const Config::GridFilterMode mode = conf.getFilterSorting();
+        std::stable_sort( perm.begin(), perm.end(), [&]( int l, int r ) {
+            if( cell_v[l] != cell_v[r] ) return cell_v[l] < cell_v[r];
+            if( mode == Config::LargestScaleFirst )  return scale_v[l] > scale_v[r];
+            if( mode == Config::SmallestScaleFirst ) return scale_v[l] < scale_v[r];
+            return false;
+        } );
+
+        // entries per occupied cell, in cell order and packed to the front (reduce_by_key's output)
+        std::vector<int> counts( n, 0 );
+        int runs = 0;
+        for( int k=0; k<total; ) {
+            int e = k + 1;
+            while( e < total && cell_v[perm[e]] == cell_v[perm[k]] ) e++;
+            if( runs < n ) counts[runs] = e - k;
+            runs++;
+            k = e;
+        }
+
+        // from here the arithmetic is upstream's host code, on std::vector
+        std::vector<int> offs( n ), lims( n );
+        int acc = 0;
+        for( int i=0; i<n; i++ ) { offs[i] = acc; acc += counts[i]; lims[i] = acc; }
+        std::vector<int> sorted( counts );
+        std::sort( sorted.begin(), sorted.end() );
+        int ct = 0, pre = 0;
+        for( int i=0; i<n; i++ ) {
+            pre += sorted[i];
+            if( sorted[i] * ( n-1-i ) + pre > conf.getFilterMaxExtrema() ) ct++;
+        }
+        if( ct == 0 )
+            return ext_total;  // nothing over the limit: the offsets the extrema kernel wrote stand
+        int tail = 0;
+        for( int i=n-ct; i<n; i++ ) tail += sorted[i];
+        float tailaverage = float( tail ) / ct;
+        int   newlimit    = ::ceilf( tailaverage - ( ext_total - conf.getFilterMaxExtrema() ) / ct );
+
+        // each cell keeps its first min(count, newlimit) entries in sorted order
+        for( int i=0; i<n; i++ ) {
+            const int from = offs[i] + std::min( counts[i], newlimit );
+            for( int k=from; k<lims[i]; k++ )
+                dat[oct_v[perm[k]]][idx_v[perm[k]]].ignore = true;
+        }
+
+        int ret_ext_total = 0;
+        for( int o=0; o<MAX_OCTAVES; o++ ) {
+            const int ocount = hct.ext_ct[o];
+            if( ocount > 0 ) {
+                std::vector<int> off;
+                off.reserve( ocount );
+                for( int i=0; i<ocount; i++ )
+                    if( ! dat[o][i].ignore ) off.push_back( i );
+                cudaMemcpy( dobuf_shadow.i_ext_dat[o], dat[o].data(), ocount * sizeof(InitialExtremum), cudaMemcpyHostToDevice );
+                if( ! off.empty() )
+                    cudaMemcpy( dobuf_shadow.i_ext_off[o], off.data(), off.size() * sizeof(int), cudaMemcpyHostToDevice );
+                hct.ext_ct[o] = (int)off.size();
+                if( getenv( "CHESHIRE_POPSIFT_DEBUG" ) )
+                    fprintf( stderr, "[popsift] filter octave %d (host): in %d, kept %d%c", o, ocount, hct.ext_ct[o], 10 );
+                ret_ext_total += hct.ext_ct[o];
+            }
+        }
+        // the orientation kernels on the octave streams read these offsets
+        cudaDeviceSynchronize( );
+        writeDescCountersToDevice( );
+        return ret_ext_total;
+    }
+
+    thrust::device_vector<int>   octave_index( ext_total );
+"""
+        t = t.replace(old_head, host.replace(chr(13), ""), 1)
+        i = t.index("#include")
+        t = t[:i] + "#include <algorithm>  // cheshire" + NL + "#include <cmath>" + NL + "#include <vector>" + NL + t[i:]
+        filt.write_text(t, encoding="utf-8", newline=NL)
+
     # 3. one translation unit. HIP cannot produce relocatable device code with COFF objects on
     #    Windows, and PopSIFT shares __constant__ and __device__ globals across its sources, so the
     #    device link that -fgpu-rdc would need is unavailable. Compiling the sources together

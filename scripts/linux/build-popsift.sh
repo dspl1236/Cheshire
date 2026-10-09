@@ -3,10 +3,12 @@
 #
 # Usage: scripts/linux/build-popsift.sh [name] [archs]
 #   name   names the build and install directories (default: linux)
-#   archs  semicolon list of code objects (default: every chip of RDNA1 to RDNA4, the APUs included - each chip by
-#          name, since PopSIFT does not run from a generic code object (docs/16); the AliceVision bundle itself
-#          builds the family generics, so this list is what limits GPU SIFT to the chips named here. 0.4.4 added
-#          gfx1011, gfx1013 and gfx1033-1036, the RDNA2 APUs among them)
+#   archs  semicolon list of code objects (default, 0.4.4: RDNA1 by name - gfx1010 to gfx1013, a family no chip will
+#          join - and the generic target of each later family, gfx10-3-generic (RDNA2, the APUs included),
+#          gfx11-generic (RDNA3/3.5) and gfx12-generic (RDNA4), so a chip of those families that ships later has GPU
+#          SIFT without a rebuild. PopSIFT runs from a generic code object since apply_popsift_patch.py 3f moved the
+#          grid filter off rocThrust (docs/16); before that the list named 21 chips. No Vega: wave64, and PopSIFT's
+#          kernels have only ever run wave32)
 #
 # Installs to build/popsift-<name>-install. Point AliceVision's CHESHIRE_POPSIFT_DIR /
 # -DPopSift_DIR at <install>/lib/cmake/PopSift.
@@ -18,7 +20,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROCM="${ROCM_PATH:-/opt/rocm}"
 NAME="${1:-linux}"
-ARCHS="${2:-gfx1010;gfx1011;gfx1012;gfx1013;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201}"
+ARCHS="${2:-gfx1010;gfx1011;gfx1012;gfx1013;gfx10-3-generic;gfx11-generic;gfx12-generic}"
 BLD="$ROOT/build/popsift-$NAME"
 INST="$ROOT/build/popsift-$NAME-install"
 

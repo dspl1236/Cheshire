@@ -5309,3 +5309,49 @@ The bluescreen reports are September 26 minidumps being re-sent, and the 16:10 b
 use the GPU, so these entries are the report queue, not crash times; the System log has no display driver reset. The
 user did see the driver fail once around 15:45, while 14a's broken switch-off runs sent a null pointer to a kernel:
 the likeliest cause, though the log cannot confirm it.
+
+## 0.4.4 packaging I: family generic code objects, GPU SIFT included (steps 15a and 15b, 2026-10-09)
+
+**Linux code objects.** Through 0.4.3 the Linux bundle named 19 chips. It now builds gfx900 and gfx906 (Vega, wave64,
+untested), RDNA1 by name (gfx1010, gfx1011, gfx1012) and one generic target for each later family: `gfx10-3-generic`,
+`gfx11-generic` and `gfx12-generic`. A chip that ships later in one of those families runs without a rebuild. RDNA1 stays
+by name because `gfx10-1-generic` cannot compile the matcher's `__builtin_amdgcn_udot4`: that needs dot7-insts, which
+gfx1010 lacks, and no chip will join the family anyway. The first bundle also carried an older 15-chip `libpopsift.so`.
+A copy left in `/opt/AliceVision_deps/lib` came first in the bundler's library search, so the PopSIFT install now comes
+first (`build-alicevision.sh`). On house-pc's RX 6750 XT (gfx1031, so the `gfx10-3-generic` code) all nine gate pipelines
+exit 0, and every depth map equals the 0.4.3 gate's. That covers Meshroom 2025.1 mini6 base, experimental, fastransacexp,
+verifyexp and verify, tiles and coarse with the T-camera and depth-list checks on, the 41 views experimental, and
+Meshroom 2023.3 mini6 base.
+
+**15a, GPU SIFT only where PopSIFT has code for the card.** A card that PopSIFT's library has no code object for fails
+on PopSIFT's own threads, where nothing can catch it. Before choosing PopSIFT, `ImageDescriber_SIFT` now reads the code
+object names from the library loaded in the process (`popsift.dll` through its module handle, `libpopsift` through
+`/proc/self/maps`). It looks for the card's own name or its family's generic target (the LLVM families; a newer chip
+matches by its name's prefix). If neither is there, it logs a warning and takes CPU SIFT.
+`CHESHIRE_POPSIFT_ARCH_TEST` names another device. On the RX 9070: gfx1201 is found and GPU SIFT runs; with
+`CHESHIRE_POPSIFT_ARCH_TEST=gfx9999` the run takes CPU SIFT and completes. The gates forbid the fallback's warning.
+CPU SIFT is upstream's VLFeat path, and it does not repeat itself. It adds keypoints in the order the OpenMP threads
+finish (`SIFT.cpp:374-401`), and the unstable sort by scale that follows lets ties, and so the 10,000 kept, vary. Three
+fallback runs of the 41 views gave three digests, with the same counts. The GPU path puts its keypoints in a stable
+order (`CHESHIRE_SIFT_SORT`), which is why every digest above repeats. Giving CPU SIFT the same order is a later step.
+
+**15b, PopSIFT from a generic code object.** Since v0.2.17 a `gfx12-generic` PopSIFT had exited 0xC0000094 on the first
+photograph, so the generic payloads carried PopSIFT built per chip, and a future chip would have had no GPU SIFT. A
+probe with a vectored exception handler (`hip/tests/popsift_generic`) put the divide in PopSIFT's grid filter. Its
+device steps are rocThrust, whose kernels are empty in a generic code object, so the per-cell counts stay zero and the
+host divides by the number of cells over the limit (docs/16 has the mechanism). `apply_popsift_patch.py` 3f runs the
+filter on the host: a stable sort and integer counting over at most a few hundred thousand extrema per image.
+`CHESHIRE_POPSIFT_HOST_FILTER=0` keeps the rocThrust path. FeatureExtraction on the RX 9070, one digest over every
+.feat and .desc file:
+
+| | 41 views | the False Door, 884 views |
+|---|---|---|
+| gfx1201 PopSIFT, rocThrust filter (upstream) | `a75bb2db91de0e72`, 25.8 s | `25d298bceabe5dc6`, 265.2 s |
+| gfx1201 PopSIFT, host filter | `a75bb2db91de0e72`, 25.4 s | |
+| gfx12-generic PopSIFT, host filter | `a75bb2db91de0e72`, 25.5 s | `25d298bceabe5dc6`, 265.2 s |
+| gfx12-generic PopSIFT, rocThrust filter | exit 0xC0000094 | |
+
+The ROCm 7.2 generic payloads on Windows now carry a PopSIFT built for the generic target itself (`build_targets.py`).
+The Linux PopSIFT is built for gfx1010 to gfx1013 by name plus `gfx10-3-generic`, `gfx11-generic` and `gfx12-generic`
+(it named 21 chips). The Windows HIP 6.2 family (RDNA1 and RDNA2) stays per chip: that toolchain emits a generic target
+only as code object v6, which it calls not ready for production (docs/16).
