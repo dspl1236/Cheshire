@@ -32,6 +32,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <set>
@@ -42,6 +43,11 @@ namespace matching {
 
 /// True when createRegionsMatcher takes the GPU matcher for these regions (defined beside it, in RegionsMatcher.cpp)
 bool cheshireGpuSearches(const feature::Regions& regions, EMatcherType matcherType);
+
+/// Step 14a: the GPU matcher keeps the descriptors it is given on the device while the returned scope lives (defined
+/// beside cheshireGpuSearches; nullptr and no effect without the GPU matcher). The regions must stay in place meanwhile.
+void* cheshireResidentBegin();
+void cheshireResidentEnd(void* scope);
 
 }  // namespace matching
 
@@ -123,6 +129,8 @@ void cheshireSearchAndFilter(matching::PairwiseMatches& out_putatives,
     {
         if (omp_get_thread_num() == 0)
         {
+            // step 14a: every view's descriptors on the device once for all its searches (regionsPerView stays in place)
+            const std::unique_ptr<void, void (*)(void*)> resident(matching::cheshireResidentBegin(), &matching::cheshireResidentEnd);
             std::size_t begin = 0;
             for (const std::size_t end : groupEnds)
             {

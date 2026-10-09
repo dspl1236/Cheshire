@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <chrono>
 #include <mutex>
+#include <unordered_map>  // step 14a
 #include <string>
 
 namespace aliceVision {
@@ -538,7 +539,114 @@ void logOnce(const char* what) {
     std::fprintf(stderr, "[cheshire] matcher: %s\n", what);
 }
 
+// Step 14a: the descriptor arrays kept on the device while a ResidentScope lives (see gpuMatcher.hpp).
+struct ResidentEntry {
+    size_t bytes = 0;
+    void* dev = nullptr;
+    void* norms = nullptr;   // |row|^2 per row, uint8 arrays only
+    size_t normBytes = 0;
+    unsigned long long lastUse = 0;
+};
+struct Resident {
+    std::mutex m;
+    int depth = 0;
+    bool on = false;
+    size_t budget = 0, used = 0, peak = 0;
+    unsigned long long clock = 0;
+    size_t calls = 0, uploads = 0, evictions = 0, refused = 0;
+    std::unordered_map<const void*, ResidentEntry> entries;
+    void drop(std::unordered_map<const void*, ResidentEntry>::iterator it) {
+        used -= it->second.bytes + it->second.normBytes;
+        if (it->second.dev) cheshire::devFree(it->second.dev);
+        if (it->second.norms) cheshire::devFree(it->second.norms);
+        entries.erase(it);
+    }
+} g_res;
+// Arrays smaller than this go up at every call (single descriptors, tiny views): not worth a slot.
+constexpr size_t kResidentMinBytes = 64 * 1024;
+
+// The device copy of `host` (rows x dim, uint8 or float), uploaded on its first call in the scope; nullptr when no scope
+// is active, the array is small, or the budget cannot make room without evicting `keep`. Same null stream as the
+// kernels, so the copy and the norms are in place before any kernel that reads them.
+const ResidentEntry* residentGet(const void* host, int rows, int dim, bool isFloat, const void* keep)
+{
+    const size_t bytes = size_t(rows) * size_t(dim) * (isFloat ? 4 : 1);
+    if (bytes < kResidentMinBytes) return nullptr;
+    std::lock_guard<std::mutex> g(g_res.m);
+    if (!g_res.on) return nullptr;
+    ++g_res.calls;
+    auto it = g_res.entries.find(host);
+    if (it != g_res.entries.end()) {
+        if (it->second.bytes == bytes) {
+            it->second.lastUse = ++g_res.clock;
+            return &it->second;
+        }
+        g_res.drop(it);  // the same address, another size: not the array the scope saw
+    }
+    const size_t normBytes = isFloat ? 0 : size_t(rows) * sizeof(unsigned int);
+    const size_t need = bytes + normBytes;
+    while (g_res.used + need > g_res.budget) {
+        auto victim = g_res.entries.end();
+        for (auto e = g_res.entries.begin(); e != g_res.entries.end(); ++e)
+            if (e->second.dev != keep && (victim == g_res.entries.end() || e->second.lastUse < victim->second.lastUse))
+                victim = e;
+        if (victim == g_res.entries.end()) { ++g_res.refused; return nullptr; }
+        g_res.drop(victim);
+        ++g_res.evictions;
+    }
+    ResidentEntry e;
+    e.bytes = bytes;
+    if (cheshire::devMalloc(&e.dev, bytes) != cudaSuccess) { ++g_res.refused; return nullptr; }
+    if (cudaMemcpy(e.dev, host, bytes, cudaMemcpyHostToDevice) != cudaSuccess) { cheshire::devFree(e.dev); ++g_res.refused; return nullptr; }
+    if (!isFloat) {
+        e.normBytes = normBytes;
+        if (cheshire::devMalloc(&e.norms, normBytes) != cudaSuccess) { cheshire::devFree(e.dev); ++g_res.refused; return nullptr; }
+        const dim3 block(256), grid((rows + 255) / 256);
+        if (dim == 128) rowNormsU8<128><<<grid, block>>>((const unsigned int*)e.dev, rows, (unsigned int*)e.norms);
+        else            rowNormsU8<64><<<grid, block>>>((const unsigned int*)e.dev, rows, (unsigned int*)e.norms);
+        if (cudaGetLastError() != cudaSuccess) { cheshire::devFree(e.dev); cheshire::devFree(e.norms); ++g_res.refused; return nullptr; }
+    }
+    e.lastUse = ++g_res.clock;
+    g_res.used += need;
+    g_res.peak = std::max(g_res.peak, g_res.used);
+    ++g_res.uploads;
+    return &(g_res.entries[host] = e);
+}
+
 }  // namespace
+
+ResidentScope::ResidentScope()
+{
+    std::lock_guard<std::mutex> g(g_res.m);
+    if (g_res.depth++ > 0) return;
+    static const bool enabled = ::cheshire::env::flag("CHESHIRE_GPU_MATCHER_RESIDENT", true);
+    g_res.on = false;
+    if (!enabled) {
+        static bool said = false;
+        if (!said) { said = true; std::fprintf(stderr, "[cheshire] matcher: descriptors uploaded at every search (CHESHIRE_GPU_MATCHER_RESIDENT=0)\n"); }
+        return;
+    }
+    size_t freeB = 0, totalB = 0;
+    if (cudaMemGetInfo(&freeB, &totalB) != cudaSuccess) return;
+    const long long mb = ::cheshire::env::integer("CHESHIRE_GPU_MATCHER_RESIDENT_MB", 0);
+    g_res.budget = mb > 0 ? size_t(mb) << 20 : freeB / 2;
+    g_res.on = true;
+    g_res.used = g_res.peak = 0;
+    g_res.calls = g_res.uploads = g_res.evictions = g_res.refused = 0;
+    std::fprintf(stderr, "[cheshire] matcher: descriptors kept on the device across searches, %zu MB budget (exact; "
+                         "CHESHIRE_GPU_MATCHER_RESIDENT=0 to upload at every search)\n", g_res.budget >> 20);
+}
+
+ResidentScope::~ResidentScope()
+{
+    std::lock_guard<std::mutex> g(g_res.m);
+    if (--g_res.depth > 0 || !g_res.on) return;
+    std::fprintf(stderr, "[cheshire] matcher: %zu calls on resident descriptors, %zu uploads, %zu evictions, %zu left to per-call "
+                         "uploads, peak %zu MB\n", g_res.calls, g_res.uploads, g_res.evictions, g_res.refused, g_res.peak >> 20);
+    while (!g_res.entries.empty())
+        g_res.drop(g_res.entries.begin());
+    g_res.on = false;
+}
 
 bool available()
 {
@@ -625,6 +733,7 @@ struct KnnMatcher::Impl {
     void* pDist = nullptr; size_t pDistCap = 0;
     void* qNorm = nullptr; size_t qNormCap = 0;     // |query|^2 for knn2_dot4q / knn2_wmma
     int rows = 0, dim = 0; bool isFloat = false;
+    const void* dbUse = nullptr; const void* dbNormUse = nullptr;  // step 14a: the owned buffers or the resident copies
     size_t rowBytes() const { return size_t(dim) * (isFloat ? 4 : 1); }
     static bool grow(void** p, size_t* cap, size_t need) {
         if (need <= *cap) return true;
@@ -648,6 +757,11 @@ bool KnnMatcher::build(const void* data, int rows, int dim, bool isFloat)
     ScopedTimer timer(g_profile.buildSec); g_profile.builds++;
     m.rows = rows; m.dim = dim; m.isFloat = isFloat;
     const size_t bytes = size_t(rows) * m.rowBytes();
+    if (const ResidentEntry* e = residentGet(data, rows, dim, isFloat, nullptr)) {  // step 14a
+        m.dbUse = e->dev; m.dbNormUse = e->norms;
+        return true;
+    }
+    m.dbUse = nullptr; m.dbNormUse = nullptr;
     if (!Impl::grow(&m.db, &m.dbCap, bytes)) return false;
     if (cudaMemcpy(m.db, data, bytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;
     if (!isFloat) {
@@ -657,6 +771,7 @@ bool KnnMatcher::build(const void* data, int rows, int dim, bool isFloat)
         else            rowNormsU8<64><<<grid, block>>>((const unsigned int*)m.db, rows, (unsigned int*)m.dbNorm);
         if (cudaGetLastError() != cudaSuccess) return false;
     }
+    m.dbUse = m.db; m.dbNormUse = m.dbNorm;
     return true;
 }
 
@@ -666,7 +781,6 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
     if (m.rows < 2 || nbQuery < 1) return false;
     ScopedTimer timer(g_profile.searchSec); g_profile.searches++; g_profile.queries += size_t(nbQuery);
     const size_t qBytes = size_t(nbQuery) * m.rowBytes();
-    if (!Impl::grow(&m.q, &m.qCap, qBytes)) return false;
     if (size_t(nbQuery) > m.outCap) {
         if (m.idx) cheshire::devFree(m.idx); if (m.dist) cheshire::devFree(m.dist);
         m.idx = nullptr; m.dist = nullptr; m.outCap = 0;
@@ -677,24 +791,31 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
     const bool prof = g_profile.on;
     std::chrono::steady_clock::time_point t0, t1, t2;
     if (prof) t0 = std::chrono::steady_clock::now();
-    if (cudaMemcpy(m.q, queries, qBytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    // step 14a: a resident query array needs no upload and has its norms already
+    const ResidentEntry* qe = residentGet(queries, nbQuery, m.dim, m.isFloat, m.dbUse);
+    if (!qe && (!Impl::grow(&m.q, &m.qCap, qBytes) || cudaMemcpy(m.q, queries, qBytes, cudaMemcpyHostToDevice) != cudaSuccess)) return false;
+    const void* qDev = qe ? qe->dev : m.q;  // after the grow, which may move m.q
     if (prof) t1 = std::chrono::steady_clock::now();
     const dim3 block(kQueriesPerBlock), grid((nbQuery + kQueriesPerBlock - 1) / kQueriesPerBlock);
     if (m.isFloat) {
-        if (m.dim == 128) knn2_f32<128><<<grid, block>>>((const float*)m.db, m.rows, (const float*)m.q, nbQuery, m.idx, m.dist);
-        else              knn2_f32<64><<<grid, block>>>((const float*)m.db, m.rows, (const float*)m.q, nbQuery, m.idx, m.dist);
+        if (m.dim == 128) knn2_f32<128><<<grid, block>>>((const float*)m.dbUse, m.rows, (const float*)qDev, nbQuery, m.idx, m.dist);
+        else              knn2_f32<64><<<grid, block>>>((const float*)m.dbUse, m.rows, (const float*)qDev, nbQuery, m.idx, m.dist);
     } else {
         int kernel = g_u8Kernel;
         if (m.dim != 128 && (kernel == kDot4q || kernel == kWmma)) kernel = kU8;
         if (kernel == kDot4q || kernel == kWmma) {
-            if (!Impl::grow(&m.qNorm, &m.qNormCap, size_t(nbQuery) * sizeof(unsigned int))) return false;
-            rowNormsU8<128><<<dim3((nbQuery + 255) / 256), dim3(256)>>>((const unsigned int*)m.q, nbQuery, (unsigned int*)m.qNorm);
+            const void* qNormDev = qe ? qe->norms : nullptr;
+            if (!qNormDev) {
+                if (!Impl::grow(&m.qNorm, &m.qNormCap, size_t(nbQuery) * sizeof(unsigned int))) return false;
+                rowNormsU8<128><<<dim3((nbQuery + 255) / 256), dim3(256)>>>((const unsigned int*)qDev, nbQuery, (unsigned int*)m.qNorm);
+                qNormDev = m.qNorm;
+            }
 #if defined(__HIP_PLATFORM_AMD__)
             if (kernel == kWmma) {
                 constexpr int perBlock = kWmmaWaves * 16 * kWmmaTiles;
                 knn2_wmma<<<dim3((nbQuery + perBlock - 1) / perBlock), dim3(kWmmaWaves * 32)>>>(
-                    (const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q,
-                    (const unsigned int*)m.qNorm, nbQuery, m.idx, m.dist);
+                    (const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev,
+                    (const unsigned int*)qNormDev, nbQuery, m.idx, m.dist);
             } else
 #endif
             {
@@ -704,12 +825,12 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
                 constexpr int threads = 128;   // 2.03x on the GTX 1080 Ti; 256 was 1.92x
 #endif
                 knn2_dot4q<2><<<dim3((nbQuery + 2 * threads - 1) / (2 * threads)), dim3(threads)>>>(
-                    (const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q,
-                    (const unsigned int*)m.qNorm, nbQuery, m.idx, m.dist);
+                    (const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev,
+                    (const unsigned int*)qNormDev, nbQuery, m.idx, m.dist);
             }
         } else if (kernel != kSliced) {
-            if (m.dim == 128) knn2_u8<128><<<grid, block>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);
-            else              knn2_u8<64><<<grid, block>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, m.idx, m.dist);
+            if (m.dim == 128) knn2_u8<128><<<grid, block>>>((const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev, nbQuery, m.idx, m.dist);
+            else              knn2_u8<64><<<grid, block>>>((const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev, nbQuery, m.idx, m.dist);
         } else {
             // sliced: Q queries per thread, the database in slices along y, partials merged after
             const int slices = (m.rows + kSliceRows - 1) / kSliceRows;
@@ -718,8 +839,8 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
             if (!Impl::grow(&m.pDist, &m.pDistCap, partN * sizeof(float))) return false;
             const int threads = 128;  // x 2 queries = 256 queries per block
             const dim3 sblock(threads), sgrid((nbQuery + threads * kQ - 1) / (threads * kQ), slices);
-            if (m.dim == 128) knn2_u8_sliced<128, kQ><<<sgrid, sblock>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, (int*)m.pIdx, (float*)m.pDist);
-            else              knn2_u8_sliced<64, kQ><<<sgrid, sblock>>>((const unsigned int*)m.db, (const unsigned int*)m.dbNorm, m.rows, (const unsigned int*)m.q, nbQuery, (int*)m.pIdx, (float*)m.pDist);
+            if (m.dim == 128) knn2_u8_sliced<128, kQ><<<sgrid, sblock>>>((const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev, nbQuery, (int*)m.pIdx, (float*)m.pDist);
+            else              knn2_u8_sliced<64, kQ><<<sgrid, sblock>>>((const unsigned int*)m.dbUse, (const unsigned int*)m.dbNormUse, m.rows, (const unsigned int*)qDev, nbQuery, (int*)m.pIdx, (float*)m.pDist);
             if (cudaGetLastError() != cudaSuccess) return false;
             merge2<<<grid, block>>>((const int*)m.pIdx, (const float*)m.pDist, slices, nbQuery, m.idx, m.dist);
         }

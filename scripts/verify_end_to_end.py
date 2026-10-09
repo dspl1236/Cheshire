@@ -50,6 +50,8 @@ GPU_MARKERS = {
                           r"7-point nullspace: (SVD \(default|Householder QR \(CHESHIRE_QR_NULLSPACE=1\))",
                           # after 0.4.3: the 7-point fits four at a time in AVX2 lanes (13a), or the QR path's own line
                           r"7-point fits (four at a time, Eigen's SVD in AVX2 lanes|one at a time, the QR nullspace)",
+                          # after 0.4.3: every view's descriptors on the device once for all its searches (14a)
+                          r"matcher: descriptors kept on the device across searches",
                           r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far",
                           r"cheshire: GPU search and geometric filter overlapped"],
     # after 0.4.0: the T cameras (step 10e) and the tiles' depth lists (10h) from each camera's own landmarks, the

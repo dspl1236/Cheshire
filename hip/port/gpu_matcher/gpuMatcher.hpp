@@ -33,6 +33,22 @@ bool checkEnabled();
 int checkSample();  // queries per search to check (CHESHIRE_GPU_MATCHER_CHECK_SAMPLE, default 64)
 void checkRecord(bool isFloat, long long checked, long long identical, long long nearestDiffers, long long distanceDiffers);
 
+// Cheshire (step 14a): while a ResidentScope lives, build() and search2() keep each descriptor array they are given on
+// the device, keyed by its address and size, with its row norms, so an array given again is not uploaded again. The
+// caller guarantees that an address names the same descriptors for the scope's life (FeatureMatching's search loop: the
+// regions are loaded once and stay in place). A VRAM budget bounds the store, least recently used out, never the
+// database being searched. The same bytes reach the same kernels: the same answers. CHESHIRE_GPU_MATCHER_RESIDENT=0
+// uploads at every call; CHESHIRE_GPU_MATCHER_RESIDENT_MB sets the budget (default: half the device's free memory when
+// the scope starts). Scopes do not nest usefully: an inner one shares the outer one's store.
+class ResidentScope
+{
+  public:
+    ResidentScope();
+    ~ResidentScope();
+    ResidentScope(const ResidentScope&) = delete;
+    ResidentScope& operator=(const ResidentScope&) = delete;
+};
+
 class KnnMatcher
 {
   public:

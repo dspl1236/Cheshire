@@ -5241,3 +5241,34 @@ experimental and verify) gave the 0.4.3 gates' depth maps, and every check came 
 The filter now ends when the GPU search does (65.5 and 66.1 s each), so the node is bound by the search on this box.
 The search itself got shorter too (about 75 to 66 s): its driving thread competes less with the filter's threads for the
 CPU. On house-pc the 41 views (experimental) took 506 s against the 0.4.3 gate's 566 s.
+
+## After 0.4.3: the matcher's descriptors kept on the device (step 14a, 2026-10-09)
+
+With 13a, FeatureMatching on the False Door is bound by its GPU search. The matcher's own profile
+(`CHESHIRE_GPU_MATCHER_LOG=1`) split the 25,354 searches' 58.5 s into 15.5 s of query uploads, 32.5 s of kernels and
+10.5 s of result downloads. Each view's descriptors went up again for every pair it was a query in, about 30 times a
+view, about 3 MB each time.
+
+FeatureMatching's search loop (`featureMatchingOverlap.hpp`) now opens a `gpu::ResidentScope` for its life. Inside it,
+`build()` and `search2()` keep each descriptor array they are given on the device, keyed by its address and size, with
+its row norms (the dot4 and matrix kernels' |row|^2). An array given again goes to the kernels from that copy. The
+regions are loaded once and stay in place for the loop, which is what makes the address a safe key; outside a scope
+nothing changes. A budget (half the free VRAM at the scope's start, `CHESHIRE_GPU_MATCHER_RESIDENT_MB`) bounds the store,
+least recently used out, never the database being searched. The kernels read the same bytes, so they give the same
+answers. `CHESHIRE_GPU_MATCHER_RESIDENT=0` uploads at every call as before.
+
+On the False Door all 884 views went up once (2,520 MB at the peak of an 8,076 MB budget, no evictions), for 26,206
+calls. The profile's uploads fell from 15.5 s to 0.9 s, and the builds from 2.6 s to 0.1 s.
+
+| the False Door's FeatureMatching (25,292 pairs, maxIteration 2048), RX 9070, 13a on | wall |
+|---|---|
+| `CHESHIRE_GPU_MATCHER_RESIDENT=0` | 70.3, 72.5 s |
+| 14a | 62.8, 62.5, 62.5 s |
+
+The match file is 0.3.9's reference in every run, and in `CHESHIRE_FM_OVERLAP=0`'s path, which opens no scope.
+
+**A crash in development, recorded.** The first build of 14a renamed the database pointer in its kernels' arguments
+mechanically, and the rename also reached the norms kernel in `build()`'s upload path, which then read a null pointer.
+Only the switch-off runs took that path. On Windows the GPU's page fault reset the AMD display driver, twice (system log
+LiveKernelEvent 141 at those runs' times). The fix restores the owned buffer there; the switch-off runs and the
+non-overlap run since are clean, with no further driver events.

@@ -8932,7 +8932,7 @@ index a7544f6..381f19b 100644
  alicevision_add_test(matching_test.cpp NAME "matching"          LINKS aliceVision_matching ${FLANN_LIBRARIES})
  alicevision_add_test(filters_test.cpp  NAME "matching_filters"  LINKS aliceVision_matching)
 diff --git a/src/aliceVision/matching/RegionsMatcher.cpp b/src/aliceVision/matching/RegionsMatcher.cpp
-index 00d1c75..2553f56 100644
+index 00d1c75..914c879 100644
 --- a/src/aliceVision/matching/RegionsMatcher.cpp
 +++ b/src/aliceVision/matching/RegionsMatcher.cpp
 @@ -10,6 +10,9 @@
@@ -8945,7 +8945,7 @@ index 00d1c75..2553f56 100644
  
  #include <aliceVision/system/Logger.hpp>
  
-@@ -51,6 +54,24 @@ RegionsDatabaseMatcher::RegionsDatabaseMatcher(std::mt19937& randomNumberGenerat
+@@ -51,6 +54,43 @@ RegionsDatabaseMatcher::RegionsDatabaseMatcher(std::mt19937& randomNumberGenerat
      _regionsMatcher = createRegionsMatcher(randomNumberGenerator, databaseRegions, matcherType);
  }
  
@@ -8967,10 +8967,29 @@ index 00d1c75..2553f56 100644
 +#endif
 +}
 +
++// cheshire (step 14a): the GPU matcher's resident descriptors for FeatureMatching's search loop (featureMatchingOverlap.hpp)
++void* cheshireResidentBegin()
++{
++#ifdef ALICEVISION_HAVE_GPU_MATCHER
++    return new gpu::ResidentScope();
++#else
++    return nullptr;
++#endif
++}
++
++void cheshireResidentEnd(void* scope)
++{
++#ifdef ALICEVISION_HAVE_GPU_MATCHER
++    delete static_cast<gpu::ResidentScope*>(scope);
++#else
++    (void)scope;
++#endif
++}
++
  std::unique_ptr<IRegionsMatcher> createRegionsMatcher(std::mt19937& randomNumberGenerator,
                                                        const feature::Regions& regions,
                                                        matching::EMatcherType matcherType)
-@@ -69,6 +90,16 @@ std::unique_ptr<IRegionsMatcher> createRegionsMatcher(std::mt19937& randomNumber
+@@ -69,6 +109,16 @@ std::unique_ptr<IRegionsMatcher> createRegionsMatcher(std::mt19937& randomNumber
          if (regions.Type_id() == typeid(unsigned char).name())
          {
              // Build on the fly unsigned char based Matcher
@@ -8987,7 +9006,7 @@ index 00d1c75..2553f56 100644
              switch (matcherType)
              {
                  case BRUTE_FORCE_L2:
-@@ -98,6 +129,16 @@ std::unique_ptr<IRegionsMatcher> createRegionsMatcher(std::mt19937& randomNumber
+@@ -98,6 +148,16 @@ std::unique_ptr<IRegionsMatcher> createRegionsMatcher(std::mt19937& randomNumber
          else if (regions.Type_id() == typeid(float).name())
          {
              // Build on the fly float based Matcher

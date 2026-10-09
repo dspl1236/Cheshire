@@ -10735,6 +10735,38 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
                 t = t.replace(STEP13A_GF_REPORT[0], STEP13A_GF_REPORT[0] + STEP13A_GF_REPORT[1])
         f13a.write_text(t, encoding="utf-8", newline="")
 
+    # 14a (after 0.4.3). FeatureMatching's search loop keeps every view's descriptors on the device once for all its
+    #     searches (gpu::ResidentScope, hip/port/gpu_matcher): no upload per search, the database built from the same
+    #     copy. The scope's two entry points live beside cheshireGpuSearches, so a build without the GPU matcher links.
+    #     CHESHIRE_GPU_MATCHER_RESIDENT=0.
+    f14a = AV / "src/aliceVision/matching/RegionsMatcher.cpp"
+    t = f14a.read_text(encoding="utf-8")
+    if "step 14a" not in t:
+        a14a = "std::unique_ptr<IRegionsMatcher> createRegionsMatcher(std::mt19937& randomNumberGenerator,\n"
+        if t.count(a14a) != 1:
+            sys.exit("createRegionsMatcher not found once in RegionsMatcher.cpp (14a)")
+        t = t.replace(a14a, r"""// cheshire (step 14a): the GPU matcher's resident descriptors for FeatureMatching's search loop (featureMatchingOverlap.hpp)
+void* cheshireResidentBegin()
+{
+#ifdef ALICEVISION_HAVE_GPU_MATCHER
+    return new gpu::ResidentScope();
+#else
+    return nullptr;
+#endif
+}
+
+void cheshireResidentEnd(void* scope)
+{
+#ifdef ALICEVISION_HAVE_GPU_MATCHER
+    delete static_cast<gpu::ResidentScope*>(scope);
+#else
+    (void)scope;
+#endif
+}
+
+""" + a14a, 1)
+    f14a.write_text(t, encoding="utf-8", newline="")
+
     # 10g (after 0.4.0). The image cache evicts by load order instead of clock(), whose millisecond ties made the
     #     texturing read-ahead evict images before their use (most False Door passes decoded each image twice).
     #     CHESHIRE_IMAGES_CACHE_CLOCK=1 for upstream's clock(). After 6c/6d/6o, whose text is around the anchors.
