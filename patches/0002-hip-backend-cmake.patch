@@ -450,7 +450,7 @@ index 25b80d4..84dba54 100644
          aliceVision_gpu
          aliceVision_sfmData
 diff --git a/src/aliceVision/depthMap/DepthMapEstimator.cpp b/src/aliceVision/depthMap/DepthMapEstimator.cpp
-index 187e8f5..ff6f7fa 100644
+index 187e8f5..7d6071d 100644
 --- a/src/aliceVision/depthMap/DepthMapEstimator.cpp
 +++ b/src/aliceVision/depthMap/DepthMapEstimator.cpp
 @@ -4,7 +4,18 @@
@@ -694,7 +694,7 @@ index 187e8f5..ff6f7fa 100644
              }
              else
              {
-@@ -216,11 +388,221 @@ void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<T
+@@ -216,11 +388,235 @@ void DepthMapEstimator::getTilesList(const std::vector<int>& cams, std::vector<T
                  t.refineTCams = tCams;
              }
  
@@ -740,12 +740,12 @@ index 187e8f5..ff6f7fa 100644
 +                refineTCams = tCams;
 +            }
 +            same += (sgmTCams == t.sgmTCams && refineTCams == t.refineTCams) ? 1 : 0;
-         }
++        }
 +        ALICEVISION_LOG_INFO("cheshire: depth map T cameras check: " << same << " of " << tiles.size()
 +                             << " tiles identical to upstream's walks over every landmark");
-     }
- }
- 
++    }
++}
++
 +// cheshire (step 10k): the batches overlap. A batch's depth and similarity maps are written on their own thread while the
 +// next batch loads and runs, from a second set of the tiles' page-locked results, and the next batch's images that are not
 +// on the device are decoded into the image cache while the device runs this batch's tiles: nothing reads that cache
@@ -811,12 +811,12 @@ index 187e8f5..ff6f7fa 100644
 +            std::lock_guard<std::mutex> lock(errorMutex);
 +            if (!error)
 +                error = std::current_exception();
-+        }
-+    }
+         }
+     }
 +    if (error)
 +        std::rethrow_exception(error);
-+}
-+
+ }
+ 
 +// cheshire (step 12c): CHESHIRE_DEPTHMAP_LOAD_PIPELINE (default on; HIP): a batch's load uploads each image of a group as
 +// soon as it is decoded, while the rest of the group decodes, where it uploaded the group after the whole group's decode.
 +// Announced once.
@@ -844,15 +844,29 @@ index 187e8f5..ff6f7fa 100644
 +}
 +
 +#if defined(CHESHIRE_HIP)
-+// cheshire (step 12c): one group of a batch's load (no larger than the image cache, so no decode evicts an image of the
-+// group): the decodes on a thread of their own, each file decoded on its worker's thread (the shared pool would finish
-+// them all together), and each image uploaded by this thread as soon as it is decoded, the lowest index first. The
-+// device cache receives the group's images in the order they decode (upstream: the group's order), so its slots and
-+// its LRU order may differ; neither changes a map. Returns the decodes' wall time. A decode's failure is raised once the
-+// decodes are done, after the images decoded before it were uploaded; the run stops there either way.
++// cheshire (step 12c): one group of a batch's load (no larger than the image cache). Its images already in the image
++// cache (decoded ahead by 10k) are uploaded first, before any decode starts: a decode takes the cache's oldest slot and
++// reuses its buffer in place, and those images are the oldest, so a decode running beside their upload could overwrite
++// one while it is copied (0.4.3's round caught that: a band of one view from another camera's rows, once a run). Then the
++// other images' decodes on a thread of their own, each file on its worker's thread (the shared pool would finish them all
++// together), each uploaded by this thread as soon as it is decoded, the lowest index first; those decodes are all newer
++// than anything else in the cache and no more than it holds, so none evicts another of them. The device cache receives
++// the group's images in that order (upstream: the group's order), so its slots and its LRU order may differ; neither
++// changes a map. Returns the decodes' wall time. A decode's failure is raised once the decodes are done, after the
++// images decoded before it were uploaded; the run stops there either way.
 +static double cheshireDecodeAndUploadGroup(mvsUtils::ImagesCache<image::Image<image::RGBAfColor>>& ic, DeviceCache& deviceCache,
-+                                           const std::vector<int>& cams, int minDownscale, int maxDownscale, const mvsUtils::MultiViewParams& mp)
++                                           const std::vector<int>& groupCams, int minDownscale, int maxDownscale, const mvsUtils::MultiViewParams& mp)
 +{
++    std::vector<int> cams;  // the images the group decodes
++    for (const int cam : groupCams)
++    {
++        if (ic.cheshireCached(cam))
++            deviceCache.addMipmapImage(cam, minDownscale, maxDownscale, ic, mp);  // no decode is running
++        else
++            cams.push_back(cam);
++    }
++    if (cams.empty())
++        return 0.0;
 +    const int n = static_cast<int>(cams.size());
 +    std::vector<char> state(static_cast<std::size_t>(n), 0);  // 0 decoding, 1 decoded, 2 failed, 3 uploaded
 +    std::mutex m;
@@ -917,7 +931,7 @@ index 187e8f5..ff6f7fa 100644
  void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
  {
      // set the device to use for GPU executions
-@@ -230,6 +612,15 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -230,6 +626,15 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
      // initialize RAM image cache
      // note: maybe move it as class member in order to share it across multiple GPUs
      mvsUtils::ImagesCache<image::Image<image::RGBAfColor>> ic(_mp, image::EImageColorSpace::LINEAR);
@@ -933,7 +947,7 @@ index 187e8f5..ff6f7fa 100644
  
      // build tile list order by R camera
      std::vector<Tile> tiles;
-@@ -268,6 +659,8 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -268,6 +673,8 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
  
      DeviceCache& deviceCache = DeviceCache::getInstance();
      deviceCache.build(nbMipmapImagesPerBatch, nbCamerasParamsPerBatch);
@@ -942,7 +956,7 @@ index 187e8f5..ff6f7fa 100644
  
      // build custom patch pattern in CUDA constant memory
      if (_sgmParams.useCustomPatchPattern || _refineParams.useCustomPatchPattern)
-@@ -295,11 +688,15 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -295,11 +702,15 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
                  refinePerStream.emplace_back(_mp, _tileParams, _refineParams, deviceStreamManager.getStream(i));
      }
  
@@ -961,7 +975,7 @@ index 187e8f5..ff6f7fa 100644
      {
          auto& depthSimMapTiles = depthSimMapTilePerCam.at(i);
          auto& depthMinMaxTiles = depthMinMaxTilePerCam.at(i);
-@@ -324,6 +721,47 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -324,6 +735,47 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
      const int minMipmapDownscale = std::min(_refineParams.scale, _sgmParams.scale);
      const int maxMipmapDownscale = std::max(_refineParams.scale, _sgmParams.scale) * std::pow(2, 6);  // we add 6 downscale levels
  
@@ -1009,7 +1023,7 @@ index 187e8f5..ff6f7fa 100644
      // compute each batch of R cameras
      for (int b = 0; b < nbBatches; ++b)
      {
-@@ -331,6 +769,113 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -331,6 +783,113 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          const int firstTileIndex = b * nbTilesPerBatch;
          const int lastTileIndex = std::min((b + 1) * nbTilesPerBatch, static_cast<int>(tiles.size()));
  
@@ -1123,7 +1137,7 @@ index 187e8f5..ff6f7fa 100644
          // load tile R and corresponding T cameras in device cache
          for (int i = firstTileIndex; i < lastTileIndex; ++i)
          {
-@@ -371,11 +916,34 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -371,11 +930,34 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
          // wait for camera loading in device cache
          cudaDeviceSynchronize();
  
@@ -1159,7 +1173,7 @@ index 187e8f5..ff6f7fa 100644
              const int streamIndex = tile.id % nbStreams;
  
              // do not compute empty ROI
-@@ -399,6 +967,20 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -399,6 +981,20 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
              // compute the R camera depth list
              sgmDepthList.computeListRc();
  
@@ -1180,7 +1194,7 @@ index 187e8f5..ff6f7fa 100644
              // check number of depths
              if (sgmDepthList.getDepths().empty())  // no depth found
              {
-@@ -441,36 +1023,84 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
+@@ -441,36 +1037,84 @@ void DepthMapEstimator::compute(int cudaDeviceId, const std::vector<int>& cams)
                  // copy Sgm depth/similarity map from device to host
                  tileDepthSimMap_hmh.copyFrom(sgm.getDeviceDepthSimMap(), deviceStreamManager.getStream(streamIndex));
              }
@@ -10635,6 +10649,30 @@ index 298c9d2..9b31e8f 100644
  
          // @fixme here there is a potential error, we should check that the size of
          // null(A) is 2. Otherwise we have a family of possible solutions for the
+diff --git a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.hpp b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.hpp
+index 90eebf0..1dce6ec 100644
+--- a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.hpp
++++ b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.hpp
+@@ -56,6 +56,19 @@ class Fundamental7PSolver : public robustEstimation::ISolver<robustEstimation::M
+     {
+         throw std::logic_error("Fundamental7PSolver does not support problem solving with weights.");
+     }
++
++    /**
++     * @brief cheshire (step 13a): solve() for n <= 4 minimal samples (seven correspondences each) at once: their
++     * nullspaces through cheshireNullspace2Lanes (Eigen's SVD in AVX2 lanes, the same bits), the rest per sample as
++     * solve() does it. The same models, in the same order, in models[0 .. n-1] (appended).
++     */
++    void cheshireSolve4(const Mat* const* x1, const Mat* const* x2, int n, std::vector<robustEstimation::Mat3Model>* models) const;
++
++    /// cheshire (step 13a): whether cheshireSolve4 runs (the lanes on, CHESHIRE_QR_NULLSPACE off)
++    static bool cheshireSolve4On();
++
++    /// cheshire (step 13a): CHESHIRE_ACR_SVD_LANES_CHECK's count, printed by this library, where the fits are counted
++    static void cheshireSolve4Report();
+ };
+ 
+ class Fundamental7PSphericalSolver : public robustEstimation::ISolver<robustEstimation::Mat3Model>
 diff --git a/src/aliceVision/multiview/relativePose/FundamentalError.hpp b/src/aliceVision/multiview/relativePose/FundamentalError.hpp
 index 0d627fb..f7b7e26 100644
 --- a/src/aliceVision/multiview/relativePose/FundamentalError.hpp
@@ -10962,7 +11000,7 @@ index c7e42f4..a333ae3 100644
  
  template<typename Image>
 diff --git a/src/aliceVision/mvsUtils/ImagesCache.hpp b/src/aliceVision/mvsUtils/ImagesCache.hpp
-index 8849153..d9877f8 100644
+index 8849153..4458680 100644
 --- a/src/aliceVision/mvsUtils/ImagesCache.hpp
 +++ b/src/aliceVision/mvsUtils/ImagesCache.hpp
 @@ -49,6 +49,9 @@ class ImagesCache
@@ -10975,7 +11013,7 @@ index 8849153..d9877f8 100644
      std::vector<std::string> _imagesNames;
  
      std::list<std::future<void>> _asyncObjects;
-@@ -66,6 +69,13 @@ class ImagesCache
+@@ -66,6 +69,19 @@ class ImagesCache
  
      void initIC(std::vector<std::string>& imagesNames);
      void setCacheSize(int nbPreload);
@@ -10986,6 +11024,12 @@ index 8849153..d9877f8 100644
 +    bool isFullResolution() const { return _fullResolution; }
 +    /// cheshire (step 6m): the file a camera's image is read from (the depth-map node decodes it on the device)
 +    const std::string& getImagePath(int camId) const { return _imagesNames.at(camId); }
++    /// cheshire (step 12c): whether a camera's image is in the cache now (nothing is loaded)
++    bool cheshireCached(int camId)
++    {
++        std::lock_guard<std::mutex> lock(_slotMutex);
++        return _camIdMapId[camId] != -1;
++    }
      void setCorrectEV(const ECorrectEV correctEV) { _correctEV = correctEV; }
      ~ImagesCache() = default;
  

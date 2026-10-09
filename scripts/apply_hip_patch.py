@@ -4721,15 +4721,29 @@ static bool cheshireLoadPipelineOn()
 }
 
 #if defined(CHESHIRE_HIP)
-// cheshire (step 12c): one group of a batch's load (no larger than the image cache, so no decode evicts an image of the
-// group): the decodes on a thread of their own, each file decoded on its worker's thread (the shared pool would finish
-// them all together), and each image uploaded by this thread as soon as it is decoded, the lowest index first. The
-// device cache receives the group's images in the order they decode (upstream: the group's order), so its slots and
-// its LRU order may differ; neither changes a map. Returns the decodes' wall time. A decode's failure is raised once the
-// decodes are done, after the images decoded before it were uploaded; the run stops there either way.
+// cheshire (step 12c): one group of a batch's load (no larger than the image cache). Its images already in the image
+// cache (decoded ahead by 10k) are uploaded first, before any decode starts: a decode takes the cache's oldest slot and
+// reuses its buffer in place, and those images are the oldest, so a decode running beside their upload could overwrite
+// one while it is copied (0.4.3's round caught that: a band of one view from another camera's rows, once a run). Then the
+// other images' decodes on a thread of their own, each file on its worker's thread (the shared pool would finish them all
+// together), each uploaded by this thread as soon as it is decoded, the lowest index first; those decodes are all newer
+// than anything else in the cache and no more than it holds, so none evicts another of them. The device cache receives
+// the group's images in that order (upstream: the group's order), so its slots and its LRU order may differ; neither
+// changes a map. Returns the decodes' wall time. A decode's failure is raised once the decodes are done, after the
+// images decoded before it were uploaded; the run stops there either way.
 static double cheshireDecodeAndUploadGroup(mvsUtils::ImagesCache<image::Image<image::RGBAfColor>>& ic, DeviceCache& deviceCache,
-                                           const std::vector<int>& cams, int minDownscale, int maxDownscale, const mvsUtils::MultiViewParams& mp)
+                                           const std::vector<int>& groupCams, int minDownscale, int maxDownscale, const mvsUtils::MultiViewParams& mp)
 {
+    std::vector<int> cams;  // the images the group decodes
+    for (const int cam : groupCams)
+    {
+        if (ic.cheshireCached(cam))
+            deviceCache.addMipmapImage(cam, minDownscale, maxDownscale, ic, mp);  // no decode is running
+        else
+            cams.push_back(cam);
+    }
+    if (cams.empty())
+        return 0.0;
     const int n = static_cast<int>(cams.size());
     std::vector<char> state(static_cast<std::size_t>(n), 0);  // 0 decoding, 1 decoded, 2 failed, 3 uploaded
     std::mutex m;
@@ -10420,6 +10434,21 @@ inline std::shared_ptr<const std::vector<Vec2>> mapFor(const IntrinsicBase* intr
             if t.count(old) != 1:
                 sys.exit("an anchor of the pipelined loads not found once in DepthMapEstimator.cpp (12c)")
             t = t.replace(old, new, 1)
+    f12c.write_text(t, encoding="utf-8", newline="")
+    # 12c: whether an image is in the image cache, for the group's upload of those before its decodes start
+    f12c = AV / "src/aliceVision/mvsUtils/ImagesCache.hpp"
+    t = f12c.read_text(encoding="utf-8")
+    if "step 12c" not in t:
+        a12c = "    const std::string& getImagePath(int camId) const { return _imagesNames.at(camId); }\n"
+        if t.count(a12c) != 1:
+            sys.exit("getImagePath not found once in ImagesCache.hpp (12c)")
+        t = t.replace(a12c, a12c +
+                      "    /// cheshire (step 12c): whether a camera's image is in the cache now (nothing is loaded)\n"
+                      "    bool cheshireCached(int camId)\n"
+                      "    {\n"
+                      "        std::lock_guard<std::mutex> lock(_slotMutex);\n"
+                      "        return _camIdMapId[camId] != -1;\n"
+                      "    }\n", 1)
     f12c.write_text(t, encoding="utf-8", newline="")
 
     # 10g (after 0.4.0). The image cache evicts by load order instead of clock(), whose millisecond ties made the
