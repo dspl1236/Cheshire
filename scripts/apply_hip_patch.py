@@ -4878,7 +4878,15 @@ void Fundamental7PSolver::solve(const Mat& x1, const Mat& x2, std::vector<robust
 STEP13A_F7_SOLVE4_HEAD = r"""// cheshire (step 13a): see Fundamental7PSolver.hpp
 bool Fundamental7PSolver::cheshireSolve4On()
 {
-    static const bool on = !cheshireQrNullspaceOn() && cheshireSvdLanesOn();
+    static const bool on = []() {
+        if (cheshireQrNullspaceOn())
+        {
+            // announced as the lanes are, so every configuration says how its 7-point fits run (docs/04 marker rule)
+            std::fprintf(stderr, "[cheshire] 7-point fits one at a time, the QR nullspace (CHESHIRE_QR_NULLSPACE=1)\n");
+            return false;
+        }
+        return cheshireSvdLanesOn();
+    }();
     return on;
 }
 

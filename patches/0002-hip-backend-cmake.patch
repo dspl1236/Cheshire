@@ -10641,7 +10641,7 @@ index f94703f..c17e007 100644
      return svd.matrixV().topRightCorner<9, 4>();
  }
 diff --git a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
-index 298c9d2..4268267 100644
+index 298c9d2..1d0b0b0 100644
 --- a/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
 +++ b/src/aliceVision/multiview/relativePose/Fundamental7PSolver.cpp
 @@ -6,14 +6,31 @@
@@ -10694,14 +10694,22 @@ index 298c9d2..4268267 100644
  
          // @fixme here there is a potential error, we should check that the size of
          // null(A) is 2. Otherwise we have a family of possible solutions for the
-@@ -85,6 +109,61 @@ void Fundamental7PSolver::solve(const Mat& x1, const Mat& x2, std::vector<robust
+@@ -85,6 +109,69 @@ void Fundamental7PSolver::solve(const Mat& x1, const Mat& x2, std::vector<robust
          models.emplace_back(F1 + roots[kk] * F2);
  }
  
 +// cheshire (step 13a): see Fundamental7PSolver.hpp
 +bool Fundamental7PSolver::cheshireSolve4On()
 +{
-+    static const bool on = !cheshireQrNullspaceOn() && cheshireSvdLanesOn();
++    static const bool on = []() {
++        if (cheshireQrNullspaceOn())
++        {
++            // announced as the lanes are, so every configuration says how its 7-point fits run (docs/04 marker rule)
++            std::fprintf(stderr, "[cheshire] 7-point fits one at a time, the QR nullspace (CHESHIRE_QR_NULLSPACE=1)\n");
++            return false;
++        }
++        return cheshireSvdLanesOn();
++    }();
 +    return on;
 +}
 +

@@ -108,11 +108,20 @@ inline bool cpuHasAvx2Fma()
 #endif
 }
 
+// No contraction of the lanes' own multiplies and adds: where Fused is false they must round as two operations, and
+// GCC's GNU modes (-ffp-contract=fast) would fuse them inside these AVX2+FMA functions. Clang is held off per function.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC push_options
+#pragma GCC optimize("fp-contract=off")
+#endif
 template<bool Fused>
 struct Lanes
 {
     CHESHIRE_SVD_LANES_TARGET static inline __m256d fmaLike(__m256d a, __m256d b, __m256d c)
     {
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
         if constexpr (Fused)
             return _mm256_fmadd_pd(a, b, c);
         else
@@ -123,6 +132,9 @@ struct Lanes
     // apply_rotation_in_the_plane on one element pair: x' = c x + s y, y' = -s x + c y, where m
     CHESHIRE_SVD_LANES_TARGET static inline void rot(__m256d& x, __m256d& y, __m256d c, __m256d s, __m256d m)
     {
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
         const __m256d nx = fmaLike(c, x, _mm256_mul_pd(s, y));
         const __m256d ny = fmaLike(neg(s), x, _mm256_mul_pd(c, y));
         x = _mm256_blendv_pd(x, nx, m);
@@ -139,6 +151,9 @@ struct Lanes
 
     CHESHIRE_SVD_LANES_TARGET static void svd4(const Mat9* const* in, Result* out)
     {
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
         const __m256d one = _mm256_set1_pd(1.0), zero = _mm256_setzero_pd();
         const __m256d tiny = _mm256_set1_pd((std::numeric_limits<double>::min)());
         const __m256d precision = _mm256_set1_pd(2.0 * std::numeric_limits<double>::epsilon());
@@ -275,6 +290,9 @@ struct Lanes
         }
     }
 };
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC pop_options
+#endif
 #endif
 
 /// four matrices (repeat one to fill), the lanes' results; false when this build or CPU has no lanes

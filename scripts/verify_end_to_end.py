@@ -48,6 +48,8 @@ GPU_MARKERS = {
     # after 0.4.0: the GPU search and the geometric filter at the same time (step 10a)
     "FeatureMatching":   [r"GPU brute-force L2 2-NN on",
                           r"7-point nullspace: (SVD \(default|Householder QR \(CHESHIRE_QR_NULLSPACE=1\))",
+                          # after 0.4.3: the 7-point fits four at a time in AVX2 lanes (13a), or the QR path's own line
+                          r"7-point fits (four at a time, Eigen's SVD in AVX2 lanes|one at a time, the QR nullspace)",
                           r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far",
                           r"cheshire: GPU search and geometric filter overlapped"],
     # after 0.4.0: the T cameras (step 10e) and the tiles' depth lists (10h) from each camera's own landmarks, the
@@ -108,7 +110,8 @@ CPU_MARKERS = {
     "DepthMap":          GPU_MARKERS["DepthMap"],
     "PrepareDenseScene": GPU_MARKERS["PrepareDenseScene"],
     "FeatureMatching":   [r"GPU brute-force disabled by CHESHIRE_GPU_MATCHER=0",
-                          r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far"],
+                          r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far",
+                          r"7-point fits (four at a time, Eigen's SVD in AVX2 lanes|one at a time, the QR nullspace)"],
     "DepthMapFilter":    [r"depth map filter: disabled by CHESHIRE_GPU_FILTER=0"],
     "Meshing":           [r"meshing votes: disabled by CHESHIRE_GPU_VOTE=0",
                           r"sim blur: disabled by CHESHIRE_GPU_BLUR=0",
@@ -150,7 +153,10 @@ FORBIDDEN = {
     "TracksBuilding": [r"the tracks file's binary copy could not be written", TRACKS_DIFFER],
     "FeatureMatching": [EPIPOLAR_FALLBACK,
                         ACR_BOUND_WRONG,
-                        r"epipolar residual check: \b(\d+) of (?!\1 )\d+ residuals"],
+                        r"epipolar residual check: \b(\d+) of (?!\1 )\d+ residuals",
+                        # after 0.4.3 (13a): the four-lane SVD's self-test falling back, and its check's verdict failing
+                        r"four-lane SVD's self-test differs from Eigen",
+                        r"7-point four-lane SVD check: \b(\d+) of (?!\1 )\d+ fits"],
     "PrepareDenseScene": [r"EXR deflate write check: '.*' does not read back as written",
                           r"EXR deflate write check: \b(\d+) of (?!\1 )\d+ files",
                           r"undistort on the device failed",
@@ -183,7 +189,7 @@ SELF_CHECK_ENV = {
     # PrepareDenseScene's libdeflate writer (8f) and device undistortion (8g), switched on here whatever
     # their platform defaults (8f is on only with OpenEXR before 3.2, 8g only with four hardware threads
     # or fewer), so every package checks them on its own card.
-    "CHESHIRE_ACR_BOUND_CHECK": "1", "CHESHIRE_ACR_RESIDUALS_CHECK": "1",
+    "CHESHIRE_ACR_BOUND_CHECK": "1", "CHESHIRE_ACR_RESIDUALS_CHECK": "1", "CHESHIRE_ACR_SVD_LANES_CHECK": "1",
     "CHESHIRE_EXR_DEFLATE_WRITE": "1", "CHESHIRE_EXR_DEFLATE_WRITE_CHECK": "1",
     "CHESHIRE_UNDISTORT_DEVICE": "1", "CHESHIRE_UNDISTORT_DEVICE_CHECK": "1",
     # after 0.4.0: SfM's statistics and filters on every core (10d), the depth map's T cameras (10e) and its tiles'
@@ -210,7 +216,8 @@ SELF_CHECK_VERDICTS = {
     # minNFA, and every residual of the epipolar loop (8e) against upstream's error().
     "FeatureMatching": [r"GPU matcher check: ([1-9]\d*) of \1 sampled queries identical to upstream's brute force",
                         r"AC-RANSAC bound check: \d+ of [1-9]\d* models skipped the sort and the NFA scan, 0 of them below minNFA",
-                        r"epipolar residual check: \b([1-9]\d*) of \1 residuals identical to FundamentalEpipolarDistanceError::error"],
+                        r"epipolar residual check: \b([1-9]\d*) of \1 residuals identical to FundamentalEpipolarDistanceError::error",
+                        r"7-point four-lane SVD check: \b([1-9]\d*) of \1 fits identical to Eigen's"],
     # The depth-map filter's vote pass against the CPU pass, every camera, printed at exit.
     "DepthMapFilter": [r"depth map filter check: ([1-9]\d*) of \1 cameras identical to the CPU vote pass"],
     "Meshing": [
