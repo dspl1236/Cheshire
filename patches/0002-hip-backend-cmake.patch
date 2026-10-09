@@ -6764,8 +6764,21 @@ index 4d09efb..bc1c92d 100644
      std::ifstream fileIn(sfileNameFeats);
  
      if (!fileIn.is_open())
+diff --git a/src/aliceVision/feature/sift/ImageDescriber_SIFT.hpp b/src/aliceVision/feature/sift/ImageDescriber_SIFT.hpp
+index bf5843d..8e7fe6a 100644
+--- a/src/aliceVision/feature/sift/ImageDescriber_SIFT.hpp
++++ b/src/aliceVision/feature/sift/ImageDescriber_SIFT.hpp
+@@ -84,7 +84,7 @@ class ImageDescriber_SIFT : public ImageDescriber
+             return;
+ 
+ #if ALICEVISION_IS_DEFINED(ALICEVISION_HAVE_POPSIFT)
+-        if (useCuda)
++        if (useCuda && ImageDescriber_SIFT_popSIFT::cheshireUsable())  // cheshire (step 15a): the card has PopSIFT code
+         {
+             _imageDescriberImpl.release();  // release first to ensure that we don't create the new ImageDescriber before destroying the previous one
+             _imageDescriberImpl.reset(new ImageDescriber_SIFT_popSIFT(_params, _isOriented));
 diff --git a/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp b/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp
-index 97f4ed5..08742bc 100644
+index 97f4ed5..b1ec752 100644
 --- a/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp
 +++ b/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp
 @@ -5,6 +5,7 @@
@@ -6776,7 +6789,7 @@ index 97f4ed5..08742bc 100644
  #include "ImageDescriber_SIFT_popSIFT.hpp"
  #include <aliceVision/system/Logger.hpp>
  
-@@ -15,6 +16,10 @@
+@@ -15,6 +16,27 @@
  #include <popsift/common/device_prop.h>
  
  #include <atomic>
@@ -6784,10 +6797,27 @@ index 97f4ed5..08742bc 100644
 +#include <cstdlib>
 +#include <cstring>
 +#include <numeric>
++#include <fstream>   // cheshire: step 15a
++#include <iterator>
++#include <string>
++#if defined(__HIP_PLATFORM_AMD__)
++#if defined(_WIN32)
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#ifndef NOGDI
++#define NOGDI  // wingdi.h's ERROR macro
++#endif
++#include <windows.h>
++#endif
++#endif
  
  namespace aliceVision {
  namespace feature {
-@@ -66,6 +71,48 @@ bool ImageDescriber_SIFT_popSIFT::describe(const image::Image<float>& image,
+@@ -66,6 +88,48 @@ bool ImageDescriber_SIFT_popSIFT::describe(const image::Image<float>& image,
          }
      }
  
@@ -6836,6 +6866,96 @@ index 97f4ed5..08742bc 100644
      ALICEVISION_LOG_TRACE("aliceVision PopSIFT feature count : " << regionsCasted->RegionCount() << std::endl);
  
      return true;
+@@ -94,6 +158,71 @@ void ImageDescriber_SIFT_popSIFT::resetConfiguration()
+     _popSift.reset(new PopSift(config, popsift::Config::ExtractingMode, PopSift::FloatImages));
+ }
+ 
++// cheshire (step 15a): see the header. PopSIFT is built for each chip by name: a generic code object makes it exit
++// 0xC0000094 (docs/16), so only the device's own name counts, followed by a character that cannot continue it.
++// CHESHIRE_POPSIFT_ARCH_TEST names another device, to exercise the fallback on a card that has its code object.
++bool ImageDescriber_SIFT_popSIFT::cheshireUsable()
++{
++    static const bool usable = []() {
++#if defined(__HIP_PLATFORM_AMD__)
++        std::string arch = ::cheshire::env::text("CHESHIRE_POPSIFT_ARCH_TEST");
++        if (arch.empty())
++        {
++            cudaDeviceProp prop{};
++            if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess)
++                return true;  // upstream's own checks decide
++            arch = prop.gcnArchName;
++        }
++        arch = arch.substr(0, arch.find(':'));  // gfx1201:sramecc-:xnack- -> gfx1201
++        std::string path;
++#if defined(_WIN32)
++        if (HMODULE mod = GetModuleHandleA("popsift.dll"))
++        {
++            char buf[MAX_PATH * 2];
++            const DWORD n = GetModuleFileNameA(mod, buf, DWORD(sizeof buf));
++            if (n > 0 && n < sizeof buf)
++                path.assign(buf, n);
++        }
++#else
++        {
++            std::ifstream maps("/proc/self/maps");
++            std::string line;
++            while (path.empty() && std::getline(maps, line))
++            {
++                const std::size_t at = line.find('/');
++                if (at != std::string::npos && line.find("libpopsift", at) != std::string::npos)
++                    path = line.substr(at);
++            }
++        }
++#endif
++        if (path.empty())
++        {
++            ALICEVISION_LOG_WARNING("cheshire: GPU SIFT: the PopSIFT library was not found in the process, its code objects not checked");
++            return true;
++        }
++        std::ifstream f(path, std::ios::binary);
++        const std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
++        const std::string want = "amdhsa--" + arch;
++        for (std::size_t at = bytes.find(want); at != std::string::npos; at = bytes.find(want, at + 1))
++        {
++            const std::size_t end = at + want.size();
++            const char c = end < bytes.size() ? bytes[end] : '\0';
++            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || c == '-'))
++            {
++                ALICEVISION_LOG_INFO("cheshire: GPU SIFT: PopSIFT carries code for " << arch << " (the CPU path where a card has none)");
++                return true;
++            }
++        }
++        ALICEVISION_LOG_WARNING("cheshire: GPU SIFT: PopSIFT (" << path << ") carries no code for this card (" << arch
++                                << "): CPU SIFT instead. A PopSIFT built for " << arch << " would run on the GPU.");
++        return false;
++#else
++        return true;
++#endif
++    }();
++    return usable;
++}
++
+ ImageDescriber_SIFT_popSIFT::ImageDescriber_SIFT_popSIFT(const SiftParams& params, bool isOriented)
+   : ImageDescriber(),
+     _params(params),
+diff --git a/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.hpp b/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.hpp
+index 0266660..63d1f1d 100644
+--- a/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.hpp
++++ b/src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.hpp
+@@ -97,6 +97,13 @@ class ImageDescriber_SIFT_popSIFT : public ImageDescriber
+      */
+     ~ImageDescriber_SIFT_popSIFT() override;
+ 
++    /**
++     * @brief cheshire (step 15a): whether the PopSIFT library loaded in this process carries a code object for device 0,
++     * read from the library's own bytes (an AMD build; true elsewhere, and when the library cannot be found). A card
++     * without one would fail on PopSIFT's own threads, where nothing can catch it: ImageDescriber_SIFT takes CPU SIFT.
++     */
++    static bool cheshireUsable();
++
+   private:
+     void resetConfiguration();
+ 
 diff --git a/src/aliceVision/fuseCut/CMakeLists.txt b/src/aliceVision/fuseCut/CMakeLists.txt
 index 1b7f39c..70c80a0 100644
 --- a/src/aliceVision/fuseCut/CMakeLists.txt

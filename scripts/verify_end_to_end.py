@@ -150,6 +150,8 @@ TRACKS_DIFFER = r"tracks file check: [1-9]\d* of \d+ tracks"
 TRACKS_COPY_DIFFER = r"tracks copy check: [1-9]\d* of \d+ tracks differ"
 SFM_FILTER_WRONG = [r"SfM filter check: .* differs from upstream's loop", r"SfM filter check: \b(\d+) of (?!\1 )\d+ comparisons"]
 FORBIDDEN = {
+    # 0.4.4 (15a): every gated card has GPU SIFT code in its package; the fallback to CPU SIFT must not happen there
+    "FeatureExtraction": [r"GPU SIFT: PopSIFT \(.*\) carries no code for this card"],
     "StructureFromMotion": [r"local BA graph: \d+ edges to posed views the graph was never handed were skipped",
                             EPIPOLAR_FALLBACK] + SFM_FILTER_WRONG,
     "DepthMap": [r"depth map T cameras check: \b(\d+) of (?!\1 )\d+ tiles",
