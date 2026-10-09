@@ -5353,5 +5353,7 @@ filter on the host: a stable sort and integer counting over at most a few hundre
 
 The ROCm 7.2 generic payloads on Windows now carry a PopSIFT built for the generic target itself (`build_targets.py`).
 The Linux PopSIFT is built for gfx1010 to gfx1013 by name plus `gfx10-3-generic`, `gfx11-generic` and `gfx12-generic`
-(it named 21 chips). The Windows HIP 6.2 family (RDNA1 and RDNA2) stays per chip: that toolchain emits a generic target
+(it named 21 chips; `libpopsift.so` 170 MB to 58 MB). A second Linux bundle with that PopSIFT was gated on house-pc the
+same way. GPU SIFT ran from the `gfx10-3-generic` code object ("PopSIFT carries code for gfx1031, its family's
+gfx10-3-generic"), all nine pipelines exit 0, and every depth map again equals the 0.4.3 gate's (the 41 views 511 s). The Windows HIP 6.2 family (RDNA1 and RDNA2) stays per chip: that toolchain emits a generic target
 only as code object v6, which it calls not ready for production (docs/16).
