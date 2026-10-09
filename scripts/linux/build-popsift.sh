@@ -3,7 +3,10 @@
 #
 # Usage: scripts/linux/build-popsift.sh [name] [archs]
 #   name   names the build and install directories (default: linux)
-#   archs  semicolon list of code objects (default: the full RDNA1 to RDNA4 range)
+#   archs  semicolon list of code objects (default: every chip of RDNA1 to RDNA4, the APUs included - each chip by
+#          name, since PopSIFT does not run from a generic code object (docs/16); the AliceVision bundle itself
+#          builds the family generics, so this list is what limits GPU SIFT to the chips named here. 0.4.4 added
+#          gfx1011, gfx1013 and gfx1033-1036, the RDNA2 APUs among them)
 #
 # Installs to build/popsift-<name>-install. Point AliceVision's CHESHIRE_POPSIFT_DIR /
 # -DPopSift_DIR at <install>/lib/cmake/PopSift.
@@ -15,7 +18,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROCM="${ROCM_PATH:-/opt/rocm}"
 NAME="${1:-linux}"
-ARCHS="${2:-gfx1010;gfx1012;gfx1030;gfx1031;gfx1032;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201}"
+ARCHS="${2:-gfx1010;gfx1011;gfx1012;gfx1013;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201}"
 BLD="$ROOT/build/popsift-$NAME"
 INST="$ROOT/build/popsift-$NAME-install"
 
