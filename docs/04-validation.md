@@ -5071,3 +5071,130 @@ rewritten to the copy (`build/nightly-cmp/mk_g42.py`), and the zip's eight new-p
 SfMExpanding placed all 41 cameras within 0.0028 % of the scene's radius of the AMD zip's reconstruction (rotations
 within 0.0028 degrees), as in 0.4.0 and 0.4.1; the rest differs at the rounding of MSVC's floating-point code against
 clang's.
+
+## After 0.4.2: DepthMap's image uploads without device-wide waits (steps 12a-12c, 2026-10-08)
+
+After 0.4.2 a False Door DepthMap chunk (warm, 56.6 s) left the device idle for about 9 s: 2.8 s of startup, 2.6 s for
+the first batch's load, 3.0 s for the later batches' uploads and 0.6 s for the last batch's writes. An upload took about
+45 ms an image. Most of that was the 324 MB float image copied from pageable memory (25 ms; 11.5 ms from pinned,
+`hip/tests/xfer`); the rest was the mipmap build. Upstream's path (`DeviceMipmapImage::fill`) frees and reallocates the
+slot's array, creates and destroys a texture per mipmap level, and calls `cudaDeviceSynchronize` twice. On HIP a free
+and a texture's teardown also wait for the whole device. So no upload could overlap the tiles.
+
+**12a, the uploads on a stream of their own.** A device-cache slot keeps its mipmapped array, its texture and one
+texture per level once it has them. A new image of the same size is refilled in place on a non-blocking stream: the
+full-resolution floats are copied into a kept buffer, then the same downscale kernel, colour conversion and level
+builds run into the kept array. A slot's first image gets its array and textures allocated without a wait
+(`DeviceMipmapImage::cheshireAllocate`). The level copies use `cudaMemcpy2DToArrayAsync`; on Linux, where the mipmaps
+are emulated, that is `mipmap_emu.h`'s new `memcpy2DToArrayAsync`. Same kernels, same data, so the same levels.
+`CHESHIRE_DEPTHMAP_UPLOAD_STREAM=0` restores upstream's path.
+
+**12b, the next batch's images uploaded during this batch's tiles.** After each tile is queued, and once the images
+that 10k decoded ahead are in the host cache, one of the next batch's images is uploaded into the slot that the LRU's
+next insertion would take (`LRUCache::cheshirePeekVictim`). That only happens when the slot holds no camera of this
+batch or the next, so no running kernel reads it. Refusals change nothing. `CHESHIRE_DEPTHMAP_PREFETCH=0` restores
+upload at the batch's load.
+
+**12c, a load's uploads while its group decodes.** A batch's load decodes in groups no larger than the host cache.
+The group's decodes now run on a thread of their own, each file on its worker's thread. (OpenEXR's shared pool had
+finished all of a group's files at the same moment, so uploading by index order gained nothing: instrumented, the
+first image finished with the second wave.) The loading thread uploads each image as soon as it is decoded, lowest
+index first, so the device cache receives a group in decode order. Neither its slots nor its LRU order changes a map.
+A window across groups would hide the rest, but the image cache reuses an evicted image's buffer in place, so an
+upload could read a buffer a later decode is writing. That was not done. `CHESHIRE_DEPTHMAP_LOAD_PIPELINE=0`
+restores upload after the group's decode.
+
+**12c's race, found in the release round and fixed (0d9ddad).** The same in-place reuse caught 12c as first committed
+(900cba4). A group's images that the previous batch had decoded ahead (10k) are already in the image cache, so 12c
+uploaded them at once while the group's other decodes ran. A decode takes the cache's oldest slot and reuses its
+buffer, and those images could be the oldest. Then a decode overwrote one of them while its copy to the device was
+still reading it. The False Door's whole DepthMap node, run with the 0.4.3 package against 0.4.2's, matched on 1,650
+of 1,652 maps: one view had a band of its top rows from another camera (rows 11-199 of 1,688, a few columns wide).
+A second full run had another view wrong, the same way. Reruns of the chunk alone were clean, 16 times out of 16:
+the race needs a decode to claim exactly that slot, which depends on the order the parallel decodes start in.
+
+A temporary check (each in-place refill read back, level by level, against upstream's fill of the same image) passed
+2,170 of 2,170 refills in the run that had the second bad view. So the device side was right, and the image had
+already been corrupted when it was copied. The group now uploads its cached images before any decode starts
+(`ImagesCache::cheshireCached`); the decodes are then all newer than anything else in the cache and no more than it
+holds, so none can evict an image still waiting for its upload. Three full runs of the node with the fix gave all
+1,652 maps of the 0.4.2 package (1,108-1,110 s). Chunk-0 replays could not have caught this: the race shows up about
+once per 800 views.
+
+All three are HIP only: CUDA's frees do not wait on the device, and the CUDA builds announce that they keep upstream's
+uploads.
+
+| False Door DepthMap chunk 0, replays alternating (RX 9070) | whole chunk | first batch's load |
+|---|---|---|
+| `CHESHIRE_DEPTHMAP_UPLOAD_STREAM=0` (upstream's uploads) | 54.85, 54.85 s | 2.49 s |
+| 12a (`CHESHIRE_DEPTHMAP_PREFETCH=0`) | 53.55, 53.51 s | 2.27 s |
+| 12a and 12b | 52.05, 52.36 s | |
+| 12a-12c, against `CHESHIRE_DEPTHMAP_LOAD_PIPELINE=0` | 51.64, 52.13 s against 52.76, 52.31 s | 1.93 s against 2.30 s |
+
+With 12b, 58 of the chunk's images are uploaded during the tiles, and the later batches' loads drop from 1.2 s to
+0.1 s. The 96 maps are identical to the reference in every run (12c's race, below, did not show in chunk 0).
+
+**Exact on Linux:** on house-pc's RX 6750 XT, the Linux HIP bundle gave the depth maps of the 0.4.2 gate on the same
+card for mini6 (base and experimental) and the 41 views, both with 12a-12c on and with all three off
+(`build/gate-12b`, `build/gate-12c`). The logs show the prefetch at work there too (batches 5-8 of 11).
+
+**Compiled:** Windows HIP (the development tree), the hip6.2 tree's depth map library, Windows CUDA, and in WSL Linux
+CUDA and Linux HIP. 12b's first commit did not compile for CUDA: the tile loop's prefetch called a HIP-only method.
+d9175eb put that block inside `CHESHIRE_HIP`.
+
+**Measured and dropped in the same round** (docs/roadmap.md):
+- **Meshing's visibility passes:** not FP64-bound. A float-filtered kd-tree walk (`hip/tests/knnfilter`) gives the
+  double walk's answers on all 32 M queries of a dump, but it is no faster: the walk is latency-bound.
+- **FeatureMatching's transfers:** on the False Door every one of the 45 chunks waits on the CPU geometric filter
+  (99 s), and the GPU search (86 s) already overlaps it.
+- **The startup:** about 2.8 s a chunk; its header reads are parallel since 10k, and what remains is under 1 % of a
+  chunk each.
+
+## The 0.4.3 release round (2026-10-08/09)
+
+**The packages, twice.** The first build (6b870ba, `build/chain-043.cmd`) passed all three gates. Then the False Door's
+whole DepthMap node found 12c's race (above), so the four packages were built again at 0d9ddad, the fix, and gated
+again. The first build was set aside as `build/release/0.4.3-race` and was not published. The Windows CUDA build's
+first attempt at 0d9ddad lost two links to the virus scanner holding fresh executables, and passed on the resume.
+
+**The False Door's whole DepthMap node, 0.4.2 against 0.4.3.** All 19 chunks of the node (Photogrammetry Experimental
+Fast Ransac on Meshroom 2025.1, the 10a-10g run's command lines), alternating chunk by chunk between the 0.4.2 and the
+0.4.3 release packages (their gfx12-generic base, the bundled HIP runtime set aside) on the RX 9070:
+
+| run | 0.4.2 | 0.4.3 | maps identical |
+|---|---|---|---|
+| the first build (6b870ba), 2026-10-08, the box idle | 1,224.4 s | 1,121.1 s | 1,650 of 1,652: 12c's race |
+| the rebuilt packages (0d9ddad), a video playing on the box | 1,313.5 s | 1,161.1 s | 1,652 of 1,652 |
+| the rebuilt packages (0d9ddad), the box idle | 1,263.2 s | 1,142.1 s | 1,652 of 1,652 |
+
+With the box idle, the rebuilt 0.4.3 takes 9.6 % less than 0.4.2, and each of the 18 chunks with cameras is 3-19 %
+shorter (the 19th has none). The two idle runs of 0.4.2 differ by 3 %, so compare within a row.
+
+**The gates** (the rebuilt packages, each as the file you download).
+
+| package | hardware | 2025.1: mini6 | 2025.1: 41 views | 2023.3: mini6 |
+|---|---|---|---|---|
+| Windows AMD | RX 9070 (rocm7.2 gfx12-generic payload) | 19/19 | base 312 s, verify 685 s, experimental 277 s, fastransacexp 252 s, verifyexp 696 s | 4/4 |
+| Linux AMD | RX 6750 XT (house-pc) | 7/7 | experimental 566 s, and 566 s with 12a-12c off | 1/1 |
+| Linux CUDA | GTX 1080 Ti (house-pc) | 7/7 | experimental 636 s | 1/1 |
+| Windows CUDA | not run on an NVIDIA card (below) | | | |
+
+On the RX 9070, 26 of the 28 configurations' depth maps are 0.4.2's gate's byte for byte. The other two are
+`cpufallback`'s, whose digest also differed between the two 0.4.3 builds (`2cdc17ad…`, `c29aef25…`). The 41-view
+times are 0.4.2's gate's less 0.3-7 % (verify and verifyexp are their self-checks).
+
+The first build's gate had come out 5-8 % slower than 0.4.2's on the same box, so the two zips ran back to back on the
+41 views (base). That gave 358 and 333 s for 0.4.2 and 338 and 323 s for 0.4.3, with the same depth maps: the box was
+slower that day.
+
+On the RX 6750 XT and the GTX 1080 Ti every depth map is the 0.4.2 gate's on that card, byte for byte. On the RX 6750
+XT the 41 views with `CHESHIRE_DEPTHMAP_UPLOAD_STREAM=0` and `CHESHIRE_DEPTHMAP_LOAD_PIPELINE=0` gave the same depth
+maps, in the same 566 s. So on that Linux box, where the mipmaps are emulated, 12a-12c gain nothing measurable on the
+41 views. They are kept there: they are exact, and the box is not slower with them (docs/roadmap.md has the item).
+
+**Windows CUDA**, still without a test box, got 0.4.2's smoke test: the 41-view Photogrammetry Experimental cache's
+SfM-chain nodes copied with their command lines rewritten (`build/nightly-cmp/mk_g43.py`), and the zip's eight
+new-pipeline programs run on it from its own `bin` and Windows alone (`replay_cudapkg043.py`). All finished.
+TracksBuilding's files are the AMD zip's byte for byte, and SfMExpanding placed all 41 cameras within 0.0028 % of the
+scene's radius of the AMD zip's reconstruction (rotations within 0.0028 degrees), as in 0.4.0-0.4.2. The rest differs
+at the rounding of MSVC's floating-point code against clang's.

@@ -872,7 +872,8 @@ release round").
 coverage on the finished packages, then the long stock-against-Cheshire benchmarks (NVIDIA, the same card, small and
 large sets).
 - **0.4.2:** 11a-11c, DepthMap's GPU stages (below).
-- **0.4.3, the engine's last items:** DepthMap's device-idle gaps (each later batch's upload during the previous
+- **0.4.3, the engine's last items** (it ships 12a-12c; the geometric filter's four-lane fit, 13a, is on the
+  `step-13a` branch for the next release): DepthMap's device-idle gaps (each later batch's upload during the previous
   batch's tiles, the first batch's load and the startup), Meshing's "Create visibilities" (64 s on the False Door),
   the matcher's transfers (batched per search). Measured 2026-10-08:
   - **DepthMap's idle time per False Door chunk** (56.6 s, warm): startup 2.8 s (SfM 1.2, headers 0.6, lists 0.5,
@@ -897,6 +898,14 @@ large sets).
     groups would hide the rest, but the image cache reuses an evicted image's buffer in place, so an upload could read
     a buffer a later decode is writing: not done. On house-pc's RX 6750 XT every depth map of mini6 and the 41 views
     the 0.4.2 gate's with 12a-12c on and all three off; the Windows and Linux CUDA builds compile.
+  - **12c's race, found in the release round and fixed 2026-10-08 (0d9ddad).** The same in-place reuse: a group's
+    images already in the image cache (decoded ahead) were uploaded while the group's other decodes took the cache's
+    oldest slots, so one could be overwritten mid-copy. The False Door's whole DepthMap node had one view in about 800
+    wrong per run (a band of another camera's rows); chunk-0 replays never showed it. The group now uploads its cached
+    images before any decode starts. Lesson: a whole-node byte comparison on a large set belongs in every DepthMap round
+    (docs/04, "After 0.4.2").
+  - **Open: 12a-12c on Linux.** On house-pc's RX 6750 XT the 41 views took 566 s with and without them (the mipmaps
+    are emulated there). Measure a False Door chunk on that card to see whether the refill path costs what it saves.
   - **The matcher's transfers would save nothing** (measured, dropped). FeatureMatching overlaps the GPU search with
     the CPU geometric filter (`CHESHIRE_FM_OVERLAP`), and on the False Door every one of its 45 chunks waits on the
     filter: 86 s of searches inside 99 s of filtering (128 s of chunk time). The query upload and result downloads

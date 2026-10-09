@@ -29,7 +29,7 @@ number is why the design is what it is.
 
 | Meshroom node | upstream | Cheshire | status |
 |---|---|---|---|
-| DepthMap | CUDA only | HIP port + VRAM-to-RAM memory bridge; the host's work kept out of the device's way | validated RDNA1/2/4, Windows + Linux; bit-identical to native across caps. v0.4.1: the T cameras and the tiles' depth lists from each camera's own landmarks, the tiles and the batches overlapping the device's work, the headers on every core: the 884-photo False Door's DepthMap 5,587 s -> 1,733 s on the RX 9070, the same maps ([notes](docs/releases/0.4.1.md)). v0.4.2: the GPU stages without double precision, exactly: the False Door's DepthMap chunks 1,878 s -> 1,297 s ([notes](docs/releases/0.4.2.md)) |
+| DepthMap | CUDA only | HIP port + VRAM-to-RAM memory bridge; the host's work kept out of the device's way | validated RDNA1/2/4, Windows + Linux; bit-identical to native across caps. v0.4.1: the T cameras and the tiles' depth lists from each camera's own landmarks, the tiles and the batches overlapping the device's work, the headers on every core: the 884-photo False Door's DepthMap 5,587 s -> 1,733 s on the RX 9070, the same maps ([notes](docs/releases/0.4.1.md)). v0.4.2: the GPU stages without double precision, exactly: the False Door's DepthMap chunks 1,878 s -> 1,297 s ([notes](docs/releases/0.4.2.md)). v0.4.3: the image uploads without device-wide waits, under the tiles and the decodes: 1,263 s -> 1,142 s, the same maps ([notes](docs/releases/0.4.3.md)) |
 | FeatureMatching | CPU (kd-tree) on every vendor | exact GPU brute-force 2-NN (HIP; the source also builds as CUDA), plus exact CPU work in AC-RANSAC ([docs/15](docs/15-acransac-cpu.md)) | validated end to end (v0.2.5): 592 s -> 75 s on 107 photos, same reconstruction. Geometric verification followed in v0.2.15: 566 s -> 351 s, byte-identical match file, and the profile is why it stayed on the CPU. v0.3.8: AC-RANSAC skips the models that cannot win and computes the epipolar residuals in one vectorised loop, both exact: geometric filtering 36.8 s -> 16.4 s on 41 views at Meshroom 2025.1's 50,000 iterations ([notes](docs/releases/0.3.8.md)). v0.4.1: the search on the cards' integer dot-product units, `knn2_wmma` on RDNA4 and `knn2_dot4q` on RDNA2 and NVIDIA, exact by construction (41 views 9.9 s -> 4.0 s on the RX 9070, [docs/07](docs/07-gpu-matcher.md)), and the search beside the geometric filter |
 | FeatureExtraction | CUDA (PopSift) or CPU | HIP PopSift port ([docs/14](docs/14-gpu-sift.md)) | done (v0.2.13): 2021 s -> 26 s on 41 views (RX 9070), and better than the CPU path rather than merely faster — 88,463 landmarks against 78,372 and RMSE 1.0377 against 1.03997 px. Validated on RDNA4, RDNA1 and RDNA2 across two runtimes and both systems, landmarks within 0.11 %; found and reported an upstream PopSift bug ([popsift#193](https://github.com/alicevision/popsift/issues/193)) |
 | DepthMapFilter | CPU | GPU vote pass (HIP / CUDA source) + a shared decoded-map cache | validated (v0.2.6): 123.5 s -> 26.5 s on 107 photos (RX 9070), 317 s -> 26.9 s on 41 views on an i3 + RX 5500 XT, bit-identical; found and replicated an upstream vote-buffer quirk; v0.2.9 cache: 17.8 s -> 12.7 s, byte-identical |
@@ -233,30 +233,35 @@ upstream refuses. Details in `docs/02-memory-bridge.md`.
 the GPU, what the error codes mean, and the dozen settings worth knowing. The rest of this file is
 what was built and why.
 
-Binaries are on the [v0.4.2 release](https://github.com/dspl1236/Cheshire/releases/tag/v0.4.2);
+Binaries are on the [v0.4.3 release](https://github.com/dspl1236/Cheshire/releases/tag/v0.4.3);
 the data sets and references are on
 [v0.1.0](https://github.com/dspl1236/Cheshire/releases/tag/v0.1.0) and unchanged, the depth
 maps being bit-identical between the two:
 
 | asset | size | contents |
 |---|---|---|
-| `cheshire-alicevision-windows-x64.zip` (v0.4.2) | 196 MB | **one Windows package for every AMD card.** Eleven GPU payloads across both HIP runtimes - gfx1010/1012 (RX 5500-5700), gfx1030/1031/1032/1034 (RX 6000), gfx1033/1035/1036 (RDNA2 APUs), and `gfx11-generic` + `gfx12-generic` for RDNA3/RDNA4 and future chips in those families (GPU SIFT only for the chips named today: PopSIFT will not run from a generic code object, [docs/16](docs/16-bundling.md)). `cheshire-detect.exe` asks the card which it needs, so there is nothing to choose; `cheshire-run.cmd` runs a node straight from it, `meshroom-pair.cmd` + launcher pair it into Meshroom |
-| `cheshire-alicevision-cuda-windows-x64-cuda12.9.zip` (v0.4.2) | 109 MB | **the same stages for NVIDIA, Windows.** GPU SIFT, matcher, depth map filter, meshing votes and texturing, plus the memory bridge; `cudart` is bundled, so no CUDA toolkit is needed - only the driver. Paired, it runs on the NVIDIA card by itself (from v0.3.8; with v0.3.0 to v0.3.7 set `CHESHIRE_BACKEND=cheshire`) |
-| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.4.2) | 126 MB | relocatable Linux bundle with the GPU matcher, depth map filter, meshing votes, texturing and the packed-slot mipmap sampler, depth-map code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested) - 19 in all; GPU SIFT covers 15 of those, not the RDNA2 APUs or Vega (neither has run here: the APUs should fall back to CPU SIFT; on Vega, PopSIFT's start-up may throw instead of falling back); needs only `amdgpu` + `/dev/kfd`; validated on the RX 6750 XT (and the RX 5500 XT in earlier releases) |
-| `cheshire-alicevision-cuda-linux-x64-cuda12.9.tar.gz` (v0.4.2) | 49 MB | **the same stages for NVIDIA, Linux.** `libcudart` bundled and no `libcuda` (the driver's, not ours); the 41-view depth and similarity maps from a clean extraction of the tarball (82 files) were byte-identical to the Meshroom CUDA 11.3 reference in v0.3.3 (GTX 1080 Ti) and v0.3.4 (GTX 1050 Ti) |
+| `cheshire-alicevision-windows-x64.zip` (v0.4.3) | 196 MB | **one Windows package for every AMD card.** Eleven GPU payloads across both HIP runtimes - gfx1010/1012 (RX 5500-5700), gfx1030/1031/1032/1034 (RX 6000), gfx1033/1035/1036 (RDNA2 APUs), and `gfx11-generic` + `gfx12-generic` for RDNA3/RDNA4 and future chips in those families (GPU SIFT only for the chips named today: PopSIFT will not run from a generic code object, [docs/16](docs/16-bundling.md)). `cheshire-detect.exe` asks the card which it needs, so there is nothing to choose; `cheshire-run.cmd` runs a node straight from it, `meshroom-pair.cmd` + launcher pair it into Meshroom |
+| `cheshire-alicevision-cuda-windows-x64-cuda12.9.zip` (v0.4.3) | 109 MB | **the same stages for NVIDIA, Windows.** GPU SIFT, matcher, depth map filter, meshing votes and texturing, plus the memory bridge; `cudart` is bundled, so no CUDA toolkit is needed - only the driver. Paired, it runs on the NVIDIA card by itself (from v0.3.8; with v0.3.0 to v0.3.7 set `CHESHIRE_BACKEND=cheshire`) |
+| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.4.3) | 126 MB | relocatable Linux bundle with the GPU matcher, depth map filter, meshing votes, texturing and the packed-slot mipmap sampler, depth-map code objects for RDNA1-RDNA4 discrete parts, the RDNA2/RDNA3 APUs (gfx1035/1036/1103/1150/1151/1152/1153) and Vega (gfx900/906, untested) - 19 in all; GPU SIFT covers 15 of those, not the RDNA2 APUs or Vega (neither has run here: the APUs should fall back to CPU SIFT; on Vega, PopSIFT's start-up may throw instead of falling back); needs only `amdgpu` + `/dev/kfd`; validated on the RX 6750 XT (and the RX 5500 XT in earlier releases) |
+| `cheshire-alicevision-cuda-linux-x64-cuda12.9.tar.gz` (v0.4.3) | 49 MB | **the same stages for NVIDIA, Linux.** `libcudart` bundled and no `libcuda` (the driver's, not ours); the 41-view depth and similarity maps from a clean extraction of the tarball (82 files) were byte-identical to the Meshroom CUDA 11.3 reference in v0.3.3 (GTX 1080 Ti) and v0.3.4 (GTX 1050 Ti) |
 | `monstree-mini6-meshroom-cache.tar.gz` (v0.1.0) | 383 MB | 6-view Meshroom 2023.3 cache: CameraInit, SfM, PrepareDenseScene and the CUDA DepthMap reference |
 | `monstree-full-cuda-reference.tar.gz` (v0.1.0) | 680 MB | 41-view SfM + CUDA DepthMap reference (GTX 1080 Ti) |
 | `cheshire-hip-depthmap-outputs.tar.gz` (v0.1.0) | 966 MB | the HIP depth maps behind the table above (RX 9070 6 + 41 views, RX 5500 XT, RX 6750 XT) |
 
-Three of the four packages in v0.4.2 passed on their own hardware, each as the file you download (docs/04):
+Three of the four packages in v0.4.3 passed on their own hardware, each as the file you download (docs/04):
 - the Windows AMD zip on the RX 9070: the full gate through Meshroom 2025.1 (the 19-configuration mini6 matrix and the
-  41-view set) and a mini6 check through Meshroom 2023.3, every depth map v0.4.1's;
+  41-view set) and a mini6 check through Meshroom 2023.3, every depth map v0.4.2's;
 - the Linux AMD package on the RX 6750 XT and the Linux NVIDIA package on a GTX 1080 Ti, through mini6 and 41 views,
   every depth map the previous gate's on that card.
 
-The Windows NVIDIA zip ships on its build checks and a CPU-only run of its new-pipeline programs, as in v0.4.0 and
-v0.4.1: its test box is still down, as is the Windows run of the hip6.2 payloads (RDNA1 and RDNA2 under Windows)
-([notes](docs/releases/0.4.2.md)).
+The Windows NVIDIA zip ships on its build checks and a CPU-only run of its new-pipeline programs, as in v0.4.0 to
+v0.4.2: its test box is still down, as is the Windows run of the hip6.2 payloads (RDNA1 and RDNA2 under Windows)
+([notes](docs/releases/0.4.3.md)).
+
+v0.4.3 takes DepthMap's image uploads off the device-wide waits that HIP put in them: each cache slot is refilled in
+place on a stream of its own, the next batch's images go up during this batch's tiles, and a batch's load uploads each
+image as soon as it is decoded. The 884-photo False Door's DepthMap chunks take 1,142 s instead of 1,263 s, all 1,652
+maps the same bytes. In full: [docs/releases/0.4.3.md](docs/releases/0.4.3.md).
 
 v0.4.2 takes DepthMap's GPU stages off double precision on AMD cards, exactly: the colour distances, the patch
 samples' projections and the colour optimisation's angles compute the same bits as before without FP64 instructions
