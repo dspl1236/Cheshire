@@ -872,7 +872,7 @@ release round").
 coverage on the finished packages, then the long stock-against-Cheshire benchmarks (NVIDIA, the same card, small and
 large sets).
 - **0.4.2:** 11a-11c, DepthMap's GPU stages (below).
-- **0.4.3, the engine's last items** (it ships 12a-12c; the geometric filter's four-lane fit, 13a, is on the
+- **0.4.3, the engine's last items** (released 2026-10-09 with 12a-12c, docs/releases/0.4.3.md; the geometric filter's four-lane fit, 13a, is on the
   `step-13a` branch for the next release): DepthMap's device-idle gaps (each later batch's upload during the previous
   batch's tiles, the first batch's load and the startup), Meshing's "Create visibilities" (64 s on the False Door),
   the matcher's transfers (batched per search). Measured 2026-10-08:
