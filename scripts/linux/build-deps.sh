@@ -2,6 +2,11 @@
 # Cheshire Linux: build AliceVision's third-party dependencies with its own superbuild
 # (ALICEVISION_BUILD_DEPENDENCIES=ON), CUDA-free. Tested in WSL2 Ubuntu 24.04 with ROCm 7.2.
 # Usage: scripts/linux/build-deps.sh [install-prefix] [build-dir]
+#
+# The four switches pinned OFF below (SuiteSparse, LAPACK, Xerces-C, OpenMP) are what the noble deps that every Linux
+# release through 0.4.4 shipped were configured with, read back from their CMakeCache (2026-10-10); the superbuild's
+# defaults turn the first two ON on Linux. SuiteSparse off keeps GPL CHOLMOD out of the bundles, and the bundles' Ceres
+# has always been CERES_NO_SUITESPARSE; pinning them makes a fresh superbuild (the jammy container) configure the same.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 AV_DEV="$ROOT/third_party/aliceVision"
@@ -36,6 +41,10 @@ cmake "$AV_DEV" \
   -DAV_BUILD_VPX:BOOL=OFF \
   -DAV_BUILD_PYBIND11:BOOL=ON \
   -DAV_BUILD_SWIG:BOOL=OFF \
+  -DAV_BUILD_SUITESPARSE:BOOL=OFF \
+  -DAV_BUILD_LAPACK:BOOL=OFF \
+  -DAV_BUILD_XERCESC:BOOL=OFF \
+  -DAV_BUILD_OPENMP:BOOL=OFF \
   -DPython_EXECUTABLE="$(command -v python3)"
 cmake --build . --parallel "$JOBS"
 # the superbuild drops dependency tools into bin/; keep them out of the AliceVision bin
