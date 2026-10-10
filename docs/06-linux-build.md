@@ -21,6 +21,30 @@ amdgpu-install -y --usecase=wsl,rocm --no-dkms      # ~10 min, installs /opt/roc
 
 Same-version base as the node (Ubuntu 24.04 / glibc 2.39), so the bundle transfers.
 
+## Release bundles: the jammy container (0.5.0 and later)
+
+A bundle built on noble needs glibc 2.38 and libstdc++'s `GLIBCXX_3.4.32` (GCC 13's, not bundled), so it loads only on
+Ubuntu 24.04-class systems. From 0.5.0 the release bundles are built in an Ubuntu 22.04 container on this box's Docker
+instead: glibc 2.35 and GCC 12, so they load on Ubuntu 22.04, Debian 12, Mint 21 and anything newer. The package set
+follows upstream's own `docker/Dockerfile_ubuntu_deps` (jammy, GCC 12, Kitware's CMake 3.31), with ROCm 7.2 and
+CUDA 12.9 from the vendors' jammy repositories.
+
+```bash
+scripts/linux/jammy/container.sh up      # once: create cheshire-jammy and provision it (provision.sh)
+scripts/linux/jammy/container.sh sync    # its source tree = this box's /root/cheshire main
+scripts/linux/jammy/container.sh run 'bash scripts/linux/jammy/build-bundles.sh <tag> both'
+                                         # deps (once), PopSIFT and the bundle for HIP, then for CUDA, into
+                                         # build/jammy/<tag>; fails if any file needs more than GLIBC_2.35 /
+                                         # GLIBCXX_3.4.30
+scripts/linux/jammy/loadtest.sh <bundle.tar.gz> [image]
+                                         # in a bare ubuntu:22.04: ldd on every ELF file, every program started
+```
+
+The container uses the host's network (`--network host`): the WSL distro has IPv4 forwarding off, so a bridged
+container cannot reach the mirrors. Its dependency superbuild is configured as the noble one was: `build-deps.sh`
+pins SuiteSparse, LAPACK, Xerces-C and OpenMP off, and Ceres's CUDA off. Same versions (Eigen 3.4.0, Ceres 2.2,
+OpenImageIO 3.0.17, Boost 1.86), only GCC 12 instead of 13.
+
 ### What WSL can and cannot do (measured with `hip/tests`)
 
 | | WSL2 + ROCm 7.2 | native Windows ROCm 7.2.1 |
