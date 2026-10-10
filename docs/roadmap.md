@@ -946,7 +946,9 @@ large sets).
   chips get GPU SIFT along with the rest. **Released as v0.4.4 on 2026-10-10** (docs/04, "The 0.4.4 release round";
   the False Door's FeatureMatching through the release zips 77-85 s to 43 s). Next: 0.5.0, packaging II.
 - **0.5.0, packaging II:** x86-64 ISA tiers chosen by CPUID (FMA contraction controlled, so every tier gives the same
-  bytes) and older-glibc Linux bundles from a jammy or bookworm container.
+  bytes) and older-glibc Linux bundles from a jammy or bookworm container. **ISA tiers measured and dropped
+  2026-10-10** (an exact v3 build is no faster; Eigen at AVX width changes the bytes), replaced by a CPU check that
+  refuses a Windows payload the CPU cannot run. Older glibc: the jammy container (scripts/linux/jammy).
 - **Then:** "Hardware coverage" below.
 
 Next:
@@ -1264,9 +1266,11 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 - **`CHESHIRE_POPSIFT` defaults OFF in the HIP build scripts** (S). **Done 2026-09-27 (docs/04
   "0.3.6: tooling debts")**: auto in both HIP build scripts, and both HIP packagers refuse a feature
   library that does not link PopSift.
-- **x86-64 ISA tiers** (L). Both Linux bundles and the Windows CUDA package are SSE2-only
-  (`scripts/linux/build-alicevision.sh:60`). Build v1/avx/v3 tiers, choose between them by CPUID,
-  and re-validate: a v3 gcc build contracts FMAs.
+- **x86-64 ISA tiers** (L). **Measured and dropped 2026-10-10 (docs/04, "0.5.0: x86-64 ISA tiers")**: at v3
+  Eigen's AVX packets reduce in another order, so the bytes differ even with contraction off; holding Eigen at SSE
+  width keeps them but the v3 Linux CUDA bundle was then no faster (41 views 571 s against 571 s, every depth map
+  the same). Instead the Windows bundle refuses a payload the CPU cannot run (CPUID check, exit 3, Meshroom's own
+  binary under auto) rather than crashing on an AVX2 instruction.
 - **Older-glibc Linux bundles** (L). Both are built on glibc 2.39 (`docs/06-linux-build.md:22`).
   Needs a jammy or bookworm container and a test node. In the same pass, pin
   `AV_BUILD_SUITESPARSE=OFF` and add a GPL check to the Linux packagers.
@@ -1538,7 +1542,8 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 - Vulkan compute and ZLUDA: HIP proved sufficient.
 - GCN4 / Polaris: ROCm 7.2 refuses the RX 570.
 - Generic RDNA1/2 code objects on Windows: code-object v6 is not production-ready.
-- RX 7000/9000 on pre-AVX2 Windows CPUs. Revisit only together with the ISA tiers.
+- RX 7000/9000 on pre-AVX2 Windows CPUs. The tiers were dropped (0.5.0); since then such a machine is told why
+  and runs Meshroom's own binaries instead of crashing. An AVX build of the rocm7.2 payloads would change their bytes.
 
 ## Stale text to fix
 

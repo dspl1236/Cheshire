@@ -5406,3 +5406,43 @@ That is −47 %, and the match file is 0.3.9's reference (`ebffcb37a3bd2b0b`) in
 41-view Photogrammetry Experimental cache, from the zip's own `bin` and Windows alone. All finished. TracksBuilding's
 files are the AMD zip's byte for byte, and SfMExpanding placed all 41 cameras within 0.0028 % of the scene's radius
 of the AMD zip's reconstruction (rotations within 0.0028 degrees), as in 0.4.0-0.4.3.
+
+## 0.5.0: x86-64 ISA tiers measured and dropped; a CPU check for the Windows payloads (2026-10-10)
+
+**What each package needs.** Read from the instructions (`build/isa_scan.py`, `scripts/check_isa_floor.py`'s tiers,
+per directory of the extracted 0.4.4 packages). The Linux bundles (HIP and CUDA) and the Windows CUDA zip are the
+x86-64 baseline (v1). Their only newer instructions are code that checks the CPU first: 13a's lanes and MSVC's STL
+algorithms, which pick AVX2 or AVX-512 at run time. The Windows AMD zip's hip6.2 payloads need AVX (`/arch:AVX`); its
+rocm7.2 payloads need x86-64-v3 (clang-cl `/arch:AVX2`: AVX2, FMA, BMI1/2, F16C, LZCNT, MOVBE), with thousands of FMA
+and AVX2 instructions in every binary.
+
+**Tiers cannot simply be wider builds.** The plan was to build the v1 packages again at v3 as well, choose by CPUID,
+and keep the bytes by switching FMA contraction off. `hip/tests/isa_tiers` compiled the same Eigen operations at v1,
+v2 and v3 with GCC 13:
+
+| Eigen result | v2 | v3, contraction off | v3, contracted | v3, AVX macros undefined |
+|---|---|---|---|---|
+| `VectorXd` dot, sum, norm | v1's bits | differ | differ | v1's bits |
+| `MatrixXd` product, `Matrix3d * Vector3d` | v1's bits | differ | differ | v1's bits |
+| `LLT`, `HouseholderQR` | v1's bits | differ | differ | v1's bits |
+| `JacobiSVD<Mat9>` | v1's bits | v1's bits | differ | v1's bits |
+
+At v3, Eigen's packets hold four doubles instead of two, so every reduction runs in another order. Contraction is not
+the only difference. With `-U__AVX__ -U__AVX2__ -U__FMA__` Eigen keeps its SSE2 packets and gives v1's bits, while the
+compiler still emits VEX code everywhere else.
+
+**And an exact v3 build gains nothing.** The Linux CUDA bundle was built with AliceVision at
+`-march=x86-64-v3 -ffp-contract=off` and the AVX macros undefined (`build/wsl-v3p.lf.sh`; the dependencies stay v1).
+It was gated on house-pc's GTX 1080 Ti against the 0.4.4 gate: every depth map was the same in all nine runs. The
+times were the same too: the 41 views took 571 s in both, and each mini6 configuration was within 5 s. A tier that
+gives the same bytes is no faster, and a faster one (Eigen at AVX width) would make the results depend on the
+user's CPU. So the packages stay as they are: no tiers.
+
+**What remained was a crash.** On a CPU older than its payload, a Windows node died on its first AVX2 instruction:
+an RDNA3/4 card's rocm7.2 payload on a pre-Haswell CPU, say. `cheshireSelectPayload` now checks CPUID, and that the
+OS saves YMM state, against the family it chose. If the CPU cannot run it, the family is refused and the message names
+the missing feature. `cheshire-detect.exe` exits 3 and `cheshire-run.cmd` prints the reason. Under
+`CHESHIRE_BACKEND=auto` the Meshroom launcher runs Meshroom's own binary for the node, as an unpaired Meshroom would;
+under `=cheshire` it stops and says why. `CHESHIRE_CPU_TEST=avx|v2|v1` pretends the CPU stops at that level. On the
+RX 9070 box, against the extracted 0.4.4 zip, the refusal named AVX2 (and AVX at `v2`), the launcher's fallback ran
+the stand-in binary, and the normal path chose rocm7.2/gfx12-generic as before.
