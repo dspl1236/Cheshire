@@ -943,7 +943,8 @@ large sets).
   15a, CPU SIFT where the loaded PopSIFT has no code object for the card; 15b, PopSIFT from generic code objects. The
   0xC0000094 since v0.2.17 was rocThrust in PopSIFT's grid filter, whose kernels are empty under a generic target; the
   filter runs on the host now, its features byte for byte upstream's on the 41 views and the False Door. Future RDNA2-4
-  chips get GPU SIFT along with the rest. Next: the 0.4.4 release round.
+  chips get GPU SIFT along with the rest. **Released as v0.4.4 on 2026-10-10** (docs/04, "The 0.4.4 release round";
+  the False Door's FeatureMatching through the release zips 77-85 s to 43 s). Next: 0.5.0, packaging II.
 - **0.5.0, packaging II:** x86-64 ISA tiers chosen by CPUID (FMA contraction controlled, so every tier gives the same
   bytes) and older-glibc Linux bundles from a jammy or bookworm container.
 - **Then:** "Hardware coverage" below.
