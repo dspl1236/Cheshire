@@ -182,6 +182,18 @@ int wmain() {
         std::wstring fam, tgt;
         bool layoutMismatch = false;
         if (!cheshireSelectPayload(pkg, false, &fam, &tgt, &layoutMismatch)) {
+            // The card's payload needs a newer CPU (cheshireCpuCanRun said which feature): under auto, the node
+            // runs as an unpaired Meshroom would run it, rather than not at all.
+            if (g_cheshireCpuRefused && mode == L"auto") {
+                fwprintf(stderr, L"[cheshire] %ls: Meshroom's own binary (%ls): this CPU cannot run the package's payload\n",
+                         stem.c_str(), orig.c_str());
+                return run(orig, args);
+            }
+            if (g_cheshireCpuRefused) {
+                fwprintf(stderr, L"[cheshire] %ls: this CPU cannot run the package's payload, and CHESHIRE_BACKEND=%ls asks for"
+                                 L" the package; unset it to run Meshroom's own binary\n", stem.c_str(), mode.c_str());
+                return 2;
+            }
             fwprintf(stderr, layoutMismatch
                 ? L"[cheshire] %ls: the HIP runtime's device-property layout is not the one this "
                   L"launcher was built against; refusing to guess a payload\n"

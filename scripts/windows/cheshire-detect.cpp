@@ -4,8 +4,9 @@
 //   cheshire-detect.exe --family <n> <root>       probe one family only (used internally)
 //
 // Prints "<family> <target>" (e.g. "rocm7.2 gfx12-generic") and exits 0; exits 1 if no family
-// enumerated a device it has a payload for, or 2 if a runtime answered but its device-property
-// layout no longer matches what this was built against.
+// enumerated a device it has a payload for, 2 if a runtime answered but its device-property
+// layout no longer matches what this was built against, or 3 if the card's payload needs a newer
+// CPU than this one (0.5.0; the message names the missing feature).
 //
 // The --family form is what makes the normal form safe. A HIP runtime built for a driver that is
 // not installed can crash on load rather than report no device - on an RX 6750 XT under a
@@ -47,6 +48,7 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     }
     if (layoutMismatch) return 2;
+    if (g_cheshireCpuRefused) return 3;  // the card's payload needs a newer CPU; already said which feature
     fwprintf(stderr, L"[detect] no AMD GPU with a matching payload under %ls\\gpu\n", root.c_str());
     return 1;
 }

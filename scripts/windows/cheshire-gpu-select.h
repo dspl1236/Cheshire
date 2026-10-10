@@ -339,8 +339,63 @@ static bool cheshireAskChild(const std::wstring& root, int famIndex, bool verbos
     return true;
 }
 
+// The CPU a family's payload was compiled for (0.5.0, docs/16). The rocm7.2 payloads are built with clang-cl
+// /arch:AVX2, which is x86-64-v3 (AVX2, FMA, BMI1/2, F16C, LZCNT, MOVBE; Intel Haswell 2013, AMD Excavator 2015 / Zen
+// 2017 and newer), and use those instructions throughout; the hip6.2 payloads with /arch:AVX (Sandy Bridge 2011,
+// Bulldozer 2011). On an older CPU the first such instruction kills the node with an illegal-instruction fault, so a
+// family whose payload this CPU cannot run is refused here, with the reason, and the node stays with Meshroom's own
+// binaries. Returns the first missing feature, or nullptr. CHESHIRE_CPU_TEST=avx (or v2, v1) pretends the CPU stops
+// at that level, to exercise the refusal on a newer one.
+#include <intrin.h>
+static const wchar_t* cheshireCpuLacks(const std::wstring& family) {
+    const bool v3 = family == L"rocm7.2";
+    const bool avx = v3 || family == L"hip6.2";
+    if (!avx) return nullptr;
+    int r[4];
+    __cpuid(r, 0);
+    const int maxLeaf = r[0];
+    __cpuid(r, 1);
+    const int ecx1 = r[2];
+    int ebx7 = 0;
+    if (maxLeaf >= 7) { __cpuidex(r, 7, 0); ebx7 = r[1]; }
+    __cpuid(r, 0x80000001);
+    const int ecxE = r[2];
+    const bool osYmm = (ecx1 >> 27 & 1) && ((_xgetbv(0) & 6) == 6);
+    wchar_t test[8] = L"";
+    GetEnvironmentVariableW(L"CHESHIRE_CPU_TEST", test, 8);
+    const bool fakeV1 = !wcscmp(test, L"v1"), fakeV2 = fakeV1 || !wcscmp(test, L"v2"), fakeAvx = fakeV2 || !wcscmp(test, L"avx");
+    struct Need { bool has; const wchar_t* name; };
+    const Need needs[] = {
+        { !fakeV1 && (ecx1 >> 20 & 1), L"SSE4.2" }, { !fakeV1 && (ecx1 >> 23 & 1), L"POPCNT" },
+        { !fakeV2 && (ecx1 >> 28 & 1) && osYmm, L"AVX (with the OS saving YMM state)" },
+        { !fakeAvx && (ebx7 >> 5 & 1), L"AVX2" }, { !fakeAvx && (ecx1 >> 12 & 1), L"FMA" },
+        { !fakeAvx && (ebx7 >> 3 & 1), L"BMI1" }, { !fakeAvx && (ebx7 >> 8 & 1), L"BMI2" },
+        { !fakeAvx && (ecx1 >> 29 & 1), L"F16C" }, { !fakeAvx && (ecxE >> 5 & 1), L"LZCNT" },
+        { !fakeAvx && (ecx1 >> 22 & 1), L"MOVBE" },
+    };
+    const int count = v3 ? 10 : 3;
+    for (int i = 0; i < count; ++i)
+        if (!needs[i].has) return needs[i].name;
+    return nullptr;
+}
+
+// Refuse a chosen family this CPU cannot run (cheshireCpuLacks), saying so whatever the verbosity: without it the
+// only symptom is "no payload", or with it a crash. g_cheshireCpuRefused tells the caller why it got no payload.
+static bool g_cheshireCpuRefused = false;
+static bool cheshireCpuCanRun(const std::wstring& family, const std::wstring& target) {
+    const wchar_t* lacks = cheshireCpuLacks(family);
+    if (!lacks) return true;
+    g_cheshireCpuRefused = true;
+    fwprintf(stderr, L"[detect] the %ls %ls payload needs a CPU with %ls, which this one does not have (%ls needs %ls): "
+                     L"no payload for this machine (paired into Meshroom, its own binaries run instead)\n",
+             family.c_str(), target.c_str(), lacks,
+             family.c_str(), family == L"rocm7.2" ? L"x86-64-v3: Intel Haswell 2013, AMD Excavator 2015 / Zen 2017 or newer"
+                                                  : L"AVX: Intel Sandy Bridge 2011, AMD Bulldozer 2011 or newer");
+    return false;
+}
+
 // Choose the payload for the card in this machine, one family per child process. Returns true and
-// fills family/target, or false if no family answered.
+// fills family/target, or false if no family answered, or the one that did needs a newer CPU.
 //
 // Isolation is the point: a HIP runtime built for a driver that is not installed can crash on load
 // instead of reporting no device, and the family that would have worked is the one after it. In
@@ -363,13 +418,13 @@ static bool cheshireSelectPayload(const std::wstring& root, bool verbose,
         if (sp == std::wstring::npos) continue;
         *family = line.substr(0, sp);
         *target = line.substr(sp + 1);
-        return true;
+        return cheshireCpuCanRun(*family, *target);
     }
     // No child produced an answer. Either none could, or cheshire-detect.exe is not beside us - in
     // which case fall back to probing here, accepting the crash risk rather than refusing to run.
     if (!spawned && GetFileAttributesW((base + L"\\cheshire-detect.exe").c_str()) == INVALID_FILE_ATTRIBUTES) {
         if (verbose) fwprintf(stderr, L"[detect] no cheshire-detect.exe beside the package; probing in-process\n");
-        return cheshireProbeFamilies(base, verbose, -1, family, target, layoutMismatch);
+        return cheshireProbeFamilies(base, verbose, -1, family, target, layoutMismatch) && cheshireCpuCanRun(*family, *target);
     }
     return false;
 }

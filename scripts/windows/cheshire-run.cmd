@@ -22,14 +22,18 @@ rem failure looks like a missing GPU rather than a quoting problem.
 set FAM=
 set TGT=
 set DETOUT=%TEMP%\cheshire-detect-%RANDOM%.txt
-"%ROOT%\cheshire-detect.exe" "%ROOT%" > "%DETOUT%" 2>nul
+"%ROOT%\cheshire-detect.exe" "%ROOT%" > "%DETOUT%" 2> "%DETOUT%.err"
+set DETRC=%ERRORLEVEL%
 for /f "usebackq tokens=1,2" %%A in ("%DETOUT%") do (
   set FAM=%%A
   set TGT=%%B
 )
 del "%DETOUT%" 2>nul
+rem exit 3: the card's payload needs a newer CPU (0.5.0); the detector says which feature is missing
+if "%DETRC%"=="3" type "%DETOUT%.err"
+del "%DETOUT%.err" 2>nul
 if not defined FAM (
-  echo [cheshire] no AMD GPU with a matching payload; run cheshire-detect.exe -v for detail
+  if not "%DETRC%"=="3" echo [cheshire] no AMD GPU with a matching payload; run cheshire-detect.exe -v for detail
   exit /b 2
 )
 
