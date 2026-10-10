@@ -539,15 +539,24 @@ void logOnce(const char* what) {
     std::fprintf(stderr, "[cheshire] matcher: %s\n", what);
 }
 
-// Step 14b: CHESHIRE_GPU_MATCHER_AHEAD (default on): searches queued ahead (KnnMatcher::searchAsync); announced once
+// Step 14b: CHESHIRE_GPU_MATCHER_AHEAD (default on): searches queued ahead (KnnMatcher::searchAsync); announced once, as
+// what runs. The matcher profile (CHESHIRE_GPU_MATCHER_LOG=1) times each phase of a search, so it searches one at a time;
+// it used to skip the announcement as well, and the 0.4.4 release gate's blast run found the matcher silent.
 bool asyncEnabled()
 {
     static const bool on = [] {
-        const bool v = ::cheshire::env::flag("CHESHIRE_GPU_MATCHER_AHEAD", true);
-        std::fprintf(stderr, v ? "[cheshire] matcher: the next pair's search queued while this pair's matches are filtered (exact; "
-                                 "CHESHIRE_GPU_MATCHER_AHEAD=0 for one at a time)\n"
-                               : "[cheshire] matcher: one search at a time (CHESHIRE_GPU_MATCHER_AHEAD=0)\n");
-        return v;
+        if (!::cheshire::env::flag("CHESHIRE_GPU_MATCHER_AHEAD", true)) {
+            std::fprintf(stderr, "[cheshire] matcher: one search at a time (CHESHIRE_GPU_MATCHER_AHEAD=0)\n");
+            return false;
+        }
+        if (g_profile.on) {
+            std::fprintf(stderr, "[cheshire] matcher: one search at a time while CHESHIRE_GPU_MATCHER_LOG=1 times each phase "
+                                 "(the next pair's search is queued without it)\n");
+            return false;
+        }
+        std::fprintf(stderr, "[cheshire] matcher: the next pair's search queued while this pair's matches are filtered (exact; "
+                             "CHESHIRE_GPU_MATCHER_AHEAD=0 for one at a time)\n");
+        return true;
     }();
     return on;
 }
@@ -939,8 +948,15 @@ bool KnnMatcher::search2(const void* queries, int nbQuery, int* idx, float* dist
 bool KnnMatcher::searchAsync(const void* queries, int nbQuery)
 {
     Impl& m = *impl_;
-    if (m.rows < 2 || nbQuery < 1 || g_profile.on || !asyncEnabled()) return false;
-    if (!m.isFloat && g_u8Kernel == kSliced) return false;
+    if (m.rows < 2 || nbQuery < 1 || !asyncEnabled()) return false;
+    if (!m.isFloat && g_u8Kernel == kSliced) {
+        static const bool told = [] {
+            std::fprintf(stderr, "[cheshire] matcher: uint8 searches one at a time, the sliced kernel (CHESHIRE_MATCHER_SLICED) is not queued\n");
+            return true;
+        }();
+        (void)told;
+        return false;
+    }
     std::lock_guard<std::mutex> g(g_async.m);
     AsyncSlot* sl = nullptr;
     for (AsyncSlot& s : g_async.slots) {

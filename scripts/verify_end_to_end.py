@@ -52,8 +52,10 @@ GPU_MARKERS = {
                           r"7-point fits (four at a time, Eigen's SVD in AVX2 lanes|one at a time, the QR nullspace)",
                           # after 0.4.3: every view's descriptors on the device once for all its searches (14a)
                           r"matcher: descriptors kept on the device across searches",
-                          # and each pair's search queued one pair ahead (14b)
-                          r"matcher: the next pair's search queued while this pair's matches are filtered",
+                          # and each pair's search queued one pair ahead (14b), or one at a time while the matcher
+                          # profile (CHESHIRE_GPU_MATCHER_LOG=1, blast) times each phase
+                          r"matcher: (the next pair's search queued while this pair's matches are filtered|"
+                          r"one search at a time while CHESHIRE_GPU_MATCHER_LOG=1 times each phase)",
                           r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far",
                           r"cheshire: GPU search and geometric filter overlapped"],
     # after 0.4.0: the T cameras (step 10e) and the tiles' depth lists (10h) from each camera's own landmarks, the
@@ -456,8 +458,14 @@ CONFIGS = {
     # ds1 plus every opt-in speed path and the profile logs, so the run reports where time went.
     # Most acceleration is already default-on; what this adds is the 7-point QR nullspace (held
     # opt-in, docs/15), the 5-point one (step 9j, docs/17) and a larger filter cache.
-    "blast": dict(overrides=SIFT + ["DepthMap:downscale=1"], checks={
+    # 0.4.4: the QR nullspace takes the 7-point fits one at a time (13a's lanes unused, and not announced), and the matcher
+    # profile searches one pair at a time (14b) and says so; the 0.4.4 release gate found both logs wrong here.
+    "blast": dict(overrides=SIFT + ["DepthMap:downscale=1"], forbid={
+        "FeatureMatching": [r"7-point fits four at a time", r"next pair's search queued"]}, checks={
         "FeatureMatching": [r"7-point nullspace: Householder QR \(CHESHIRE_QR_NULLSPACE=1\)",
+                            r"7-point fits one at a time, the QR nullspace",
+                            r"matcher: one search at a time while CHESHIRE_GPU_MATCHER_LOG=1 times each phase",
+                            r"matcher profile: \d+ builds",
                             r"other +vram: [1-9]\d* allocs"],
         "StructureFromMotion": [r"5-point nullspace: Householder QR \(CHESHIRE_QR_NULLSPACE5=1\)"],
         # 0.3.2 items 4 and 5: the bridge summary (CHESHIRE_BRIDGE_LOG=1) must show the camera
@@ -676,7 +684,11 @@ def run_one(name, cfg, meshroom: Path, photos: Path, outroot: Path) -> bool:
             checks[n] = checks.get(n, []) + list(pats)
     unmet = [f"{n}: /{p}/" for n, pats in checks.items()
              for p in pats if not re.search(p, node_logs(cache, n))]
-    for n, pats in FORBIDDEN.items():
+    # what no run may log, and what this config may not (its "forbid": a line that would contradict its switches)
+    forbid = {n: list(p) for n, p in FORBIDDEN.items()}
+    for n, pats in cfg.get("forbid", {}).items():
+        forbid[n] = forbid.get(n, []) + list(pats)
+    for n, pats in forbid.items():
         for p in pats:
             m = re.search(p, node_logs(cache, n))
             if m:

@@ -446,11 +446,13 @@ inline Stats& stats()
     return s;
 }
 
-/// CHESHIRE_ACR_SVD_LANES_CHECK=1: what the check found, once the caller's estimations are done
+/// CHESHIRE_ACR_SVD_LANES_CHECK=1: what the check found, once the caller's estimations are done. Fits were checked only
+/// if the lanes ran, so state() is read only then: reading it first would announce the lanes in a run that never used
+/// them (the QR nullspace's, which takes precedence; the 0.4.4 release gate's blast run logged both).
 inline void report()
 {
     const Stats& s = stats();
-    if (state().check && s.checked.load() > 0)
+    if (s.checked.load() > 0 && state().check)
         std::fprintf(stderr, "[cheshire] 7-point four-lane SVD check: %lld of %lld fits identical to Eigen's\n", s.checked.load() - s.differ.load(),
                      s.checked.load());
 }
