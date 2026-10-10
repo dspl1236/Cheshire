@@ -2,13 +2,14 @@
 """FeatureMatching benchmark on a set sfmbench.py prepared, with the development install - for the geometric filtering
 (AC-RANSAC), whose output has to stay byte for byte the same.
 
-  run <set> --tag <name> [--maxIteration N] [--ref <tag>] [KEY=VALUE ...]
+  run <set> --tag <name> [--maxIteration N] [--ref <tag>] [--runner <cmd>] [KEY=VALUE ...]
         aliceVision_featureMatching from build/sfmbench/<set>/cache with sfmbench's options (Meshroom 2023.3's; 2025.1
         raised maxIteration from 2048 to 50000), into build/fmbench/<set>/<tag>; prints the wall time, the log's
         geometric filtering time and one digest over every match file, and with --ref whether they are byte for byte
         those of an earlier tag.
 
-Every binary is started through build/dev-run.cmd (the development install), as sfmbench.py does.
+Every binary is started through build/dev-run.cmd (the development install), as sfmbench.py does, or through --runner, a
+launcher .cmd in build/ (e.g. one that calls a release package's cheshire-run.cmd, to time two packages against each other).
 """
 from __future__ import annotations
 
@@ -60,10 +61,11 @@ def main(argv: list[str]) -> None:
            "--matchFromKnownCameraPoses", "False", "--exportDebugFiles", "False", "--verboseLevel", "info",
            "--output", str(out)]
     env = dict(os.environ, **envs)
+    runner = B / argv[argv.index("--runner") + 1] if "--runner" in argv else DEVRUN
     log = out / "fm.log"
     t0 = time.perf_counter()
     with open(log, "w", encoding="utf-8", errors="replace") as f:
-        r = subprocess.run(["cmd", "/c", str(DEVRUN)] + cmd, stdout=f, stderr=subprocess.STDOUT, env=env, cwd=str(ROOT))
+        r = subprocess.run(["cmd", "/c", str(runner)] + cmd, stdout=f, stderr=subprocess.STDOUT, env=env, cwd=str(ROOT))
     wall = time.perf_counter() - t0
     if r.returncode:
         sys.exit(f"featureMatching failed ({r.returncode}); see {log}")

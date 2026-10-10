@@ -5357,3 +5357,51 @@ The Linux PopSIFT is built for gfx1010 to gfx1013 by name plus `gfx10-3-generic`
 same way. GPU SIFT ran from the `gfx10-3-generic` code object ("PopSIFT carries code for gfx1031, its family's
 gfx10-3-generic"), all nine pipelines exit 0, and every depth map again equals the 0.4.3 gate's (the 41 views 511 s). The Windows HIP 6.2 family (RDNA1 and RDNA2) stays per chip: that toolchain emits a generic target
 only as code object v6, which it calls not ready for production (docs/16).
+
+## The 0.4.4 release round (2026-10-09)
+
+**The packages, twice.** The first build (9f51bc8, `build/chain-044.cmd`) passed the Linux AMD gate. The Windows AMD
+gate's `blast` run then failed the marker rule on two log lines that did not say what ran. Under the matcher profile
+(`CHESHIRE_GPU_MATCHER_LOG=1`), 14b searches one pair at a time and returned before its announcement, so the
+matcher said nothing about it. With the QR nullspace, 13a's lanes never run, but the end-of-node report read their
+state first and so announced "four at a time, Eigen's SVD in AVX2 lanes". Both now log what runs (355306f), and
+`blast` requires those lines and forbids the wrong ones (`verify_end_to_end.py` configs can forbid lines now). The
+same gate then stopped on a full disk (`OSError: [Errno 28]`, D: at 0 GB): old gate caches were cleared and the gate
+script now refuses to start with less than 80 GB free. The four packages were built again at 355306f and every gate
+run again. The first build was set aside as `build/release/0.4.4-logs` and was not published.
+
+**The gates** (the rebuilt packages, each as the file you download).
+
+| package | hardware | 2025.1: mini6 | 2025.1: 41 views | 2023.3: mini6 |
+|---|---|---|---|---|
+| Windows AMD | RX 9070 (rocm7.2 gfx12-generic payload) | 19/19 | base 297 s, verify 691 s, experimental 272 s, fastransacexp 257 s, verifyexp 696 s | 4/4 |
+| Linux AMD | RX 6750 XT (house-pc) | 7/7 | experimental 511 s, and 566 s with 13a, 14a, 14b and 15b's host filter off | 1/1 |
+| Linux CUDA | GTX 1080 Ti (house-pc) | PENDING | | |
+| Windows CUDA | not run on an NVIDIA card (below) | | | |
+
+On the RX 9070, 26 of the 28 configurations' depth maps are the 0.4.3 gate's byte for byte. The other two are the
+`cpufallback` runs, CPU SIFT's, which differ from run to run (above). The 41-view times are 0.4.3's gate's within
+−5 % and +2 %. On the 41 views, FeatureMatching is a few seconds of the 270-700 s.
+
+On the RX 6750 XT every depth map is the 0.4.3 gate's, byte for byte. That includes the 41 views with
+`CHESHIRE_ACR_SVD_LANES=0`, `CHESHIRE_GPU_MATCHER_RESIDENT=0`, `CHESHIRE_GPU_MATCHER_AHEAD=0` and
+`CHESHIRE_POPSIFT_HOST_FILTER=0`. gfx1031 is not in rocPRIM's table, so the rocThrust filter runs there. That run takes
+566 s, as 0.4.3 did, and 511 s with the steps on (−9.7 %; 13a's lanes on house-pc's Haswell had given 506 s). GPU SIFT
+ran from the bundle's `gfx10-3-generic` PopSIFT ("carries code for gfx1031, its family's gfx10-3-generic").
+
+**The False Door's FeatureMatching, 0.4.3 against 0.4.4.** `aliceVision_featureMatching` on the 884-view set's kept
+cache (Meshroom 2023.3's options, maxIteration 2048), through each Windows AMD zip's own `cheshire-run.cmd`
+(`fmbench.py --runner`), alternating, on the idle RX 9070 box:
+
+| run | 0.4.3 | 0.4.4 |
+|---|---|---|
+| 1 | 85.0 s | 42.7 s |
+| 2 | 76.5 s | 43.3 s |
+
+That is −47 %, and the match file is 0.3.9's reference (`ebffcb37a3bd2b0b`) in all four runs.
+
+**Windows CUDA**, still without a test box, got the same smoke test as 0.4.3 (`build/nightly-cmp/mk_g44.py`,
+`replay_cudapkg044.py`, `cmp_cudapkg044.py`). The zip's eight new-pipeline programs ran on a copy of this gate's
+41-view Photogrammetry Experimental cache, from the zip's own `bin` and Windows alone. All finished. TracksBuilding's
+files are the AMD zip's byte for byte, and SfMExpanding placed all 41 cameras within 0.0028 % of the scene's radius
+of the AMD zip's reconstruction (rotations within 0.0028 degrees), as in 0.4.0-0.4.3.
