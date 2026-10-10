@@ -1271,7 +1271,7 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   width keeps them but the v3 Linux CUDA bundle was then no faster (41 views 571 s against 571 s, every depth map
   the same). Instead the Windows bundle refuses a payload the CPU cannot run (CPUID check, exit 3, Meshroom's own
   binary under auto) rather than crashing on an AVX2 instruction.
-- **Older-glibc Linux bundles** (L). Both are built on glibc 2.39 (`docs/06-linux-build.md:22`).
+- **Older-glibc Linux bundles** (L). **Done 2026-10-10 (docs/04, "0.5.0: Linux bundles for glibc 2.35")**: built in a jammy container, they need GLIBC_2.35 / GLIBCXX_3.4.30 and load on a bare Ubuntu 22.04; the depth maps are 0.4.4's on both cards. Was: both are built on glibc 2.39 (`docs/06-linux-build.md:22`).
   Needs a jammy or bookworm container and a test node. In the same pass, pin
   `AV_BUILD_SUITESPARSE=OFF` and add a GPL check to the Linux packagers.
 - **Meshroom 2025.x** (M). Pairing, shims and gates target 2023.3 only; 2025.1.0 is declared

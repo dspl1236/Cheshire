@@ -5446,3 +5446,36 @@ the missing feature. `cheshire-detect.exe` exits 3 and `cheshire-run.cmd` prints
 under `=cheshire` it stops and says why. `CHESHIRE_CPU_TEST=avx|v2|v1` pretends the CPU stops at that level. On the
 RX 9070 box, against the extracted 0.4.4 zip, the refusal named AVX2 (and AVX at `v2`), the launcher's fallback ran
 the stand-in binary, and the normal path chose rocm7.2/gfx12-generic as before.
+
+## 0.5.0: Linux bundles for glibc 2.35 (2026-10-10)
+
+**What the bundles needed.** The 0.4.4 Linux bundles, built on the noble box with GCC 13, need `GLIBC_2.38` and
+libstdc++'s `GLIBCXX_3.4.32`, which is not bundled. On Ubuntu 22.04 every program stopped at load time
+("`GLIBCXX_3.4.31' not found"). `scripts/linux/jammy/loadtest.sh` shows it: the bundle is extracted into a bare
+`ubuntu:22.04` container (no ROCm, CUDA or compiler), and ldd runs on every ELF file with the bundle's `lib/` on the
+library path, as its users set it, and every `aliceVision_*` program is started.
+
+**The jammy container.** `scripts/linux/jammy` builds both bundles in an Ubuntu 22.04 container on the WSL box's
+Docker: glibc 2.35, GCC 12, Kitware's CMake 3.31 (upstream's `docker/Dockerfile_ubuntu_deps` package set), ROCm 7.2
+and CUDA 12.9 from the vendors' jammy repositories. The steps and their order are the release chain's WSL side. Two
+traps on the way:
+- The WSL distro has IPv4 forwarding off, so a bridged container cannot reach the mirrors; it uses the host's network.
+- With a CUDA toolkit present, Ceres 2.2's `USE_CUDA` defaults on, and its configure failed identifying nvcc. The
+  noble deps were built before that box had CUDA, so every shipped Linux Ceres is `CERES_NO_CUDA`.
+
+`build-deps.sh` now pins what the noble deps were configured with, read back from their CMakeCache: SuiteSparse,
+LAPACK, Xerces-C and OpenMP off (the superbuild defaults the first two on, so a fresh superbuild would have linked GPL
+CHOLMOD), and Ceres's CUDA off. The dependency versions are the noble prefix's: Eigen 3.4.0, Ceres 2.2, OpenImageIO
+3.0.17, Boost 1.86, OpenEXR 3.1.6, geogram 1.9.6.
+
+**The result.** Both bundles need at most `GLIBC_2.35` and `GLIBCXX_3.4.30` (`build-bundles.sh` refuses more). On a
+bare `ubuntu:22.04` every library resolves and every program starts: 196 ELF files and 208 programs in the HIP bundle,
+180 and 208 in the CUDA bundle. The 0.4.4 bundle fails the same test. On house-pc, each was gated against the 0.4.4
+gate's depth maps:
+
+| bundle | card | runs | depth maps | 41 views |
+|---|---|---|---|---|
+| HIP, jammy | RX 6750 XT | 10, the 13a-15b-off run included | every one the 0.4.4 gate's | 516 s (0.4.4: 511-516 s), 566 s with the steps off |
+| CUDA, jammy | GTX 1080 Ti | 9 | every one the 0.4.4 gate's | 581 s (0.4.4: 571 s) |
+
+So GCC 12 against 13 changes no byte. (GPU SIFT ran from the jammy PopSIFT's `gfx10-3-generic` code.)
