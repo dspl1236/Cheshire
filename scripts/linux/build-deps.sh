@@ -19,6 +19,12 @@ export CMAKE_POLICY_VERSION_MINIMUM=3.5
 # GCC 13: assimp's bundled Draco lacks <cstdint> includes ("uint8_t was not declared")
 ASSIMP_CMAKE="$AV_DEV/src/cmake/deps/assimp.cmake"
 grep -q "include cstdint" "$ASSIMP_CMAKE" || sed -i 's|            -DASSIMP_BUILD_DRACO:BOOL=ON|            -DASSIMP_BUILD_DRACO:BOOL=ON\n            "-DCMAKE_CXX_FLAGS=-include cstdint"|' "$ASSIMP_CMAKE"
+# Ceres without CUDA, as every shipped Linux Ceres (CERES_NO_CUDA): the noble deps were built before the box had a CUDA
+# toolkit, so Ceres found none. Where one is installed (the jammy container), Ceres 2.2's USE_CUDA defaults ON, and its
+# configure failed there identifying nvcc (2026-10-10).
+CERES_CMAKE="$AV_DEV/src/cmake/deps/ceres.cmake"
+grep -q "USE_CUDA" "$CERES_CMAKE" || sed -i 's|            -DMINIGLOG=ON|            -DMINIGLOG=ON\n            -DUSE_CUDA:BOOL=OFF|' "$CERES_CMAKE"
+grep -q "USE_CUDA:BOOL=OFF" "$CERES_CMAKE" || { echo "could not pin USE_CUDA=OFF in $CERES_CMAKE" >&2; exit 1; }
 mkdir -p "$AV_BUILD" "$AV_INSTALL/lib"
 ln -sfn lib "$AV_INSTALL/lib64"
 cd "$AV_BUILD"
