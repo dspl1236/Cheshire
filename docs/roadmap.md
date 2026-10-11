@@ -972,7 +972,11 @@ Next:
   startup. The later batches' uploads overlap the tiles since 12a and 12b.
 - **The Windows CUDA zip and the Windows hip6.2 payloads on hardware**, when bench-pc is back: neither has run on a
   card since 0.3.9 and 0.4.0 respectively.
-- **Smaller host costs in the same logs:** Meshing's "Create visibilities" (64 s).
+- **Smaller host costs in the same logs:** Meshing's "Create visibilities" (64 s). **Measured 2026-10-11 and dropped**
+  (docs/04, "After 0.4.5: Meshing's visibility passes, measured"): of the False Door's 211 s Meshing node the two
+  passes take about 68 s, and 57 s of that is the device's backprojection and kd-tree walk (latency-bound, above); the
+  host's part (index 4.6 s, staging 3 s, votes 4.5 s, map waits 8 s) is spread thin, and 6 or 8 map readers instead of
+  3 change nothing (209-214 s, the same pass digests).
 - **The reference patch is not cacheable exactly.** `volume_computeSimilarity_kernel` samples the R camera on a
   3D patch built per depth (epipolar-aligned axes); its pixel positions agree across depths only in exact
   arithmetic, and bilinear sampling sees the rounding. It stays with "Texture-window caching" under DepthMap below.

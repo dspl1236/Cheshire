@@ -5538,3 +5538,26 @@ Their depth maps still differ, from FeatureMatching on: `cpufallback` also switc
 CPU matcher (`ANN_L2`, FLANN's randomized kd-trees) shuffles each tree from a generator seeded by `std::random_device`
 (`flann/algorithms/kdtree_index.h`), ignoring the `random_seed` AliceVision passes. Every run builds different trees, so
 the approximate neighbours differ (282 against 300 matches on the first pair). The roadmap has it.
+
+## After 0.4.5: Meshing's visibility passes, measured (2026-10-11)
+
+The roadmap listed Meshing's "Create visibilities" (64 s on the False Door) as a host cost. `scripts/meshbench.py 833`
+(the kept False Door cache, the dev build, RX 9070) puts the plain node at 211 s. `CHESHIRE_GPU_VIS_LOG=1` splits the
+two visibility passes:
+
+| | pass 1 | pass 2 |
+|---|---|---|
+| device: backprojection, kd-tree walk and votes | 33.2 s | 23.6 s |
+| host waiting on the device | 25.6 s | 12.9 s |
+| waiting for depth maps (3 readers) | 4.0 s | 6.3 s |
+| index build | 2.9 s | 1.7 s |
+| staging the queries | 1.4 s | 1.6 s |
+| camera-list appends from the device's votes | 3.0 s | 1.5 s |
+| total | 40.2 s | 28.0 s |
+
+So most of it is the device's walk, already found latency-bound (roadmap, "Meshing's visibility passes are not
+FP64-bound"). The host's share is spread thin. More map readers do not move it: 6 and 8 readers against 3 gave
+209.4, 213.0 and 213.6 s, the waits the same, and the same pass digests (`c572bc163615194e`, `f0ff15ea5102a55c`). The
+node's other large blocks are the first read of the depth maps (about 22 s), the tetrahedralization (18 s, geogram)
+and the s-t weights with the votes on the device (26 s). (`CHESHIRE_GPU_VOTE_LOG=1` also runs the neighbour-table and
+facet-weight checks, which nearly doubled the node, so profile with `CHESHIRE_GPU_VIS_LOG=1` alone.)
