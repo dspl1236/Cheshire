@@ -107,12 +107,13 @@ GPU_MARKERS = {
 }
 # ... and the lines printed when switched off. DepthMap and PrepareDenseScene have no such switch,
 # so they keep their markers in the fallback run. FeatureExtraction is forced onto the CPU there
-# (forceCpuExtraction=True, see CPUFALLBACK below), so its GPU SIFT lines cannot appear and it is
-# held only to being the paired binary, as in the defaults configuration. Sim blur announces its
+# (forceCpuExtraction=True, see CPUFALLBACK below), so its GPU SIFT lines cannot appear; since 16a
+# (after 0.4.5) CPU SIFT announces its keypoint order instead, which makes the fallback run's
+# features, and so its depth maps, repeat run to run. Sim blur announces its
 # disabled state; max-flow and visibility do not, so with CHESHIRE_GPU_MAXFLOW=0 and
 # CHESHIRE_GPU_VIS=0 set the fallback run exercises their CPU paths without being able to prove it.
 CPU_MARKERS = {
-    "FeatureExtraction": [],
+    "FeatureExtraction": [r"CPU SIFT keypoints in (the order one thread adds them|arrival order)"],
     "DepthMap":          GPU_MARKERS["DepthMap"],
     "PrepareDenseScene": GPU_MARKERS["PrepareDenseScene"],
     "FeatureMatching":   [r"GPU brute-force disabled by CHESHIRE_GPU_MATCHER=0",

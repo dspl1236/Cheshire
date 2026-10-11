@@ -6995,6 +6995,78 @@ index 0266660..63d1f1d 100644
    private:
      void resetConfiguration();
  
+diff --git a/src/aliceVision/feature/sift/SIFT.cpp b/src/aliceVision/feature/sift/SIFT.cpp
+index 0111a5b..26ce301 100644
+--- a/src/aliceVision/feature/sift/SIFT.cpp
++++ b/src/aliceVision/feature/sift/SIFT.cpp
+@@ -4,6 +4,7 @@
+ // v. 2.0. If a copy of the MPL was not distributed with this file,
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ #include "SIFT.hpp"
+ 
+ namespace aliceVision {
+@@ -371,6 +372,23 @@ bool extractSIFT(const image::Image<float>& image,
+ 
+         std::vector<std::vector<double>> anglesPerKeypoint(filteredKeypointsIndex.size());
+ 
++        // cheshire (step 16a): each keypoint's features in a slot of its own, appended in loop order after the loop
++        static const bool cheshireSiftOrder = []() {
++            const bool on = ::cheshire::env::flag("CHESHIRE_SIFT_SORT", true);
++            if (on)
++                ALICEVISION_LOG_INFO("cheshire: CPU SIFT keypoints in the order one thread adds them (CHESHIRE_SIFT_SORT=0 for arrival order)");
++            else
++                ALICEVISION_LOG_INFO("cheshire: CPU SIFT keypoints in arrival order (CHESHIRE_SIFT_SORT=0)");
++            return on;
++        }();
++        struct CheshireSiftSlot
++        {
++            std::vector<Descriptor<T, 128>> descriptors;
++            std::vector<PointFeature> features;
++            std::vector<float> peaks;
++        };
++        std::vector<CheshireSiftSlot> cheshireSlots(cheshireSiftOrder ? filteredKeypointsIndex.size() : 0);
++
+ #pragma omp parallel for
+         for (int ii = 0; ii < static_cast<int>(filteredKeypointsIndex.size()); ++ii)
+         {
+@@ -393,12 +411,31 @@ bool extractSIFT(const image::Image<float>& image,
+                 vl_sift_calc_keypoint_descriptor(filt, &vlFeatDescriptor[0], keys + i, angles[q]);
+                 convertSIFT<T>(&vlFeatDescriptor[0], descriptor, params._rootSift);
+ 
+-#pragma omp critical
++                if (cheshireSiftOrder)
+                 {
+-                    regionsCasted->Descriptors().push_back(descriptor);
+-                    regionsCasted->Features().push_back(fp);
+-                    featuresPeakValue.push_back(keys[i].peak_value);
++                    CheshireSiftSlot& slot = cheshireSlots[ii];
++                    slot.descriptors.push_back(descriptor);
++                    slot.features.push_back(fp);
++                    slot.peaks.push_back(keys[i].peak_value);
+                 }
++                else
++                {
++#pragma omp critical
++                    {
++                        regionsCasted->Descriptors().push_back(descriptor);
++                        regionsCasted->Features().push_back(fp);
++                        featuresPeakValue.push_back(keys[i].peak_value);
++                    }
++                }
++            }
++        }
++        for (const CheshireSiftSlot& slot : cheshireSlots)  // empty unless cheshireSiftOrder
++        {
++            for (std::size_t k = 0; k < slot.features.size(); ++k)
++            {
++                regionsCasted->Descriptors().push_back(slot.descriptors[k]);
++                regionsCasted->Features().push_back(slot.features[k]);
++                featuresPeakValue.push_back(slot.peaks[k]);
+             }
+         }
+ 
 diff --git a/src/aliceVision/fuseCut/CMakeLists.txt b/src/aliceVision/fuseCut/CMakeLists.txt
 index 1b7f39c..70c80a0 100644
 --- a/src/aliceVision/fuseCut/CMakeLists.txt

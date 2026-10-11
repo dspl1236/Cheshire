@@ -5247,6 +5247,85 @@ bool ImageDescriber_SIFT_popSIFT::cheshireUsable()
 ImageDescriber_SIFT_popSIFT::ImageDescriber_SIFT_popSIFT(const SiftParams& params, bool isOriented)
 """),
 ]
+# 16a (after 0.4.5): CPU SIFT's keypoints in the order one thread would add them. The descriptor loop pushes each
+# keypoint's features from an OpenMP critical section, so the order (and, through the unstable sort by scale that
+# follows, the order of ties and so which features the cap keeps) is the order the threads finish: three runs of the 41
+# views gave three digests. Each keypoint now fills a slot of its own, and the slots are appended in loop order after the
+# loop: upstream's single-threaded output, every run. CHESHIRE_SIFT_SORT=0 (the GPU path's 5c switch) keeps upstream's
+# arrival order.
+STEP16A_SIFT_CPP = [
+    ("""#pragma omp parallel for
+        for (int ii = 0; ii < static_cast<int>(filteredKeypointsIndex.size()); ++ii)
+        {
+            const int i = filteredKeypointsIndex[ii];
+""",
+     """        // cheshire (step 16a): each keypoint's features in a slot of its own, appended in loop order after the loop
+        static const bool cheshireSiftOrder = []() {
+            const bool on = ::cheshire::env::flag("CHESHIRE_SIFT_SORT", true);
+            if (on)
+                ALICEVISION_LOG_INFO("cheshire: CPU SIFT keypoints in the order one thread adds them (CHESHIRE_SIFT_SORT=0 for arrival order)");
+            else
+                ALICEVISION_LOG_INFO("cheshire: CPU SIFT keypoints in arrival order (CHESHIRE_SIFT_SORT=0)");
+            return on;
+        }();
+        struct CheshireSiftSlot
+        {
+            std::vector<Descriptor<T, 128>> descriptors;
+            std::vector<PointFeature> features;
+            std::vector<float> peaks;
+        };
+        std::vector<CheshireSiftSlot> cheshireSlots(cheshireSiftOrder ? filteredKeypointsIndex.size() : 0);
+
+#pragma omp parallel for
+        for (int ii = 0; ii < static_cast<int>(filteredKeypointsIndex.size()); ++ii)
+        {
+            const int i = filteredKeypointsIndex[ii];
+"""),
+    ("""                vl_sift_calc_keypoint_descriptor(filt, &vlFeatDescriptor[0], keys + i, angles[q]);
+                convertSIFT<T>(&vlFeatDescriptor[0], descriptor, params._rootSift);
+
+#pragma omp critical
+                {
+                    regionsCasted->Descriptors().push_back(descriptor);
+                    regionsCasted->Features().push_back(fp);
+                    featuresPeakValue.push_back(keys[i].peak_value);
+                }
+            }
+        }
+""",
+     """                vl_sift_calc_keypoint_descriptor(filt, &vlFeatDescriptor[0], keys + i, angles[q]);
+                convertSIFT<T>(&vlFeatDescriptor[0], descriptor, params._rootSift);
+
+                if (cheshireSiftOrder)
+                {
+                    CheshireSiftSlot& slot = cheshireSlots[ii];
+                    slot.descriptors.push_back(descriptor);
+                    slot.features.push_back(fp);
+                    slot.peaks.push_back(keys[i].peak_value);
+                }
+                else
+                {
+#pragma omp critical
+                    {
+                        regionsCasted->Descriptors().push_back(descriptor);
+                        regionsCasted->Features().push_back(fp);
+                        featuresPeakValue.push_back(keys[i].peak_value);
+                    }
+                }
+            }
+        }
+        for (const CheshireSiftSlot& slot : cheshireSlots)  // empty unless cheshireSiftOrder
+        {
+            for (std::size_t k = 0; k < slot.features.size(); ++k)
+            {
+                regionsCasted->Descriptors().push_back(slot.descriptors[k]);
+                regionsCasted->Features().push_back(slot.features[k]);
+                featuresPeakValue.push_back(slot.peaks[k]);
+            }
+        }
+"""),
+]
+
 STEP15A_SIFT_HPP = [
     ("        if (useCuda)\n        {\n            _imageDescriberImpl.release();  // release first to ensure that we don't create the new ImageDescriber before destroying the previous one\n            _imageDescriberImpl.reset(new ImageDescriber_SIFT_popSIFT(_params, _isOriented));\n",
      "        if (useCuda && ImageDescriber_SIFT_popSIFT::cheshireUsable())  // cheshire (step 15a): the card has PopSIFT code\n        {\n            _imageDescriberImpl.release();  // release first to ensure that we don't create the new ImageDescriber before destroying the previous one\n            _imageDescriberImpl.reset(new ImageDescriber_SIFT_popSIFT(_params, _isOriented));\n"),
@@ -5429,6 +5508,7 @@ TRACKED = [
     "src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.cpp",
     "src/aliceVision/feature/sift/ImageDescriber_SIFT_popSIFT.hpp",  # 15a
     "src/aliceVision/feature/sift/ImageDescriber_SIFT.hpp",  # 15a
+    "src/aliceVision/feature/sift/SIFT.cpp",  # 16a
     "src/aliceVision/camera/cameraUndistortImage.hpp",
     "src/software/pipeline/main_incrementalSfM.cpp",  # 5k's CHESHIRE_SFM_PENDING_BA switch; same gap
     "src/aliceVision/sfm/LocalBundleAdjustmentGraph.cpp",  # 5k, same gap
@@ -10976,6 +11056,16 @@ void cheshireResidentEnd(void* scope)
                     sys.exit(f"an anchor of GPU SIFT's code object check not found once in {f15a.name} (15a)")
                 t = t.replace(old, new, 1)
         f15a.write_text(t, encoding="utf-8", newline="")
+
+    # 16a (after 0.4.5). CPU SIFT's keypoints in loop order instead of thread-finish order (STEP16A_SIFT_CPP).
+    f16a = AV / "src/aliceVision/feature/sift/SIFT.cpp"
+    t = f16a.read_text(encoding="utf-8")
+    if "step 16a" not in t:
+        for old, new in STEP16A_SIFT_CPP:
+            if t.count(old) != 1:
+                sys.exit("an anchor of CPU SIFT's keypoint order not found once in SIFT.cpp (16a)")
+            t = t.replace(old, new, 1)
+    f16a.write_text(t, encoding="utf-8", newline="")
 
     # 10g (after 0.4.0). The image cache evicts by load order instead of clock(), whose millisecond ties made the
     #     texturing read-ahead evict images before their use (most False Door passes decoded each image twice).

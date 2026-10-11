@@ -5513,3 +5513,28 @@ differ only by the module identifiers nvcc generates per build and the addresses
 `replay_cudapkg050.py`, `cmp_cudapkg050.py`): all eight new-pipeline programs finished from the zip alone,
 TracksBuilding is the AMD zip's byte for byte, and SfMExpanding placed all 41 cameras within 0.0028 % of the scene's
 radius of the AMD zip's reconstruction.
+
+## After 0.4.5: CPU SIFT in a stable order (step 16a, 2026-10-11)
+
+Upstream's CPU SIFT (`SIFT.cpp`) computes each keypoint's descriptors in an OpenMP loop and appends them from a critical
+section, so the features come out in the order the threads finish. The unstable sort by scale that follows then breaks
+ties differently, which changes which features the cap keeps: three runs of the 41 views gave three digests (the
+`cpufallback` gate configuration, and 15a's fallback, had never repeated). Each keypoint now fills a slot of its own,
+and the slots are appended in loop order after the loop. `CHESHIRE_SIFT_SORT=0`, the GPU path's 5c switch, keeps the
+arrival order.
+
+| CPU SIFT, 41 views, RX 9070 box | digest of the .feat/.desc files | time |
+|---|---|---|
+| 16a, two runs | `449daade8a6bc4e3`, `449daade8a6bc4e3` | 33.9, 33.2 s |
+| upstream's arrival order (`CHESHIRE_SIFT_SORT=0`), two runs | `fb51174f13c2a04b`, `06479809606394b6` | 50.9, 48.6 s |
+| upstream on one thread (`OMP_NUM_THREADS=1`) | `449daade8a6bc4e3` | 34.6 s |
+
+So 16a's output is upstream's single-threaded output, every run, and a third faster than upstream's threaded loop,
+whose critical section cost more than the threads gained. In the mini6 gate (Meshroom 2025.1, a flat package of the
+dev build) `base` keeps the 0.4.5 digest (GPU SIFT is untouched) and `cpufallback` announces the new line; two runs'
+FeatureExtraction outputs are now the same bytes.
+
+Their depth maps still differ, from FeatureMatching on: `cpufallback` also switches the GPU matcher off, and upstream's
+CPU matcher (`ANN_L2`, FLANN's randomized kd-trees) shuffles each tree from a generator seeded by `std::random_device`
+(`flann/algorithms/kdtree_index.h`), ignoring the `random_seed` AliceVision passes. Every run builds different trees, so
+the approximate neighbours differ (282 against 300 matches on the first pair). The roadmap has it.
