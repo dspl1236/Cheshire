@@ -948,7 +948,7 @@ large sets).
 - **0.4.5, packaging II** (planned as 0.5.0; relabelled 0.4.5 on 2026-10-10 once the ISA tiers were dropped, since what remained is a packaging and crash fix, and 0.5.0 is kept for the next capability jump, hardware coverage)**:** x86-64 ISA tiers chosen by CPUID (FMA contraction controlled, so every tier gives the same
   bytes) and older-glibc Linux bundles from a jammy or bookworm container. **ISA tiers measured and dropped
   2026-10-10** (an exact v3 build is no faster; Eigen at AVX width changes the bytes), replaced by a CPU check that
-  refuses a Windows payload the CPU cannot run. Older glibc: the jammy container (scripts/linux/jammy). **Release round done 2026-10-10** (docs/04).
+  refuses a Windows payload the CPU cannot run. Older glibc: the jammy container (scripts/linux/jammy). **Released as v0.4.5 on 2026-10-11** (docs/04, "The 0.4.5 release round").
 - **Then:** "Hardware coverage" below.
 
 Next:
