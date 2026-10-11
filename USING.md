@@ -144,6 +144,11 @@ forces the Cheshire package instead. A paired **Cheshire CUDA** package runs on 
 itself from v0.3.8; with v0.3.0 to v0.3.7 it needs `CHESHIRE_BACKEND=cheshire`, or the automatic
 choice hands every node back to Meshroom and the package never runs.
 
+From v0.4.5 the same line can also read `this CPU cannot run the package's payload`: the AMD package's
+payload for your card needs a newer CPU (RDNA3/4 cards: AVX2 and FMA, so Intel Haswell or AMD Excavator/Zen
+and newer), and the node runs Meshroom's own binary instead of crashing. The `[detect]` line before it names
+the missing feature.
+
 ## 4. When it goes wrong
 
 | symptom | cause | fix |
@@ -184,6 +189,7 @@ these are *on* unless set to `0`:
 | `CHESHIRE_GPU_BLUR=0` | the similarity-map blur through OpenImageIO |
 | `CHESHIRE_GPU_TEX=0` | texturing on the CPU |
 | `CHESHIRE_BACKEND=auto\|cheshire\|meshroom` | force the launcher's choice (`CHESHIRE_DEPTHMAP=cuda\|hip` is the older spelling and still works) |
+| `CHESHIRE_CPU_TEST=avx\|v2\|v1` | (0.4.5, Windows AMD) pretend the CPU stops at that level, to see what an older machine gets: the rocm7.2 payloads (RDNA3/4) need x86-64-v3 (AVX2, FMA; Haswell, Excavator/Zen and newer), the hip6.2 ones AVX. Below that, `cheshire-detect.exe` exits 3 naming the missing feature, and under `auto` the launcher runs Meshroom's own binary for the node instead of crashing |
 | `CHESHIRE_GPU_VIS=0` | the visibility passes' nearest-neighbour search through upstream's nanoflann on the CPU ([docs/13](docs/13-gpu-visibilities.md)) |
 | `CHESHIRE_GPU_VIS_BUCKETS=0` | the visibility votes through the ordered loop (one vertex range per thread) instead of vertex buckets spread over all threads; same result, slower at scale |
 | `CHESHIRE_SFM_PENDING_BA=0` | upstream's incremental SfM loop exit: a resection pass that ends because no candidate view reaches the score threshold leaves the views resected since the last bundle adjustment without one, and without a node in the local-BA graph; a later edge to one of them is the `[fatal] invalid map<K, T> key` of Meshroom #2344 (three of three runs on an 884-photo set, v0.3.3 finishes the pass with that bundle adjustment and the graph never throws) |

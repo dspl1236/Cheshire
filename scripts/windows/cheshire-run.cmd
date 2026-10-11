@@ -29,7 +29,7 @@ for /f "usebackq tokens=1,2" %%A in ("%DETOUT%") do (
   set TGT=%%B
 )
 del "%DETOUT%" 2>nul
-rem exit 3: the card's payload needs a newer CPU (0.5.0); the detector says which feature is missing
+rem exit 3: the card's payload needs a newer CPU (0.4.5); the detector says which feature is missing
 if "%DETRC%"=="3" type "%DETOUT%.err"
 del "%DETOUT%.err" 2>nul
 if not defined FAM (

@@ -5407,7 +5407,7 @@ That is −47 %, and the match file is 0.3.9's reference (`ebffcb37a3bd2b0b`) in
 files are the AMD zip's byte for byte, and SfMExpanding placed all 41 cameras within 0.0028 % of the scene's radius
 of the AMD zip's reconstruction (rotations within 0.0028 degrees), as in 0.4.0-0.4.3.
 
-## 0.5.0: x86-64 ISA tiers measured and dropped; a CPU check for the Windows payloads (2026-10-10)
+## 0.4.5: x86-64 ISA tiers measured and dropped; a CPU check for the Windows payloads (2026-10-10)
 
 **What each package needs.** Read from the instructions (`build/isa_scan.py`, `scripts/check_isa_floor.py`'s tiers,
 per directory of the extracted 0.4.4 packages). The Linux bundles (HIP and CUDA) and the Windows CUDA zip are the
@@ -5447,7 +5447,7 @@ under `=cheshire` it stops and says why. `CHESHIRE_CPU_TEST=avx|v2|v1` pretends 
 RX 9070 box, against the extracted 0.4.4 zip, the refusal named AVX2 (and AVX at `v2`), the launcher's fallback ran
 the stand-in binary, and the normal path chose rocm7.2/gfx12-generic as before.
 
-## 0.5.0: Linux bundles for glibc 2.35 (2026-10-10)
+## 0.4.5: Linux bundles for glibc 2.35 (2026-10-10)
 
 **What the bundles needed.** The 0.4.4 Linux bundles, built on the noble box with GCC 13, need `GLIBC_2.38` and
 libstdc++'s `GLIBCXX_3.4.32`, which is not bundled. On Ubuntu 22.04 every program stopped at load time
@@ -5479,3 +5479,37 @@ gate's depth maps:
 | CUDA, jammy | GTX 1080 Ti | 9 | every one the 0.4.4 gate's | 581 s (0.4.4: 571 s) |
 
 So GCC 12 against 13 changes no byte. (GPU SIFT ran from the jammy PopSIFT's `gfx10-3-generic` code.)
+
+## The 0.4.5 release round (2026-10-10)
+
+**Planned as 0.5.0, published as 0.4.5.** With the ISA tiers dropped, what remained is a packaging change and a crash
+fix, so the release was relabelled before publishing and 0.5.0 kept for the next capability jump. The packages were
+built under the 0.5.0 name (the build scripts below keep it). None of them carries a version, except one comment in the
+Windows AMD zip's `cheshire-run.cmd`. That zip was composed again from the same payloads, and it is the gated zip in
+1,286 of its 1,287 entries; the other is that comment line (`build/zipdiff-045.py`).
+
+Built at 3aba057 (`build/chain-050.cmd`): the Windows packages as before, the Linux bundles in the jammy container
+(`build/wsl-050.lf.sh`), each Linux tarball load-tested on a bare `ubuntu:22.04` (every library resolves, every program
+starts). Both need at most `GLIBC_2.35` and `GLIBCXX_3.4.30`.
+
+| package | hardware | 2025.1: mini6 | 2025.1: 41 views | 2023.3: mini6 |
+|---|---|---|---|---|
+| Windows AMD | RX 9070 (rocm7.2 gfx12-generic payload) | 19/19 | base 297 s, verify 691 s, experimental 272 s, fastransacexp 252 s, verifyexp 702 s | 4/4 |
+| Linux AMD | RX 6750 XT (house-pc) | 7/7 | experimental 511 s, and 581 s with 13a-15b off | 1/1 |
+| Linux CUDA | the same code gated on the GTX 1080 Ti (below) | | | |
+| Windows CUDA | not run on an NVIDIA card (below) | | | |
+
+On the RX 9070, 26 of the 28 configurations' depth maps are the 0.4.4 gate's byte for byte; the other two are the
+`cpufallback` runs (CPU SIFT, not repeatable). On the RX 6750 XT every depth map is the 0.4.4 gate's, the steps-off run
+included.
+
+**Linux CUDA.** The GTX 1080 Ti had gone back out of house-pc when the release tarball was built, so it was compared
+with the jammy build of the same code that passed all nine runs on that card, every depth map the 0.4.4 gate's (above).
+325 of the 332 files are byte for byte the same. The other seven are the libraries carrying CUDA code: their GPU code
+(`cuobjdump -sass`) is the same in all seven, and their host instructions are the same once addresses are masked. They
+differ only by the module identifiers nvcc generates per build and the addresses those shift.
+
+**Windows CUDA**, still without a test box, got the same smoke test as 0.4.4 (`build/nightly-cmp/mk_g50.py`,
+`replay_cudapkg050.py`, `cmp_cudapkg050.py`): all eight new-pipeline programs finished from the zip alone,
+TracksBuilding is the AMD zip's byte for byte, and SfMExpanding placed all 41 cameras within 0.0028 % of the scene's
+radius of the AMD zip's reconstruction.

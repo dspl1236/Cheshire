@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cheshire 0.5.0: does a Linux bundle load on a system with nothing but the base OS? Extracts the tarball and, in a
+# Cheshire 0.4.5: does a Linux bundle load on a system with nothing but the base OS? Extracts the tarball and, in a
 # fresh container of the given image (default ubuntu:22.04, glibc 2.35; no ROCm, no CUDA, no compiler), runs ldd on
 # every ELF file - none may have a library "not found" - and starts every aliceVision_* program with --help, which
 # must not die of a loader error (exit 127, or "GLIBC_... not found" / "version ... not found").

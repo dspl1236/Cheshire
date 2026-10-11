@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cheshire 0.5.0: both Linux bundles built in the jammy container (glibc 2.35, GCC 12), the same steps and order as the
+# Cheshire 0.4.5: both Linux bundles built in the jammy container (glibc 2.35, GCC 12), the same steps and order as the
 # release chain's WSL side (build/wsl-0xx.lf.sh): the dependency superbuild once, the HIP PopSIFT, the HIP bundle, the
 # CUDA PopSIFT (its reset to upstream and the fixes both backends take), the CUDA bundle. Packed into /out/<tag>/ with
 # the newest glibc / libstdc++ symbol versions each bundle needs, which must not exceed jammy's (GLIBC_2.35,

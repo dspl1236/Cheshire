@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cheshire 0.5.0: provision the Ubuntu 22.04 (jammy, glibc 2.35) build container in which both Linux bundles are built,
+# Cheshire 0.4.5: provision the Ubuntu 22.04 (jammy, glibc 2.35) build container in which both Linux bundles are built,
 # so they load on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Mint 21 and later) instead of 2.38 and newer.
 # Runs as root INSIDE the container (scripts/linux/jammy/container.sh starts it). The package set follows upstream's own
 # docker/Dockerfile_ubuntu_deps (jammy, GCC 12, Kitware's CMake 3.31); ROCm and CUDA are the versions the noble build

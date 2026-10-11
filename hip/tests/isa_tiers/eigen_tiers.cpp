@@ -1,4 +1,4 @@
-// 0.5.0 scoping: does Eigen compute the same bits at x86-64-v1 (SSE2 packets) and x86-64-v3 (AVX packets), with FMA
+// 0.4.5 scoping: does Eigen compute the same bits at x86-64-v1 (SSE2 packets) and x86-64-v3 (AVX packets), with FMA
 // contraction off? Prints a hash of the bits of each result; build it twice and compare (run.sh).
 #include <Eigen/Dense>
 #include <cstdint>

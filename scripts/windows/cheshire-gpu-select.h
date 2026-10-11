@@ -339,7 +339,7 @@ static bool cheshireAskChild(const std::wstring& root, int famIndex, bool verbos
     return true;
 }
 
-// The CPU a family's payload was compiled for (0.5.0, docs/16). The rocm7.2 payloads are built with clang-cl
+// The CPU a family's payload was compiled for (0.4.5, docs/16). The rocm7.2 payloads are built with clang-cl
 // /arch:AVX2, which is x86-64-v3 (AVX2, FMA, BMI1/2, F16C, LZCNT, MOVBE; Intel Haswell 2013, AMD Excavator 2015 / Zen
 // 2017 and newer), and use those instructions throughout; the hip6.2 payloads with /arch:AVX (Sandy Bridge 2011,
 // Bulldozer 2011). On an older CPU the first such instruction kills the node with an illegal-instruction fault, so a

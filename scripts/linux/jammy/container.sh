@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cheshire 0.5.0: the jammy build container on the WSL build box (Docker Engine in the WSL distro).
+# Cheshire 0.4.5: the jammy build container on the WSL build box (Docker Engine in the WSL distro).
 #
 #   scripts/linux/jammy/container.sh up        create and provision it (provision.sh), once
 #   scripts/linux/jammy/container.sh sync      refresh its source tree from the box's /root/cheshire (origin/main)

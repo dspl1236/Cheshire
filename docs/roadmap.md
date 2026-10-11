@@ -944,11 +944,11 @@ large sets).
   0xC0000094 since v0.2.17 was rocThrust in PopSIFT's grid filter, whose kernels are empty under a generic target; the
   filter runs on the host now, its features byte for byte upstream's on the 41 views and the False Door. Future RDNA2-4
   chips get GPU SIFT along with the rest. **Released as v0.4.4 on 2026-10-10** (docs/04, "The 0.4.4 release round";
-  the False Door's FeatureMatching through the release zips 77-85 s to 43 s). Next: 0.5.0, packaging II.
-- **0.5.0, packaging II:** x86-64 ISA tiers chosen by CPUID (FMA contraction controlled, so every tier gives the same
+  the False Door's FeatureMatching through the release zips 77-85 s to 43 s). Next: packaging II (released as 0.4.5).
+- **0.4.5, packaging II** (planned as 0.5.0; relabelled 0.4.5 on 2026-10-10 once the ISA tiers were dropped, since what remained is a packaging and crash fix, and 0.5.0 is kept for the next capability jump, hardware coverage)**:** x86-64 ISA tiers chosen by CPUID (FMA contraction controlled, so every tier gives the same
   bytes) and older-glibc Linux bundles from a jammy or bookworm container. **ISA tiers measured and dropped
   2026-10-10** (an exact v3 build is no faster; Eigen at AVX width changes the bytes), replaced by a CPU check that
-  refuses a Windows payload the CPU cannot run. Older glibc: the jammy container (scripts/linux/jammy).
+  refuses a Windows payload the CPU cannot run. Older glibc: the jammy container (scripts/linux/jammy). **Release round done 2026-10-10** (docs/04).
 - **Then:** "Hardware coverage" below.
 
 Next:
@@ -1245,7 +1245,16 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 - **Rubble re-score** (M). The run was scored on the b033 bundle at 6/6 with upstream's SfM and a
   one-camera texture caveat (`docs/04-validation.md:1032, :1040-1041`). Either rerun Texturing
   (about 2.8 h) or everything from SfM down (about 15 h).
-- **Offered machines** (M). Linux on bench-pc's FX-8120 (useful once ISA tiers exist) and the
+- **Intel GPUs** (L, idea 2026-10-10). Upstream already has a SYCL DepthMap (`src/aliceVision/depthMap_sycl`,
+  `ALICEVISION_USE_SYCL`); Cheshire's own GPU ports (matcher, depth map filter, meshing votes, texturing, PopSIFT,
+  the bundle adjustment) would need SYCL too. Routes: a HIP-to-SYCL translation of our own, Intel's SYCLomatic (the
+  ports are CUDA dialect), or chipStar (HIP/CUDA compiled for Intel GPUs unchanged). The exactness rule is the hard
+  part: Intel's compiler defaults differ on FMA contraction and denormals. Worth doing on Arc / Xe hardware; garage-pc's
+  UHD 630 (Gen 9.5) predates Xe.
+- **The 0.4.5 CPU check on real pre-AVX2 hardware** (S). bench-pc's FX-8120 has AVX and no AVX2: the Windows zip
+  there would confirm the check does not refuse the hip6.2 payload on a genuinely older CPU (only simulated so far,
+  `CHESHIRE_CPU_TEST`). bench-pc is out until it gets a new SSD (2026-10-10).
+- **Offered machines** (M). Linux on bench-pc's FX-8120 (the ISA tiers it was for were dropped in 0.4.5) and the
   DL380 Gen10 (AVX-512, dual-socket NUMA) for SfM variation across thread counts. Neither has run.
 - **house-pc upkeep** (S). The documented udev rule lacks the `bind` action
   (`docs/06-linux-build.md:235`), and `node-amd-setup.sh` does not install it. The SATA timeout
@@ -1266,12 +1275,12 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 - **`CHESHIRE_POPSIFT` defaults OFF in the HIP build scripts** (S). **Done 2026-09-27 (docs/04
   "0.3.6: tooling debts")**: auto in both HIP build scripts, and both HIP packagers refuse a feature
   library that does not link PopSift.
-- **x86-64 ISA tiers** (L). **Measured and dropped 2026-10-10 (docs/04, "0.5.0: x86-64 ISA tiers")**: at v3
+- **x86-64 ISA tiers** (L). **Measured and dropped 2026-10-10 (docs/04, "0.4.5: x86-64 ISA tiers")**: at v3
   Eigen's AVX packets reduce in another order, so the bytes differ even with contraction off; holding Eigen at SSE
   width keeps them but the v3 Linux CUDA bundle was then no faster (41 views 571 s against 571 s, every depth map
   the same). Instead the Windows bundle refuses a payload the CPU cannot run (CPUID check, exit 3, Meshroom's own
   binary under auto) rather than crashing on an AVX2 instruction.
-- **Older-glibc Linux bundles** (L). **Done 2026-10-10 (docs/04, "0.5.0: Linux bundles for glibc 2.35")**: built in a jammy container, they need GLIBC_2.35 / GLIBCXX_3.4.30 and load on a bare Ubuntu 22.04; the depth maps are 0.4.4's on both cards. Was: both are built on glibc 2.39 (`docs/06-linux-build.md:22`).
+- **Older-glibc Linux bundles** (L). **Done 2026-10-10 (docs/04, "0.4.5: Linux bundles for glibc 2.35")**: built in a jammy container, they need GLIBC_2.35 / GLIBCXX_3.4.30 and load on a bare Ubuntu 22.04; the depth maps are 0.4.4's on both cards. Was: both are built on glibc 2.39 (`docs/06-linux-build.md:22`).
   Needs a jammy or bookworm container and a test node. In the same pass, pin
   `AV_BUILD_SUITESPARSE=OFF` and add a GPL check to the Linux packagers.
 - **Meshroom 2025.x** (M). Pairing, shims and gates target 2023.3 only; 2025.1.0 is declared
@@ -1542,7 +1551,7 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 - Vulkan compute and ZLUDA: HIP proved sufficient.
 - GCN4 / Polaris: ROCm 7.2 refuses the RX 570.
 - Generic RDNA1/2 code objects on Windows: code-object v6 is not production-ready.
-- RX 7000/9000 on pre-AVX2 Windows CPUs. The tiers were dropped (0.5.0); since then such a machine is told why
+- RX 7000/9000 on pre-AVX2 Windows CPUs. The tiers were dropped (0.4.5); since then such a machine is told why
   and runs Meshroom's own binaries instead of crashing. An AVX build of the rocm7.2 payloads would change their bytes.
 
 ## Stale text to fix

@@ -6,7 +6,7 @@
 // Prints "<family> <target>" (e.g. "rocm7.2 gfx12-generic") and exits 0; exits 1 if no family
 // enumerated a device it has a payload for, 2 if a runtime answered but its device-property
 // layout no longer matches what this was built against, or 3 if the card's payload needs a newer
-// CPU than this one (0.5.0; the message names the missing feature).
+// CPU than this one (0.4.5; the message names the missing feature).
 //
 // The --family form is what makes the normal form safe. A HIP runtime built for a driver that is
 // not installed can crash on load rather than report no device - on an RX 6750 XT under a

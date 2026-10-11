@@ -21,10 +21,10 @@ amdgpu-install -y --usecase=wsl,rocm --no-dkms      # ~10 min, installs /opt/roc
 
 Same-version base as the node (Ubuntu 24.04 / glibc 2.39), so the bundle transfers.
 
-## Release bundles: the jammy container (0.5.0 and later)
+## Release bundles: the jammy container (0.4.5 and later)
 
 A bundle built on noble needs glibc 2.38 and libstdc++'s `GLIBCXX_3.4.32` (GCC 13's, not bundled), so it loads only on
-Ubuntu 24.04-class systems. From 0.5.0 the release bundles are built in an Ubuntu 22.04 container on this box's Docker
+Ubuntu 24.04-class systems. From 0.4.5 the release bundles are built in an Ubuntu 22.04 container on this box's Docker
 instead: glibc 2.35 and GCC 12, so they load on Ubuntu 22.04, Debian 12, Mint 21 and anything newer. The package set
 follows upstream's own `docker/Dockerfile_ubuntu_deps` (jammy, GCC 12, Kitware's CMake 3.31), with ROCm 7.2 and
 CUDA 12.9 from the vendors' jammy repositories.

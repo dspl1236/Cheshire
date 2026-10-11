@@ -233,30 +233,37 @@ upstream refuses. Details in `docs/02-memory-bridge.md`.
 the GPU, what the error codes mean, and the dozen settings worth knowing. The rest of this file is
 what was built and why.
 
-Binaries are on the [v0.4.4 release](https://github.com/dspl1236/Cheshire/releases/tag/v0.4.4);
+Binaries are on the [v0.4.5 release](https://github.com/dspl1236/Cheshire/releases/tag/v0.4.5);
 the data sets and references are on
 [v0.1.0](https://github.com/dspl1236/Cheshire/releases/tag/v0.1.0) and unchanged, the depth
 maps being bit-identical between the two:
 
 | asset | size | contents |
 |---|---|---|
-| `cheshire-alicevision-windows-x64.zip` (v0.4.4) | 194 MB | **one Windows package for every AMD card.** Eleven GPU payloads across both HIP runtimes - gfx1010/1012 (RX 5500-5700), gfx1030/1031/1032/1034 (RX 6000), gfx1033/1035/1036 (RDNA2 APUs), and `gfx11-generic` + `gfx12-generic` for RDNA3/RDNA4 and future chips in those families (GPU SIFT included: from v0.4.4 PopSIFT runs from the generic code objects too, [docs/16](docs/16-bundling.md)). `cheshire-detect.exe` asks the card which it needs, so there is nothing to choose; `cheshire-run.cmd` runs a node straight from it, `meshroom-pair.cmd` + launcher pair it into Meshroom |
-| `cheshire-alicevision-cuda-windows-x64-cuda12.9.zip` (v0.4.4) | 109 MB | **the same stages for NVIDIA, Windows.** GPU SIFT, matcher, depth map filter, meshing votes and texturing, plus the memory bridge; `cudart` is bundled, so no CUDA toolkit is needed - only the driver. Paired, it runs on the NVIDIA card by itself (from v0.3.8; with v0.3.0 to v0.3.7 set `CHESHIRE_BACKEND=cheshire`) |
-| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.4.4) | 121 MB | relocatable Linux bundle with the GPU matcher, depth map filter, meshing votes, texturing and the packed-slot mipmap sampler, code objects for RDNA1 by name (gfx1010/1011/1012), one generic code object each for RDNA2, RDNA3 and RDNA4 (`gfx10-3-generic`, `gfx11-generic`, `gfx12-generic`: the APUs and chips not out yet included) and Vega (gfx900/906, untested); GPU SIFT for the same RDNA targets (and gfx1013), not Vega, which takes CPU SIFT (v0.4.4 checks the loaded PopSIFT for the card's code first); needs only `amdgpu` + `/dev/kfd`; validated on the RX 6750 XT (and the RX 5500 XT in earlier releases) |
-| `cheshire-alicevision-cuda-linux-x64-cuda12.9.tar.gz` (v0.4.4) | 49 MB | **the same stages for NVIDIA, Linux.** `libcudart` bundled and no `libcuda` (the driver's, not ours); the 41-view depth and similarity maps from a clean extraction of the tarball (82 files) were byte-identical to the Meshroom CUDA 11.3 reference in v0.3.3 (GTX 1080 Ti) and v0.3.4 (GTX 1050 Ti) |
+| `cheshire-alicevision-windows-x64.zip` (v0.4.5) | 194 MB | **one Windows package for every AMD card.** Eleven GPU payloads across both HIP runtimes - gfx1010/1012 (RX 5500-5700), gfx1030/1031/1032/1034 (RX 6000), gfx1033/1035/1036 (RDNA2 APUs), and `gfx11-generic` + `gfx12-generic` for RDNA3/RDNA4 and future chips in those families (GPU SIFT included: from v0.4.4 PopSIFT runs from the generic code objects too, [docs/16](docs/16-bundling.md)). `cheshire-detect.exe` asks the card which it needs, so there is nothing to choose; `cheshire-run.cmd` runs a node straight from it, `meshroom-pair.cmd` + launcher pair it into Meshroom |
+| `cheshire-alicevision-cuda-windows-x64-cuda12.9.zip` (v0.4.5) | 109 MB | **the same stages for NVIDIA, Windows.** GPU SIFT, matcher, depth map filter, meshing votes and texturing, plus the memory bridge; `cudart` is bundled, so no CUDA toolkit is needed - only the driver. Paired, it runs on the NVIDIA card by itself (from v0.3.8; with v0.3.0 to v0.3.7 set `CHESHIRE_BACKEND=cheshire`) |
+| `cheshire-alicevision-hip-linux-x64-rocm7.2.tar.gz` (v0.4.5) | 120 MB | relocatable Linux bundle with the GPU matcher, depth map filter, meshing votes, texturing and the packed-slot mipmap sampler, code objects for RDNA1 by name (gfx1010/1011/1012), one generic code object each for RDNA2, RDNA3 and RDNA4 (`gfx10-3-generic`, `gfx11-generic`, `gfx12-generic`: the APUs and chips not out yet included) and Vega (gfx900/906, untested); GPU SIFT for the same RDNA targets (and gfx1013), not Vega, which takes CPU SIFT (v0.4.4 checks the loaded PopSIFT for the card's code first); needs only `amdgpu` + `/dev/kfd` and glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Mint 21 and later, from v0.4.5; earlier releases needed 24.04); validated on the RX 6750 XT (and the RX 5500 XT in earlier releases) |
+| `cheshire-alicevision-cuda-linux-x64-cuda12.9.tar.gz` (v0.4.5) | 48 MB | **the same stages for NVIDIA, Linux.** `libcudart` bundled and no `libcuda` (the driver's, not ours); glibc 2.35 or newer, as the AMD bundle; the 41-view depth and similarity maps from a clean extraction of the tarball (82 files) were byte-identical to the Meshroom CUDA 11.3 reference in v0.3.3 (GTX 1080 Ti) and v0.3.4 (GTX 1050 Ti) |
 | `monstree-mini6-meshroom-cache.tar.gz` (v0.1.0) | 383 MB | 6-view Meshroom 2023.3 cache: CameraInit, SfM, PrepareDenseScene and the CUDA DepthMap reference |
 | `monstree-full-cuda-reference.tar.gz` (v0.1.0) | 680 MB | 41-view SfM + CUDA DepthMap reference (GTX 1080 Ti) |
 | `cheshire-hip-depthmap-outputs.tar.gz` (v0.1.0) | 966 MB | the HIP depth maps behind the table above (RX 9070 6 + 41 views, RX 5500 XT, RX 6750 XT) |
 
-Three of the four packages in v0.4.4 passed on their own hardware, each as the file you download (docs/04):
+Three of the four packages in v0.4.5 passed on their own hardware, each as the file you download (docs/04):
 - the Windows AMD zip on the RX 9070: the full gate through Meshroom 2025.1 (the 19-configuration mini6 matrix and the
-  41-view set) and a mini6 check through Meshroom 2023.3, every depth map v0.4.3's;
-- the Linux AMD package on the RX 6750 XT and the Linux NVIDIA package on a GTX 1080 Ti, through mini6 and 41 views,
-  every depth map the previous gate's on that card.
+  41-view set) and a mini6 check through Meshroom 2023.3, every depth map v0.4.4's;
+- the Linux AMD package on the RX 6750 XT and (a build of the same code, see the notes) the Linux NVIDIA package on a
+  GTX 1080 Ti, through mini6 and 41 views, every depth map the previous gate's on that card; both Linux packages load on
+  a bare Ubuntu 22.04.
 
 The Windows NVIDIA zip ships on its build checks and a CPU-only run of its new-pipeline programs, as in v0.4.0 to
-v0.4.3: its test box is still down, as is the Windows run of the hip6.2 payloads (RDNA1 and RDNA2 under Windows)
-([notes](docs/releases/0.4.4.md)).
+v0.4.4: its test box is still down, as is the Windows run of the hip6.2 payloads (RDNA1 and RDNA2 under Windows)
+([notes](docs/releases/0.4.5.md)).
+
+v0.4.5 builds the Linux packages on Ubuntu 22.04 (glibc 2.35, GCC 12), so they run on Ubuntu 22.04, Debian 12, Mint 21
+and newer instead of only 24.04-class systems, with the same depth maps as v0.4.4. The Windows AMD package checks the
+CPU before choosing a payload: on one older than the payload needs it names the missing feature and, paired into
+Meshroom, runs Meshroom's own binary instead of crashing. CPU-specific (AVX2) builds were measured and dropped: the
+exact one was no faster. In full: [docs/releases/0.4.5.md](docs/releases/0.4.5.md).
 
 v0.4.4 halves FeatureMatching on large sets, exactly: the geometric filter's 7-point fits run four at a time in AVX2
 lanes with Eigen's arithmetic, each view's descriptors stay on the GPU for all its searches, and the GPU searches the
