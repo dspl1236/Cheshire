@@ -1356,8 +1356,11 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   upstream.
 - **AliceVision: DepthMapFilter vote buffer** (S). Votes accumulate across neighbours
   (`hip/port/gpu_filter/depthMapFilterGPU.cu:263-270`). Frame it as a question, not a bug.
-- **AliceVision: bundle-target PR** (S). Issue #2182 was filed on 2026-09-20, which a live GitHub
-  search found. The drafted PR is not opened (`docs/upstream/alicevision-bundle-libs-paths.md`).
+- **AliceVision: bundle-target fix: taken upstream, nothing to open.** Issue #2182 (filed 2026-09-20)
+  was reproduced by the maintainer on 2026-10-13 and the suggested `COMMAND` + quoted list + `VERBATIM` form
+  folded into their open PR alicevision/AliceVision#2148 ("fix(bundle): fix MakeBundle and RPATH issues on
+  Linux", review pending). The block it adds is the one step 3c writes, plus `USES_TERMINAL`; 3c is guarded by
+  `"VERBATIM" not in t`, so it skips itself once #2148 is in the submodule. Drop 3c then.
 - **OpenMesh `/bigobj`** (S). Exported without a language guard
   (`docs/upstream/openmesh-bigobj-language-guard.md`).
 
@@ -1401,7 +1404,7 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   day** (docs/04, "AliceVision develop f2447d4"): step 4u and `CHESHIRE_INVERT_OLD` dropped, step 7f's anchor follows
   upstream's `LEMON::lemon` line, every output on the test sets the same bytes but Texturing's, which #2181 changes
   (Cheshire left that bug alone, docs/10). The fork stays for draft #2194 (`dspl1236:dev/sfmQualityPipeline`). Issue
-  #2182 and popsift#193 have no maintainer reply yet.
+  #2182 was answered on 2026-10-13 (into #2148, above); popsift#193 has no maintainer reply yet.
 - The #2344 SfM fix was posted with a PR offer (`docs/drafts/meshroom-2344-comment.md:93`), and
   nobody has replied.
 - Discussion #2116 (2026-09-26): asked where functional tests should live (see "Functional tests
