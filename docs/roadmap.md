@@ -1361,6 +1361,20 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   folded into their open PR alicevision/AliceVision#2148 ("fix(bundle): fix MakeBundle and RPATH issues on
   Linux", review pending). The block it adds is the one step 3c writes, plus `USES_TERMINAL`; 3c is guarded by
   `"VERBATIM" not in t`, so it skips itself once #2148 is in the submodule. Drop 3c then.
+- **Upstream PRs against the patch set: dry run 2026-10-14** (`scripts/dryrun_patch.py`, which runs
+  `apply_hip_patch.py` on another checkout through `CHESHIRE_AV_DIR` and lists every anchor that misses).
+  - **alicevision/AliceVision#2202** (camera model fixes, open): its 11 commits on our f2447d4 apply with **0** misses.
+    Numbers: for a camera without an `Undistortion` (every test set, Meshroom's default) `CostIntrinsicsProject` now
+    multiplies by an identity weight, `1*a + 0*b`, the same values; the analytic and Grin paths call it and follow.
+    Read from the diff, not yet built. **At the bump:** the fused projection (`projectionCheshire.hpp:250`) still
+    takes a camera with a distortion and an `Undistortion`, which #2202 moves to undistorted space with a weight; make
+    it step aside for any `Undistortion`.
+  - **alicevision/AliceVision#2190** (Boost to C++20 std, open): 3 misses, all `fuseCut/GraphFiller.cpp`'s
+    `<cmath>` include anchor (the steps at `apply_hip_patch.py` 5555, 6h, 6p). No behaviour change claimed.
+  - **develop since f2447d4** (8b23adb, 59+ commits): 6 misses. #2200 (unused includes) moves the anchors of 8d, 8e,
+    10b and 13a; 795ece5 changes the `CMAKE_CUDA_ARCHITECTURES` block; #2150 (exposure on every read path) moves
+    the `fileIO.cpp` profile anchor and may change what the image reads return, which Cheshire's direct readers
+    (CheshireJPG, CheshireEXR, the RGBA read) must then match. Check that before the next submodule bump.
 - **OpenMesh `/bigobj`** (S). Exported without a language guard
   (`docs/upstream/openmesh-bigobj-language-guard.md`).
 
