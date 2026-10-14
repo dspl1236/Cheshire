@@ -117,6 +117,8 @@ CPU_MARKERS = {
     "DepthMap":          GPU_MARKERS["DepthMap"],
     "PrepareDenseScene": GPU_MARKERS["PrepareDenseScene"],
     "FeatureMatching":   [r"GPU brute-force disabled by CHESHIRE_GPU_MATCHER=0",
+                          # 16b: the CPU matcher's kd-trees from random_seed (a seeded copy on stock FLANN, Windows)
+                          r"CPU matcher kd-trees shuffled from (random_seed|this FLANN's random_device)",
                           r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far",
                           r"7-point fits (four at a time, Eigen's SVD in AVX2 lanes|one at a time, the QR nullspace)"],
     "DepthMapFilter":    [r"depth map filter: disabled by CHESHIRE_GPU_FILTER=0"],

@@ -5561,3 +5561,35 @@ FP64-bound"). The host's share is spread thin. More map readers do not move it: 
 node's other large blocks are the first read of the depth maps (about 22 s), the tetrahedralization (18 s, geogram)
 and the s-t weights with the votes on the device (26 s). (`CHESHIRE_GPU_VOTE_LOG=1` also runs the neighbour-table and
 facet-weight checks, which nearly doubled the node, so profile with `CHESHIRE_GPU_VIS_LOG=1` alone.)
+## After 0.4.5: the CPU matcher's kd-trees from random_seed on Windows (step 16b, 2026-10-14)
+
+16a left `cpufallback` diverging from FeatureMatching on: the CPU matcher (`ANN_L2`, FLANN's randomized kd-trees)
+built different trees every run. `ArrayMatcher_kdtreeFlann` sets the index's `random_seed` to 1, and the two
+dependency trees treat it differently:
+
+- **Linux** (the superbuild) installs AliceVision's FLANN fork, whose `kdtree_index.h` reads `random_seed` and shuffles
+  every tree from one `std::mt19937` seeded with it. The Linux CPU matcher already repeats.
+- **Windows** (vcpkg's `flann` 2022-10-28, FLANN 1.9.2) ignores the parameter and seeds each tree's shuffle from a
+  `std::random_device`. Meshroom 2025.1's own Windows build has the same FLANN: its FeatureMatching on the same mini6
+  features, three times, gave three digests (`cd6a0955baac245b`, `7bee8c7af90d3d03`, `e0634a071e2fa744`). An upstream
+  bug, not ours (`docs/upstream/alicevision-flann-random-seed.md`).
+
+`matching/CMakeLists.txt` now reads the installed `kdtree_index.h` at configure time. If it reads `random_seed`, nothing
+changes but a log line. If it shuffles from `std::random_device`, it writes a copy of the header into the build tree with
+`KDTreeIndex` renamed (`CheshireSeededKDTreeIndex`, so no clash with the original) and the fork's two lines in place of
+the `random_device`; the matcher builds that index. The copy, names put back, is the fork's file but for where the two
+lines sit. `CHESHIRE_FLANN_SEED=0` builds the FLANN's own index. FeatureMatching announces which: "CPU matcher kd-trees
+shuffled from random_seed, as AliceVision's FLANN does" (Windows), "... from random_seed by this FLANN" (Linux); the
+`cpufallback` gate configuration requires the line.
+
+| 41 views, CPU matcher (`CHESHIRE_GPU_MATCHER=0`), RX 9070 box | digest of the matches | time |
+|---|---|---|
+| 16b, two runs | `795a28d563db0fd4`, `795a28d563db0fd4` | 91.7, 90.4 s |
+| this FLANN's own index (`CHESHIRE_FLANN_SEED=0`), two runs | `21fcb0bc6b586503`, `c282195b47e2c0ea` | 99.1, 84.8 s |
+
+The mini6 gate (Meshroom 2025.1, a flat package of the dev build): `base` keeps the 0.4.5 depth-map digest
+`7c5369fc24ee7540` (the GPU matcher does not use FLANN), and `cpufallback` passes 8/8 ports with the new line, twice,
+with the same depth-map digest `ed686b1445cce32c`. Matches, depth maps and filtered depth maps are now the same bytes in
+both runs. Meshing is the first node that differs, as it does on the GPU path (its races are on the roadmap, "AliceVision
+races and waste"). The three paths (seed read natively, the seeded copy, neither) were also compiled with g++ 13 against
+the Linux dependencies.

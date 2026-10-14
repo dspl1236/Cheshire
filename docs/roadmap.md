@@ -1275,11 +1275,11 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   empty under a generic target, so the grid filter divided by zero; it runs on the host now, byte for byte.
 - **CPU SIFT in a stable order** (S). **Done 2026-10-11 (step 16a, docs/04)**: each keypoint's features in a slot of
   its own, appended in loop order: upstream's single-threaded output every run, and a third faster.
-- **The CPU matcher's kd-trees from a fixed seed** (S-M). Upstream's `ANN_L2` (FLANN) shuffles each randomized tree from
-  a `std::random_device`-seeded generator, ignoring AliceVision's `random_seed`, so the CPU matcher
-  (`CHESHIRE_GPU_MATCHER=0`, the `cpufallback` gate run, a machine without a supported GPU) differs run to run. Seeding
-  that shuffle from `random_seed` needs FLANN's header patched in both dependency trees (vcpkg on Windows, the superbuild
-  on Linux), or a seeded copy of the index in AliceVision. Then `cpufallback` would repeat end to end.
+- **The CPU matcher's kd-trees from a fixed seed** (S-M). **Done 2026-10-14 (step 16b, docs/04)**: only Windows was
+  affected. The Linux superbuild's FLANN fork already reads `random_seed`; vcpkg's FLANN 1.9.2 shuffles each tree from
+  a `std::random_device` (Meshroom 2025.1's own Windows build too: three runs, three digests). Configure time now writes
+  a renamed, seeded copy of the installed `kdtree_index.h` when it ignores the seed; `cpufallback` repeats through
+  DepthMapFilter. Upstream report drafted (`docs/upstream/alicevision-flann-random-seed.md`), not filed.
 - **`CHESHIRE_POPSIFT` defaults OFF in the HIP build scripts** (S). **Done 2026-09-27 (docs/04
   "0.3.6: tooling debts")**: auto in both HIP build scripts, and both HIP packagers refuse a feature
   library that does not link PopSift.

@@ -9121,8 +9121,91 @@ index 8c5e1d3..186de35 100644
      {
          const std::string error = outBuf->geterror();
          ALICEVISION_THROW_ERROR("Can't write output image file '" << path << "': "
+diff --git a/src/aliceVision/matching/ArrayMatcher_kdtreeFlann.hpp b/src/aliceVision/matching/ArrayMatcher_kdtreeFlann.hpp
+index 1dff233..6ebbb0a 100644
+--- a/src/aliceVision/matching/ArrayMatcher_kdtreeFlann.hpp
++++ b/src/aliceVision/matching/ArrayMatcher_kdtreeFlann.hpp
+@@ -6,18 +6,47 @@
+ // You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
+ #pragma once
++#include <aliceVision/depthMap/cuda/hip/cheshire/env.h>  // cheshire (step 6q): CHESHIRE_* switches
+ 
+ #include <aliceVision/matching/ArrayMatcher.hpp>
+ #include <aliceVision/config.hpp>
+ #include <aliceVision/alicevision_omp.hpp>
+ 
+ #include <flann/flann.hpp>
++// cheshire (step 16b): the kd-trees from random_seed on a FLANN that ignores it (matching/CMakeLists.txt)
++#if defined(CHESHIRE_FLANN_SEEDED_COPY)
++#include <cheshire_seeded_kdtree_index.h>
++#endif
++#if defined(CHESHIRE_FLANN_SEEDED_COPY) || defined(CHESHIRE_FLANN_SEEDED_NATIVE)
++#include <aliceVision/system/Logger.hpp>
++#endif
+ 
+ #include <memory>
+ 
+ namespace aliceVision {
+ namespace matching {
+ 
++#if defined(CHESHIRE_FLANN_SEEDED_COPY) || defined(CHESHIRE_FLANN_SEEDED_NATIVE)
++// cheshire (step 16b): whether the kd-trees are shuffled from random_seed; announced once per process
++inline bool cheshireFlannSeeded()
++{
++    static const bool on = []() {
++#if defined(CHESHIRE_FLANN_SEEDED_COPY)
++        const bool v = ::cheshire::env::flag("CHESHIRE_FLANN_SEED", true);
++        if (v)
++            ALICEVISION_LOG_INFO("cheshire: CPU matcher kd-trees shuffled from random_seed, as AliceVision's FLANN does (CHESHIRE_FLANN_SEED=0 for this FLANN's random_device)");
++        else
++            ALICEVISION_LOG_INFO("cheshire: CPU matcher kd-trees shuffled from this FLANN's random_device (CHESHIRE_FLANN_SEED=0)");
++        return v;
++#else
++        ALICEVISION_LOG_INFO("cheshire: CPU matcher kd-trees shuffled from random_seed by this FLANN");
++        return true;
++#endif
++    }();
++    return on;
++}
++#endif
++
+ /// Implement ArrayMatcher as a FLANN KDtree matcher.
+ // http://www.cs.ubc.ca/~mariusm/index.php/FLANN/FLANN
+ // David G. Lowe and Marius Muja
+@@ -57,7 +86,18 @@ class ArrayMatcher_kdtreeFlann : public ArrayMatcher<Scalar, Metric>
+         //-- Build FLANN index
+         flann::KDTreeIndexParams params(4);
+         params["random_seed"] = 1;
++#if defined(CHESHIRE_FLANN_SEEDED_COPY)
++        // cheshire (step 16b): the seeded copy, or this FLANN's own index (what flann::Index builds for these params)
++        if (cheshireFlannSeeded())
++            _index.reset(new flann::CheshireSeededKDTreeIndex<Metric>(*_datasetM, params));
++        else
++            _index.reset(new flann::KDTreeIndex<Metric>(*_datasetM, params));
++#else
++#if defined(CHESHIRE_FLANN_SEEDED_NATIVE)
++        cheshireFlannSeeded();
++#endif
+         _index.reset(new flann::Index<Metric>(*_datasetM, params));
++#endif
+         _index->buildIndex();
+ 
+         return true;
+@@ -136,7 +176,11 @@ class ArrayMatcher_kdtreeFlann : public ArrayMatcher<Scalar, Metric>
+ 
+   private:
+     std::unique_ptr<flann::Matrix<Scalar>> _datasetM;
++#if defined(CHESHIRE_FLANN_SEEDED_COPY)
++    std::unique_ptr<flann::NNIndex<Metric>> _index;  // cheshire (step 16b): either kd-tree index
++#else
+     std::unique_ptr<flann::Index<Metric>> _index;
++#endif
+     std::size_t _dimension;
+ };
+ 
 diff --git a/src/aliceVision/matching/CMakeLists.txt b/src/aliceVision/matching/CMakeLists.txt
-index a7544f6..381f19b 100644
+index a7544f6..cb07689 100644
 --- a/src/aliceVision/matching/CMakeLists.txt
 +++ b/src/aliceVision/matching/CMakeLists.txt
 @@ -30,6 +30,21 @@ set(matching_files_sources
@@ -9147,7 +9230,7 @@ index a7544f6..381f19b 100644
  alicevision_add_library(aliceVision_matching
      SOURCES ${matching_files_headers} ${matching_files_sources}
      PUBLIC_LINKS
-@@ -42,8 +57,14 @@ alicevision_add_library(aliceVision_matching
+@@ -42,8 +57,67 @@ alicevision_add_library(aliceVision_matching
      PRIVATE_LINKS
          Boost::boost
          ${FLANN_LIBRARIES}
@@ -9157,6 +9240,59 @@ index a7544f6..381f19b 100644
 +# --- cheshire HIP backend --- (GPU matcher)
 +if (ALICEVISION_HAVE_CUDA OR ALICEVISION_HAVE_HIP)
 +    target_compile_definitions(aliceVision_matching PRIVATE ALICEVISION_HAVE_GPU_MATCHER=1)
++endif()
++
++# cheshire (step 16b): the CPU matcher's kd-trees from random_seed. AliceVision's FLANN fork seeds each tree's shuffle
++# from the index's "random_seed" (1, ArrayMatcher_kdtreeFlann.hpp); stock FLANN shuffles from a std::random_device.
++# For a stock FLANN, a copy of its kd-tree index under another name, with the fork's seeded shuffle.
++set(_cheshireFlannDirs ${FLANN_INCLUDE_DIRS} ${FLANN_INCLUDE_DIR})
++if (TARGET flann::flann_cpp)
++    get_target_property(_cheshireFlannInc flann::flann_cpp INTERFACE_INCLUDE_DIRECTORIES)
++    if (_cheshireFlannInc)
++        list(APPEND _cheshireFlannDirs ${_cheshireFlannInc})
++    endif()
++endif()
++set(_cheshireKdtree "")
++foreach (_d ${_cheshireFlannDirs})
++    if (NOT _cheshireKdtree AND EXISTS "${_d}/flann/algorithms/kdtree_index.h")
++        set(_cheshireKdtree "${_d}/flann/algorithms/kdtree_index.h")
++    endif()
++endforeach()
++if (NOT _cheshireKdtree)
++    message(WARNING "cheshire (16b): FLANN's kdtree_index.h not found; the CPU matcher keeps FLANN's own index")
++else()
++    file(READ "${_cheshireKdtree}" _t)
++    string(REPLACE "\r\n" "\n" _t "${_t}")
++    string(FIND "${_t}" "\"random_seed\"" _cheshireReadsSeed)
++    if (NOT _cheshireReadsSeed EQUAL -1)
++        target_compile_definitions(aliceVision_matching PUBLIC $<BUILD_INTERFACE:CHESHIRE_FLANN_SEEDED_NATIVE=1>)
++        message(STATUS "cheshire (16b): FLANN shuffles its kd-trees from random_seed (${_cheshireKdtree})")
++    else()
++        set(_unseeded "            std::random_device rd;\n            std::mt19937 g(rd());\n")
++        set(_loop "        tree_roots_.resize(trees_);\n")
++        string(FIND "${_t}" "${_unseeded}" _a)
++        string(FIND "${_t}" "${_loop}" _b)
++        if (_a EQUAL -1 OR _b EQUAL -1)
++            message(WARNING "cheshire (16b): FLANN's kd-tree build is not the one 16b knows (${_cheshireKdtree}); the CPU matcher keeps it")
++        else()
++            string(REPLACE "${_unseeded}" "" _t "${_t}")
++            string(REPLACE "${_loop}" "        auto seed = get_param(index_params_, \"random_seed\", 0);\n        std::mt19937 g(seed);\n\n${_loop}" _t "${_t}")
++            string(REPLACE "KDTreeIndex" "CheshireSeededKDTreeIndex" _t "${_t}")  # KDTreeIndexParams too: no redefinition
++            string(REPLACE "FLANN_KDTREE_INDEX_H_" "CHESHIRE_SEEDED_KDTREE_INDEX_H_" _t "${_t}")
++            set(_t "// Generated by matching/CMakeLists.txt (cheshire step 16b) from ${_cheshireKdtree}:\n// FLANN's KDTreeIndex renamed, each tree's shuffle seeded from random_seed as in AliceVision's FLANN fork.\n${_t}")
++            set(_out "${CMAKE_CURRENT_BINARY_DIR}/cheshire16b/cheshire_seeded_kdtree_index.h")
++            set(_old "")
++            if (EXISTS "${_out}")
++                file(READ "${_out}" _old)
++            endif()
++            if (NOT _old STREQUAL _t)
++                file(WRITE "${_out}" "${_t}")
++            endif()
++            target_include_directories(aliceVision_matching PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/cheshire16b>)
++            target_compile_definitions(aliceVision_matching PUBLIC $<BUILD_INTERFACE:CHESHIRE_FLANN_SEEDED_COPY=1>)
++            message(STATUS "cheshire (16b): FLANN shuffles its kd-trees from std::random_device; the CPU matcher builds a seeded copy (${_out})")
++        endif()
++    endif()
 +endif()
 +
  # Unit tests
