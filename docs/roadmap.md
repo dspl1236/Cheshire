@@ -1366,9 +1366,10 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   - **alicevision/AliceVision#2202** (camera model fixes, open): its 11 commits on our f2447d4 apply with **0** misses.
     Numbers: for a camera without an `Undistortion` (every test set, Meshroom's default) `CostIntrinsicsProject` now
     multiplies by an identity weight, `1*a + 0*b`, the same values; the analytic and Grin paths call it and follow.
-    Read from the diff, not yet built. **At the bump:** the fused projection (`projectionCheshire.hpp:250`) still
-    takes a camera with a distortion and an `Undistortion`, which #2202 moves to undistorted space with a weight; make
-    it step aside for any `Undistortion`.
+    Read from the diff, not yet built. The fused projection (`projectionCheshire.hpp`) took a camera with a distortion and an
+    `Undistortion`, which #2202 moves to undistorted space with a weight. **Guarded 2026-10-14**: any `Undistortion`
+    now keeps `CostIntrinsicsProject`. The 41 views and the engine bay give the 2026-10-06 cameras (`361ddd5cf663cfe6`,
+    `af98cde31a5f153c`), as they must: no test camera has an `Undistortion`.
   - **alicevision/AliceVision#2190** (Boost to C++20 std, open): 3 misses, all `fuseCut/GraphFiller.cpp`'s
     `<cmath>` include anchor (the steps at `apply_hip_patch.py` 5555, 6h, 6p). No behaviour change claimed.
   - **develop since f2447d4** (8b23adb, 59+ commits): 6 misses. #2200 (unused includes) moves the anchors of 8d, 8e,

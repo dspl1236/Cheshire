@@ -247,7 +247,10 @@ inline FusedCamera fusedCamera(const std::shared_ptr<camera::IntrinsicBase>& int
         c.sizes[1] = static_cast<std::int32_t>(c.distortion->getParameters().size());
     }
     c.model = -1;
-    if (fusedProjectionEnabled() && pinhole && isod && c.sizes[0] == 4 && !(isod->getUndistortion() && c.distortion == nullptr))
+    // Any Undistortion keeps CostIntrinsicsProject (2026-10-14). The fused models mirror a projection through the
+    // Distortion alone; with both objects upstream applied only the Distortion until alicevision/AliceVision#2202,
+    // which composes the two and compares in undistorted space with a weight, so the fused model must not follow it.
+    if (fusedProjectionEnabled() && pinhole && isod && c.sizes[0] == 4 && !isod->getUndistortion())
     {
         if (c.distortion == nullptr)
             c.model = 0;
