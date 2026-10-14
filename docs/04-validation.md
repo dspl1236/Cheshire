@@ -5572,7 +5572,7 @@ dependency trees treat it differently:
 - **Windows** (vcpkg's `flann` 2022-10-28, FLANN 1.9.2) ignores the parameter and seeds each tree's shuffle from a
   `std::random_device`. Meshroom 2025.1's own Windows build has the same FLANN: its FeatureMatching on the same mini6
   features, three times, gave three digests (`cd6a0955baac245b`, `7bee8c7af90d3d03`, `e0634a071e2fa744`). An upstream
-  bug, not ours (`docs/upstream/alicevision-flann-random-seed.md`).
+  bug, not ours: filed as alicevision/AliceVision#2210 (`docs/upstream/alicevision-flann-random-seed.md`).
 
 `matching/CMakeLists.txt` now reads the installed `kdtree_index.h` at configure time. If it reads `random_seed`, nothing
 changes but a log line. If it shuffles from `std::random_device`, it writes a copy of the header into the build tree with

@@ -1,6 +1,6 @@
-# Draft: the CPU matcher's `random_seed` is ignored on Windows (vcpkg FLANN)
+# The CPU matcher's `random_seed` is ignored on Windows (vcpkg FLANN)
 
-Not filed. For alicevision/AliceVision (or their vcpkg registry, wherever the Windows `flann` port lives).
+**Filed 2026-10-14 as alicevision/AliceVision#2210.** The text below is the draft it was filed from.
 
 **Title:** FeatureMatching (ANN_L2) differs run to run on Windows: vcpkg's FLANN ignores `random_seed`
 
