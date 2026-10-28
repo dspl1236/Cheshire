@@ -1347,12 +1347,11 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 - **ROCm/clr#285 label** (S). The second-card comment says gfx1010, but the card is gfx1012
   (`docs/upstream/rocm-issue-second-card-comment.md:3`).
 - **PopSIFT** (S). The #193 PRs are merged (#201, #202, #203) and the `LinearTexture` type is fixed upstream.
-  Opened 2026-10-28: #205, the normalisation race (3e). Ready, with the user's go-ahead (docs/14, "Upstream's own
-  HIP port"):
-  - the HIP port's plain 3D arrays cannot be allocated wider than 2048 on RDNA (`hip/port/popsift/array3d_test.cpp`),
-    so photographs are refused;
-  - its surface read does not clamp the blur level (`texFetchClamped`), where CUDA's layered fetch does: one or two
-    extrema per image.
+  Opened 2026-10-28: #205, the normalisation race (3e). Filed 2026-10-28 (docs/14, "Upstream's own HIP port"):
+  - #206: the HIP port's plain 3D arrays cannot be allocated wider than 2048 on RDNA
+    (`hip/port/popsift/array3d_test.cpp`), so photographs are refused; 3g is the offered fix;
+  - #207: its surface read does not clamp the blur level (`texFetchClamped`), where CUDA's layered fetch does: one or
+    two extrema per image.
 - **AliceVision races and waste** (M). None is drafted:
   - filterByPixSize: survivors depend on thread timing (4p)
   - addGridHelperPoints: shared RNG across threads (4q)
