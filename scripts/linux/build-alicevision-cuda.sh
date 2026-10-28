@@ -28,7 +28,7 @@ AV_BUNDLE="${AV_BUNDLE:-$AV_INSTALL/bundle}"
 JOBS="${JOBS:-$(nproc)}"
 
 # GPU SIFT. PopSIFT is a CUDA project to begin with (third_party/popsift is a clone of
-# alicevision/popsift v0.10.0; scripts/apply_popsift_patch.py is what adapts it *to* HIP), so this
+# alicevision/popsift at the pinned commit; scripts/apply_popsift_patch.py is what adapts it *to* HIP), so this
 # needs a build rather than a port - see scripts/linux/build-popsift-cuda.sh. Built OFF until
 # 2026-09-21, which made the bundle die on --describerTypes sift with a bare std::runtime_error.
 POPSIFT="${CHESHIRE_POPSIFT:-ON}"

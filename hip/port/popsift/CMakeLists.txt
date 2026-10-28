@@ -1,7 +1,9 @@
-# Cheshire: build PopSIFT (alicevision/popsift v0.10.0) as a HIP library for AMD.
+# Cheshire: build PopSIFT (alicevision/popsift, the commit scripts/apply_popsift_patch.py pins) as a
+# HIP library for AMD.
 #
-# Upstream's own CMake is written around the CUDA language. This builds the same 29 sources as HIP
-# instead, with hip/port/popsift/popsift_hip.h force-included in front of each one, and installs a
+# Upstream's own HIP build links its sources with -fgpu-rdc, which Windows cannot do (COFF objects).
+# This builds the same sources as one HIP translation unit instead, headed by hip/port/popsift/
+# popsift_hip.h (upstream's cuda_to_hip.h plus Cheshire's changes), and installs a
 # PopSiftConfig.cmake exporting PopSift::popsift so AliceVision's find_package(PopSift CONFIG) picks
 # it up in place of the CUDA build that vcpkg ships.
 #
@@ -25,7 +27,7 @@ set(POPSIFT_SRC "${CHESHIRE_ROOT}/third_party/popsift/src")
 set(POPSIFT_GEN "${CHESHIRE_ROOT}/build/popsift-gen")
 
 if (NOT EXISTS "${POPSIFT_SRC}/popsift/popsift.cu")
-    message(FATAL_ERROR "popsift sources not found at ${POPSIFT_SRC}; clone alicevision/popsift v0.10.0 and run scripts/apply_popsift_patch.py")
+    message(FATAL_ERROR "popsift sources not found at ${POPSIFT_SRC}; run scripts/apply_popsift_patch.py --fetch, then without arguments")
 endif()
 if (NOT EXISTS "${POPSIFT_GEN}/popsift/sift_config.h")
     message(FATAL_ERROR "generated sift_config.h missing; run scripts/apply_popsift_patch.py")
@@ -55,10 +57,14 @@ target_include_directories(popsift PUBLIC
 # needs it: the sources use quoted includes, which resolve relative to the including file.
 # ${POPSIFT_GEN}/popsift is needed and is safe - popsift.h includes "sift_config.h" by bare name,
 # and that directory holds only the generated sift_config.h.
+# hip_compat holds upstream's <cuda_runtime.h> for HIP (it includes cuda_to_hip.h), and nothing else
+# that could shadow a system header. USE_HIP selects upstream's HIP branches.
 target_include_directories(popsift PRIVATE
+    "${POPSIFT_SRC}/popsift/hip_compat"
     "${POPSIFT_GEN}/popsift"
     "${CHESHIRE_ROOT}/hip/compat/include"
     "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(popsift PRIVATE USE_HIP)
 
 # The shim is included by the unity source itself (scripts/apply_popsift_patch.py writes it), not
 # forced in here: clang-cl and clang++ spell that flag differently, and on Linux forcing a header
@@ -88,7 +94,7 @@ configure_package_config_file("${CMAKE_CURRENT_BINARY_DIR}/PopSiftConfig.cmake.i
     "${CMAKE_CURRENT_BINARY_DIR}/PopSiftConfig.cmake"
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/PopSift)
 write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/PopSiftConfigVersion.cmake"
-    VERSION 0.10.0 COMPATIBILITY SameMajorVersion)
+    VERSION 0.10.1 COMPATIBILITY SameMajorVersion)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/PopSiftConfig.cmake"
               "${CMAKE_CURRENT_BINARY_DIR}/PopSiftConfigVersion.cmake"
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/PopSift)

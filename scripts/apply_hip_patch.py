@@ -7706,6 +7706,23 @@ CheshireDepthMapCache& cheshireDepthMaps() { static CheshireDepthMapCache c; ret
                + "    endif()" + NL)
         t = t.replace(old, new, 1)
         fc.write_text(t, encoding="utf-8", newline=NL)
+    # 4v2. ...and PopSIFT's headers from the PopSIFT that is linked. vcpkg's dependency tree ships PopSIFT 0.10.0's
+    #     headers in its common include directory, which reaches the compiler (-imsvc) ahead of the PopSift
+    #     target's own, so the describer compiled against vcpkg's copy. While Cheshire built 0.10.0 too nothing
+    #     showed; from the pin at bda4581 (scripts/apply_popsift_patch.py) popsift::Config has another layout
+    #     (ScalingMode is gone), and a Config built on the stack from the old header and read by the new library
+    #     is memory corruption. The target's own include directories go first.
+    t = fc.read_text(encoding="utf-8")
+    if "cheshire: PopSIFT's own headers" not in t:
+        old = "    target_link_libraries(aliceVision_feature PRIVATE PopSift::popsift)" + NL
+        if t.count(old) != 1:
+            sys.exit("PopSift link line not found once in feature/CMakeLists.txt")
+        new = (old
+               + "    # cheshire: PopSIFT's own headers, ahead of the copy in the dependency tree's include directory" + NL
+               + "    get_target_property(_cheshire_popsift_inc PopSift::popsift INTERFACE_INCLUDE_DIRECTORIES)" + NL
+               + "    target_include_directories(aliceVision_feature BEFORE PRIVATE ${_cheshire_popsift_inc})" + NL)
+        t = t.replace(old, new, 1)
+        fc.write_text(t, encoding="utf-8", newline=NL)
 
     # 4w. AC-RANSAC's residual sort. Geometric filtering is 95 % of FeatureMatching's wall clock on
     #     the engine bay, and profiling AC-RANSAC put 48 % of that in one std::sort: the loop builds

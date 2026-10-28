@@ -1280,6 +1280,11 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   a `std::random_device` (Meshroom 2025.1's own Windows build too: three runs, three digests). Configure time now writes
   a renamed, seeded copy of the installed `kdtree_index.h` when it ignores the seed; `cpufallback` repeats through
   DepthMapFilter. **Filed 2026-10-14 as alicevision/AliceVision#2210** (`docs/upstream/alicevision-flann-random-seed.md`).
+- **PopSIFT pinned at develop bda4581** (M). **Built 2026-10-28 (docs/14, "Upstream's own HIP port")**: upstream's
+  HIP port plus Cheshire's overlay; 3c and the texture handle are upstream now; 3g keeps the pyramid layered on HIP
+  (HIP caps plain 3D arrays at 2048 on RDNA); 4v2 makes the describer compile against the PopSIFT it links. The
+  features change (upstream's fractional orientation votes). Gates and the Linux, CUDA and RDNA2 legs before a
+  release.
 - **`CHESHIRE_POPSIFT` defaults OFF in the HIP build scripts** (S). **Done 2026-09-27 (docs/04
   "0.3.6: tooling debts")**: auto in both HIP build scripts, and both HIP packagers refuse a feature
   library that does not link PopSift.
@@ -1338,8 +1343,13 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   (`scripts/windows/cheshire-detect.cpp:10-12`).
 - **ROCm/clr#285 label** (S). The second-card comment says gfx1010, but the card is gfx1012
   (`docs/upstream/rocm-issue-second-card-comment.md:3`).
-- **PopSIFT** (S). Open the PR offered on popsift#193. Also report the `LinearTexture` type error
-  (`scripts/apply_popsift_patch.py:42-54`).
+- **PopSIFT** (S). The #193 PRs are merged (#201, #202, #203) and the `LinearTexture` type is fixed upstream.
+  Opened 2026-10-28: #205, the normalisation race (3e). Ready, with the user's go-ahead (docs/14, "Upstream's own
+  HIP port"):
+  - the HIP port's plain 3D arrays cannot be allocated wider than 2048 on RDNA (`hip/port/popsift/array3d_test.cpp`),
+    so photographs are refused;
+  - its surface read does not clamp the blur level (`texFetchClamped`), where CUDA's layered fetch does: one or two
+    extrema per image.
 - **AliceVision races and waste** (M). None is drafted:
   - filterByPixSize: survivors depend on thread timing (4p)
   - addGridHelperPoints: shared RNG across threads (4q)

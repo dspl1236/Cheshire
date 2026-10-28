@@ -1,27 +1,29 @@
-"""Prepare PopSIFT (alicevision/popsift v0.10.0) for the HIP build.
+"""Prepare PopSIFT (alicevision/popsift, pinned at POPSIFT_PIN) for the HIP build.
 
 third_party/popsift is a clone, like third_party/aliceVision, and is patched rather than forked:
 
-    git clone --depth 1 --branch v0.10.0 https://github.com/alicevision/popsift.git third_party/popsift
+    python scripts/apply_popsift_patch.py --fetch
     python scripts/apply_popsift_patch.py
 
-Two things are needed. The generated config header, which upstream's CMake writes and which the
-sources include, and one genuine type error that CUDA does not notice: LinearTexture holds a handle
-created by cudaCreateTextureObject and read with tex2D, but declares it cudaSurfaceObject_t. CUDA
-makes both of those unsigned long long, so it compiles; HIP has them as distinct pointer types and
-rejects it.
+--fetch makes third_party/popsift the pinned commit (a shallow fetch of that commit; any local change
+is discarded) and exits; every build script runs it first. The pin moved from v0.10.0 to develop at
+bda4581 on 2026-10-28: upstream now has the extremum counter's fix (#201, #203, the old 3c), the
+texture handle's type and a HIP port of its own. That port maps the runtime in src/popsift/
+cuda_to_hip.h and takes a HIP branch wherever the platforms differ; hip/port/popsift/popsift_hip.h
+includes it and changes two things (see there). Two things are generated here: the config header
+upstream's CMake writes, and the single translation unit Windows needs (step 3, below).
 
-Everything else PopSIFT needs is supplied by hip/port/popsift/popsift_hip.h, which is force-included
-in front of every translation unit. Nothing in the pyramid had to be restructured: HIP 7.2 has
-layered arrays, layered surfaces and 2D textures natively, unlike the mipmapped arrays the depth-map
-port had to emulate.
+The pin also brings upstream's change to the orientation histogram (4d66f18, fractional votes), so
+keypoint orientations, and with them the descriptors, differ slightly from v0.10.0's and from
+Meshroom's own PopSIFT (AliceVision pins 77d1d28) until AliceVision moves its pin.
 
     python scripts/apply_popsift_patch.py --fixes-only
 
-applies only the fixes that are not about HIP and that both backends take (the extremum counter's
-uninitialised read, and the race in the descriptor normalisation, 3c and 3e below). The CUDA builds
-reset the tree to upstream and then run this, since 0.3.8.
+applies only the fixes that are not about HIP and that both backends take (today the race in the
+descriptor normalisation, 3e below; offered upstream as alicevision/popsift#205). The CUDA builds
+fetch the pin and then run this, since 0.3.8.
 """
+import subprocess
 import sys
 from pathlib import Path
 
@@ -29,37 +31,40 @@ ROOT = Path(__file__).resolve().parent.parent
 POPSIFT = ROOT / "third_party" / "popsift"
 GEN = ROOT / "build" / "popsift-gen" / "popsift"
 NL = chr(10)
+POPSIFT_URL = "https://github.com/alicevision/popsift.git"
+POPSIFT_PIN = "bda45811fbae113e938b5a8ee0e8e6d98aeff99d"   # develop, 2026-10-28 (after #203)
 
 
-def fix_extrema_counter() -> None:
-    # 3c. The extremum counter, and the reason GPU SIFT reconstructed badly. extrema_count() does
-    #
-    #         int write_index;
-    #         if( threadIdx.x == 0 ) { write_index = atomicAdd( extrema_counter, ct ); }
-    #         write_index = popsift::shuffle( write_index, 0 );
-    #
-    #     so every lane but 0 reads write_index uninitialised, which is undefined behaviour. nvcc
-    #     leaves the guard alone. The AMDGPU backend takes the licence and every lane performs the
-    #     atomic, so the counter advances by 32 * ct instead of ct and each octave reports exactly
-    #     32x the extrema it wrote. The surplus slots are never written, their i_ext_off stays 0 and
-    #     they alias the octave's extremum 0; once AliceVision's grid filter runs, copy_if promotes
-    #     them to survivors pointing at a zeroed InitialExtremum, whose sigma is 0, and a keypoint
-    #     with no scale gets no descriptor at all. Initialising the variable removes the UB. The
-    #     other lanes take lane 0's value from the shuffle either way, so nothing nvcc produces
-    #     changes, and the CUDA builds take it too.
-    extrema = POPSIFT / "src" / "popsift" / "s_extrema.cu"
-    t = extrema.read_text(encoding="utf-8")
-    if "cheshire" not in t:
-        old_decl = ("    int write_index;" + NL
-                    + "    if( threadIdx.x == 0 ) {" + NL)
-        if t.count(old_decl) != 1:
-            sys.exit("write_index declaration not found once in s_extrema.cu")
-        new_decl = ("    // cheshire: lanes other than 0 read this below without it being assigned." + NL
-                    + "    // That is undefined behaviour, and on AMDGPU it costs the guard: every lane" + NL
-                    + "    // performs the atomic and the octave counts come out 32x too large." + NL
-                    + "    int write_index = 0;" + NL
-                    + "    if( threadIdx.x == 0 ) {" + NL)
-        extrema.write_text(t.replace(old_decl, new_decl, 1), encoding="utf-8", newline=NL)
+def git(*args: str) -> str:
+    return subprocess.run(["git", "-C", str(POPSIFT), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def fetch_pin() -> None:
+    """third_party/popsift as the pinned commit, clean: a shallow fetch of that one commit, skipped when
+    the checkout is already at it (then only the local changes, the previous patching, are discarded)."""
+    if not (POPSIFT / ".git").exists():
+        POPSIFT.mkdir(parents=True, exist_ok=True)
+        git("init", "-q")
+        git("remote", "add", "origin", POPSIFT_URL)
+    try:
+        at_pin = git("rev-parse", "HEAD") == POPSIFT_PIN
+    except subprocess.CalledProcessError:
+        at_pin = False
+    if not at_pin:
+        git("fetch", "-q", "--depth", "1", "origin", POPSIFT_PIN)
+    git("checkout", "-q", "-f", POPSIFT_PIN)
+    git("clean", "-fdq")
+    print(f"popsift: {POPSIFT} at {POPSIFT_PIN[:7]}")
+
+
+def check_pin() -> None:
+    """Refuse to patch any other commit: the anchors below are written against this one."""
+    try:
+        head = git("rev-parse", "HEAD")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        sys.exit(f"{POPSIFT} is not a git checkout; run scripts/apply_popsift_patch.py --fetch")
+    if head != POPSIFT_PIN:
+        sys.exit(f"{POPSIFT} is at {head[:7]}, the pin is {POPSIFT_PIN[:7]}; run scripts/apply_popsift_patch.py --fetch")
 
 
 def fix_normalize_race() -> None:
@@ -75,7 +80,8 @@ def fix_normalize_race() -> None:
     #     never showed it, and the fix leaves what they compute as it was.
     norm = POPSIFT / "src" / "popsift" / "s_desc_normalize.h"
     t = norm.read_text(encoding="utf-8")
-    if "cheshire" not in t:
+    upstream_fixed = "const bool ignoreme = ( offset >= num_orientations );" in t   # #205, once merged
+    if "cheshire" not in t and not upstream_fixed:
         old = ("    offset = ( offset < num_orientations ) ? offset" + NL
                + "                                           : num_orientations-1;" + NL
                + "    Descriptor* desc = &descs[offset];" + NL
@@ -92,37 +98,27 @@ def fix_normalize_race() -> None:
 
 
 def main() -> None:
+    if "--fetch" in sys.argv[1:]:
+        fetch_pin()
+        return
     if not POPSIFT.exists():
-        sys.exit(f"{POPSIFT} not found; clone alicevision/popsift v0.10.0 there first (see the docstring)")
+        sys.exit(f"{POPSIFT} not found; run scripts/apply_popsift_patch.py --fetch first")
+    check_pin()
     if "--fixes-only" in sys.argv[1:]:
-        fix_extrema_counter()
         fix_normalize_race()
-        print("popsift: the fixes both backends take are in (the extremum counter, the descriptor normalisation)")
+        print("popsift: the fixes both backends take are in (the descriptor normalisation)")
         return
 
-    # 1. the config header upstream's CMake generates. HIP has the *_sync shuffles, and the grid
-    #    filter stays on (rocThrust provides the algorithms it uses).
+    # 1. the config header upstream's CMake generates. The shuffles are the non-sync forms
+    #    (common/assist.h): both toolchains have them, and the HIP SDK 6.2 one used for RDNA2 has no
+    #    *_sync forms. The grid filter stays on (3f, below, moves it to the host).
     template = POPSIFT / "cmake" / "sift_config.h.in"
     if not template.exists():
-        sys.exit(f"{template} not found; is this popsift v0.10.0?")
+        sys.exit(f"{template} not found")
     text = template.read_text(encoding="utf-8")
-    text = text.replace("@PopSift_HAVE_SHFL_DOWN_SYNC@", "1").replace("@DISABLE_GRID_FILTER@", "0")
+    text = text.replace("@PopSift_HAVE_SHFL_DOWN_SYNC@", "0").replace("@DISABLE_GRID_FILTER@", "0")
     GEN.mkdir(parents=True, exist_ok=True)
     (GEN / "sift_config.h").write_text(text, encoding="utf-8", newline=NL)
-
-    # 2. the texture handle declared with the surface object type
-    octave = POPSIFT / "src" / "popsift" / "sift_octave.h"
-    t = octave.read_text(encoding="utf-8")
-    if "cheshire" not in t:
-        old = "struct LinearTexture" + NL + "{" + NL + "    cudaSurfaceObject_t tex;" + NL + "};"
-        if t.count(old) != 1:
-            sys.exit("LinearTexture declaration not found once in sift_octave.h")
-        new = ("struct LinearTexture" + NL + "{" + NL
-               + "    // cheshire: created by cudaCreateTextureObject and read with tex2D, so it is a texture" + NL
-               + "    // object. CUDA makes both handle types unsigned long long and does not notice; HIP has" + NL
-               + "    // them as distinct pointer types." + NL
-               + "    cudaTextureObject_t tex;" + NL + "};")
-        octave.write_text(t.replace(old, new, 1), encoding="utf-8", newline=NL)
 
     # 3a. CHESHIRE_POPSIFT_SORT overrides the extrema filter's sort order. AliceVision asks for
     #     LargestScaleFirst, which keeps the biggest-scale extrema; those live in the most blurred
@@ -201,9 +197,6 @@ def main() -> None:
         i = t.index("#include")
         t = t[:i] + "#include <cstdlib>  // cheshire" + NL + "#include <cstdio>" + NL + t[i:]
         ori.write_text(t, encoding="utf-8", newline=NL)
-
-    # 3c. the extremum counter (the function above; the CUDA builds take it too)
-    fix_extrema_counter()
 
     # 3d. CHESHIRE_POPSIFT_DEBUG=1 also reports what the grid filter did per octave. The filter
     #     compacts the surviving extrema with copy_if and separately sets the count with reduce over
@@ -370,6 +363,43 @@ def main() -> None:
         i = t.index("#include")
         t = t[:i] + "#include <algorithm>  // cheshire" + NL + "#include <cmath>" + NL + "#include <vector>" + NL + t[i:]
         filt.write_text(t, encoding="utf-8", newline=NL)
+
+    # 3g. The pyramid stays layered on HIP (0.4.6, the move to upstream's own HIP port). Upstream keeps each
+    #     octave's blur levels in a plain 3D array on HIP, because HIP's surf2DLayeredwrite writes every layer
+    #     to the same place (ROCm/clr#275; the same defect popsift_hip.h has fixed since 0.2). But HIP will
+    #     not allocate a plain 3D array wider than maxTexture3D, 2048 on RDNA: hipMalloc3DArray returns
+    #     invalid argument at 6000 x 3376 x 6 on the RX 9070 (hip/port/popsift/array3d_test.cpp), so no
+    #     photograph would get through. A layered array takes the 2D limit, 16384 there. So on HIP the three
+    #     arrays are allocated layered again, written through popsift_hip.h's 2D-array store, and read the
+    #     way upstream reads a texture on HIP: point fetches through tex2DLayered with the bilinear weights
+    #     in software (common/assist.h readTex). LayeredReadTex is the plain texture, as on CUDA, and the
+    #     surface-read helpers that went with the 3D array are left out.
+    HIP_IF = "#if defined(USE_HIP) || defined(__HIP_PLATFORM_AMD__)" + NL
+    CHE_IF = "#if 0  // cheshire 3g: layered on HIP as on CUDA (scripts/apply_popsift_patch.py)" + NL
+    octave_cu = POPSIFT / "src" / "popsift" / "sift_octave.cu"
+    t = octave_cu.read_text(encoding="utf-8")
+    if "cheshire 3g" not in t:
+        for alloc in ("    err = cudaMalloc3DArray( &_data, &_data_desc, _data_ext, cudaArraySurfaceLoadStore );" + NL,
+                      "    err = cudaMalloc3DArray( &_intm, &_intm_desc, _intm_ext, cudaArraySurfaceLoadStore );" + NL,
+                      "        err = cudaMalloc3DArray(&_dog_3d, &_dog_3d_desc, _dog_3d_ext, cudaArraySurfaceLoadStore);" + NL):
+            if t.count(HIP_IF + alloc) != 1:
+                sys.exit("a HIP 3D-array allocation not found once in sift_octave.cu")
+            t = t.replace(HIP_IF + alloc, CHE_IF + alloc, 1)
+        octave_cu.write_text(t, encoding="utf-8", newline=NL)
+    textures = POPSIFT / "src" / "popsift" / "sift_textures.h"
+    t = textures.read_text(encoding="utf-8")
+    if "cheshire 3g" not in t:
+        old = HIP_IF + "/* The read handle for a pyramid array, passed to the readTex overloads in" + NL
+        if t.count(old) != 1:
+            sys.exit("the HIP LayeredReadTex not found once in sift_textures.h")
+        textures.write_text(t.replace(old, CHE_IF + old[len(HIP_IF):], 1), encoding="utf-8", newline=NL)
+    assist = POPSIFT / "src" / "popsift" / "common" / "assist.h"
+    t = assist.read_text(encoding="utf-8")
+    if "cheshire 3g" not in t:
+        old = HIP_IF + "/* Fetch one texel of the pyramid array through its surface, emulating a" + NL
+        if t.count(old) != 1:
+            sys.exit("the HIP surface-read helpers not found once in common/assist.h")
+        assist.write_text(t.replace(old, CHE_IF + old[len(HIP_IF):], 1), encoding="utf-8", newline=NL)
 
     # 3. one translation unit. HIP cannot produce relocatable device code with COFF objects on
     #    Windows, and PopSIFT shares __constant__ and __device__ globals across its sources, so the

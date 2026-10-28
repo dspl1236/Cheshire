@@ -2,7 +2,7 @@
 # Cheshire Linux: build PopSIFT with the CUDA backend, for the CUDA AliceVision build.
 #
 # Nothing is ported here. PopSIFT is a CUDA project to begin with - third_party/popsift is a
-# clone of alicevision/popsift v0.10.0, and scripts/apply_popsift_patch.py is what adapts it *to*
+# clone of alicevision/popsift at the pinned commit, and scripts/apply_popsift_patch.py is what adapts it *to*
 # HIP. So the CUDA build wants the upstream source, which is the easy direction - plus, since 0.3.8,
 # the fixes that are not about HIP and that both backends take (apply_popsift_patch.py --fixes-only):
 # the descriptor normalisation's race, which made the CUDA packages' descriptors differ between runs.
@@ -25,13 +25,8 @@ JOBS="${JOBS:-$(nproc)}"
 
 [ -x "$CUDA/bin/nvcc" ] || { echo "no nvcc at $CUDA/bin/nvcc - set CUDA_PATH" >&2; exit 1; }
 
-if [ ! -d "$SRC/.git" ]; then
-  echo "[popsift] cloning alicevision/popsift v0.10.0 into $SRC"
-  git clone --depth 1 --branch v0.10.0 https://github.com/alicevision/popsift.git "$SRC"
-else
-  # a HIP build may have left the tree patched; CUDA wants it pristine
-  git -C "$SRC" checkout -- . 2>/dev/null || true
-fi
+# the pinned commit, pristine (a HIP build may have left the tree patched; CUDA wants upstream)
+python3 "$ROOT/scripts/apply_popsift_patch.py" --fetch
 # ...and then the fixes both backends take
 python3 "$ROOT/scripts/apply_popsift_patch.py" --fixes-only
 echo "[popsift] source $(git -C "$SRC" log --oneline -1)"

@@ -1,5 +1,6 @@
 @echo off
-rem Build PopSIFT (alicevision/popsift v0.10.0) as a HIP library for AMD, for GPU SIFT.
+rem Build PopSIFT (alicevision/popsift, the commit scripts/apply_popsift_patch.py pins) as a HIP
+rem library for AMD, for GPU SIFT.
 rem Usage: scripts\build-popsift.cmd [name] [configure|build|install]   (default: gfx1201 install)
 rem
 rem [name] only names the build and install directories. The code objects come from
@@ -39,7 +40,9 @@ rem not reach HIP translation units, whose runtime wrapper includes the STL firs
 set CFLAGS=%CHESHIRE_EXTRA_CXXFLAGS%
 set CXXFLAGS=%CHESHIRE_EXTRA_CXXFLAGS%
 
-rem the generated sift_config.h, the source fixes and the unity translation unit
+rem the pinned source (fetched only when the checkout is elsewhere), then the generated sift_config.h,
+rem the source fixes and the unity translation unit
+python "%R%/scripts/apply_popsift_patch.py" --fetch || exit /b 1
 python "%R%/scripts/apply_popsift_patch.py" || exit /b 1
 
 for /f "delims=" %%I in ('dir /b /s "%WindowsSdkVerBinPath%x64\rc.exe" 2^>nul') do set RCEXE=%%I

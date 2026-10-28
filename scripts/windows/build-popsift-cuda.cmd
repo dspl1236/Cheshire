@@ -2,7 +2,7 @@
 rem Build PopSIFT with the CUDA backend on Windows, for GPU SIFT in the CUDA AliceVision build.
 rem Usage: scripts\windows\build-popsift-cuda.cmd [configure|build|install]   (default install)
 rem
-rem Nothing is ported. third_party/popsift is a clone of alicevision/popsift v0.10.0 - the original
+rem Nothing is ported. third_party/popsift is a clone of alicevision/popsift at the pinned commit - the original
 rem CUDA project - and scripts/apply_popsift_patch.py is what adapts it *to* HIP. So this resets the
 rem tree to upstream and builds that, while scripts\build-popsift.cmd builds the HIP port from
 rem hip/port/popsift instead. The two do not share a build or install directory. Since 0.3.8 the
@@ -52,7 +52,7 @@ set BLD=%R%/build/popsift-cuda
 set INST=%R%/build/popsift-cuda-install
 
 rem A HIP build leaves the tree patched; CUDA wants it as upstream wrote it.
-git -C "%CHESHIRE_ROOT%\third_party\popsift" checkout -- . 2>nul
+python "%CHESHIRE_ROOT%\scripts\apply_popsift_patch.py" --fetch || exit /b 1
 rem ...and then the fixes both backends take
 python "%CHESHIRE_ROOT%\scripts\apply_popsift_patch.py" --fixes-only || exit /b 1
 for /f "delims=" %%I in ('git -C "%CHESHIRE_ROOT%\third_party\popsift" log --oneline -1') do echo [popsift] source %%I

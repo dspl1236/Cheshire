@@ -466,6 +466,75 @@ spare warps of the last block normalise the last descriptor a second time, in pl
 that owns it. At most one descriptor per image, and only when the count is not a multiple of 32.
 Step 3e of `scripts/apply_popsift_patch.py` fixes it on both backends; the HIP build never showed it
 and its bytes are unchanged. Evidence and runs: docs/04, "0.3.8: PopSIFT's CUDA descriptor race".
+Offered upstream as alicevision/popsift#205 (2026-10-28); 3e steps aside by itself once it is in.
+
+## Upstream's own HIP port, and the pin at bda4581 (after 0.4.5)
+
+Until 0.4.5 Cheshire built PopSIFT v0.10.0 and supplied everything HIP needed itself. Upstream has
+since taken its own HIP port (05e698e and the [ROCm] commits after it) and the fixes from issue #193
+(#201, #202, #203), so on 2026-10-28 the pin moved to develop at bda4581.
+`scripts/apply_popsift_patch.py --fetch` makes `third_party/popsift` that commit, every build script
+runs it first, and the patch refuses any other commit.
+
+**What upstream now does, and what Cheshire keeps.** Upstream maps the runtime in
+`src/popsift/cuda_to_hip.h` and takes a HIP branch wherever the two platforms differ. Cheshire's
+`hip/port/popsift/popsift_hip.h` now includes that header and changes only three things on top:
+- the layered surface write: the 2D-array store, as since 0.2;
+- the round-up multiply and fma: exact, as CUDA's, where upstream rounds to nearest;
+- the reported layered limits, raised to the 2D limit.
+
+Gone from Cheshire: the shuffle wrappers (the config header now selects the non-sync forms), the
+thrust alias, the symbol-copy overloads, the extremum counter (3c) and the texture handle's type.
+
+**The pyramid stays layered on HIP (patch step 3g).** Upstream keeps each octave's blur levels in a
+plain 3D array on HIP, because HIP's `surf2DLayeredwrite` writes every layer to the same place
+(ROCm/clr#275, the defect this port has fixed in its own header since 0.2). But HIP will not
+allocate a plain 3D array wider than `maxTexture3D`, 2048 on RDNA:
+- `hipMalloc3DArray` returns invalid argument at 6000 x 3376 x 6 on the RX 9070
+  (`hip/port/popsift/array3d_test.cpp`);
+- at 2048 x 2048 every cell reads back correctly;
+- so upstream's HIP build refuses any photograph wider than 2048.
+
+Step 3g allocates the three arrays layered again, which takes the 2D limit (16384 there). Their
+reads go upstream's HIP way: point fetches through `tex2DLayered`, with the bilinear weights computed
+in software.
+
+**A difference from upstream's HIP path, and why Cheshire's is the right one.** On small images that
+fit either way, upstream's 3D path and 3g differ by one or two extrema per image. The cause is
+upstream's surface read (`texFetchClamped` in `common/assist.h`): it clamps x and y but not the blur
+level, so a read one level past the top or bottom returns 0. CUDA's layered texture fetch, and
+Cheshire's, clamp it to the nearest level. Clamping the level in a scratch copy of upstream's 3D path
+makes it identical to 3g, descriptor for descriptor, on three images (504x378 to 960x720).
+
+**The features change.** Upstream's 4d66f18 splits each gradient between the two nearest orientation
+bins instead of rounding it into one, unconditionally. So keypoint orientations, and with them the
+descriptors, differ slightly from v0.10.0's and from Meshroom's own PopSIFT (AliceVision pins
+77d1d28) until AliceVision moves its pin. The reference caches' features are therefore not
+comparable byte for byte across the move, on either backend.
+
+**The describer had been compiling against vcpkg's PopSIFT headers.** The vcpkg dependency tree
+ships PopSIFT 0.10.0's headers in its common include directory, and that directory reaches the
+compiler ahead of the PopSift target's own. `ninja -t deps` on `ImageDescriber_SIFT_popSIFT.cpp.obj`
+listed `vcpkg-deps/.../include/popsift/sift_conf.h`. While Cheshire also built 0.10.0, the two were
+the same and nothing showed. At bda4581 `popsift::Config` has another layout (`ScalingMode` is gone),
+so a Config built from the old header and read by the new library would corrupt memory.
+`apply_hip_patch.py` step 4v2 puts the PopSift target's include directories first for
+`aliceVision_feature`, in all three AliceVision builds. Check it with the same `ninja -t deps`: the
+headers must come from the PopSIFT install.
+
+**End to end, RX 9070, Meshroom 2025.1, base config** (`build/gate-pin-win.cmd`, `build/pin_compare.py`;
+gfx12-generic `popsift.dll`, 2026-10-28). Every port's marker was present in every run.
+
+| run | features per view (mean, range) | posed | landmarks | RMSE | textured mesh |
+|---|---|---|---|---|---|
+| monstree full, 0.4.5 release (v0.10.0) | 23,627 (23,207-24,004) | 41 / 41 | 91,494 | 1.3123 | 1,179,366 v, 2,348,215 f |
+| monstree full, pin bda4581 | 23,617 (23,213-23,982) | 41 / 41 | 91,475 | 1.3147 | 1,178,482 v, 2,346,751 f |
+| mini6, pin, twice | 23,687 (23,517-23,943), both | 6 / 6, both | 9,412, both | 0.7279, both | 498,373 f, both |
+
+The reconstruction is the same within a few hundredths of a percent; the features differ as expected
+and are no worse. The two mini6 runs gave the same depth maps (digest 511a67a516b23214). The final
+OBJ's vertex count differed by 12 (249,359 against 249,347) with the same faces, which points at
+Texturing, not SIFT.
 
 ## What is not done
 

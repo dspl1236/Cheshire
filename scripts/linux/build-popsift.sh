@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build PopSIFT (alicevision/popsift v0.10.0) as a HIP library for AMD, for GPU SIFT on Linux.
+# Build PopSIFT (alicevision/popsift, the commit scripts/apply_popsift_patch.py pins) as a HIP library for AMD,
+# for GPU SIFT on Linux.
 #
 # Usage: scripts/linux/build-popsift.sh [name] [archs]
 #   name   names the build and install directories (default: linux)
@@ -33,6 +34,7 @@ echo "[popsift] rocm=$ROCM errchk=$ERRCHK"
 echo "[popsift] install=$INST"
 
 # the generated sift_config.h, the source fixes and the unity translation unit
+python3 "$ROOT/scripts/apply_popsift_patch.py" --fetch
 python3 "$ROOT/scripts/apply_popsift_patch.py"
 
 cmake -G Ninja -S "$ROOT/hip/port/popsift" -B "$BLD" \

@@ -40,11 +40,13 @@ case "$cmd" in
       git -c protocol.file.allow=always submodule update --init --quiet third_party/aliceVision
       git -C third_party/aliceVision checkout -q -- . && git -C third_party/aliceVision clean -fdq
       git checkout -q -- .gitmodules
-      # PopSIFT: a clone of its own (v0.10.0), not a submodule; reset to its tag, the build scripts patch it
-      if [ ! -d third_party/popsift/.git ]; then git clone -q /host/third_party/popsift third_party/popsift; fi
-      git -C third_party/popsift fetch -q --tags /host/third_party/popsift
-      git -C third_party/popsift checkout -q -f v0.10.0 && git -C third_party/popsift clean -fdq
-      echo "[jammy] source at $(git log --oneline -1); aliceVision $(git -C third_party/aliceVision rev-parse --short HEAD); popsift $(git -C third_party/popsift describe --tags)"
+      # PopSIFT: a clone of its own, not a submodule, at the commit scripts/apply_popsift_patch.py pins: taken
+      # from the host checkout (which the host build has fetched), then checked against the pin
+      if [ ! -d third_party/popsift/.git ]; then git init -q third_party/popsift; fi
+      git -C third_party/popsift fetch -q /host/third_party/popsift HEAD
+      git -C third_party/popsift checkout -q -f FETCH_HEAD && git -C third_party/popsift clean -fdq
+      python3 scripts/apply_popsift_patch.py --fetch
+      echo "[jammy] source at $(git log --oneline -1); aliceVision $(git -C third_party/aliceVision rev-parse --short HEAD); popsift $(git -C third_party/popsift rev-parse --short HEAD)"
     '
     ;;
   run)
