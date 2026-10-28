@@ -1280,7 +1280,7 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   a `std::random_device` (Meshroom 2025.1's own Windows build too: three runs, three digests). Configure time now writes
   a renamed, seeded copy of the installed `kdtree_index.h` when it ignores the seed; `cpufallback` repeats through
   DepthMapFilter. **Filed 2026-10-14 as alicevision/AliceVision#2210** (`docs/upstream/alicevision-flann-random-seed.md`).
-- **PopSIFT pinned at develop bda4581** (M). **Built 2026-10-28 (docs/14, "Upstream's own HIP port")**: upstream's
+- **PopSIFT pinned at develop** (M), bda4581 then 54f42f3 (#205 merged, 3e upstream). **Built 2026-10-28 (docs/14, "Upstream's own HIP port")**: upstream's
   HIP port plus Cheshire's overlay; 3c and the texture handle are upstream now; 3g keeps the pyramid layered on HIP
   (HIP caps plain 3D arrays at 2048 on RDNA); 4v2 makes the describer compile against the PopSIFT it links. The
   features change (upstream's fractional orientation votes). Gated on Windows (RX 9070) and Linux HIP (lgpu-pc's

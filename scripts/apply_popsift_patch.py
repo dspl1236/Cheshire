@@ -7,10 +7,11 @@ third_party/popsift is a clone, like third_party/aliceVision, and is patched rat
 
 --fetch makes third_party/popsift the pinned commit (a shallow fetch of that commit; any local change
 is discarded) and exits; every build script runs it first. The pin moved from v0.10.0 to develop at
-bda4581 on 2026-10-28: upstream now has the extremum counter's fix (#201, #203, the old 3c), the
-texture handle's type and a HIP port of its own. That port maps the runtime in src/popsift/
-cuda_to_hip.h and takes a HIP branch wherever the platforms differ; hip/port/popsift/popsift_hip.h
-includes it and changes two things (see there). Two things are generated here: the config header
+bda4581 on 2026-10-28, then to 54f42f3 the same day: upstream now has the extremum counter's fix (#201,
+#203, the old 3c), the descriptor normalisation's (#205, the old 3e), the texture handle's type and a
+HIP port of its own. That port maps the runtime in src/popsift/cuda_to_hip.h and takes a HIP branch
+wherever the platforms differ; hip/port/popsift/popsift_hip.h includes it and changes three things
+(see there). Two things are generated here: the config header
 upstream's CMake writes, and the single translation unit Windows needs (step 3, below).
 
 The pin also brings upstream's change to the orientation histogram (4d66f18, fractional votes), so
@@ -19,9 +20,10 @@ Meshroom's own PopSIFT (AliceVision pins 77d1d28) until AliceVision moves its pi
 
     python scripts/apply_popsift_patch.py --fixes-only
 
-applies only the fixes that are not about HIP and that both backends take (today the race in the
-descriptor normalisation, 3e below; offered upstream as alicevision/popsift#205). The CUDA builds
-fetch the pin and then run this, since 0.3.8.
+applies only the fixes that are not about HIP and that both backends take. Since the pin at 54f42f3
+there are none left: 3e, the race in the descriptor normalisation, is upstream (#205) and steps aside
+by itself. The CUDA builds still fetch the pin and run this, since 0.3.8, so a future fix of this kind
+has its place.
 """
 import subprocess
 import sys
@@ -32,7 +34,7 @@ POPSIFT = ROOT / "third_party" / "popsift"
 GEN = ROOT / "build" / "popsift-gen" / "popsift"
 NL = chr(10)
 POPSIFT_URL = "https://github.com/alicevision/popsift.git"
-POPSIFT_PIN = "bda45811fbae113e938b5a8ee0e8e6d98aeff99d"   # develop, 2026-10-28 (after #203)
+POPSIFT_PIN = "54f42f3765dc5182f03257a95d9d69777613ccd0"   # develop, 2026-10-28 (after #205)
 
 
 def git(*args: str) -> str:
@@ -67,7 +69,7 @@ def check_pin() -> None:
         sys.exit(f"{POPSIFT} is at {head[:7]}, the pin is {POPSIFT_PIN[:7]}; run scripts/apply_popsift_patch.py --fetch")
 
 
-def fix_normalize_race() -> None:
+def fix_normalize_race() -> bool:
     # 3e. The descriptor normalisation, and why the CUDA packages did not repeat themselves.
     #     normalize_histogram runs one warp per descriptor, 32 to a block. In the last block the warps
     #     past the end are clamped onto the last descriptor so that their shuffles have data, and
@@ -80,7 +82,7 @@ def fix_normalize_race() -> None:
     #     never showed it, and the fix leaves what they compute as it was.
     norm = POPSIFT / "src" / "popsift" / "s_desc_normalize.h"
     t = norm.read_text(encoding="utf-8")
-    upstream_fixed = "const bool ignoreme = ( offset >= num_orientations );" in t   # #205, once merged
+    upstream_fixed = "const bool ignoreme = ( offset >= num_orientations );" in t   # #205, upstream since 54f42f3
     if "cheshire" not in t and not upstream_fixed:
         old = ("    offset = ( offset < num_orientations ) ? offset" + NL
                + "                                           : num_orientations-1;" + NL
@@ -95,6 +97,7 @@ def fix_normalize_race() -> None:
                + "    offset = ignoreme ? num_orientations-1 : offset;" + NL
                + "    Descriptor* desc = &descs[offset];" + NL)
         norm.write_text(t.replace(old, new, 1), encoding="utf-8", newline=NL)
+    return not upstream_fixed
 
 
 def main() -> None:
@@ -105,8 +108,8 @@ def main() -> None:
         sys.exit(f"{POPSIFT} not found; run scripts/apply_popsift_patch.py --fetch first")
     check_pin()
     if "--fixes-only" in sys.argv[1:]:
-        fix_normalize_race()
-        print("popsift: the fixes both backends take are in (the descriptor normalisation)")
+        print("popsift: the fixes both backends take are in (the descriptor normalisation)" if fix_normalize_race()
+              else "popsift: no fixes to apply at this pin (the descriptor normalisation is upstream, #205)")
         return
 
     # 1. the config header upstream's CMake generates. The shuffles are the non-sync forms

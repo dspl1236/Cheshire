@@ -466,13 +466,16 @@ spare warps of the last block normalise the last descriptor a second time, in pl
 that owns it. At most one descriptor per image, and only when the count is not a multiple of 32.
 Step 3e of `scripts/apply_popsift_patch.py` fixes it on both backends; the HIP build never showed it
 and its bytes are unchanged. Evidence and runs: docs/04, "0.3.8: PopSIFT's CUDA descriptor race".
-Offered upstream as alicevision/popsift#205 (2026-10-28); 3e steps aside by itself once it is in.
+Upstream since alicevision/popsift#205 (merged 2026-10-28, 54f42f3); at that pin 3e steps aside by itself.
 
-## Upstream's own HIP port, and the pin at bda4581 (after 0.4.5)
+## Upstream's own HIP port, and the pin at develop (after 0.4.5)
 
 Until 0.4.5 Cheshire built PopSIFT v0.10.0 and supplied everything HIP needed itself. Upstream has
 since taken its own HIP port (05e698e and the [ROCm] commits after it) and the fixes from issue #193
-(#201, #202, #203), so on 2026-10-28 the pin moved to develop at bda4581.
+(#201, #202, #203), so on 2026-10-28 the pin moved to develop at bda4581, and the same evening to
+54f42f3, which adds #205 (the normalisation race, 3e) and nothing else. At 54f42f3 the descriptors are
+bda4581's with 3e: four images hash the same, a 6000x3376 photograph among them, and mini6 end to end
+gives the same depth maps (511a67a516b23214).
 `scripts/apply_popsift_patch.py --fetch` makes `third_party/popsift` that commit, every build script
 runs it first, and the patch refuses any other commit.
 
