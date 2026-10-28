@@ -48,8 +48,10 @@ GPU_MARKERS = {
     # after 0.4.0: the GPU search and the geometric filter at the same time (step 10a)
     "FeatureMatching":   [r"GPU brute-force L2 2-NN on",
                           r"7-point nullspace: (SVD \(default|Householder QR \(CHESHIRE_QR_NULLSPACE=1\))",
-                          # after 0.4.3: the 7-point fits four at a time in AVX2 lanes (13a), or the QR path's own line
-                          r"7-point fits (four at a time, Eigen's SVD in AVX2 lanes|one at a time, the QR nullspace)",
+                          # after 0.4.3: the 7-point fits four at a time in AVX2 lanes (13a), or the QR path's own line, or
+                          # one at a time on a CPU without AVX2 and FMA (lgpu-pc's FX-8120, 2026-10-28; not the
+                          # CHESHIRE_ACR_SVD_LANES=0 line, which is the switch turning the lanes off)
+                          r"7-point fits (four at a time, Eigen's SVD in AVX2 lanes|one at a time, the QR nullspace|one at a time through Eigen \(no AVX2 and FMA on this CPU\))",
                           # after 0.4.3: every view's descriptors on the device once for all its searches (14a)
                           r"matcher: descriptors kept on the device across searches",
                           # and each pair's search queued one pair ahead (14b), or one at a time while the matcher
@@ -120,7 +122,7 @@ CPU_MARKERS = {
                           # 16b: the CPU matcher's kd-trees from random_seed (a seeded copy on stock FLANN, Windows)
                           r"CPU matcher kd-trees shuffled from (random_seed|this FLANN's random_device)",
                           r"cheshire: AC-RANSAC skips the residual sort and the NFA scan of models that cannot beat the best so far",
-                          r"7-point fits (four at a time, Eigen's SVD in AVX2 lanes|one at a time, the QR nullspace)"],
+                          r"7-point fits (four at a time, Eigen's SVD in AVX2 lanes|one at a time, the QR nullspace|one at a time through Eigen \(no AVX2 and FMA on this CPU\))"],
     "DepthMapFilter":    [r"depth map filter: disabled by CHESHIRE_GPU_FILTER=0"],
     "Meshing":           [r"meshing votes: disabled by CHESHIRE_GPU_VOTE=0",
                           r"sim blur: disabled by CHESHIRE_GPU_BLUR=0",

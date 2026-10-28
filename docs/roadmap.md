@@ -1283,8 +1283,11 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
 - **PopSIFT pinned at develop bda4581** (M). **Built 2026-10-28 (docs/14, "Upstream's own HIP port")**: upstream's
   HIP port plus Cheshire's overlay; 3c and the texture handle are upstream now; 3g keeps the pyramid layered on HIP
   (HIP caps plain 3D arrays at 2048 on RDNA); 4v2 makes the describer compile against the PopSIFT it links. The
-  features change (upstream's fractional orientation votes). Gates and the Linux, CUDA and RDNA2 legs before a
-  release.
+  features change (upstream's fractional orientation votes). Gated on Windows (RX 9070) and Linux HIP (lgpu-pc's
+  RX 6750 XT); CUDA compiles on Linux but has not run, and RDNA2 (HIP SDK 6.2) compiles but has not run.
+- **0.4.5's Linux HIP bundle segfaults in the SIFT describer on lgpu-pc** (S-M, docs/14). The likely cause is a
+  PopSIFT header mismatch in the jammy build, the case 4v2 now prevents. Rebuild the jammy container, check its
+  PopSIFT headers, and reissue the Linux bundles from the pin.
 - **`CHESHIRE_POPSIFT` defaults OFF in the HIP build scripts** (S). **Done 2026-09-27 (docs/04
   "0.3.6: tooling debts")**: auto in both HIP build scripts, and both HIP packagers refuse a feature
   library that does not link PopSift.

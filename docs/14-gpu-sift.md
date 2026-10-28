@@ -536,6 +536,37 @@ and are no worse. The two mini6 runs gave the same depth maps (digest 511a67a516
 OBJ's vertex count differed by 12 (249,359 against 249,347) with the same faces, which points at
 Texturing, not SIFT.
 
+**Linux HIP, lgpu-pc's RX 6750 XT** (gfx1031, gfx10-3-generic code objects; Ubuntu 26.04, kernel 7.0,
+an FX-8120 without AVX2). The bundle was built on the WSL box's noble trees at 55993bc
+(`build/wsl-pin.lf.sh`; the jammy container no longer exists) and run under Meshroom 2025.1 with
+`build/gate-pin-lgpu.lf.sh`:
+
+| run | features per view (mean, range) | posed | landmarks | RMSE |
+|---|---|---|---|---|
+| monstree full, pin bundle | 23,617 (23,213-23,982) | 41 / 41 | 91,503 | 1.3146 |
+| mini6, pin bundle, three runs | 23,687 (23,517-23,943) | 6 / 6 | 9,369 | 0.7123 |
+
+- The features per view are the Windows build's exactly, mean and range alike.
+- The three mini6 runs gave the same depth maps (4b7c87750141edc6).
+- Every port announced itself once the harness accepted the matcher's line for a CPU without AVX2
+  and FMA, "7-point fits one at a time through Eigen", which no gate machine had shown before.
+- The CUDA PopSIFT and the CUDA AliceVision build at the pin compile, and the describer compiles
+  against the pin's headers. They have not run: there is no NVIDIA card on hand.
+
+**The published 0.4.5 Linux HIP bundle crashes on this machine.** It segfaults in FeatureExtraction
+on the first photograph (`aliceVision_featureExtraction`, exit 139). The kernel puts the fault in
+`libaliceVision_feature.so.3.4` at 0x6f30b, which is
+`ImageDescriber_SIFT_popSIFT::describe`, reading address 0x100000001, after PopSIFT itself had
+detected and filtered exactly what the pin's bundle does (`CHESHIRE_POPSIFT_DEBUG=1`, same counts
+per octave).
+- That is the shape of the header mismatch 4v2 fixes: the describer reading PopSIFT's results
+  through another version's layout.
+- 0.4.5's bundles were the first built in the jammy container, whose dependency superbuild has its
+  own PopSIFT headers. The container is gone, so which version they were is not proven.
+- The same bundle passed on house-pc's RX 6750 XT in the 0.4.5 gate, which undefined behaviour
+  allows.
+- The pin's bundle, with 4v2, runs on the same machine.
+
 ## What is not done
 
 The descriptors have not been judged, only counted. PopSIFT and CPU SIFT do not agree exactly by
