@@ -43,7 +43,8 @@ case "$cmd" in
       # PopSIFT: a clone of its own, not a submodule, at the commit scripts/apply_popsift_patch.py pins: taken
       # from the host checkout (which the host build has fetched), then checked against the pin
       if [ ! -d third_party/popsift/.git ]; then git init -q third_party/popsift; fi
-      git -C third_party/popsift fetch -q /host/third_party/popsift HEAD
+      # --update-shallow: the host clone is shallow since the pin (apply_popsift_patch.py --fetch, depth 1)
+      git -C third_party/popsift fetch -q --update-shallow /host/third_party/popsift HEAD
       git -C third_party/popsift checkout -q -f FETCH_HEAD && git -C third_party/popsift clean -fdq
       python3 scripts/apply_popsift_patch.py --fetch
       echo "[jammy] source at $(git log --oneline -1); aliceVision $(git -C third_party/aliceVision rev-parse --short HEAD); popsift $(git -C third_party/popsift rev-parse --short HEAD)"
