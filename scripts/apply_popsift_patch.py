@@ -47,6 +47,7 @@ def fetch_pin() -> None:
     if not (POPSIFT / ".git").exists():
         POPSIFT.mkdir(parents=True, exist_ok=True)
         git("init", "-q")
+    if "origin" not in git("remote").split():   # also a repository someone else created (the jammy container's)
         git("remote", "add", "origin", POPSIFT_URL)
     try:
         at_pin = git("rev-parse", "HEAD") == POPSIFT_PIN
