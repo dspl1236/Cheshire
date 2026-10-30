@@ -26,7 +26,7 @@ case "$cmd" in
     fi
     docker start "$NAME" >/dev/null
     docker exec "$NAME" bash /jammy/provision.sh
-    "$0" sync
+    bash "$0" sync   # through bash: the repository keeps these scripts at mode 644
     ;;
   sync)
     docker start "$NAME" >/dev/null
