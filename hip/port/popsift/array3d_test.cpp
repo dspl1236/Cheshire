@@ -1,4 +1,4 @@
-// Cheshire: is a non-layered 3D array wider than the reported maxTexture3D (2048 on RDNA) real?
+// Cheshire: is a non-layered 3D array wider than the reported maxTexture3D (2048 on Windows) real?
 //
 // Since 0.10.1 upstream PopSIFT keeps each octave's blur levels in a plain 3D array on HIP (the levels
 // are its z), written with surf3Dwrite and read with surf3Dread or through a texture, and it checks the

@@ -65,6 +65,17 @@ else
   note FAIL "$(basename "$feat") does not need libpopsift: built with ALICEVISION_USE_POPSIFT=OFF (no PopSift found at build time?)"
 fi
 
+# No kernel may need hostcall (device printf and the like): Linux will not dispatch one on a machine without
+# PCIe atomics. 0.4.5 shipped PopSIFT v0.10.0's orientation kernel with a debug printf; on lgpu-pc (an FX-8120
+# board) it never ran, no keypoint got an orientation, and featureExtraction segfaulted (docs/14).
+hc=$(python3 "$(dirname "$0")/../check_hostcall.py" "$B/lib" 2>&1)
+if [ $? -eq 0 ]; then
+  note ok "no kernel needs hostcall ($(echo "$hc" | grep -c '^  ok') libraries with GPU code)"
+else
+  echo "$hc" | grep -v '^  ok'
+  note FAIL "kernels that need hostcall, which do not launch without PCIe atomics (scripts/check_hostcall.py)"
+fi
+
 dm="$B/lib/libaliceVision_depthMap_cuda.so.3.4"
 if [ -f "$dm" ]; then
   note ok "depthMap: amdhsa=$(grep -ac 'amdhsa--' "$dm") clamp=$(grep -ac 'exceeds this device' "$dm") ($(stat -c %s "$dm") bytes)"

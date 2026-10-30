@@ -20,10 +20,10 @@ Meshroom's own PopSIFT (AliceVision pins 77d1d28) until AliceVision moves its pi
 
     python scripts/apply_popsift_patch.py --fixes-only
 
-applies only the fixes that are not about HIP and that both backends take. Since the pin at 54f42f3
-there are none left: 3e, the race in the descriptor normalisation, is upstream (#205) and steps aside
-by itself. The CUDA builds still fetch the pin and run this, since 0.3.8, so a future fix of this kind
-has its place.
+applies only the fixes that are not about HIP and that both backends take: 3h, an empty result rather
+than unfilled features when an image yields no orientations. 3e, the race in the descriptor
+normalisation, is upstream since the pin at 54f42f3 (#205) and steps aside by itself. The CUDA builds
+fetch the pin and run this, since 0.3.8.
 """
 import subprocess
 import sys
@@ -100,6 +100,34 @@ def fix_normalize_race() -> bool:
     return not upstream_fixed
 
 
+def fix_empty_download() -> None:
+    # 3h. Nothing to download, nothing returned. When an image yields extrema but no orientations,
+    #     get_descriptors returned FeaturesHost( ext_total, 0 ): ext_total features allocated and never
+    #     filled, so the caller walked page-aligned garbage - num_ori and the desc pointers included - and
+    #     AliceVision's describer segfaulted on the first one. That is what a failed orientation kernel
+    #     looks like: Cheshire 0.4.5 on Linux, on a board without PCIe atomics (lgpu-pc), where v0.10.0's
+    #     ori_par could not be dispatched because a debug printf made it need hostcall (docs/14). An empty
+    #     FeaturesHost is the honest answer, and both backends take it.
+    pyr = POPSIFT / "src" / "popsift" / "sift_pyramid.cu"
+    t = pyr.read_text(encoding="utf-8")
+    if "cheshire 3h" not in t:
+        old = ("    FeaturesHost* features = new FeaturesHost( hct.ext_total, hct.ori_total );" + NL
+               + NL
+               + "    if( hct.ext_total == 0 || hct.ori_total == 0 )" + NL
+               + "    {" + NL
+               + "        return features;" + NL
+               + "    }" + NL)
+        if t.count(old) != 1:
+            sys.exit("get_descriptors' allocation and early return not found once in sift_pyramid.cu")
+        new = ("    if( hct.ext_total == 0 || hct.ori_total == 0 )" + NL
+               + "    {" + NL
+               + "        return new FeaturesHost( );  // cheshire 3h: empty, not ext_total unfilled features" + NL
+               + "    }" + NL
+               + NL
+               + "    FeaturesHost* features = new FeaturesHost( hct.ext_total, hct.ori_total );" + NL)
+        pyr.write_text(t.replace(old, new, 1), encoding="utf-8", newline=NL)
+
+
 def main() -> None:
     if "--fetch" in sys.argv[1:]:
         fetch_pin()
@@ -108,8 +136,10 @@ def main() -> None:
         sys.exit(f"{POPSIFT} not found; run scripts/apply_popsift_patch.py --fetch first")
     check_pin()
     if "--fixes-only" in sys.argv[1:]:
-        print("popsift: the fixes both backends take are in (the descriptor normalisation)" if fix_normalize_race()
-              else "popsift: no fixes to apply at this pin (the descriptor normalisation is upstream, #205)")
+        fix_empty_download()
+        print("popsift: the fixes both backends take are in (the descriptor normalisation, the empty download)"
+              if fix_normalize_race()
+              else "popsift: the fixes both backends take are in (the empty download; the descriptor normalisation is upstream, #205)")
         return
 
     # 1. the config header upstream's CMake generates. The shuffles are the non-sync forms
@@ -238,6 +268,8 @@ def main() -> None:
 
     # 3e. the descriptor normalisation's race (the function above; the CUDA builds take it too)
     fix_normalize_race()
+    # 3h. an empty result when there is nothing to download (the function above; the CUDA builds take it too)
+    fix_empty_download()
 
     # 3f. The grid filter on the host, and why PopSIFT would not run from a generic code object (0.4.4,
     #     docs/16). The filter's device steps are rocThrust, and rocPRIM launches a trampoline kernel picked
@@ -370,7 +402,8 @@ def main() -> None:
     # 3g. The pyramid stays layered on HIP (0.4.6, the move to upstream's own HIP port). Upstream keeps each
     #     octave's blur levels in a plain 3D array on HIP, because HIP's surf2DLayeredwrite writes every layer
     #     to the same place (ROCm/clr#275; the same defect popsift_hip.h has fixed since 0.2). But HIP will
-    #     not allocate a plain 3D array wider than maxTexture3D, 2048 on RDNA: hipMalloc3DArray returns
+    #     not allocate a plain 3D array wider than maxTexture3D, 2048 on Windows (a constant in the runtime's
+    #     PAL backend, ROCm/rocm-systems#14652; Linux allows 16384): hipMalloc3DArray returns
     #     invalid argument at 6000 x 3376 x 6 on the RX 9070 (hip/port/popsift/array3d_test.cpp), so no
     #     photograph would get through. A layered array takes the 2D limit, 16384 there. So on HIP the three
     #     arrays are allocated layered again, written through popsift_hip.h's 2D-array store, and read the

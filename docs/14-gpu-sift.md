@@ -61,7 +61,7 @@ Four things had to be solved to get there, none of them in the kernels:
 - **clang-cl does not take `-include`.** It reads the header as a second source file and reports
   "cannot specify /Fo when compiling multiple source files". The MSVC spelling `/FI` works.
 - **PopSIFT's own size check rejects the image.** `checkLimit_2DtexLinear` and its surface twin read
-  `maxTexture2DLayered` and `maxSurface2DLayered`, which HIP reports as 2048 on RDNA, so `enqueue`
+  `maxTexture2DLayered` and `maxSurface2DLayered`, which HIP on Windows reports as 2048, so `enqueue`
   returned nothing and AliceVision dereferenced the null job: that was the segmentation fault. The
   limit is not real. `hip/port/popsift/layered_test.cpp` allocates a layered array at 4032 x 3024
   and at 8192 x 8192 on the same device without error, so the shim raises the reported layered
@@ -492,7 +492,10 @@ thrust alias, the symbol-copy overloads, the extremum counter (3c) and the textu
 **The pyramid stays layered on HIP (patch step 3g).** Upstream keeps each octave's blur levels in a
 plain 3D array on HIP, because HIP's `surf2DLayeredwrite` writes every layer to the same place
 (ROCm/clr#275, the defect this port has fixed in its own header since 0.2). But HIP will not
-allocate a plain 3D array wider than `maxTexture3D`, 2048 on RDNA:
+allocate a plain 3D array wider than `maxTexture3D`, 2048 on Windows. That number is a constant in
+the runtime's Windows (PAL) backend, `rocclr/device/pal/paldevice.cpp:437-439`, not the hardware: the
+RX 9070's Vulkan driver reports 8192, and HIP on Linux allows 16384 on the RX 6750 XT (filed
+2026-10-30 as ROCm/rocm-systems#14652). So:
 - `hipMalloc3DArray` returns invalid argument at 6000 x 3376 x 6 on the RX 9070
   (`hip/port/popsift/array3d_test.cpp`);
 - at 2048 x 2048 every cell reads back correctly;
@@ -556,19 +559,36 @@ an FX-8120 without AVX2). The bundle was built on the WSL box's noble trees at 5
 - The CUDA PopSIFT and the CUDA AliceVision build at the pin compile, and the describer compiles
   against the pin's headers. They have not run: there is no NVIDIA card on hand.
 
-**The published 0.4.5 Linux HIP bundle crashes on this machine.** It segfaults in FeatureExtraction
-on the first photograph (`aliceVision_featureExtraction`, exit 139). The kernel puts the fault in
-`libaliceVision_feature.so.3.4` at 0x6f30b, which is
-`ImageDescriber_SIFT_popSIFT::describe`, reading address 0x100000001, after PopSIFT itself had
-detected and filtered exactly what the pin's bundle does (`CHESHIRE_POPSIFT_DEBUG=1`, same counts
-per octave).
-- That is the shape of the header mismatch 4v2 fixes: the describer reading PopSIFT's results
-  through another version's layout.
-- 0.4.5's bundles were the first built in the jammy container, whose dependency superbuild has its
-  own PopSIFT headers. The container is gone, so which version they were is not proven.
-- The same bundle passed on house-pc's RX 6750 XT in the 0.4.5 gate, which undefined behaviour
-  allows.
-- The pin's bundle, with 4v2, runs on the same machine.
+**The published 0.4.5 Linux HIP bundle crashes on this machine, because the board has no PCIe
+atomics.** It segfaults in FeatureExtraction on the first photograph (`aliceVision_featureExtraction`,
+exit 139), in `ImageDescriber_SIFT_popSIFT::describe` (`libaliceVision_feature.so.3.4` at 0x6f30b).
+The cause, found 2026-10-30 (a header mismatch was the first guess, and wrong):
+- With `AMD_LOG_LEVEL=1` the runtime says why: "Pcie atomics not enabled, hostcall not supported",
+  then "AQL dispatch failed!", once per octave. lgpu-pc is an FX-8120 on a PCIe 2.0 board without
+  atomics, and the HIP runtime on Linux will not dispatch a kernel that asks for a hostcall buffer
+  there.
+- A kernel asks for one when it may call the host from the device; a printf is enough. PopSIFT
+  v0.10.0's orientation kernel `ori_par` has two, guards that print "Crashing: bin %d theta %f :-)"
+  for an out-of-range bin. So `ori_par` never ran, no extremum got an orientation, and the image had
+  extrema (`ext_total`) but no descriptors: "Warning: no descriptors extracted".
+- `Pyramid::get_descriptors` then returned `FeaturesHost( ext_total, 0 )`: that many features
+  allocated and never filled. The describer walked them, page-aligned garbage, `num_ori` and the
+  descriptor pointers included, and the first dereference faulted.
+- house-pc's RX 6750 XT passed the same bundle in the 0.4.5 gate because its board (an i3-4330's)
+  has the atomics. Windows is unaffected anywhere: its runtime prints from the device without
+  hostcall, which is why bench-pc, the same FX-8120 machine, ran the Windows packages in September.
+- The pin is already clear of it: upstream dropped the printf with the fractional orientation votes
+  (4d66f18). The pin's bundle runs on lgpu-pc (the tables above).
+
+Two things now keep it from coming back. `scripts/check_hostcall.py` reads every kernel's metadata in
+a bundle's GPU libraries and fails on any that needs hostcall, other than four print-only PopSIFT
+debug kernels nothing launches; `scripts/linux/wsl-pack-bundle.sh` runs it, so the jammy build does
+too. On 0.4.5's `libpopsift.so` it names `ori_par` on all seven code objects; on the pin's bundle every
+library passes. And `apply_popsift_patch.py` 3h makes `get_descriptors` return an empty `FeaturesHost`
+when there is nothing to download, so a failed kernel costs an image its features rather than the run.
+A harness that walks the result the way the describer does, built from 0.4.5's PopSIFT source and run
+on lgpu-pc, segfaults without 3h (exit 139) and reports 0 features with it (exit 0); with the pin's
+source, 3h leaves the descriptors byte for byte as they were (the three test images, RX 9070).
 
 ## What is not done
 

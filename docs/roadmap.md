@@ -1282,12 +1282,17 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   DepthMapFilter. **Filed 2026-10-14 as alicevision/AliceVision#2210** (`docs/upstream/alicevision-flann-random-seed.md`).
 - **PopSIFT pinned at develop** (M), bda4581 then 54f42f3 (#205 merged, 3e upstream). **Built 2026-10-28 (docs/14, "Upstream's own HIP port")**: upstream's
   HIP port plus Cheshire's overlay; 3c and the texture handle are upstream now; 3g keeps the pyramid layered on HIP
-  (HIP caps plain 3D arrays at 2048 on RDNA); 4v2 makes the describer compile against the PopSIFT it links. The
+  (HIP on Windows caps plain 3D arrays at 2048, ROCm/rocm-systems#14652); 4v2 makes the describer compile against the PopSIFT it links. The
   features change (upstream's fractional orientation votes). Gated on Windows (RX 9070) and Linux HIP (lgpu-pc's
   RX 6750 XT); CUDA compiles on Linux but has not run, and RDNA2 (HIP SDK 6.2) compiles but has not run.
-- **0.4.5's Linux HIP bundle segfaults in the SIFT describer on lgpu-pc** (S-M, docs/14). The likely cause is a
-  PopSIFT header mismatch in the jammy build, the case 4v2 now prevents. Rebuild the jammy container, check its
-  PopSIFT headers, and reissue the Linux bundles from the pin.
+- **0.4.5's Linux HIP bundle segfaults in the SIFT describer on lgpu-pc** (S-M, docs/14). **Cause found and fixed
+  2026-10-30**: lgpu-pc's board has no PCIe atomics, so the Linux runtime will not dispatch a kernel that needs
+  hostcall, and PopSIFT v0.10.0's orientation kernel had a debug printf. No orientations, extrema without
+  descriptors, and `get_descriptors` handed the describer unfilled features. The pin already drops the printf
+  (upstream 4d66f18); `scripts/check_hostcall.py`, run by `wsl-pack-bundle.sh`, now refuses any bundle with a
+  kernel that needs hostcall, and apply_popsift_patch.py 3h returns an empty result instead of unfilled features.
+  Left: rebuild the jammy container and reissue the Linux bundles from main, gated on lgpu-pc (no atomics) as well
+  as house-pc.
 - **`CHESHIRE_POPSIFT` defaults OFF in the HIP build scripts** (S). **Done 2026-09-27 (docs/04
   "0.3.6: tooling debts")**: auto in both HIP build scripts, and both HIP packagers refuse a feature
   library that does not link PopSift.
@@ -1348,8 +1353,9 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   (`docs/upstream/rocm-issue-second-card-comment.md:3`).
 - **PopSIFT** (S). The #193 PRs are merged (#201, #202, #203) and the `LinearTexture` type is fixed upstream.
   Opened 2026-10-28: #205, the normalisation race (3e). Filed 2026-10-28 (docs/14, "Upstream's own HIP port"):
-  - #206: the HIP port's plain 3D arrays cannot be allocated wider than 2048 on RDNA
-    (`hip/port/popsift/array3d_test.cpp`), so photographs are refused; 3g is the offered fix;
+  - #206: the HIP port's plain 3D arrays cannot be allocated wider than 2048 on Windows
+    (`hip/port/popsift/array3d_test.cpp`), so photographs are refused; 3g is the offered fix. The cause is a
+    constant in the HIP runtime's Windows backend, filed 2026-10-30 as ROCm/rocm-systems#14652;
   - #207: its surface read does not clamp the blur level (`texFetchClamped`), where CUDA's layered fetch does: one or
     two extrema per image.
 - **AliceVision races and waste** (M). None is drafted:

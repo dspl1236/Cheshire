@@ -7,12 +7,12 @@
 // of Cheshire's single translation unit and includes upstream's mapping, then changes three things:
 //   - the layered surface write. Upstream gave up layered arrays on HIP because HIP's
 //     surf2DLayeredwrite writes every layer to the same place, and keeps the pyramid in a plain 3D
-//     array, which HIP will not allocate wider than 2048 on RDNA. apply_popsift_patch.py (3g) puts the
+//     array, which HIP on Windows will not allocate wider than 2048 (ROCm/rocm-systems#14652). apply_popsift_patch.py (3g) puts the
 //     layered arrays back, and this writes them correctly (below).
 //   - the round-toward-positive-infinity multiply and fused multiply-add. Upstream maps them to the
 //     round-to-nearest forms; here both are computed exactly in double (a float product and a float
 //     fma are exact in double) and then rounded up, so they are the values CUDA's intrinsics produce.
-//   - the device limits. HIP reports maxTexture2DLayered as 2048 on RDNA, and PopSIFT reads that field
+//   - the device limits. HIP on Windows reports maxTexture2DLayered as 2048, and PopSIFT reads that field
 //     to decide whether an image fits (common/device_prop.cu), so it would refuse anything wider. The
 //     limit is not real for layered arrays: hipMalloc3DArray with hipArrayLayered succeeds at
 //     4032 x 3024 and at 8192 x 8192 on the RX 9070 (hip/port/popsift/layered_test.cpp).
