@@ -951,7 +951,7 @@ large sets).
   refuses a Windows payload the CPU cannot run. Older glibc: the jammy container (scripts/linux/jammy). **Released as v0.4.5 on 2026-10-11** (docs/04, "The 0.4.5 release round").
 - **0.4.6, the Linux crash fix and the PopSIFT pin:** 0.4.5's Linux HIP bundle crashed on boards without PCIe atomics
   (no kernel may need hostcall now, `check_hostcall.py`; 3h); PopSIFT pinned at develop 54f42f3 on upstream's HIP
-  port; 16a, 16b; the BA fused projection steps aside for an undistortion model. **Release round done 2026-11-01**
+  port; 16a, 16b; the BA fused projection steps aside for an undistortion model. **Released as v0.4.6 on 2026-11-01**
   (docs/04, "The 0.4.6 release round"; the Linux CUDA package on the GTX 1080 Ti finds the AMD packages' features).
 - **Then:** "Hardware coverage" below.
 
