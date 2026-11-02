@@ -949,6 +949,10 @@ large sets).
   bytes) and older-glibc Linux bundles from a jammy or bookworm container. **ISA tiers measured and dropped
   2026-10-10** (an exact v3 build is no faster; Eigen at AVX width changes the bytes), replaced by a CPU check that
   refuses a Windows payload the CPU cannot run. Older glibc: the jammy container (scripts/linux/jammy). **Released as v0.4.5 on 2026-10-11** (docs/04, "The 0.4.5 release round").
+- **0.4.6, the Linux crash fix and the PopSIFT pin:** 0.4.5's Linux HIP bundle crashed on boards without PCIe atomics
+  (no kernel may need hostcall now, `check_hostcall.py`; 3h); PopSIFT pinned at develop 54f42f3 on upstream's HIP
+  port; 16a, 16b; the BA fused projection steps aside for an undistortion model. **Release round done 2026-11-01**
+  (docs/04, "The 0.4.6 release round"; the Linux CUDA package on the GTX 1080 Ti finds the AMD packages' features).
 - **Then:** "Hardware coverage" below.
 
 Next:
@@ -1284,15 +1288,16 @@ live: AliceVision's CTest suite or a data-driven suite on the Meshroom side.
   HIP port plus Cheshire's overlay; 3c and the texture handle are upstream now; 3g keeps the pyramid layered on HIP
   (HIP on Windows caps plain 3D arrays at 2048, ROCm/rocm-systems#14652); 4v2 makes the describer compile against the PopSIFT it links. The
   features change (upstream's fractional orientation votes). Gated on Windows (RX 9070) and Linux HIP (lgpu-pc's
-  RX 6750 XT); CUDA compiles on Linux but has not run, and RDNA2 (HIP SDK 6.2) compiles but has not run.
+  RX 6750 XT); Linux CUDA in the 0.4.6 gate (GTX 1080 Ti: the AMD packages' features exactly); RDNA2 (HIP SDK
+  6.2) compiles but has not run.
 - **0.4.5's Linux HIP bundle segfaults in the SIFT describer on lgpu-pc** (S-M, docs/14). **Cause found and fixed
   2026-10-30**: lgpu-pc's board has no PCIe atomics, so the Linux runtime will not dispatch a kernel that needs
   hostcall, and PopSIFT v0.10.0's orientation kernel had a debug printf. No orientations, extrema without
   descriptors, and `get_descriptors` handed the describer unfilled features. The pin already drops the printf
   (upstream 4d66f18); `scripts/check_hostcall.py`, run by `wsl-pack-bundle.sh`, now refuses any bundle with a
   kernel that needs hostcall, and apply_popsift_patch.py 3h returns an empty result instead of unfilled features.
-  Left: rebuild the jammy container and reissue the Linux bundles from main, gated on lgpu-pc (no atomics) as well
-  as house-pc.
+  **Reissued for 0.4.6**: the jammy container re-created and both Linux bundles rebuilt from main (ece9d30); the HIP
+  tarball gated on lgpu-pc (docs/04, "The 0.4.6 release round"). house-pc no longer has an AMD card.
 - **`CHESHIRE_POPSIFT` defaults OFF in the HIP build scripts** (S). **Done 2026-09-27 (docs/04
   "0.3.6: tooling debts")**: auto in both HIP build scripts, and both HIP packagers refuse a feature
   library that does not link PopSift.

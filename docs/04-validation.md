@@ -5593,3 +5593,54 @@ with the same depth-map digest `ed686b1445cce32c`. Matches, depth maps and filte
 both runs. Meshing is the first node that differs, as it does on the GPU path (its races are on the roadmap, "AliceVision
 races and waste"). The three paths (seed read natively, the seeded copy, neither) were also compiled with g++ 13 against
 the Linux dependencies.
+
+## The 0.4.6 release round (2026-10-30/11-01)
+
+Built at ece9d30. The Linux bundles were built on 2026-10-30 in the jammy container, re-created for this release
+(`build/jammy-rebuild.lf.sh main-ece9d30`). The Windows packages were built on 2026-11-01 (`build/chain-046.cmd`:
+`release-046.cmd`, then `cuda-046.cmd`). Every build fetched PopSIFT at the pin (`apply_popsift_patch.py --fetch`), and
+`check_hostcall.py` passed all seven GPU libraries of the Linux HIP bundle. Both Linux tarballs need at most
+`GLIBC_2.35` and `GLIBCXX_3.4.30`. The pin changed the features, so the references are the pin's development builds
+of 2026-10-28 (docs/14, "Upstream's own HIP port"), not the 0.4.5 gate.
+
+| package | hardware | 2025.1: mini6 | 2025.1: 41 views | 2023.3: mini6 |
+|---|---|---|---|---|
+| Windows AMD | RX 9070 (rocm7.2 gfx12-generic payload) | 19/19 | base 293 s, verify 701 s, experimental 263 s, fastransacexp 243 s, verifyexp 717 s | 4/4 |
+| Linux AMD | RX 6750 XT on lgpu-pc (no PCIe atomics) | base, twice | base 644 s | |
+| Linux CUDA | GTX 1080 Ti (house-pc) | 7/7, and base again | base 576 s, experimental 596 s; 0.4.5's bundle, base 576 s | 1/1 |
+| Windows CUDA | not run on an NVIDIA card (below) | | | |
+
+**RX 9070** (`build/gate-046/windows-amd.sh`, under `build/gate-guard.ps1`):
+- mini6 `base` gives the pin gate's depth maps (`511a67a516b23214`), as do the eight configurations that change only
+  how the work is done (`verify`, `texbig`, `hostvotes`, the three bridge modes, `gpujpeg`, `texcheck`).
+- `verifyexp` gives `experimental`'s (`f69110d4eccb2ac5`).
+- `cpufallback` gives the depth maps of 16b's two development runs (`ed686b1445cce32c`): the CPU path now repeats from
+  the development build to the release package. It does not use PopSIFT, so the pin leaves it alone.
+- On the 41 views, `base` and `verify` give the same depth maps (`deab7d69744c2c1c`), and `experimental` and
+  `verifyexp` agree with each other (`974ad77e183d5904`).
+- `pin_compare.py` puts `base` at the pin gate's figures exactly: 23,617 features per view (23,213-23,982), 41 of 41
+  posed, 91,475 landmarks, RMSE 1.3147. The textured mesh has 1,178,506 vertices against 1,178,482, Texturing's usual
+  variation.
+
+**lgpu-pc** (`build/gate-new-lgpu.lf.sh`): the release tarball itself (sha256 `119083ec…`), on the machine 0.4.5's
+bundle crashed on.
+- mini6 `base`, twice: 8/8 ports, with the depth maps of the pin's noble bundle's three runs (`4b7c87750141edc6`).
+- monstree full, `base`: 8/8 ports, with the noble bundle's depth maps (`0637c26654667127`). Features, posed views,
+  landmarks (91,503) and RMSE (1.3146) are the same, and `sfm.abc` differs only by the build date Alembic embeds.
+
+**GTX 1080 Ti** (`build/gate-cuda046/gatecuda046.sh`, on house-pc under `halt-and-gate.sh`, which stopped the card's
+other work for the gate and started it again after). The release tarball itself (sha256 `8dee7c4c…`), in scratch
+Meshroom installs: 0.4.3's nine runs, mini6 `base` a second time, and the 41 views in `base` on this package and on
+the published 0.4.5 CUDA bundle. There is no CUDA reference at the pin: its CUDA PopSIFT had not run before.
+- The features per view are the AMD packages' exactly: 23,617 (23,213-23,982) on the 41 views, 23,687
+  (23,517-23,943) on mini6.
+- mini6 `base` gave the same depth maps twice (`58f8acee4077e4b4`), and `verify` gives them too; `verifyexp` gives
+  `experimental`'s (`dcc1c10b213bd529`). `tiles` and `coarse` passed their T-camera and depth-list checks.
+- 41 views, 0.4.5's bundle against 0.4.6's (`pin_compare.py`): 23,627 against 23,617 features per view (0.4.5's range
+  23,207-24,004, as on the RX 9070), 41 of 41 posed both times, 91,377 against 91,324 landmarks, RMSE 1.3140 against
+  1.3147, 576 s both.
+
+**Windows CUDA** got the same smoke test as before (`build/nightly-cmp/mk_g46.py`, `replay_cudapkg046.py`,
+`cmp_cudapkg046.py`). All eight new-pipeline programs finished from the zip alone, and TracksBuilding is the AMD zip's
+byte for byte. SfMExpanding placed all 41 cameras within 0.0010 % of the scene's radius of the AMD zip's
+reconstruction (rotations within 0.0009°), against 0.0028 % in 0.4.5.
